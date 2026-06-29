@@ -46,7 +46,11 @@ export function stripAgentMdSignature(content: string): string {
   return ensureTrailingNewline(content.slice(0, signature.index));
 }
 
-export function updateAgentMdFrontmatterAvatar(content: string, avatarUrl: string): FrontmatterUpdateResult {
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function updateAgentMdFrontmatterField(content: string, key: string, value: string, insertAfterKey?: string): FrontmatterUpdateResult {
   const original = content;
   const payload = stripAgentMdSignature(content);
   const lines = payload.match(/[^\n]*\n|[^\n]+$/g) ?? [];
@@ -63,16 +67,17 @@ export function updateAgentMdFrontmatterAvatar(content: string, avatarUrl: strin
 
   const defaultEol = lineEnding(openLine, '\n');
   const fmLines = lines.slice(1, closeIndex);
-  const avatarLine = `avatar: ${yamlDoubleQuote(avatarUrl)}${defaultEol}`;
-  const avatarIndex = fmLines.findIndex(line => /^avatar\s*:/.test(lineValue(line)));
+  const fieldPattern = new RegExp(`^${escapeRegExp(key)}\\s*:`);
+  const fieldIndex = fmLines.findIndex(line => fieldPattern.test(lineValue(line)));
 
-  if (avatarIndex >= 0) {
-    const existingLine = fmLines[avatarIndex] ?? '';
-    fmLines[avatarIndex] = `avatar: ${yamlDoubleQuote(avatarUrl)}${lineEnding(existingLine, defaultEol)}`;
+  if (fieldIndex >= 0) {
+    const existingLine = fmLines[fieldIndex] ?? '';
+    fmLines[fieldIndex] = `${key}: ${yamlDoubleQuote(value)}${lineEnding(existingLine, defaultEol)}`;
   } else {
-    const versionIndex = fmLines.findIndex(line => /^version\s*:/.test(lineValue(line)));
-    const insertIndex = versionIndex >= 0 ? versionIndex + 1 : fmLines.length;
-    fmLines.splice(insertIndex, 0, avatarLine);
+    const anchorPattern = insertAfterKey ? new RegExp(`^${escapeRegExp(insertAfterKey)}\\s*:`) : null;
+    const anchorIndex = anchorPattern ? fmLines.findIndex(line => anchorPattern.test(lineValue(line))) : -1;
+    const insertIndex = anchorIndex >= 0 ? anchorIndex + 1 : fmLines.length;
+    fmLines.splice(insertIndex, 0, `${key}: ${yamlDoubleQuote(value)}${defaultEol}`);
   }
 
   const updated = ensureTrailingNewline([
@@ -82,6 +87,14 @@ export function updateAgentMdFrontmatterAvatar(content: string, avatarUrl: strin
   ].join(''));
 
   return { content: updated, changed: updated !== original };
+}
+
+export function updateAgentMdFrontmatterAvatar(content: string, avatarUrl: string): FrontmatterUpdateResult {
+  return updateAgentMdFrontmatterField(content, 'avatar', avatarUrl, 'version');
+}
+
+export function updateAgentMdFrontmatterName(content: string, name: string): FrontmatterUpdateResult {
+  return updateAgentMdFrontmatterField(content, 'name', name, 'aid');
 }
 
 /** Normalize an SDK verification result to the local union type. */

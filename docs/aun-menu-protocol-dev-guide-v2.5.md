@@ -3,12 +3,14 @@
 > 本文是 EvolClaw `menu.*` 协议**唯一权威**集成文档。面向客户端开发者（App / Bot / Web UI / CLI）。
 > 协议在 AUN `message.send` 之上传输 JSON payload，与文本消息共享同一通道。
 
-最后更新：2026-06-24
+最后更新：2026-06-29
 对应代码：`src/types.ts` · `src/core/message/message-bridge.ts` · `src/core/command/command-handler.ts`（门面） · `src/core/command/menu-handler.ts`（menu 执行） · `src/core/message/command-handler-agent-control.ts`（agent 生命周期桥接） · `src/channels/aun.ts` · `src/index.ts`（控制 AID 通道 menu.* 路由）
 
 > **v2.3 变更（仅 menu 相关）**：修复**控制 AID 通道**上 `menu.response` 的封装与加密——之前响应被错误包成普通文本消息（`payload.type='text'`），客户端无法识别；现统一为 typed payload 直发，且加密态跟随入站请求对称。详见 §12.2。普通 agent 通道行为不变。
 >
 > **v2.4 变更（agent 管理）**：`menu.action name=agent action=update` 支持 `patch.avatar` 单独提交，用于上传头像到 agent 自己的 AUN storage，并更新 `agent.md` frontmatter 的 `avatar` 字段。详见 §8.5。
+>
+> **v2.5 变更（capability 管理）**：新增 `menu.query/options/update name=capability`，用于查看并管理当前 agent 的 Skills / MCP / Plugins 策略。MVP 支持 `claude` 与 `codex`，策略存入 `agents/<aid>/config.json`，不写 baseagent 用户级配置文件。详见 §5.12、§6.9、§7.6。
 
 ---
 
@@ -128,6 +130,7 @@ interface MenuResponse {
 | `activity` | — | ✅ | ✅ | ✅ | — | agent 级 | 无需会话 |
 | `system` | — | ✅ | — | — | `restart` `check` `upgrade` | 进程级 | 鉴权：`evolclaw.json` `owners` 名单（见 §3.1） |
 | `agent` | — | ✅ | ✅ | — | `create` `delete` `enable` `disable` `update` `reload` | 进程级 / 本 agent 管理 | 进程级走控制面；本 agent `reload` admin+，`update` owner-only |
+| `capability` | — | ✅ | ✅ | ✅ | — | agent/project 级 | Skills / MCP / Plugins 策略管理；MVP 支持 `claude` / `codex` |
 | `trigger` | — | — | ✅ | ✅ | `set` `cancel` | 关系级 | scoped 可见性，见 §8.7 |
 | `cli` | — | — | — | — | `exec` | 进程级 | owner-only，白名单透传后端 CLI，见 §8.4 |
 | `file` | — | ✅ | — | — | `fetch` `list` | 关系级文件操作 | 项目内 owner/admin；项目外文件仅 owner（见 §8.8） |
@@ -149,6 +152,7 @@ MENU_NAME_MAP = {
   system:     '/system',
   cli:        '/cli',       // owner-only，透传后端 CLI（路由键，非真实 slash）
   agent:      '/agent',     // 进程级 owners 鉴权，evolagent 生命周期管理
+  capability: '/capability',// agent/project 级，Skills / MCP / Plugins 策略管理
   trigger:    '/trigger',   // 关系级，自主触发器
   file:       '/file',      // 会话级，文件元信息查询 + 拉取（见 §8.8）
 }
@@ -478,6 +482,46 @@ agent 级配置，无需会话：
 { "error": { "code": "NO_PERMISSION", "message": "无权限" } }
 ```
 
+### 5.12 capability — 能力策略类型状态
+
+`capability` 管理当前 agent 在当前 project 下的 Skills / MCP / Plugins 策略。MVP scope 固定为 `project`，projectPath 由当前 agent 的 `projects.defaultPath` 或活跃 session 解析，客户端不得传任意文件路径。
+
+`menu.query name=capability` 只返回类型级状态，即 `capabilities.<type>.*`；单项列表必须通过 `menu.options name=capability` 继续查询。
+
+```jsonc
+// → 查询全部类型
+{ "type": "menu.query", "id": "q-cap-1", "name": "capability" }
+
+// → 只查询 mcp
+{ "type": "menu.query", "id": "q-cap-2", "name": "capability",
+  "args": { "type": "mcp" } }
+
+// ←
+{ "data": {
+    "scope": "project",
+    "projectPath": "/home/evolclaw",
+    "baseagent": "codex",
+    "capabilities": {
+      "skill": { "mode": "inherit", "canUpdate": true },
+      "mcp": { "mode": "none", "canUpdate": true },
+      "plugin": { "mode": "inherit", "canUpdate": true }
+    }
+}}
+```
+
+字段说明：
+
+| 字段 | 含义 |
+|---|---|
+| `scope` | MVP 固定为 `project` |
+| `projectPath` | 当前 agent 绑定项目路径；guest 查询会脱敏不返回 |
+| `baseagent` | 当前查询的 baseagent，可通过 `args.baseagent` 指定 |
+| `capabilities.<type>.mode` | 类型默认策略：`inherit` / `all` / `none` |
+| `capabilities.<type>.canUpdate` | 当前 provider 是否支持下一轮注入 |
+| `capabilities.<type>.reason` | `canUpdate=false` 时的可选说明 |
+
+权限：owner/admin/guest 均可 query；guest 只读且脱敏。
+
 ---
 
 ## 6. menu.options — 可选值列表
@@ -665,6 +709,49 @@ interface MenuItem {
 
 历史项也按相同 MenuItem 结构返回；客户端如需区分历史原因，应走后续专用查询接口（当前 menu protocol 未提供 trigger query）。
 
+### 6.9 capability — 能力单项列表
+
+`menu.options name=capability` 用于列出某个能力类型下的单项。必须提供 `args.type`。
+
+```jsonc
+// →
+{ "type": "menu.options", "id": "o-cap-1", "name": "capability",
+  "args": { "type": "skill" } }
+
+// ←
+{ "data": [
+    {
+      "value": "legacy",
+      "label": "legacy",
+      "source": "project",
+      "enabled": true,
+      "override": "enabled",
+      "runtimeEnabled": true
+    },
+    {
+      "value": "writer",
+      "label": "writer",
+      "source": "project",
+      "enabled": false,
+      "override": null
+    }
+]}
+```
+
+字段说明：
+
+| 字段 | 含义 |
+|---|---|
+| `value` | 能力 id，后续 `menu.update args.name` 使用 |
+| `label` | 展示名 |
+| `desc` | 可选描述；guest 查询会脱敏不返回 |
+| `source` | `project` / `user` / `system` / `plugin` / `marketplace` / `unknown` |
+| `enabled` | 按当前策略计算的展示状态：`true` / `false` / `"inherit"` |
+| `override` | 单项显式覆盖：`enabled` / `disabled` / `null` |
+| `runtimeEnabled` | provider 可观测到的当前运行态开关，可选 |
+
+权限：owner/admin/guest 均可 options；guest 只读且不返回本机绝对路径、MCP command/env、plugin path、skill 文件内容。
+
 ---
 
 ## 7. menu.update — 写入新值
@@ -785,6 +872,52 @@ input → 存储值映射：
 | `dm` | `dm-only` |
 | `owner` | `owner-dm-only` |
 | `none` | `none` |
+
+### 7.6 capability — 能力策略写入
+
+`menu.update name=capability` 支持两类写入：
+
+| 层级 | args | value |
+|---|---|---|
+| 类型级 | `{ "type": "skill" }` | `inherit` / `all` / `none` |
+| 单项级 | `{ "type": "skill", "name": "legacy" }` | `enabled` / `disabled` / `inherit` |
+
+类型级 `value` 与 `mode` 值一致；单项级 `value` 与类型级值不同，避免把类型策略和单项覆盖错配。
+
+```jsonc
+// → 类型级：禁用全部 Skills，除非单项 override 启用
+{ "type": "menu.update", "id": "u-cap-1", "name": "capability",
+  "value": "none",
+  "args": { "type": "skill" } }
+
+// ←
+{ "data": { "type": "skill", "mode": "none", "saved": true } }
+
+// → 单项级：显式启用 legacy
+{ "type": "menu.update", "id": "u-cap-2", "name": "capability",
+  "value": "enabled",
+  "args": { "type": "skill", "name": "legacy" } }
+
+// ←
+{ "data": { "type": "skill", "name": "legacy", "override": "enabled", "saved": true } }
+
+// → 单项级：删除 override，回到类型级 mode
+{ "type": "menu.update", "id": "u-cap-3", "name": "capability",
+  "value": "inherit",
+  "args": { "type": "skill", "name": "legacy" } }
+
+// ←
+{ "data": { "type": "skill", "name": "legacy", "override": null, "saved": true } }
+```
+
+权限：
+
+| 操作 | owner | admin | guest |
+|---|:---:|:---:|:---:|
+| 类型级 update | ✅ | — | — |
+| 单项级 update | ✅ | ✅ | — |
+
+写入位置固定为 `$EVOLCLAW_HOME/agents/<aid>/config.json` 的 `capabilities.<baseagent>.<type>`。MVP 不写 Claude/Codex/Gemini 等 baseagent 的用户级配置文件；runner 在下一轮启动或恢复时将策略注入 baseagent。Codex app-server 的 `turn/start` 没有通用 `config` 字段，因此 Codex 语义是下一轮 `thread/start` / `thread/resume` 生效，不承诺当前运行中的 turn 热切。
 
 ---
 
@@ -1463,7 +1596,10 @@ create 受理后，后台逐环节把进度写入 `agents/<aid>/create-status.js
 | `UNKNOWN_NAME` | `name` 不在映射表内且未提供 `cmd` | 协议层错误，开发期排查 |
 | `MISSING_CMD` | 请求中既无 `name` 也无 `cmd`（极少触发） | 协议层错误 |
 | `MISSING_VALUE` | update 缺 `value` / action 缺必需 args | 协议层错误 |
-| `INVALID_ARGS` | 进程级/触发器操作参数非法（缺必填、非法枚举/数值） | 校正 args 后重试 |
+| `INVALID_ARGS` | 进程级/触发器/capability 操作参数非法（缺必填、非法枚举/数值） | 校正 args 后重试 |
+| `INVALID_TYPE` | capability `args.type` 不是 `skill` / `mcp` / `plugin` | 重新拉取协议配置 |
+| `INVALID_SCOPE` | capability scope 不是 MVP 支持的 `project` | 固定使用 `scope=project` 或省略 |
+| `NO_PROJECT` | 无法解析当前 agent projectPath | 提示先配置 agent project |
 | `FORBIDDEN` | 进程级操作发送方 AID 不在 `evolclaw.json` `owners`；或非 admin 操作 trigger 时缺 `userId` | UI 隐藏该项或提示无法确认身份 |
 | `CONFLICT` | 目标已存在（如 agent create 重名、trigger 重名、session/topic rename 名称冲突） | 提示已存在 |
 | `NO_ACTIVE_SESSION` | 此操作必须有活跃会话 | 提示用户先发条消息建立会话 |
@@ -1473,7 +1609,7 @@ create 受理后，后台逐环节把进度写入 `agents/<aid>/create-status.js
 | `NOT_APPLICABLE` | 操作在当前上下文无意义（如私聊改 dispatch） | 灰显该项 |
 | `NOT_FOUND` | 目标会话/话题/项目不存在 | 刷新列表后重试 |
 | `EXEC_FAILED` | 业务层兜底拒绝（含 delegated slash 命令失败） | 展示 message |
-| `NOT_SUPPORTED` | 该操作未实现 | — |
+| `NOT_SUPPORTED` | 该操作未实现，或当前 baseagent/capability 类型不支持下一轮注入 | — |
 | `NOT_ALLOWED` | cli 命令/子命令不在白名单 | 不开放任意命令输入；开发期排查 |
 | `TIMEOUT` | cli 执行超 15s，子进程已被强杀 | 提示超时 |
 | `BUSY` | 操作冲突（如正在处理中时触发同类操作） | 稍后重试 |
@@ -1524,7 +1660,8 @@ list 视图里 `dynamic: true` 节点对应一个 `name`：客户端可以拉子
 | 会话存在但无任务 | `NO_ACTIVE_TASK` | `session.action.stop` |
 | 私聊会话/无会话上调 dispatch | `NOT_APPLICABLE` | `dispatch` query/update |
 | guest 修改管理项 | `NO_PERMISSION` | `permission` / `model` / `chatmode` / `dispatch` update |
-| admin 修改 owner-only 项 | `NO_PERMISSION` | `activity` update、`agent.update`、项目外文件或跨通道 `/file` |
+| admin 修改 owner-only 项 | `NO_PERMISSION` | `activity` update、`agent.update`、`capability` 类型级 update、项目外文件或跨通道 `/file` |
+| capability 单项不存在 | `NOT_FOUND` | `capability` item update |
 | 进程级非 owners 名单 | `FORBIDDEN` | `system` query/action / `agent` query/options/action |
 | 群聊非管理员改 chatmode/dispatch | `NO_PERMISSION` | `chatmode` update / `dispatch` update |
 | anonymous 访问话题菜单 | `FORBIDDEN` | `topic` query/options/action |
@@ -1721,6 +1858,7 @@ name 速查
   activity  query / options / update          中间输出可见性（owner/agent）
   system    query / action(*)                 进程信息 / restart+check+upgrade（进程级 owners 鉴权）
   agent     query / options / action(*)       evolagent 详情/列表/create+delete+enable+disable/reload/update
+  capability query / options / update         Skills/MCP/Plugins 策略（类型级 owner，单项 admin+）
   trigger   options / update / action(*)      触发器列表/改调度/set+cancel（关系级 scoped）
   cli       action(exec)                       owner-only 透传后端 CLI（见 menu-protocol-cli-exec-frontend.md）
   file      query / action(fetch/list)         文件元信息(sha256/size/mtime) / 拉取 / 列目录（owner/admin，见 §8.8）

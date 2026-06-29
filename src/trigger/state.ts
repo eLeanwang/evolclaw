@@ -146,7 +146,9 @@ function isValidSchedule(value: unknown): value is TriggerScheduleState {
   const schedule = value as TriggerScheduleState;
   return Number.isFinite(schedule.nextFireAt)
     && Number.isFinite(schedule.updatedAt)
-    && typeof schedule.sourceSignature === 'string';
+    && typeof schedule.sourceSignature === 'string'
+    && (schedule.lastScheduledAt === undefined || Number.isFinite(schedule.lastScheduledAt))
+    && (schedule.lastFiredAt === undefined || Number.isFinite(schedule.lastFiredAt));
 }
 
 function isValidLimitState(value: unknown): value is TriggerLimitState {

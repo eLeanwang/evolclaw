@@ -14,7 +14,7 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import { commandExists } from '../utils/cross-platform.js';
-import type { Config } from '../types.js';
+import type { AgentConfig, Config, EffectiveAgentConfig } from '../types.js';
 
 // ── baseagent 别名归一 ─────────────────────────────────────────────────
 
@@ -125,6 +125,8 @@ export interface OpenaiResolved {
   effort?: string;
   enableRequestUserInput?: boolean;
   approvalsReviewer?: string;
+  evolclawAgentAid?: string;
+  evolclawAgentConfig?: AgentConfig | EffectiveAgentConfig;
 }
 
 function loadCodexSettings(): { apiKey?: string; baseUrl?: string; model?: string } {

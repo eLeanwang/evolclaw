@@ -2407,17 +2407,19 @@ function renderTriggers(data) {
   for (const t of triggers) {
     const status = t.status || 'active';
     const active = status === 'active';
+    const lastFireTime = t.lastFiredAt || t.lastScheduledAt;
+    const lastResult = t.lastResult || (t.lastScheduledAt ? '未记录' : '');
     html += `<tr class="${active ? '' : 'trig-done'}">` +
       `<td>${trigStatusBadge(status)}</td>` +
       `<td>${esc(t.name ?? t.label ?? '')}</td>` +
       `<td>${esc(t.id ?? t.value ?? '')}</td>` +
       `<td>${esc(t.scheduleType ?? '')}</td>` +
       `<td>${t.scheduleType === 'at' && t.scheduleValue ? fmtTime(new Date(t.scheduleValue).getTime()) : esc(t.scheduleValue ?? '')}</td>` +
-      `<td>${t.lastFiredAt ? fmtTime(t.lastFiredAt) : '—'}</td>` +
+      `<td>${lastFireTime ? fmtTime(lastFireTime) : '—'}</td>` +
       `<td>${t.nextFireAt ? fmtTime(t.nextFireAt) : '—'}</td>` +
       `<td>${t.fireCount ?? 0}</td>` +
       `<td>${t.failCount ? `<span style="color:var(--red)">${t.failCount}</span>` : '0'}</td>` +
-      `<td>${t.lastResult ? esc(t.lastResult) : '—'}</td>` +
+      `<td>${lastResult ? esc(lastResult) : '—'}</td>` +
       `<td>${esc(t.targetSessionStrategy ?? '')}</td>` +
       `<td>${esc(t.targetChannel ?? '')}</td>` +
       `<td>${esc(t.targetChannelId ?? '')}</td>` +

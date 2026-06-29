@@ -88,6 +88,7 @@ interface CodexThreadOptions {
   config?: JsonObject | null;
   baseInstructions?: string;
   developerInstructions?: string;
+  selectedCapabilityRoots?: JsonObject[];
 }
 
 export class CodexAppServerClient {
@@ -120,6 +121,7 @@ export class CodexAppServerClient {
       config: this.buildThreadConfig(effort, options?.config),
       ...(options?.baseInstructions ? { baseInstructions: options.baseInstructions } : {}),
       ...(options?.developerInstructions ? { developerInstructions: options.developerInstructions } : {}),
+      ...(options?.selectedCapabilityRoots ? { selectedCapabilityRoots: options.selectedCapabilityRoots } : {}),
     }) as Promise<CodexThreadResponse>;
   }
 
@@ -139,6 +141,7 @@ export class CodexAppServerClient {
       config: this.buildThreadConfig(effort, options?.config),
       ...(options?.baseInstructions ? { baseInstructions: options.baseInstructions } : {}),
       ...(options?.developerInstructions ? { developerInstructions: options.developerInstructions } : {}),
+      ...(options?.selectedCapabilityRoots ? { selectedCapabilityRoots: options.selectedCapabilityRoots } : {}),
     }) as Promise<CodexThreadResponse>;
   }
 

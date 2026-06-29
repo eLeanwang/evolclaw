@@ -12,6 +12,8 @@ import os from 'os';
 import { logger } from '../utils/logger.js';
 import { checkBlacklist, checkReadonly, checkHClassWrite, parseEvolclawSendCommand, summarizeToolInput, requestDangerousCommandPermission } from '../core/permission.js';
 import { encodePath } from '../utils/cross-platform.js';
+import { resolveEffective } from '../config/config-manager.js';
+import { resolveClaudeCapabilityRunOptionsForProject } from '../core/capability/capability-manager.js';
 import type { AgentPlugin, AgentInstance, AgentCallbacks } from '../core/baseagent-loader.js';
 import type { AgentEvent, ImageData, PermissionContext, PermissionModeInfo, AgentTokenUsage, AgentContextUsage, AgentLastModelCall, AgentModelCall } from './runner-types.js';
 import type { GatewayPricingCache, PriceQuad } from '../stats/price-resolver.js';
@@ -359,6 +361,17 @@ export class AgentRunner {
       refreshGatewayPricing(this.baseUrl, this.apiKey); // 不 await，stale-while-revalidate
     }
     return entry?.cache;
+  }
+
+  private async resolveCapabilityRunOptions(projectPath: string): Promise<Record<string, unknown>> {
+    const claudeConfig = this.config?.agents?.claude;
+    let agentConfig = claudeConfig?.evolclawAgentConfig;
+    if (claudeConfig?.evolclawAgentAid) {
+      try {
+        agentConfig = resolveEffective({ self: claudeConfig.evolclawAgentAid }, { cache: true });
+      } catch {}
+    }
+    return await resolveClaudeCapabilityRunOptionsForProject(agentConfig, projectPath, 'claude');
   }
 
   async listModels(): Promise<string[]> {
@@ -1472,9 +1485,11 @@ export class AgentRunner {
       logger.info(`[AgentRunner] systemPromptAppend: none`);
     }
     const sdkModel = resolveSdkModel(callModel, this.baseUrl);
+    const capabilityOptions = await this.resolveCapabilityRunOptions(projectPath);
     const commonOptions = {
       cwd: projectPath,
       model: sdkModel,
+      ...capabilityOptions,
       ...(callEffort ? { effort: callEffort } : {}),
       ...(this.claudeExecutablePath ? { pathToClaudeCodeExecutable: this.claudeExecutablePath } : {}),
       autoCompactWindow: autoCompactWindowForModel(sdkModel),
@@ -1810,7 +1825,7 @@ export class ClaudeAgentPlugin implements AgentPlugin {
     const syntheticConfig = { agents: { claude: override } } as Config;
     const anthropic = resolveAnthropicConfig(syntheticConfig, override);
     const merged: Config = {
-      agents: { claude: { ...(override || {}) } },
+      agents: { claude: { ...(override || {}), evolclawAgentAid: agent.aid, evolclawAgentConfig: agent.config } },
     } as Config;
     const agentRunner = new AgentRunner(
       anthropic.apiKey,

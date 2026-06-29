@@ -15,9 +15,17 @@ import type { ParsedTriggerSet } from '../../trigger/parser.js';
 import { checkLatestVersion, getLocalVersion, isLinkedInstall, compareVersions, resolveGlobalPkg } from '../../utils/npm-ops.js';
 import { commandExists } from '../../utils/cross-platform.js';
 import { loadDefaults, loadEvolclawConfig } from '../../config-store.js';
+import { resolveEffective } from '../../config/config-manager.js';
 import { execAgentAction, execAgentQuery, execAgentOptions, resolveProjectPath } from '../message/command-handler-agent-control.js';
 import { gatewayList, gatewayUpdate, gatewayDelete, gatewayTest, gatewayModels, gatewaySetPrice, gatewaySyncEnv } from '../../config/gateway-config.js';
 import { displaySessionTitle } from '../session/session-title.js';
+import {
+  isCapabilityType,
+  listCapabilityOptions,
+  queryCapabilityTypes,
+  resolveCapabilityContext,
+  updateCapabilityPolicy,
+} from '../capability/capability-manager.js';
 
 /**
  * 获取 baseagent CLI 的版本号（claude/gemini/codex）。
@@ -84,6 +92,71 @@ interface FileListEntry {
 interface FileListEntryInfo {
   isDirectory: boolean;
   followTarget: boolean;
+}
+
+function validateCapabilityScope(args?: Record<string, any>): { error: string; code: string } | null {
+  const scope = args?.scope ?? 'project';
+  return scope === 'project' ? null : { error: 'MVP 只支持 scope=project', code: 'INVALID_SCOPE' };
+}
+
+function sanitizeCapabilityOptionsForRole(items: any[], role: string): any[] {
+  if (role === 'owner' || role === 'admin') return items;
+  return items.map(item => {
+    const { desc: _desc, ...rest } = item;
+    return rest;
+  });
+}
+
+function sanitizeCapabilityQueryForRole(data: any, role: string): any {
+  if (role === 'owner' || role === 'admin') return data;
+  const { projectPath: _projectPath, ...rest } = data;
+  return rest;
+}
+
+function resolveCapabilityTarget(this: any, params: {
+  channel: string;
+  args?: Record<string, any>;
+  session?: Session | null;
+  evolagent?: any;
+  fromControlChannel?: boolean;
+}): { ctx: import('../capability/types.js').CapabilityContext; config: any; agent: any } | { error: string; code: string } {
+  const scopeError = validateCapabilityScope(params.args);
+  if (scopeError) return scopeError;
+
+  const requestedAid = params.args?.aid ?? params.args?.agent;
+  const targetAgent = requestedAid
+    ? this.agentRegistry?.get?.(String(requestedAid))
+    : params.evolagent ?? this.getOwningAgent?.(params.channel);
+
+  if (!targetAgent) {
+    return { error: requestedAid ? `未找到 Agent: ${requestedAid}` : '当前 channel 无绑定 agent', code: requestedAid ? 'NOT_FOUND' : 'FORBIDDEN' };
+  }
+
+  if (!params.fromControlChannel) {
+    const selfAid = this.getOwningAgent?.(params.channel)?.aid;
+    if (selfAid && targetAgent.aid !== selfAid) {
+      return { error: '跨 agent 操作仅允许通过控制 AID channel 执行', code: 'FORBIDDEN' };
+    }
+  }
+
+  const freshConfig = (() => {
+    try { return resolveEffective({ self: targetAgent.aid }, { cache: true }); }
+    catch { return targetAgent.config; }
+  })();
+  const fallbackBaseagent = (() => {
+    try { return targetAgent.baseagent; } catch { return undefined; }
+  })();
+
+  const ctx = resolveCapabilityContext({
+    aid: targetAgent.aid,
+    baseagent: params.args?.baseagent ?? params.session?.baseagent ?? freshConfig?.active_baseagent ?? fallbackBaseagent,
+    projectPath: targetAgent.projectPath,
+    sessionProjectPath: params.session?.projectPath,
+    sessionBaseagent: params.session?.baseagent,
+    config: freshConfig,
+  });
+  if ('error' in ctx) return ctx;
+  return { ctx, config: freshConfig, agent: targetAgent };
 }
 
 function getRenameName(args: any): string {
@@ -460,6 +533,7 @@ export function getMenuItems(this: any, role: string, chatType: string = 'privat
           { value: 'mention', label: '@ 提及', desc: '仅在被 @ 提及时响应' },
           { value: 'broadcast', label: '广播', desc: '响应群内所有消息' },
         ] } },
+        { cmd: '/capability', label: '能力开关管理', desc: '查看并管理 Skills / MCP / Plugins' },
       ]
     });
 
@@ -548,6 +622,18 @@ export async function getSubMenuItems(this: any, cmd: string, channel: string, c
       .map(ag => ({ value: ag.aid, label: ag.name || ag.aid, desc: ag.status }));
   }
 
+  if (cmd === '/capability') {
+    const type = args?.type;
+    if (!isCapabilityType(type)) {
+      throw { code: type ? 'INVALID_TYPE' : 'INVALID_ARGS', message: 'args.type 必须是 skill / mcp / plugin' };
+    }
+    const target = resolveCapabilityTarget.call(this, { channel, args, session, fromControlChannel });
+    if ('error' in target) throw { code: target.code, message: target.error };
+    const identity = overrideIdentity ?? this.sessionManager.resolveIdentity(channel, userId);
+    const options = await listCapabilityOptions(target.ctx, target.config, type) as any[];
+    return sanitizeCapabilityOptionsForRole(options, identity.role);
+  }
+
   // ── 关系级 /trigger list（每个 trigger 一个 MenuItem） ──
   if (cmd === '/trigger') {
     const triggerScheduler = this.getTriggerSchedulerForChannel?.(channel);
@@ -612,7 +698,9 @@ export async function getSubMenuItems(this: any, cmd: string, channel: string, c
   }
 
   if (cmd === '/baseagent') {
-    const currentAgent = session?.baseagent;
+    const currentAgent = session?.baseagent
+      ?? this.agentRegistry?.resolveByChannel(channel)?.baseagent
+      ?? this.parseDefaultBaseagent?.();
     return this.getAvailableBaseagents(channel).map((name: string) => ({ value: name, label: name, selected: name === currentAgent }));
   }
 
@@ -810,6 +898,18 @@ export async function execMenuQuery(this: any,
     }
 
     return { error: '未知的 scope', code: 'INVALID_SCOPE' };
+  }
+
+  if (cmdBase === '/capability') {
+    const type = args?.type;
+    if (type !== undefined && !isCapabilityType(type)) {
+      return { error: 'type 必须是 skill / mcp / plugin', code: 'INVALID_TYPE' };
+    }
+    const target = resolveCapabilityTarget.call(this, { channel, args, session, evolagent, fromControlChannel });
+    if ('error' in target) return target;
+    const identity = this.sessionManager.resolveIdentity(channel, userId);
+    const data = queryCapabilityTypes(target.ctx, target.config, type);
+    return { data: sanitizeCapabilityQueryForRole(data, identity.role) };
   }
 
   if (cmdBase === '/pwd') {
@@ -1107,6 +1207,39 @@ export async function execMenuUpdate(this: any,
     );
     if (!updated.ok) return { error: updated.error, code: /不存在|无权限/.test(updated.error) ? 'NOT_FOUND' : 'INVALID_ARGS' };
     return { data: { id: updated.trigger.id, nextFireAt: updated.trigger.nextFireAt } };
+  }
+
+  if (cmdBase === '/capability') {
+    const type = args?.type;
+    if (!isCapabilityType(type)) {
+      return { error: 'args.type 必须是 skill / mcp / plugin', code: type ? 'INVALID_TYPE' : 'INVALID_ARGS' };
+    }
+    const name = (args?.name ?? '').toString().trim();
+    if (name) {
+      if (!isAdmin) return { error: '无权限', code: 'NO_PERMISSION' };
+    } else if (identity.role !== 'owner') {
+      return { error: '类型级能力策略仅 owner 可修改', code: 'NO_PERMISSION' };
+    }
+
+    const target = resolveCapabilityTarget.call(this, { channel, args, session, evolagent, fromControlChannel });
+    if ('error' in target) return target;
+    const support = queryCapabilityTypes(target.ctx, target.config, type).capabilities[type];
+    if (!support?.canUpdate) {
+      return { error: support?.reason || '当前 baseagent 不支持 capability 更新', code: 'NOT_SUPPORTED' };
+    }
+    if (name) {
+      const options = await listCapabilityOptions(target.ctx, target.config, type);
+      if (!options.some(item => item.value === name)) {
+        return { error: `未发现能力: ${name}`, code: 'NOT_FOUND' };
+      }
+    }
+
+    try {
+      const data = updateCapabilityPolicy(target.ctx.aid, target.ctx.baseagent, type, arg as any, name || undefined);
+      return { data };
+    } catch (e: any) {
+      return { error: e?.message || String(e), code: e?.code || 'EXEC_FAILED' };
+    }
   }
 
   if (cmdBase === '/baseagent') {
@@ -1740,7 +1873,7 @@ export async function execMenuForEcweb(this: any, payload: any): Promise<import(
     effort: '/effort', chatmode: '/chatmode', dispatch: '/dispatch',
     permission: '/perm', activity: '/activity', system: '/system',
     agent: '/agent', trigger: '/trigger', file: '/file', gateway: '/gateway',
-    config: '/config',
+    config: '/config', capability: '/capability',
   };
   const cmd = name ? (nameMap[name] ?? payload.cmd) : payload.cmd;
 
@@ -1808,7 +1941,7 @@ export async function execMenuForControl(this: any, payload: any, peerId: string
     effort: '/effort', chatmode: '/chatmode', dispatch: '/dispatch',
     permission: '/perm', activity: '/activity', system: '/system',
     agent: '/agent', trigger: '/trigger', file: '/file', gateway: '/gateway',
-    config: '/config',
+    config: '/config', capability: '/capability',
   };
   const cmd = name ? (nameMap[name] ?? payload.cmd) : payload.cmd;
 

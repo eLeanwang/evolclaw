@@ -702,6 +702,9 @@ async function main() {
 
   // 把所有事件录到 events.log（受 EVENT_LOG 环境变量控制）
   eventBus.subscribeAll((event) => logger.event(event));
+  eventBus.subscribe('agent:updated', (event) => {
+    if ((event as any).nameChanged) agentRegistry?.invalidateAgentDisplayCache?.((event as any).aid);
+  });
 
   // 统计收集器（近 1 小时滚动统计）
   const statsCollector = new StatsCollector(eventBus);

@@ -125,6 +125,8 @@ export interface Config {
       useSettingSources?: boolean;
       agentProgressSummaries?: boolean;
       excludeDynamicSections?: boolean;
+      evolclawAgentAid?: string;
+      evolclawAgentConfig?: AgentConfig | EffectiveAgentConfig;
     };
     codex?: {
       apiKey?: string;
@@ -134,6 +136,8 @@ export interface Config {
       reasoning?: string;
       enableRequestUserInput?: boolean;
       approvalsReviewer?: 'user' | 'auto_review' | 'guardian_subagent';
+      evolclawAgentAid?: string;
+      evolclawAgentConfig?: AgentConfig | EffectiveAgentConfig;
     };
     gemini?: {
       apiKey?: string;
@@ -618,6 +622,7 @@ export interface EvolAgentRegistryHandle {
   setChannelOwner(channelName: string, userId: string): void;
   getShowActivities(channelName: string): 'all' | 'none';
   setShowActivities(channelName: string, mode: 'all' | 'none'): void;
+  invalidateAgentDisplayCache?(aid: string): void;
 }
 
 // ── AUN AID Connection State ───────────────────────────────────────
@@ -734,6 +739,17 @@ export interface ProjectsBlock {
   rootPath?: string;
   defaultPath?: string;
 }
+
+export type CapabilityType = 'skill' | 'mcp' | 'plugin';
+export type CapabilityMode = 'inherit' | 'all' | 'none';
+export type CapabilityOverride = 'enabled' | 'disabled';
+
+export interface CapabilityTypeConfig {
+  mode?: CapabilityMode;
+  overrides?: Record<string, CapabilityOverride>;
+}
+
+export type CapabilitiesBlock = Record<string, Partial<Record<CapabilityType, CapabilityTypeConfig>>>;
 
 export interface ChatmodeBlock {
   private?: 'interactive' | 'proactive';
@@ -912,6 +928,7 @@ export interface AgentConfig {
   channels: ChannelInstance[];
   models?: ModelsBlock;
   projects?: ProjectsBlock;
+  capabilities?: CapabilitiesBlock;
   debug?: DebugBlock;
   /** 观察者模式：开启后入站/出站消息各转发一份给顶层 owners[]。默认 false。 */
   observable?: boolean;
@@ -989,6 +1006,7 @@ export interface EffectiveAgentConfig {
   channels: ChannelInstance[];
   models?: ModelsBlock;
   projects?: ProjectsBlock;
+  capabilities?: CapabilitiesBlock;
   debug?: DebugBlock;
   observable?: boolean;
   extra_backup?: Array<{ path: string; pattern?: string }>;

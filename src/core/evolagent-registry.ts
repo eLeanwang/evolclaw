@@ -235,6 +235,12 @@ export class EvolAgentRegistry {
     return [...this.agents.values()].map(a => this.toInfo(a));
   }
 
+  invalidateAgentDisplayCache(aid: string): void {
+    this.displayNameCache.delete(aid);
+    this.personalNameCache.delete(aid);
+    this.displayNamePending.delete(aid);
+  }
+
   /** 启动后还能跑（status === 'stopped'）的 agents——给 AgentLoader 起 runner 用。 */
   runnableAgents(): EvolAgent[] {
     return [...this.agents.values()].filter(a => a.status === 'stopped');

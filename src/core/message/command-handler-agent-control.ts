@@ -17,8 +17,11 @@ import { CreateStatusWriter, readCreateStatus, type CreatePhase } from './create
 import { deriveAgentProjectPath } from '../../utils/project-path.js';
 import type { EventBus } from '../event-bus.js';
 import { uploadAvatar } from '../../utils/avatar-upload.js';
+import { agentmdGet, agentmdPut, updateAgentMdFrontmatterName } from '../../aun/aid/agentmd.js';
 
 export type ExecResult = { data: any } | { error: string; code: string };
+
+const SUPPORTED_AGENT_PATCH_FIELDS = new Set(['aid', 'name', 'avatar', 'baseagents', 'projects', 'owners', 'chatmode', 'channels']);
 
 /** 把 cli/agent.ts 的 error 字符串映射为结构化错误码 */
 function classifyError(error: string): string {
@@ -26,6 +29,56 @@ function classifyError(error: string): string {
   if (/not found/i.test(error)) return 'NOT_FOUND';
   if (/invalid|must be|required|缺少/i.test(error)) return 'INVALID_ARGS';
   return 'INTERNAL';
+}
+
+function classifyAgentMdError(error: string): string {
+  if (/not found|404|不存在/i.test(error)) return 'NOT_FOUND';
+  if (/invalid|must be|required|缺少|frontmatter|empty|为空/i.test(error)) return 'INVALID_ARGS';
+  return 'UPLOAD_FAILED';
+}
+
+async function updateAgentMdName(aid: string, value: unknown): Promise<{ ok: true; name: string } | { ok: false; error: string; code: string }> {
+  const name = typeof value === 'string' ? value.trim() : '';
+  if (!name) return { ok: false, error: 'name 不能为空', code: 'INVALID_ARGS' };
+  try {
+    const content = await agentmdGet(aid, { aunPath: resolveRoot() });
+    const updated = updateAgentMdFrontmatterName(content, name);
+    await agentmdPut(updated.content, { aid, aunPath: resolveRoot() });
+    return { ok: true, name };
+  } catch (e: any) {
+    const message = e?.message || String(e);
+    return { ok: false, error: `更新 agent.md name 失败: ${message}`, code: classifyAgentMdError(message) };
+  }
+}
+
+function toPosix(p: string): string {
+  return p.replace(/\\/g, '/');
+}
+
+function buildCreateProgressOnlyAgent(aid: string, progress: any): Record<string, any> {
+  const agentDir = path.join(resolvePaths().agentsDir, aid);
+  return {
+    aid,
+    status: progress?.status === 'failed' ? 'error' : 'stopped',
+    identity: { name: null, description: null },
+    config: {
+      baseagent: null,
+      model: null,
+      effort: null,
+      chatmode: null,
+      owners: [],
+      channels: [],
+    },
+    connection: null,
+    sessions: { active: 0, last_activity: null },
+    paths: {
+      config: toPosix(path.join(agentDir, 'config.json')),
+      agent_md: null,
+      project: null,
+      data: toPosix(path.join(agentDir, 'data')),
+    },
+    createProgress: progress,
+  };
 }
 
 /** 后台异步：实际创建 agent + 落 model/chatmode，全程写构建进度（D3）。
@@ -36,9 +89,7 @@ async function runCreateInBackground(opts: {
   aid: string; name: string; baseagent: string; project: string; owner: string;
   model?: string; chatmode?: any;
   eventBus?: EventBus;
-}): Promise<void> {
-  const agentDir = path.join(resolvePaths().agentsDir, opts.aid);
-  const w = new CreateStatusWriter(agentDir, opts.aid);
+}, w: CreateStatusWriter): Promise<void> {
   let curPhase: CreatePhase = 'validating';   // 跟踪当前环节，供 catch 兜底时标注正确 phase
   try {
     // onPhase 把 agentCreateNonInteractive 内部环节（0-3、5）映射到进度文件
@@ -112,15 +163,20 @@ export async function execAgentAction(
     if (!a.project || typeof a.project !== 'string') {
       return { error: 'project 缺失且无法兜底（需 defaults.projects.rootPath/defaultPath）', code: 'INVALID_ARGS' };
     }
-    // D3: 受理即返回，重副作用转后台
-    // 受理即返回；后台 promise fire-and-forget。runCreateInBackground 内部有 try/catch，
-    // 但 CreateStatusWriter 构造（mkdir/写盘）在 try 之前，故再加一层兜底防未处理拒绝。
+    // D3: accepted=true 必须意味着后续 query 能查到该 AID 的创建状态。
+    let progressWriter: CreateStatusWriter;
+    try {
+      progressWriter = new CreateStatusWriter(path.join(resolvePaths().agentsDir, a.aid), a.aid);
+    } catch (e: any) {
+      return { error: `创建进度状态初始化失败: ${e?.message || e}`, code: 'INTERNAL' };
+    }
+    // 重副作用转后台，后台内部有 try/catch；这里 catch 只兜底未预期拒绝。
     void runCreateInBackground({
       aid: a.aid, name: a.name, baseagent: a.baseagent,
       project: a.project, owner: peerId,
       model: a.model, chatmode: a.chatmode,
       eventBus,
-    }).catch(e => logger.error(`[agent-control] runCreateInBackground unhandled ${a.aid}: ${e?.message || e}`));
+    }, progressWriter).catch(e => logger.error(`[agent-control] runCreateInBackground unhandled ${a.aid}: ${e?.message || e}`));
     return { data: { accepted: true, aid: a.aid } };
   }
 
@@ -164,7 +220,12 @@ export async function execAgentAction(
           timestamp: Date.now(),
         });
       }
-      eventBus?.publish({ type: 'agent:updated', aid: a.aid, timestamp: Date.now() });
+      eventBus?.publish({
+        type: 'agent:updated',
+        aid: a.aid,
+        nameChanged: Boolean((result.data as any)?.name),
+        timestamp: Date.now(),
+      });
     }
     return result;
   }
@@ -172,15 +233,22 @@ export async function execAgentAction(
   return { error: `不支持的 action: ${action}`, code: 'INVALID_ARGS' };
 }
 
-/** name=agent 的 menu.action=update：仅落盘 config patch，不触发 reload。
+/** name=agent 的 menu.action=update：落盘 config patch / agent.md patch，不触发 reload。
  *  直接 loadAgent + saveAgent（不走 agentSet，避免其内部自动 evolagent.reload）——
  *  重载由用户在 Agents 页操作列手动触发（带任务执行检查）。
  *  AUN 渠道绑定 agent 顶层 aid，不可通过 patch 编辑：拒绝改 aid、拒绝 channels 数组里出现 aun 条目。
- *  可写字段：baseagents / projects / owners / chatmode / channels（非 aun）。 */
+ *  可写字段：name / baseagents / projects / owners / chatmode / channels（非 aun）。 */
 export async function execAgentUpdate(args: Record<string, any> | undefined): Promise<ExecResult> {
   const a = args ?? {};
   if (!a.aid) return { error: '缺少 aid', code: 'INVALID_ARGS' };
   const p = a.patch ?? {};
+  if (!p || typeof p !== 'object' || Array.isArray(p)) {
+    return { error: 'patch 必须是对象', code: 'INVALID_ARGS' };
+  }
+  const unsupported = Object.keys(p).filter(k => !SUPPORTED_AGENT_PATCH_FIELDS.has(k));
+  if (unsupported.length > 0) {
+    return { error: `不支持的 patch 字段: ${unsupported.join(', ')}`, code: 'UNSUPPORTED_FIELD' };
+  }
   if (p.aid !== undefined) {
     return { error: 'aid 不可修改（AUN 身份绑定，如需换 AID 请删除后重建）', code: 'INVALID_ARGS' };
   }
@@ -188,6 +256,12 @@ export async function execAgentUpdate(args: Record<string, any> | undefined): Pr
     const otherKeys = Object.keys(p).filter(k => k !== 'avatar');
     if (otherKeys.length > 0) {
       return { error: 'avatar 不能与其他 patch 字段同时提交，请拆分为两次 update', code: 'INVALID_ARGS' };
+    }
+  }
+  if (p.name !== undefined) {
+    const otherKeys = Object.keys(p).filter(k => k !== 'name');
+    if (otherKeys.length > 0) {
+      return { error: 'name 不能与其他 patch 字段同时提交，请拆分为两次 update', code: 'INVALID_ARGS' };
     }
   }
   if (Array.isArray(p.channels) && p.channels.some((c: any) => c?.type === 'aun')) {
@@ -205,19 +279,31 @@ export async function execAgentUpdate(args: Record<string, any> | undefined): Pr
   }
 
   let touched = false;
+  const data: Record<string, any> = { aid: a.aid };
+  const hasConfigPatch = p.baseagents !== undefined || p.projects !== undefined || p.owners !== undefined || p.chatmode !== undefined || p.channels !== undefined;
   if (p.baseagents !== undefined) { (config as any).baseagents = p.baseagents; touched = true; }
   if (p.projects !== undefined)   { (config as any).projects = p.projects; touched = true; }
   if (p.owners !== undefined)     { (config as any).owners = p.owners; touched = true; }
   if (p.chatmode !== undefined)   { (config as any).chatmode = p.chatmode; touched = true; }
   if (p.channels !== undefined)   { (config as any).channels = p.channels; touched = true; }
+
+  if (p.name !== undefined) {
+    const result = await updateAgentMdName(a.aid, p.name);
+    if (!result.ok) return { error: result.error, code: result.code };
+    data.name = result.name;
+    touched = true;
+  }
+
   if (!touched) return { error: 'patch 为空，无可写字段', code: 'INVALID_ARGS' };
 
-  try {
-    saveAgent(config);
-  } catch (e: any) {
-    return { error: e?.message || String(e), code: classifyError(e?.message || String(e)) };
+  if (hasConfigPatch) {
+    try {
+      saveAgent(config);
+    } catch (e: any) {
+      return { error: e?.message || String(e), code: classifyError(e?.message || String(e)) };
+    }
   }
-  return { data: { aid: a.aid, saved: true } };
+  return { data: { ...data, saved: true } };
 }
 
 /** project 兜底：显式值 > rootPath 合成 > defaultPath > undefined */
@@ -236,11 +322,15 @@ export function resolveProjectPath(
 export async function execAgentQuery(args: Record<string, any> | undefined): Promise<ExecResult> {
   const aid = args?.aid;
   if (!aid) return { error: '缺少 aid', code: 'INVALID_ARGS' };
-  const res = await agentShow(aid);
-  if (!('ok' in res) || res.ok !== true) return { error: (res as any).error, code: classifyError((res as any).error) };
-  // 叠加构建进度（create 受理后、ready 前可见；ready 后文件仍在，可反映软失败 warn）
   const agentDir = path.join(resolvePaths().agentsDir, aid);
   const progress = readCreateStatus(agentDir);
+  const res = await agentShow(aid);
+  if (!('ok' in res) || res.ok !== true) {
+    const code = classifyError((res as any).error);
+    if (code === 'NOT_FOUND' && progress) return { data: buildCreateProgressOnlyAgent(aid, progress) };
+    return { error: (res as any).error, code };
+  }
+  // 叠加构建进度（create 受理后、ready 前可见；ready 后文件仍在，可反映软失败 warn）
   return { data: progress ? { ...res, createProgress: progress } : res };
 }
 

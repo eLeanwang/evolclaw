@@ -116,7 +116,9 @@ export class TriggerRuntimeScheduler {
   }
 
   stats(triggerId: string): TriggerRunStats {
-    return this.audit.stats(triggerId);
+    const merged = mergeStats(this.manager.legacyStats(triggerId), this.audit.stats(triggerId));
+    const schedule = this.state.readSchedule(triggerId);
+    return accountScheduleMarker(merged, schedule, skipped => this.audit.hasSkippedSchedule(triggerId, skipped));
   }
 
   create(input: unknown, files: TriggerCreateFile[] = [], opts: { enable?: boolean } = {}): TriggerDefinition {
@@ -257,7 +259,6 @@ export class TriggerRuntimeScheduler {
         this.disableForLimit(definition, scheduledAt, firedAt, disabledReason);
         return;
       }
-      this.advancePeriodicSchedule(definition, scheduledAt, firedAt);
     } else {
       const disabledReason = this.limitDisabledReason(definition, firedAt);
       if (disabledReason) {
@@ -273,6 +274,7 @@ export class TriggerRuntimeScheduler {
     });
 
     if (this.isPeriodic(definition.source)) {
+      this.advancePeriodicSchedule(definition, scheduledAt, firedAt);
       this.schedule(definition);
       await runPromise;
       return;
@@ -628,7 +630,9 @@ export class TriggerRuntimeScheduler {
       case 'cron': {
         const signature = this.sourceSignature(definition.source);
         const state = this.state.readSchedule(definition.id);
-        if (state?.sourceSignature === signature) return state.nextFireAt;
+        if (state?.sourceSignature === signature) {
+          return this.ensureScheduleRunMarker(definition, state).nextFireAt;
+        }
         const nextFireAt = this.nextPeriodicFireAt(definition.source, now);
         this.writeScheduleCursor(definition, nextFireAt, signature);
         return nextFireAt;
@@ -647,7 +651,7 @@ export class TriggerRuntimeScheduler {
     if (nextFireAt <= now && missed) {
       nextFireAt = this.nextPeriodicFireAt(definition.source, now);
     }
-    this.writeScheduleCursor(definition, nextFireAt);
+    this.writeScheduleCursor(definition, nextFireAt, undefined, { lastScheduledAt: scheduledAt, lastFiredAt: firedAt });
   }
 
   private nextPeriodicFireAt(source: Extract<TriggerSource, { type: 'cron' | 'interval' }>, ref: number): number {
@@ -663,12 +667,52 @@ export class TriggerRuntimeScheduler {
     return interval.next().getTime();
   }
 
-  private writeScheduleCursor(definition: TriggerDefinition, nextFireAt: number, signature = this.sourceSignature(definition.source)): void {
+  private writeScheduleCursor(
+    definition: TriggerDefinition,
+    nextFireAt: number,
+    signature = this.sourceSignature(definition.source),
+    patch: Partial<Pick<TriggerScheduleState, 'lastScheduledAt' | 'lastFiredAt'>> = {},
+  ): void {
+    const previous = this.state.readSchedule(definition.id);
     this.state.writeSchedule(definition.id, {
       nextFireAt,
       updatedAt: Date.now(),
       sourceSignature: signature,
+      ...(previous?.sourceSignature === signature && previous.lastScheduledAt !== undefined
+        ? { lastScheduledAt: previous.lastScheduledAt }
+        : {}),
+      ...(previous?.sourceSignature === signature && previous.lastFiredAt !== undefined
+        ? { lastFiredAt: previous.lastFiredAt }
+        : {}),
+      ...patch,
     });
+  }
+
+  private ensureScheduleRunMarker(definition: TriggerDefinition, schedule: TriggerScheduleState): TriggerScheduleState {
+    if (schedule.lastScheduledAt !== undefined || !this.isPeriodic(definition.source)) return schedule;
+    const inferred = this.previousPeriodicFireAt(definition.source, schedule.nextFireAt);
+    if (inferred === undefined) return schedule;
+    if (Math.abs(schedule.updatedAt - inferred) > 300_000) return schedule;
+    const patched = {
+      ...schedule,
+      lastScheduledAt: inferred,
+      lastFiredAt: schedule.updatedAt,
+    };
+    this.state.writeSchedule(definition.id, patched);
+    return patched;
+  }
+
+  private previousPeriodicFireAt(source: Extract<TriggerSource, { type: 'cron' | 'interval' }>, ref: number): number | undefined {
+    if (source.type === 'interval') return ref - source.everyMs;
+    try {
+      const interval = CronExpressionParser.parse(source.expression, {
+        currentDate: new Date(ref),
+        tz: source.timezone,
+      });
+      return interval.prev().getTime();
+    } catch {
+      return undefined;
+    }
   }
 
   private sourceSignature(source: TriggerSource): string {
@@ -1055,4 +1099,35 @@ function sleep(ms: number): Promise<void> {
 
 function limitsSignature(limits: TriggerDefinition['limits']): string {
   return JSON.stringify(limits ?? null);
+}
+
+function mergeStats(legacy: TriggerRunStats | undefined, current: TriggerRunStats): TriggerRunStats {
+  if (!legacy) return current;
+  const out: TriggerRunStats = {
+    fireCount: legacy.fireCount + current.fireCount,
+    failCount: legacy.failCount + current.failCount,
+  };
+  const legacyAt = legacy.lastFiredAt ?? -1;
+  const currentAt = current.lastFiredAt ?? -1;
+  if (legacyAt >= currentAt && legacy.lastFiredAt !== undefined) {
+    out.lastFiredAt = legacy.lastFiredAt;
+    out.lastResult = legacy.lastResult;
+  } else if (current.lastFiredAt !== undefined) {
+    out.lastFiredAt = current.lastFiredAt;
+    out.lastResult = current.lastResult;
+  }
+  return out;
+}
+
+function accountScheduleMarker(
+  stats: TriggerRunStats,
+  schedule: TriggerScheduleState | undefined,
+  hasSkippedSchedule: (scheduledAt: number) => boolean,
+): TriggerRunStats {
+  if (stats.fireCount > 0 || schedule?.lastScheduledAt === undefined) return stats;
+  if (hasSkippedSchedule(schedule.lastScheduledAt)) return stats;
+  return {
+    ...stats,
+    fireCount: 1,
+  };
 }
