@@ -54,15 +54,15 @@ export class TriggerFeedbackDispatcher {
   constructor(private deps: TriggerFeedbackDependencies) {}
 
   async dispatch(input: TriggerFeedbackDispatchInput): Promise<TriggerFeedbackDispatchResult> {
-    const template = input.disposition.kind === 'silent' ? undefined : input.disposition.template;
-    const renderedText = template ? renderTemplate(template, {
+    const template = input.disposition.kind === 'silent' ? undefined : nonBlankTemplate(input.disposition.template);
+    const renderedText = input.disposition.kind === 'silent' ? '' : renderTemplate(template, {
       trigger: input.trigger,
       reply: replyTemplateObject(input.reply),
       error: input.reply.error ? { code: input.reply.error.reason, message: input.reply.error.text } : undefined,
       event: input.sourcePayload,
       source: input.sourcePayload ? { type: input.trigger.source.type, payload: input.sourcePayload } : undefined,
       timestamp: input.firedAt,
-    }) : '';
+    });
     const feedback: NonNullable<TriggerAuditRecord['feedback']> = {
       branch: input.branch,
       disposition: input.disposition.kind,
@@ -344,6 +344,10 @@ function replyTemplateObject(reply: TriggerReply): Record<string, unknown> {
     meta: reply.meta,
     error: reply.error,
   };
+}
+
+function nonBlankTemplate(template: string | undefined): string | undefined {
+  return template && template.trim() ? template : undefined;
 }
 
 function dispositionTarget(disposition: FeedbackDisposition): FeedbackTarget | FeedbackTarget[] | undefined {

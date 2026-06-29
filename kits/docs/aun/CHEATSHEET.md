@@ -1,7 +1,5 @@
 # AUN 协议速查表
 
-<!-- TODO: 填充 AUN 协议命名空间与常用操作速查内容 -->
-
 ## 命名空间
 
 | 命名空间 | 作用 |
@@ -15,3 +13,7 @@
 | `nameservice.*` | AID 名字注册查询 |
 | `custody.*` | AID 托管 |
 | `peer.*` / `relay.*` | 直连/中继认证 |
+
+## Group 使用入口
+
+日常群操作使用 `ec group`，详见 `evolclaw/group.md`。群文件使用 `ec fs`，详见 `evolclaw/fs.md`。

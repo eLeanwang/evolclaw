@@ -9,7 +9,7 @@
 import type { Config, InteractionRequest } from '../types.js';
 import type { AgentPlugin, AgentInstance, AgentCallbacks } from '../core/baseagent-loader.js';
 import type { AgentEvent, AgentRunnerFull, ModelSwitcher, PermissionContext, PermissionModeInfo } from './runner-types.js';
-import { checkBlacklist, checkReadonly, checkDangerousCommand, parseEvolclawSendCommand, type PermissionGateway } from '../core/permission.js';
+import { checkBlacklist, checkReadonly, checkDangerousCommand, parseEvolclawSendCommand, requestDangerousCommandPermission, type PermissionGateway } from '../core/permission.js';
 import { CodexAppServerClient, type CodexServerNotification, type CodexServerRequest, type CodexThreadResponse, type CodexTurnItem } from './codex-app-server-client.js';
 import { resolveOpenaiConfig } from './baseagent.js';
 import { logger } from '../utils/logger.js';
@@ -302,7 +302,7 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
   listModes(): PermissionModeInfo[] {
     return [
       { key: 'auto', nameZh: '自动', description: '全部自动（受 sandbox 约束）', available: true },
-      { key: 'bypass', nameZh: '放行', description: '全部自动（受 sandbox 约束）', available: true },
+      { key: 'bypass', nameZh: '放行', description: '跳过 AI 判断，危险操作仍需确认', available: true },
       { key: 'readonly', nameZh: '只读', description: '允许读取和临时目录写入，拒绝项目文件修改', available: true },
       { key: 'request', nameZh: '审批', description: '需要审批时询问', available: true },
       { key: 'noask', nameZh: '静默', description: '只执行已知安全操作', available: true },
@@ -1017,7 +1017,18 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
       return 'allow';
     }
 
-    if (mode === 'bypass') return 'allow';
+    if (mode === 'bypass') {
+      const dangerous = await requestDangerousCommandPermission(
+        this.permissionGateway,
+        sessionKey,
+        toolName,
+        toolInput,
+        this.sendPromptFn,
+        this.permissionContexts.get(sessionKey)
+      );
+      if (dangerous.matched) return dangerous.decision;
+      return 'allow';
+    }
     if (mode === 'noask') return 'deny';
     if (!this.permissionGateway || !this.sendPromptFn) return 'allow';
     if (this.permissionGateway.isAlwaysAllowed(toolName)) return 'always';

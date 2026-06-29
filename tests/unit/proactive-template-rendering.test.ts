@@ -6,6 +6,8 @@ import path from 'path';
 describe('Proactive Mode Template Rendering', () => {
   const sessionTemplatePath = path.join(process.cwd(), 'kits/templates/system-fragments/session.md');
   const sessionTemplate = fs.readFileSync(sessionTemplatePath, 'utf-8');
+  const channelTemplatePath = path.join(process.cwd(), 'kits/templates/system-fragments/channel.md');
+  const channelTemplate = fs.readFileSync(channelTemplatePath, 'utf-8');
 
   describe('chatMode=proactive with chatType=group', () => {
     it('should render group send command', () => {
@@ -159,6 +161,61 @@ describe('Proactive Mode Template Rendering', () => {
       expect(rendered).not.toContain('第一时间发消息说明意图');
       expect(rendered).not.toContain('不要闷头干');
       expect(rendered).not.toContain('超过 10 次工具调用需再次汇报情况');
+    });
+  });
+
+  describe('channel file marker instructions', () => {
+    it('injects file marker syntax for interactive non-AUN channels with file support', () => {
+      const rendered = renderTemplate(channelTemplate, {
+        channel: 'feishu',
+        chatMode: 'interactive',
+        peerId: 'ou_user',
+        capabilities: '图片输入、图片输出、文件发送',
+        supportsFileMarker: true,
+      });
+
+      expect(rendered).toContain('发送文件语法：');
+      expect(rendered).toContain('[SEND_FILE:文件路径]');
+      expect(rendered).toContain('相对路径从项目根目录解析');
+      expect(rendered).toContain('非 aun 渠道：回复由 evolclaw 自动完成，无需调用 CLI');
+      expect(rendered).not.toContain('FILE_MARKER');
+    });
+
+    it('does not inject marker syntax for AUN channel file support', () => {
+      const rendered = renderTemplate(channelTemplate, {
+        channel: 'aun',
+        chatMode: 'interactive',
+        selfAid: 'alice.agentid.pub',
+        peerId: 'bob.agentid.pub',
+        capabilities: '图片输出、文件发送',
+        supportsFileMarker: false,
+      });
+
+      expect(rendered).not.toContain('发送文件语法：');
+      expect(rendered).toContain('ec msg send alice.agentid.pub bob.agentid.pub');
+    });
+
+    it('does not inject marker syntax when marker processing is unavailable', () => {
+      const rendered = renderTemplate(channelTemplate, {
+        channel: 'feishu',
+        chatMode: 'proactive',
+        peerId: 'ou_user',
+        capabilities: '图片输入、图片输出',
+        supportsFileMarker: false,
+      });
+
+      expect(rendered).not.toContain('发送文件语法：');
+      expect(rendered).not.toContain('[SEND_FILE:文件路径]');
+    });
+
+    it('keeps the active file marker parser on the public SEND_FILE syntax only', () => {
+      const responseEngine = fs.readFileSync(path.join(process.cwd(), 'src/core/message/response-engine.ts'), 'utf-8');
+
+      expect(responseEngine).toContain('[SEND_FILE:path]');
+      expect(responseEngine).not.toContain('FILE_MARKER');
+      expect(responseEngine).toContain('channelPlaceholders');
+      expect(responseEngine).toContain("'channel'");
+      expect(responseEngine).toContain("'\\u6e20\\u9053'");
     });
   });
 });

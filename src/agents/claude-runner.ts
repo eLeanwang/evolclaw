@@ -10,7 +10,7 @@ import path from 'path';
 import fs from 'fs';
 import os from 'os';
 import { logger } from '../utils/logger.js';
-import { checkBlacklist, checkReadonly, checkHClassWrite, parseEvolclawSendCommand, summarizeToolInput, checkDangerousCommand } from '../core/permission.js';
+import { checkBlacklist, checkReadonly, checkHClassWrite, parseEvolclawSendCommand, summarizeToolInput, requestDangerousCommandPermission } from '../core/permission.js';
 import { encodePath } from '../utils/cross-platform.js';
 import type { AgentPlugin, AgentInstance, AgentCallbacks } from '../core/baseagent-loader.js';
 import type { AgentEvent, ImageData, PermissionContext, PermissionModeInfo, AgentTokenUsage, AgentContextUsage, AgentLastModelCall, AgentModelCall } from './runner-types.js';
@@ -407,7 +407,7 @@ export class AgentRunner {
     // 且 READONLY_WRITE_PATTERNS 未覆盖 evolclaw ctl send/file，契约不稳固
     return [
       { key: 'auto', nameZh: '自动', description: 'AI 分类器自动判断', available: true },
-      { key: 'bypass', nameZh: '放行', description: '全部自动放行', available: true },
+      { key: 'bypass', nameZh: '放行', description: '跳过 AI 判断，危险操作仍需确认', available: true },
       { key: 'request', nameZh: '审批', description: '部分自动，部分询问', available: true },
       { key: 'edit', nameZh: '编辑', description: '自动接受编辑，其他询问', available: true },
       { key: 'plan', nameZh: '规划', description: '只规划不执行', available: true },
@@ -430,7 +430,7 @@ export class AgentRunner {
   private toSdkPermissionMode(mode?: string): 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan' | 'dontAsk' | 'auto' {
     const map: Record<string, 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan' | 'dontAsk' | 'auto'> = {
       'auto': 'auto',         // AI 分类器自动判断
-      'bypass': 'bypassPermissions',  // 全部自动放行（SDK 跳过分类器，canUseTool 仍保留 hook 安全检查）
+      'bypass': 'bypassPermissions',  // 跳过 SDK 分类器，canUseTool/Hook 仍保留安全检查
       'request': 'default',   // 部分自动，部分询问
       'edit': 'acceptEdits',
       'plan': 'plan',
@@ -1346,8 +1346,26 @@ export class AgentRunner {
         return await this.handleExitPlanMode(sessionId, input, options);
       }
 
-      // bypass 模式：一律 allow
+      // bypass 模式：跳过 SDK/AI 分类器，但保留人工维护的危险命令审批规则。
       if (callPermissionMode === 'bypass') {
+        const dangerDecision = await requestDangerousCommandPermission(
+          this.permissionGateway,
+          sessionId,
+          toolName,
+          input,
+          this.sendPromptFn,
+          this.permissionContexts.get(sessionId)
+        );
+        if (dangerDecision.matched) {
+          if (dangerDecision.decision === 'deny') {
+            return { behavior: 'deny' as const, message: '用户拒绝了危险操作', decisionClassification: 'user_reject' as const };
+          }
+          return {
+            behavior: 'allow' as const,
+            updatedInput: input,
+            decisionClassification: dangerDecision.decision === 'always' ? 'user_permanent' as const : 'user_temporary' as const
+          };
+        }
         return { behavior: 'allow' as const, updatedInput: input, decisionClassification: 'user_permanent' as const };
       }
 
@@ -1361,35 +1379,23 @@ export class AgentRunner {
       }
 
       // 危险命令检测：需要用户审批的高风险操作（rm -rf, sudo 等）
-      const dangerCheck = checkDangerousCommand(toolName, input);
-      if (dangerCheck.isDangerous) {
-        // 检查 always-allow 缓存
-        const cacheKey = `dangerous:${toolName}`;
-        if (this.permissionGateway?.isAlwaysAllowed(cacheKey)) {
-          return { behavior: 'allow' as const, updatedInput: input, decisionClassification: 'user_permanent' as const };
+      const dangerDecision = await requestDangerousCommandPermission(
+        this.permissionGateway,
+        sessionId,
+        toolName,
+        input,
+        this.sendPromptFn,
+        this.permissionContexts.get(sessionId)
+      );
+      if (dangerDecision.matched) {
+        if (dangerDecision.decision === 'deny') {
+          return { behavior: 'deny' as const, message: '用户拒绝了危险操作', decisionClassification: 'user_reject' as const };
         }
-
-        // 需要用户审批
-        if (this.permissionGateway && this.sendPromptFn) {
-          const decision: PermissionDecision = await this.permissionGateway.requestPermission(
-            sessionId,
-            cacheKey,
-            input,
-            this.sendPromptFn,
-            this.permissionContexts.get(sessionId),
-            `⚠️ ${dangerCheck.command}`,
-            dangerCheck.reason
-          );
-
-          if (decision === 'deny') {
-            return { behavior: 'deny' as const, message: '用户拒绝了危险操作', decisionClassification: 'user_reject' as const };
-          }
-          return {
-            behavior: 'allow' as const,
-            updatedInput: input,
-            decisionClassification: decision === 'always' ? 'user_permanent' as const : 'user_temporary' as const
-          };
-        }
+        return {
+          behavior: 'allow' as const,
+          updatedInput: input,
+          decisionClassification: dangerDecision.decision === 'always' ? 'user_permanent' as const : 'user_temporary' as const
+        };
       }
 
       // readonly 模式：二次拦截（belt-and-suspenders）

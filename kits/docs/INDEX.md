@@ -46,6 +46,7 @@
 
 | 文档 | 路径 | 说明 |
 |------|------|------|
+| Trigger 命令手册 | `evolclaw/trigger.md` | 创建、管理、运行定时与事件 trigger |
 | EventBus 事件目录 | `triggers/event-catalog.md` | event source 可监听事件、payload、filter 与循环防护规则 |
 
 ## ECK 模板

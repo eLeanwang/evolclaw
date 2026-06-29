@@ -130,6 +130,25 @@ function formatRetryableErrorFinalMessage(error: unknown, retries: number): stri
   return `❌ API 暂时不可用，已自动重试 ${retries} 次仍失败，任务已停止。\n原因：${firstLine}`;
 }
 
+function getStreamErrorText(result: StreamRunResult): string {
+  return [
+    result.errors?.join('\n'),
+    result.lastReplyText,
+    result.fullText,
+    result.subtype,
+    result.terminalReason,
+  ]
+    .filter((part): part is string => typeof part === 'string' && part.trim().length > 0)
+    .join('\n');
+}
+
+function streamHitContextLimit(result: StreamRunResult): boolean {
+  return result.terminalReason === 'prompt_too_long' ||
+    isContextTooLongText(result.lastReplyText) ||
+    isContextTooLongText(result.errors?.join(' ') || '') ||
+    isContextTooLongText(result.fullText);
+}
+
 function resolveProactiveBehavior(block?: ProactiveBehaviorBlock): Required<ProactiveBehaviorBlock> {
   return {
     pre_tool_1stmsgchk: block?.pre_tool_1stmsgchk ?? true,
@@ -1161,6 +1180,7 @@ export class ResponseEngine implements IMessageProcessor {
         const contextParts: string[] = [];
 
         // 通道能力
+        const supportsFileMarker = currentChannelType !== 'aun' && !isProactive && !!channelInfo.adapter.capabilities?.file;
         const capParts: string[] = [];
         if (options?.supportsImages) capParts.push('图片输入');
         if (channelInfo.adapter.capabilities?.image) capParts.push('图片输出');
@@ -1183,10 +1203,11 @@ export class ResponseEngine implements IMessageProcessor {
         // 不写 AgentRunner 实例字段，多对端/多会话并发共享同一 runner 实例时互不污染。
         let effectivePermissionMode: string;
         try {
-          effectivePermissionMode = resolvePermissionMode({ self: selfAid || undefined, peerKey, role: peerRole });
+          effectivePermissionMode = message.triggerMeta?.permissionModeOverride
+            ?? resolvePermissionMode({ self: selfAid || undefined, peerKey, role: peerRole });
         } catch (e) {
           logger.warn(`[ResponseEngine] resolvePermissionMode failed, using fallback: ${e instanceof Error ? e.message : String(e)}`);
-          effectivePermissionMode = 'auto';
+          effectivePermissionMode = message.triggerMeta?.permissionModeOverride ?? 'auto';
         }
 
         // 按 关系级 > agent级 > 全局 解析本次调用的模型/强度，作为 per-call 入参传入 runQuery。
@@ -1278,6 +1299,8 @@ export class ResponseEngine implements IMessageProcessor {
             clientType: message.clientType || undefined,
             permissionMode: effectivePermissionMode,
             capabilities: capParts.length > 0 ? capParts.join('、') : undefined,
+            fileCapable: supportsFileMarker,
+            supportsFileMarker,
             project: path.basename(absoluteProjectPath),
             sessionId: session.id,
             sessionName: session.name || undefined,
@@ -1459,6 +1482,13 @@ export class ResponseEngine implements IMessageProcessor {
               proactive,
               resolvedMode ? { mode: resolvedMode.mode, state: modeState } : undefined
             );
+            if (streamResult.isError && !streamHitContextLimit(streamResult)) {
+              const streamErrorText = getStreamErrorText(streamResult);
+              if (streamErrorText && isRetryableError(new Error(streamErrorText))) {
+                renderer.discardPending();
+                throw new Error(streamErrorText);
+              }
+            }
             // 探测成功（退避期内到达探测点且用的是 evolclaw 模型）→ 清零降级状态
             if (fbState.fallbackActive && !skipEvolclawModel && !usedFallback) {
               this.modelFallbackMap.delete(session.id);
@@ -1531,11 +1561,6 @@ export class ResponseEngine implements IMessageProcessor {
 
       // prompt_too_long：SDK 以 complete 事件（非异常）返回，需在此处触发 compact
       // 检测条件：terminalReason 明确为 prompt_too_long，或文本/errors 包含相关错误文本
-      const streamHitContextLimit = (sr: StreamRunResult): boolean =>
-        sr.terminalReason === 'prompt_too_long' ||
-        isContextTooLongText(sr.lastReplyText) ||
-        isContextTooLongText(sr.errors?.join(' ') || '') ||
-        isContextTooLongText(sr.fullText);
       const compactAgent = canCompactAgent(agent) ? agent : undefined;
       const isPromptTooLong = streamResult.isError && !!session.agentSessionId && !!compactAgent
         && streamHitContextLimit(streamResult);
@@ -1590,46 +1615,19 @@ export class ResponseEngine implements IMessageProcessor {
           },
           channelCapabilities: { file: !!adapter.capabilities?.file, thought: !!adapter.capabilities?.thought },
           processFileMarkers: async (scanText: string) => {
-            // 支持两种格式：
-            // 1. FILE_MARKER: path (新格式，用于 CLI/工具输出)
-            // 2. [SEND_FILE:path] 或 [SEND_FILE:channel:path] (旧格式，通过 fileMarkerPattern 配置)
-            const FILE_MARKER_RE = /(?:^|\n)FILE_MARKER:\s*([^\r\n]+)/g;
+            // 仅支持公开文件标记语法：[SEND_FILE:path] 或 [SEND_FILE:channel:path]。
             const SEND_FILE_RE = options?.fileMarkerPattern ?? /\[SEND_FILE:(?:(\w+):)?([^\]]+)\]/g;
-
-            const fileMarkerMatches = [...scanText.matchAll(FILE_MARKER_RE)];
             const sendFileMatches = [...scanText.matchAll(SEND_FILE_RE)];
 
-            if (fileMarkerMatches.length === 0 && sendFileMatches.length === 0) return 0;
+            if (sendFileMatches.length === 0) return 0;
 
             // 记录所有文件标记（快照用）
-            const allMarkers = [
-              ...fileMarkerMatches.map(m => (m.length >= 3 ? (m[2] ?? m[1]) : m[1]).trim()),
-              ...sendFileMatches.map(m => (m.length >= 3 ? (m[2] ?? m[1]) : m[1]).trim()),
-            ];
-            snapshot.set(session.id, taskId, { fileMarkers: allMarkers });
+            snapshot.set(session.id, taskId, {
+              fileMarkers: sendFileMatches.map(m => (m.length >= 3 ? (m[2] ?? m[1]) : m[1]).trim()),
+            });
 
             let sent = 0;
 
-            // 处理 FILE_MARKER: 格式
-            for (const match of fileMarkerMatches) {
-              const rest = match.length >= 3 ? (match[2] ?? match[1]) : match[1];
-              const [filePathRaw, ...labelParts] = rest.split(/\s+/);
-              const filePath = filePathRaw.trim();
-              const label = labelParts.join(' ').trim() || undefined;
-              if (!filePath) continue;
-              if (adapter.capabilities?.file) {
-                const agentProjectPath = session.projectPath || process.cwd();
-                const absPath = path.isAbsolute(filePath) ? filePath : path.resolve(agentProjectPath, filePath);
-                if (fs.existsSync(absPath)) {
-                  await adapter.send({ ...envelope, replyContext: capturedReplyContext }, { kind: 'result.file', filePath: absPath, fileName: label });
-                  sent++;
-                } else {
-                  logger.warn(`[ResponseEngine] FILE_MARKER not found: ${absPath}`);
-                }
-              }
-            }
-
-            // 处理 [SEND_FILE:...] 格式
             for (const match of sendFileMatches) {
               const hasChannelGroup = match.length >= 3;
               let targetSpec = hasChannelGroup ? (match[1] ?? undefined) : undefined;
@@ -2595,7 +2593,11 @@ export class ResponseEngine implements IMessageProcessor {
           const isContextTooLong = event.terminalReason === 'prompt_too_long'
             || isContextTooLongText(event.errors?.join(' ') || '')
             || isContextTooLongText(lastReplyText);
-          if (event.isError && !hasErrorResult && !shouldSuppress() && !isUserInterrupt && !isContextTooLong) {
+          const completeErrorText = getStreamErrorText(completeResult);
+          const isRetryableCompleteError = event.isError && !isContextTooLong && completeErrorText
+            ? isRetryableError(new Error(completeErrorText))
+            : false;
+          if (event.isError && !hasErrorResult && !shouldSuppress() && !isUserInterrupt && !isContextTooLong && !isRetryableCompleteError) {
             const errorSummary = event.errors?.join('; ') || '任务执行失败';
             // 使用 terminalReason 提供更友好的错误提示（不带 emoji，由 formatter 统一加）
             const userFriendlyMessage = event.terminalReason === 'prompt_too_long'
@@ -2779,11 +2781,22 @@ export class ResponseEngine implements IMessageProcessor {
    */
   private isPlaceholderPath(filePath: string): boolean {
     if (!filePath) return true;
+    const normalized = filePath.trim().toLowerCase();
 
     // 精确占位符
     const exactPlaceholders = ['...', '\u2026', 'path', 'file', 'file_path', 'filepath',
       '\u8def\u5f84', '\u6587\u4ef6\u8def\u5f84', '\u6587\u4ef6', 'filename', 'xxx'];
-    if (exactPlaceholders.includes(filePath.toLowerCase())) return true;
+    if (exactPlaceholders.includes(normalized)) return true;
+
+    // 跨通道示例占位符，如 [SEND_FILE:channel:路径] 被未知 channel 回退后会变成 channel:路径。
+    const channelPlaceholders = ['channel', 'channel_name', 'channelname', 'target', 'target_channel', 'targetchannel',
+      '\u6e20\u9053', '\u901a\u9053', '\u9891\u9053', '\u76ee\u6807\u6e20\u9053', '\u6e20\u9053\u540d', '\u901a\u9053\u540d'];
+    const colonIndex = normalized.indexOf(':');
+    if (colonIndex > 0) {
+      const maybeChannel = normalized.slice(0, colonIndex).trim();
+      const maybePath = normalized.slice(colonIndex + 1).trim();
+      if (channelPlaceholders.includes(maybeChannel) && exactPlaceholders.includes(maybePath)) return true;
+    }
 
     // 示例路径前缀
     if (/^(\/path\/to\/|\.\/path\/to\/|example\/|\u793a\u4f8b|\/example)/i.test(filePath)) return true;

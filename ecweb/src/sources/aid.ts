@@ -1,7 +1,7 @@
 /**
  * AID 数据源 — 复用 daemon 的 IPC socket（与 evolclaw `watch aid` 同源）。
  *
- * daemon 运行时：拉 aun-aids / aun-aid-stats / status / evolagent.list。
+ * daemon 运行时：拉 aun-aids / aun-aid-stats / agent-stats / status / evolagent.list。
  * daemon 未运行时：降级到读 instance/ 目录的 aid-*.jsonl（精简版 scanInstances）。
  * IPC 无推送能力，故 1s 轮询 + JSON diff，仅在变化时 push。
  */
@@ -62,9 +62,10 @@ async function fetchVersion(socket: string): Promise<string | null> {
 
 async function buildSnapshot(): Promise<any> {
   const p = resolvePaths();
-  const [aidsResp, statsResp, statusResp, agentsResp, version] = await Promise.all([
+  const [aidsResp, statsResp, agentStatsResp, statusResp, agentsResp, version] = await Promise.all([
     ipcQuery<{ ok: boolean; aids: any[] }>(p.socket, { type: 'aun-aids' }),
     ipcQuery<{ ok: boolean; stats: any[] }>(p.socket, { type: 'aun-aid-stats' }),
+    ipcQuery<{ ok: boolean; stats: any[] }>(p.socket, { type: 'agent-stats' }),
     ipcQuery<any>(p.socket, { type: 'status' }),
     ipcQuery<{ ok: boolean; agents: any[] }>(p.socket, { type: 'evolagent.list' }),
     fetchVersion(p.socket),
@@ -87,6 +88,7 @@ async function buildSnapshot(): Promise<any> {
     daemonRunning: true,
     aids: aidsResp?.aids ?? [],
     stats: statsResp?.stats ?? [],
+    agentStats: agentStatsResp?.stats ?? [],
     status: statusResp ?? null,
     agents: agentsResp?.agents ?? [],
     version: version ?? null,

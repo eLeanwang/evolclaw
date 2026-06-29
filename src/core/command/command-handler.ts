@@ -23,6 +23,7 @@ import {
   type TriggerDefinition,
   type FeedbackDisposition,
   type FeedbackTarget,
+  type TriggerPermissionMode,
   type TriggerSource,
 } from '../../trigger/types.js';
 import { tryParseChannelKey } from '../channel-loader.js';
@@ -214,17 +215,6 @@ export class CommandHandler {
     }
   }
 
-  private nextFireAtForDefinition(scheduler: TriggerRuntimeScheduler | undefined, definition: TriggerDefinition): number | undefined {
-    if (definition.source.type === 'delay') return definition.createdAt + definition.source.afterMs;
-    if (definition.source.type === 'at') return new Date(definition.source.at).getTime();
-    if (definition.source.type === 'event') return undefined;
-    try {
-      return scheduler?.show(definition.id).schedule?.nextFireAt;
-    } catch {
-      return undefined;
-    }
-  }
-
   private triggerPrompt(definition: TriggerDefinition): string {
     if (definition.execution.mode === 'agent') return definition.execution.prompt ?? '';
     const primary = this.primaryFeedbackDisposition(definition);
@@ -234,6 +224,10 @@ export class CommandHandler {
   private definitionToTriggerView(definition: TriggerDefinition, scheduler?: TriggerRuntimeScheduler): any {
     const target = this.primaryFeedbackTarget(definition);
     const schedule = this.scheduleViewFromSource(definition.source);
+    let schedulerDetails: ReturnType<TriggerRuntimeScheduler['show']> | undefined;
+    try {
+      schedulerDetails = scheduler?.show(definition.id);
+    } catch { /* trigger state is best-effort for views */ }
     // 运行统计（fireCount/failCount/lastFiredAt/lastResult）不再存进 trigger.json
     // （定义是不可变配置），改从审计日志按需汇总。受日志保留期限制，是保留窗口内的统计。
     let stats: { fireCount: number; failCount: number; lastFiredAt?: number; lastResult?: string } = { fireCount: 0, failCount: 0 };
@@ -246,7 +240,13 @@ export class CommandHandler {
       enabled: definition.enabled,
       scheduleType: schedule.scheduleType,
       scheduleValue: schedule.scheduleValue,
-      nextFireAt: this.nextFireAtForDefinition(scheduler, definition),
+      nextFireAt: definition.source.type === 'delay'
+        ? definition.createdAt + definition.source.afterMs
+        : definition.source.type === 'at'
+          ? new Date(definition.source.at).getTime()
+          : definition.source.type === 'event'
+            ? undefined
+            : schedulerDetails?.schedule?.nextFireAt,
       targetChannel: target?.channelKey,
       targetChannelName: target?.channelKey,
       targetChannelId: target?.channelId,
@@ -254,6 +254,7 @@ export class CommandHandler {
       targetSessionStrategy: definition.execution.session.strategy,
       targetThreadId: definition.execution.session.threadId,
       boundSessionId: definition.execution.session.sessionId,
+      permissionMode: definition.execution.permissionMode,
       prompt: this.triggerPrompt(definition),
       createdByPeerId: definition.origin?.peerId ?? '',
       createdByChannel: definition.origin?.channel ?? '',
@@ -265,6 +266,8 @@ export class CommandHandler {
       createdAt: definition.createdAt,
       updatedAt: definition.updatedAt,
       status: definition.enabled ? 'active' : 'disabled',
+      limits: definition.limits,
+      limitState: schedulerDetails?.limitState,
     };
   }
 
@@ -308,6 +311,22 @@ export class CommandHandler {
     return definition.origin?.peerId === peerId && definition.origin?.channel === channel;
   }
 
+  private triggerPermissionFromParsed(
+    parsed: { permissionMode?: TriggerPermissionMode },
+    isAdmin: boolean,
+  ): TriggerPermissionMode {
+    if (parsed.permissionMode) return parsed.permissionMode;
+    return isAdmin ? 'bypass' : 'readonly';
+  }
+
+  private validateTriggerPermissionModeForRole(
+    mode: TriggerPermissionMode | undefined,
+    isAdmin: boolean,
+  ): string | undefined {
+    if (mode === 'bypass' && !isAdmin) return '无权限：只有 owner/admin 可以创建或修改 bypass trigger';
+    return undefined;
+  }
+
   private findTriggerDefinition(
     scheduler: TriggerRuntimeScheduler,
     nameOrId: string,
@@ -327,6 +346,7 @@ export class CommandHandler {
     channel: string,
     channelId: string,
     peerId: string,
+    isAdmin: boolean,
     messageId?: string,
     threadId?: string,
   ): Promise<{ definition: TriggerDefinition; scheduler: TriggerRuntimeScheduler } | { error: string }> {
@@ -394,6 +414,9 @@ export class CommandHandler {
     // Determine onFailure/onNoop mode (default: notify if origin present, silent otherwise)
     const onFailureMode = parsed.onFailure ?? (peerId ? 'notify' : 'silent');
     const onNoopMode = parsed.onNoop ?? 'silent';
+    const permissionMode = this.triggerPermissionFromParsed(parsed, isAdmin);
+    const permissionError = this.validateTriggerPermissionModeForRole(permissionMode, isAdmin);
+    if (permissionError) return { error: permissionError };
 
     const feedbackTarget: FeedbackTarget = {
       channelKey: target.channelKey,
@@ -426,6 +449,7 @@ export class CommandHandler {
           ...(strategy === 'current' && activeSession ? { sessionId: activeSession.id } : {}),
           ...(strategy === 'thread' ? { threadId: target.threadId } : {}),
         },
+        permissionMode,
         onError: 'retry',
         noopSentinel: '[[NOOP]]',
       },
@@ -451,6 +475,7 @@ export class CommandHandler {
         missedPolicy: 'run_once' as const,
         retry: { maxAttempts: 0, backoffMs: 30_000 },
       },
+      limits: this.limitsFromParsed(parsed),
     };
 
     return { definition, scheduler };
@@ -1058,7 +1083,14 @@ export class CommandHandler {
       const { definition } = extractAndFindTrigger(sub, 'cancel ', 'cancel');
       const cancelled = scheduler.cancel(definition.id);
       this.eventBus.publish({ type: 'trigger:cancelled', triggerId: cancelled.id, name: cancelled.name, by: peerId });
-      return `✅ 触发器已取消：**${cancelled.name}**`;
+      return `✅ 触发器已禁用：**${cancelled.name}**`;
+    }
+
+    if (sub.startsWith('delete ') || sub.startsWith('remove ') || sub.startsWith('rm ')) {
+      const prefix = sub.startsWith('delete ') ? 'delete ' : sub.startsWith('remove ') ? 'remove ' : 'rm ';
+      const { definition } = extractAndFindTrigger(sub, prefix, 'delete');
+      const deleted = scheduler.delete(definition.id);
+      return `✅ 触发器已删除：**${deleted.name}**`;
     }
 
     if (sub.startsWith('enable ')) {
@@ -1084,9 +1116,28 @@ export class CommandHandler {
       output += `状态: ${definition.enabled ? 'active' : 'disabled'}\n`;
       output += `调度: ${view.scheduleType} | 下次: ${nextStr}\n`;
       output += `处理: ${definition.execution.mode}\n`;
+      output += `权限: ${definition.execution.permissionMode ?? 'inherit'}\n`;
       output += `反馈: ${this.primaryFeedbackDisposition(definition).kind}\n`;
       output += `失败通知: ${this.failureFeedbackDisposition(definition).kind === 'silent' ? 'silent' : 'notify'}\n`;
       if (definition.execution.mode === 'script') output += `脚本: ${definition.execution.script!.runtime} ${definition.execution.script!.path}\n`;
+      if (definition.limits?.maxRuns !== undefined || definition.limits?.maxDuration !== undefined) {
+        const limitParts = [
+          definition.limits.maxRuns !== undefined ? `maxRuns=${definition.limits.maxRuns}` : undefined,
+          definition.limits.maxDuration !== undefined ? `maxDuration=${definition.limits.maxDuration}` : undefined,
+        ].filter(Boolean);
+        output += `限制: ${limitParts.join(', ')}\n`;
+      }
+      if (details.limitState) {
+        const stateParts = [
+          `runCount=${details.limitState.runCount}`,
+          `startedAt=${new Date(details.limitState.startedAt).toLocaleString()}`,
+          details.limitState.disabledReason ? `disabledReason=${details.limitState.disabledReason}` : undefined,
+        ].filter(Boolean);
+        if (definition.limits?.maxDuration) {
+          stateParts.push(`expiresAt=${new Date(details.limitState.startedAt + this.limitDurationMs(definition.limits.maxDuration)).toLocaleString()}`);
+        }
+        output += `限制状态: ${stateParts.join(', ')}\n`;
+      }
       output += `活跃运行: ${activeRuns}\n`;
       if (recentRuns.length > 0) {
         output += `\n最近运行:\n`;
@@ -1148,7 +1199,7 @@ export class CommandHandler {
       const args = sub.slice('set '.length);
       const result = parseTriggerSet(args);
       if (!result.ok) return `❌ ${result.error}`;
-      const reg = await this.registerTriggerFromParsed(result.value, channel, channelId, peerId, messageId, undefined, threadId);
+      const reg = await this.registerTriggerFromParsed(result.value, channel, channelId, peerId, messageId, undefined, threadId, isAdmin);
       if (!reg.ok) return `❌ ${reg.error}`;
       const nextStr = reg.trigger.nextFireAt ? new Date(reg.trigger.nextFireAt).toLocaleString() : '未计算';
       return `✅ 触发器已注册：**${reg.trigger.name}**\n下次触发：${nextStr}`;
@@ -1163,7 +1214,8 @@ export class CommandHandler {
 /trigger disable <名称|ID> — 暂停触发器
 /trigger show <名称|ID> — 查看触发器详情
 /trigger run <名称|ID> [--dry-run] — 手动触发
-/trigger cancel <名称|ID> — 取消触发器`;
+/trigger cancel <名称|ID> — 禁用触发器（disable 的兼容别名）
+/trigger delete <名称|ID> — 删除触发器`;
   }
 
   private async handleTrigger(
@@ -1214,6 +1266,7 @@ export class CommandHandler {
         ...definition.reliability,
         retry: { ...definition.reliability.retry },
       },
+      limits: definition.limits ? { ...definition.limits } : undefined,
     };
 
     if (patch.name !== undefined) updated.name = String(patch.name);
@@ -1373,6 +1426,20 @@ export class CommandHandler {
       }
     }
 
+    if (patch.maxRuns !== undefined || patch.maxDuration !== undefined) {
+      const limits = updated.limits ? { ...updated.limits } : {};
+      if (patch.maxRuns !== undefined) limits.maxRuns = Number(patch.maxRuns);
+      if (patch.maxDuration !== undefined) limits.maxDuration = String(patch.maxDuration);
+      updated.limits = Object.keys(limits).length > 0 ? limits : undefined;
+    }
+
+    if (patch.permissionMode !== undefined) {
+      const permissionMode = patch.permissionMode as TriggerPermissionMode;
+      const permissionError = this.validateTriggerPermissionModeForRole(permissionMode, isAdmin);
+      if (permissionError) return { ok: false, error: permissionError };
+      updated.execution.permissionMode = permissionMode;
+    }
+
     try {
       const saved = scheduler.update(definition.id, updated);
       return { ok: true, trigger: this.definitionToTriggerView(saved, scheduler) };
@@ -1389,8 +1456,9 @@ export class CommandHandler {
     channel: string, channelId: string, peerId: string, messageId?: string,
     _chatType?: string,
     threadId?: string,
+    isAdmin = false,
   ): Promise<{ ok: true; trigger: any } | { ok: false; error: string }> {
-    const built = await this.buildTriggerDefinitionFromParsed(parsed, channel, channelId, peerId, messageId, threadId);
+    const built = await this.buildTriggerDefinitionFromParsed(parsed, channel, channelId, peerId, isAdmin, messageId, threadId);
     if ('error' in built) return { ok: false, error: built.error };
     try {
       const created = built.scheduler.create(built.definition, [], { enable: true });
@@ -1398,6 +1466,21 @@ export class CommandHandler {
     } catch (err: any) {
       return { ok: false, error: `注册失败：${err?.message || err}` };
     }
+  }
+
+  private limitsFromParsed(parsed: { maxRuns?: number; maxDuration?: string }): TriggerDefinition['limits'] {
+    const limits: TriggerDefinition['limits'] = {};
+    if (parsed.maxRuns !== undefined) limits.maxRuns = parsed.maxRuns;
+    if (parsed.maxDuration !== undefined) limits.maxDuration = parsed.maxDuration;
+    return limits.maxRuns === undefined && limits.maxDuration === undefined ? undefined : limits;
+  }
+
+  private limitDurationMs(value: string): number {
+    const amount = Number(value.slice(0, -1));
+    const unit = value.slice(-1);
+    if (unit === 'd') return amount * 86_400_000;
+    if (unit === 'h') return amount * 3_600_000;
+    return amount * 60_000;
   }
 
   // ── /rewind helpers ──

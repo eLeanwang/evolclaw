@@ -45,6 +45,11 @@ export async function cmdTrigger(args: string[]): Promise<void> {
       case 'cancel':
         await cancelTrigger(rest, json);
         return;
+      case 'delete':
+      case 'remove':
+      case 'rm':
+        await deleteTrigger(rest, json);
+        return;
       case 'run':
         await runTrigger(rest, json);
         return;
@@ -70,7 +75,8 @@ function printHelp(): void {
   update --agent <aid> <triggerId> --file <trigger.json> [--json]
   enable --agent <aid> <triggerId>
   disable --agent <aid> <triggerId>
-  cancel --agent <aid> <triggerId>
+  cancel --agent <aid> <triggerId>  (disable 的兼容别名)
+  delete --agent <aid> <triggerId>
   run --agent <aid> <triggerId> [--dry-run] [--json]
   template list|show <name> [--json]
 
@@ -80,6 +86,8 @@ Flag 模式支持的参数（与 /trigger 命令一致）:
   --script <路径> --runtime <node|python|bash>
   --mode <agent|direct>
   --on-fail <notify|silent>  --on-noop <notify|silent>
+  --max-runs <次数>  --max-duration <时长: 30m|12h|3d>
+  --permission <auto|bypass|readonly|plan|edit|request|noask>
   --tz <时区> (仅 cron)
   --channel <名称> --channelid <ID>
   --session <latest|current|thread>
@@ -110,7 +118,27 @@ async function showTrigger(args: string[], json: boolean): Promise<void> {
   console.log(`agent: ${t.agentAid}`);
   console.log(`enabled: ${t.enabled}`);
   console.log(`source: ${sourceLabel(t)}`);
+  if (t.limits?.maxRuns !== undefined || t.limits?.maxDuration !== undefined) {
+    console.log(`limits: ${[
+      t.limits.maxRuns !== undefined ? `maxRuns=${t.limits.maxRuns}` : undefined,
+      t.limits.maxDuration !== undefined ? `maxDuration=${t.limits.maxDuration}` : undefined,
+    ].filter(Boolean).join(', ')}`);
+  }
+  const limitState = res.limitState;
+  if (limitState) {
+    const parts = [
+      `runCount=${limitState.runCount}`,
+      `startedAt=${new Date(limitState.startedAt).toISOString()}`,
+      limitState.disabledReason ? `disabledReason=${limitState.disabledReason}` : undefined,
+    ].filter(Boolean);
+    if (t.limits?.maxDuration) {
+      const expiresAt = limitState.startedAt + limitDurationMs(t.limits.maxDuration);
+      parts.push(`expiresAt=${new Date(expiresAt).toISOString()}`);
+    }
+    console.log(`limit state: ${parts.join(', ')}`);
+  }
   if (t.execution.mode === 'script') console.log(`script: ${t.execution.script!.runtime} ${t.execution.script!.path}`);
+  console.log(`permission: ${t.execution.permissionMode ?? 'inherit'}`);
   console.log(`feedback: reply=${t.feedback.onReply.kind}, noop=${t.feedback.onNoop.kind}, default=${t.feedback.default.kind}`);
   const active = Array.isArray(res.active) ? res.active : [];
   console.log(`active runs: ${active.length}`);
@@ -196,11 +224,13 @@ async function createTrigger(args: string[], json: boolean): Promise<void> {
       mode: script ? 'script' : 'agent',
       ...(script ? { script } : { prompt: parsed.prompt }),
       session,
+      ...(parsed.permissionMode ? { permissionMode: parsed.permissionMode } : {}),
       onError: 'retry',
       noopSentinel: '[[NOOP]]',
     },
     feedback: feedbackFromParsed(parsed, mode, script !== undefined, target),
     reliability: { concurrency: 'forbid', missedPolicy: 'run_once', retry: { maxAttempts: 0, backoffMs: 30_000 } },
+    limits: limitsFromParsed(parsed),
   };
 
   const res = await request({
@@ -244,6 +274,21 @@ function feedbackFromParsed(parsed: any, _mode: string | undefined, hasScript: b
   };
 }
 
+function limitsFromParsed(parsed: { maxRuns?: number; maxDuration?: string }): any {
+  const limits: any = {};
+  if (parsed.maxRuns !== undefined) limits.maxRuns = parsed.maxRuns;
+  if (parsed.maxDuration !== undefined) limits.maxDuration = parsed.maxDuration;
+  return Object.keys(limits).length > 0 ? limits : undefined;
+}
+
+function limitDurationMs(value: string): number {
+  const amount = Number(value.slice(0, -1));
+  const unit = value.slice(-1);
+  if (unit === 'd') return amount * 86_400_000;
+  if (unit === 'h') return amount * 3_600_000;
+  return amount * 60_000;
+}
+
 async function updateTrigger(args: string[], json: boolean): Promise<void> {
   const agentAid = requireFlag(args, '--agent');
   const file = requireFlag(args, '--file');
@@ -267,7 +312,15 @@ async function cancelTrigger(args: string[], json: boolean): Promise<void> {
   const triggerId = positional(args, 0, ['--agent']);
   const res = await request({ type: 'trigger.cancel', agentAid, triggerId });
   if (json) return printJson(res);
-  console.log(`✓ cancelled ${res.trigger.id}`);
+  console.log(`✓ disabled ${res.trigger.id}`);
+}
+
+async function deleteTrigger(args: string[], json: boolean): Promise<void> {
+  const agentAid = requireFlag(args, '--agent');
+  const triggerId = positional(args, 0, ['--agent']);
+  const res = await request({ type: 'trigger.delete', agentAid, triggerId });
+  if (json) return printJson(res);
+  console.log(`✓ deleted ${res.trigger.id}`);
 }
 
 async function runTrigger(args: string[], json: boolean): Promise<void> {

@@ -19,7 +19,7 @@ interface PendingConversation {
     toolCallCount: number;
   };
   startedAt: number;
-  timer: NodeJS.Timeout;
+  watchdogTimer: NodeJS.Timeout;
 }
 
 export interface DaemonConversationContext {
@@ -29,8 +29,13 @@ export interface DaemonConversationContext {
   projectPath: string;
   baseagent: string;
   session: Session;
-  timeoutMs?: number;
 }
+
+export interface DaemonChannelOptions {
+  watchdogMs?: number;
+}
+
+const DEFAULT_WATCHDOG_MS = 11 * 60 * 1000;
 
 export class DaemonChannel implements ChannelAdapter {
   readonly channelName = 'daemon';
@@ -46,22 +51,26 @@ export class DaemonChannel implements ChannelAdapter {
   };
 
   private pending = new Map<string, PendingConversation>();
+  private watchdogMs: number;
 
   constructor(
     private sessionManager: SessionManager,
     private messageQueue: MessageQueue,
-  ) {}
+    opts: DaemonChannelOptions = {},
+  ) {
+    this.watchdogMs = normalizeWatchdogMs(opts.watchdogMs);
+  }
 
   async converse(prompt: string, ctx: DaemonConversationContext): Promise<TriggerReply> {
     const runId = ctx.runId;
     const startedAt = Date.now();
     const promise = new Promise<TriggerReply>((resolve) => {
-      const timer = setTimeout(() => this.finish(runId, 'timeout'), ctx.timeoutMs ?? 120_000);
-      timer.unref?.();
+      const watchdogTimer = setTimeout(() => this.watchdogTimeout(runId), this.watchdogMs);
+      watchdogTimer.unref?.();
       this.pending.set(runId, {
         resolve,
         startedAt,
-        timer,
+        watchdogTimer,
         acc: { text: '', files: [], toolCallCount: 0 },
       });
     });
@@ -87,6 +96,7 @@ export class DaemonChannel implements ChannelAdapter {
         triggerName: ctx.trigger.name,
         fireTime: ctx.firedAt,
         boundSessionId: ctx.session.id,
+        permissionModeOverride: ctx.trigger.execution.permissionMode,
       },
     };
 
@@ -109,6 +119,7 @@ export class DaemonChannel implements ChannelAdapter {
     if (!runId) return;
     const slot = this.pending.get(runId);
     if (!slot) return;
+    this.resetWatchdog(runId, slot);
 
     switch (payload.kind) {
       case 'result.text':
@@ -199,7 +210,7 @@ export class DaemonChannel implements ChannelAdapter {
   private finish(runId: string, status: TriggerReply['outcome'], metadata?: Record<string, unknown>): void {
     const slot = this.pending.get(runId);
     if (!slot) return;
-    clearTimeout(slot.timer);
+    clearTimeout(slot.watchdogTimer);
     this.pending.delete(runId);
     const durationMs = typeof metadata?.durationMs === 'number'
       ? metadata.durationMs
@@ -228,10 +239,32 @@ export class DaemonChannel implements ChannelAdapter {
     slot.acc.error = { reason, text };
     this.finish(runId, 'error');
   }
+
+  private watchdogTimeout(runId: string): void {
+    const slot = this.pending.get(runId);
+    if (!slot) return;
+    slot.acc.error = {
+      reason: 'daemon_watchdog_timeout',
+      text: `daemon conversation watchdog timed out after ${this.watchdogMs}ms`,
+    };
+    this.finish(runId, 'error', { errorType: 'daemon_watchdog_timeout', watchdogMs: this.watchdogMs });
+  }
+
+  private resetWatchdog(runId: string, slot: PendingConversation): void {
+    clearTimeout(slot.watchdogTimer);
+    slot.watchdogTimer = setTimeout(() => this.watchdogTimeout(runId), this.watchdogMs);
+    slot.watchdogTimer.unref?.();
+  }
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+function normalizeWatchdogMs(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0
+    ? value
+    : DEFAULT_WATCHDOG_MS;
 }
 
 function channelTypeFromKey(channelKey: string): string {

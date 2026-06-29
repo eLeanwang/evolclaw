@@ -69,6 +69,7 @@ import { DaemonChannel } from './channels/daemon.js';
 import { normalizeTriggerDefinition } from './trigger/validation.js';
 import type { FeedbackDisposition, TriggerDefinition } from './trigger/types.js';
 import { atomicWriteJson } from './core/session/session-fs-store.js';
+import { appendMessageLog, buildOutboundEntry } from './core/message/message-log.js';
 import fs from 'fs';
 import os from 'os';
 import crypto from 'crypto';
@@ -120,6 +121,50 @@ function summarizeOutboundPayload(payload: any): Record<string, any> {
   return s;
 }
 
+function shouldCountSentPayload(payload: OutboundPayload): boolean {
+  return [
+    'result.text',
+    'result.file',
+    'result.image',
+    'result.error',
+    'command.result',
+    'command.error',
+    'interaction',
+  ].includes(payload.kind);
+}
+
+function outboundPayloadToLogText(payload: OutboundPayload): { text: string; msgType: 'text' | 'file' | 'image' } | null {
+  switch (payload.kind) {
+    case 'result.text':
+    case 'command.result':
+    case 'command.error':
+    case 'result.error':
+      return { text: payload.text, msgType: 'text' };
+    case 'result.file':
+      return { text: payload.fileName || payload.filePath, msgType: 'file' };
+    case 'result.image':
+      return { text: payload.alt || '[image]', msgType: 'image' };
+    case 'interaction':
+      return { text: payload.fallbackText || '[interaction]', msgType: 'text' };
+    default:
+      return null;
+  }
+}
+
+function normalizeMessageSource(value: unknown): 'daemon' | 'cli' | 'msg' | 'ctl' | 'owner-inject' {
+  return value === 'cli' || value === 'msg' || value === 'ctl' || value === 'owner-inject'
+    ? value
+    : 'daemon';
+}
+
+function daemonConversationWatchdogMs(settings: { idleMonitor?: { timeout?: number } }): number {
+  const idleTimeoutSec = settings.idleMonitor?.timeout;
+  const idleMs = typeof idleTimeoutSec === 'number' && Number.isFinite(idleTimeoutSec) && idleTimeoutSec > 0
+    ? idleTimeoutSec * 1000
+    : 120_000;
+  return Math.ceil(idleMs * 5 + 60_000);
+}
+
 function seedUpgradeCheckTrigger(manager: TriggerDefinitionManager, owner: { aid: string; originPeerId?: string; baseagent: string }): void {
   const now = Date.now();
   const scriptName = 'upgrade-check.sh';
@@ -153,6 +198,7 @@ function seedUpgradeCheckTrigger(manager: TriggerDefinitionManager, owner: { aid
         strategy: 'isolated',
         name: '__upgrade-check',
       },
+      permissionMode: 'bypass',
       onError: 'fail',
       noopSentinel: '[[NOOP]]',
     },
@@ -895,7 +941,9 @@ async function main() {
   const triggerSchedulers = new Map<string, TriggerRuntimeScheduler>();
   const triggerAudit = new TriggerAuditLogger();
   const triggerScriptExecutor = new TriggerScriptExecutor();
-  const daemonChannel = new DaemonChannel(sessionManager, messageQueue);
+  const daemonChannel = new DaemonChannel(sessionManager, messageQueue, {
+    watchdogMs: daemonConversationWatchdogMs(globalSettings),
+  });
   const triggerStartupAgents = [...agentRegistry.runnableAgents()];
   const controlAid = evolclawCfg.aid || '__daemon__';
   const daemonTriggerOwner = {
@@ -1024,7 +1072,54 @@ async function main() {
     const originalSend = inst.adapter.send.bind(inst.adapter);
     inst.adapter.send = async (envelope: any, payload: any) => {
       logger.channelOut({ channel: inst.adapter.channelName, channelId: envelope.channelId, taskId: envelope.taskId, payload: summarizeOutboundPayload(payload) });
-      return originalSend(envelope, payload);
+      const result = await originalSend(envelope, payload);
+      if (shouldCountSentPayload(payload)) {
+        const owningAgent = agentRegistry.resolveByChannel(inst.adapter.channelKey)
+          ?? agentRegistry.resolveByChannel(inst.adapter.channelName);
+        if ((inst.channelType || inst.adapter.channelName) !== 'aun') {
+          try {
+            const logPayload = outboundPayloadToLogText(payload);
+            const session = envelope.sessionId
+              ? await sessionManager.getSessionById(envelope.sessionId)
+              : sessionManager.getActiveSessionSync(envelope.channel ?? inst.adapter.channelName, envelope.channelId, inst.channelType || inst.adapter.channelName, owningAgent?.aid);
+            if (logPayload && session) {
+              const chatDir = sessionManager.getChatDir(session);
+              const isGroup = session.chatType === 'group';
+              const target = isGroup
+                ? (session.metadata?.groupId || session.channelId)
+                : (session.metadata?.peerId || envelope.channelId);
+              appendMessageLog(chatDir, buildOutboundEntry({
+                from: owningAgent?.aid ?? envelope.agentName ?? session.selfAID ?? 'self',
+                to: String(target || envelope.channelId),
+                chatType: isGroup ? 'group' : 'private',
+                groupId: isGroup ? String(session.metadata?.groupId || session.channelId) : null,
+                msgId: `${envelope.taskId || 'out'}_${Date.now()}`,
+                content: logPayload.text,
+                replyTo: envelope.replyContext?.replyToMessageId ?? null,
+                agent: session.baseagent ?? null,
+                model: null,
+                durationMs: null,
+                msgType: logPayload.msgType,
+                source: normalizeMessageSource(envelope.replyContext?.metadata?.source),
+                chatmode: envelope.chatmode,
+              }));
+            }
+          } catch (err) {
+            logger.debug(`[MessageLog] Failed to write outbound channel log: ${err}`);
+          }
+        }
+        eventBus.publish({
+          type: 'message:sent',
+          sessionId: envelope.sessionId ?? envelope.taskId ?? `out-${Date.now()}`,
+          channel: envelope.channel ?? inst.adapter.channelName,
+          channelName: inst.adapter.channelName,
+          channelId: envelope.channelId,
+          agentName: owningAgent?.aid ?? envelope.agentName,
+          payloadKind: payload.kind,
+          timestamp: Date.now(),
+        });
+      }
+      return result;
     };
 
     // 1. 项目路径提供器
@@ -1621,6 +1716,7 @@ async function main() {
       },
       stats: {
         received: snap.lastHour.received,
+        sent: snap.lastHour.sent,
         completed: snap.lastHour.completed,
         errors: snap.lastHour.errors,
         avgResponseMs: snap.lastHour.avgResponseMs,
@@ -1841,6 +1937,21 @@ async function main() {
   };
 
   ipcServer.setStatsProvider(() => statsCollector.getSnapshot());
+  ipcServer.setAgentStatsProvider(() => agentRegistry.list().map((agent) => {
+    const snap = statsCollector.getSnapshot(agent.aid);
+    return {
+      aid: agent.aid,
+      received: snap.lastHour.received,
+      sent: snap.lastHour.sent,
+      completed: snap.lastHour.completed,
+      errors: snap.lastHour.errors,
+      interrupts: snap.lastHour.interrupts,
+      avgResponseMs: snap.lastHour.avgResponseMs,
+      processing: messageQueue.getProcessingCountByAgent(agent.aid),
+      queued: messageQueue.getQueueLengthByAgent(agent.aid),
+      muted: messageQueue.isAgentMuted(agent.aid),
+    };
+  }));
 
   // Queue snapshot & action (for evolclaw queue --agent CLI)
   ipcServer.setQueueSnapshotProvider((params: { agent: string }) => {
@@ -1921,6 +2032,12 @@ async function main() {
         const agentAid = requireAgent(cmd.agentAid);
         if (!cmd.triggerId) throw new Error('missing triggerId');
         const trigger = schedulerFor(agentAid).cancel(cmd.triggerId);
+        return { ok: true, trigger };
+      }
+      case 'trigger.delete': {
+        const agentAid = requireAgent(cmd.agentAid);
+        if (!cmd.triggerId) throw new Error('missing triggerId');
+        const trigger = schedulerFor(agentAid).delete(cmd.triggerId);
         return { ok: true, trigger };
       }
       case 'trigger.run': {

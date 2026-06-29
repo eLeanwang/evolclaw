@@ -1,5 +1,6 @@
 import type { ShortConnectionOpts } from '../rpc/index.js';
 import { createShortConnection } from '../rpc/index.js';
+import { getAidStore, loadClient, SLOT } from '../aid/store.js';
 import { uploadFileAndBuildPayload, type UploadProgress } from './upload.js';
 import type { MsgError } from './p2p.js';
 
@@ -103,10 +104,34 @@ export interface GroupOnlineResult {
   total: number;
 }
 
+export interface GroupBanlistResult {
+  ok: true;
+  group_id: string;
+  items: unknown[];
+}
+
+export interface GroupRulesResult {
+  ok: true;
+  group_id: string;
+  rules: Record<string, unknown>;
+}
+
 export interface GroupSimpleResult {
   ok: true;
   group_id: string;
   data?: Record<string, unknown>;
+}
+
+export interface GroupOwnerTransferResult {
+  ok: true;
+  group_id: string;
+  data: {
+    status: string;
+    auto_completed: boolean;
+    start: Record<string, unknown>;
+    complete?: Record<string, unknown>;
+    complete_error?: string;
+  };
 }
 
 // ==================== Common opts ====================
@@ -249,20 +274,25 @@ export interface GroupCreateArgs extends GroupCommonOpts {
 }
 
 export async function groupCreate(args: GroupCreateArgs): Promise<GroupCreateResult | MsgError> {
-  const conn = await createShortConnection(args.from, { aunPath: args.aunPath, slotId: args.slotId });
+  const store = await getAidStore({ slotId: args.slotId ?? SLOT.cli, aunPath: args.aunPath });
+  const conn = await loadClient(store, args.from);
   try {
+    await conn.connect({ connection_kind: 'short', short_ttl_ms: 30000, auto_reconnect: false } as any);
     const params: Record<string, unknown> = { name: args.name };
     if (args.groupId) params.group_id = args.groupId;
+    const groupName = groupNameFromGroupId(args.groupId);
+    if (groupName) params.group_name = groupName;
     if (args.visibility) params.visibility = args.visibility;
     if (args.description) params.description = args.description;
     if (args.joinMode) params.join_mode = args.joinMode;
 
-    const result = await conn.call('group.create', params);
+    const result = await (conn as any).createGroup(params);
     return { ok: true, group: result?.group };
   } catch (e: any) {
     return formatRpcError(e);
   } finally {
     await conn.close();
+    try { store.close(); } catch {}
   }
 }
 
@@ -342,6 +372,40 @@ export async function groupDissolve(args: GroupDissolveArgs): Promise<GroupDisso
       group_id: result?.group_id ?? args.groupId,
       status: result?.status ?? 'dissolved',
     };
+  } catch (e: any) {
+    return formatRpcError(e);
+  } finally {
+    await conn.close();
+  }
+}
+
+export interface GroupSuspendArgs extends GroupCommonOpts {
+  from: string;
+  groupId: string;
+}
+
+export async function groupSuspend(args: GroupSuspendArgs): Promise<GroupSimpleResult | MsgError> {
+  const conn = await createShortConnection(args.from, { aunPath: args.aunPath, slotId: args.slotId });
+  try {
+    const result = await conn.call('group.suspend', { group_id: args.groupId });
+    return { ok: true, group_id: args.groupId, data: result };
+  } catch (e: any) {
+    return formatRpcError(e);
+  } finally {
+    await conn.close();
+  }
+}
+
+export interface GroupResumeArgs extends GroupCommonOpts {
+  from: string;
+  groupId: string;
+}
+
+export async function groupResume(args: GroupResumeArgs): Promise<GroupSimpleResult | MsgError> {
+  const conn = await createShortConnection(args.from, { aunPath: args.aunPath, slotId: args.slotId });
+  try {
+    const result = await conn.call('group.resume', { group_id: args.groupId });
+    return { ok: true, group_id: args.groupId, data: result };
   } catch (e: any) {
     return formatRpcError(e);
   } finally {
@@ -494,6 +558,208 @@ export async function groupOnline(args: GroupOnlineArgs): Promise<GroupOnlineRes
   }
 }
 
+export interface GroupSetRoleArgs extends GroupCommonOpts {
+  from: string;
+  groupId: string;
+  memberAid: string;
+  role: 'admin' | 'member';
+}
+
+export async function groupSetRole(args: GroupSetRoleArgs): Promise<GroupSimpleResult | MsgError> {
+  const conn = await createShortConnection(args.from, { aunPath: args.aunPath, slotId: args.slotId });
+  try {
+    const result = await conn.call('group.set_role', {
+      group_id: args.groupId,
+      aid: args.memberAid,
+      role: args.role,
+    });
+    return { ok: true, group_id: args.groupId, data: result };
+  } catch (e: any) {
+    return formatRpcError(e);
+  } finally {
+    await conn.close();
+  }
+}
+
+export interface GroupTransferOwnerArgs extends GroupCommonOpts {
+  from: string;
+  groupId: string;
+  newOwner: string;
+}
+
+export async function groupTransferOwner(args: GroupTransferOwnerArgs): Promise<GroupOwnerTransferResult | MsgError> {
+  const store = await getAidStore({ slotId: args.slotId ?? SLOT.cli, aunPath: args.aunPath });
+  const conn = await loadClient(store, args.from);
+  try {
+    await conn.connect({ connection_kind: 'short', short_ttl_ms: 30000, auto_reconnect: false } as any);
+    const start = await (conn as any).startGroupTransfer({
+      group_id: args.groupId,
+      new_owner: args.newOwner,
+    }, { aidStore: store });
+    if (!ownerTransferNeedsCompletion(start)) {
+      return {
+        ok: true,
+        group_id: args.groupId,
+        data: { status: 'completed', auto_completed: false, start: normalizeRecord(start) },
+      };
+    }
+
+    try {
+      const newOwnerConn = await loadClient(store, args.newOwner);
+      try {
+        await newOwnerConn.connect({ connection_kind: 'short', short_ttl_ms: 30000, auto_reconnect: false } as any);
+        const complete = await (newOwnerConn as any).completeGroupTransfer({
+          group_id: args.groupId,
+        }, { aidStore: store });
+        return {
+          ok: true,
+          group_id: args.groupId,
+          data: {
+            status: 'completed',
+            auto_completed: true,
+            start: normalizeRecord(start),
+            complete: normalizeRecord(complete),
+          },
+        };
+      } finally {
+        await newOwnerConn.close();
+      }
+    } catch (completeError: any) {
+      return {
+        ok: true,
+        group_id: args.groupId,
+        data: {
+          status: 'pending_rekey',
+          auto_completed: false,
+          start: normalizeRecord(start),
+          complete_error: errorMessage(completeError),
+        },
+      };
+    }
+  } catch (e: any) {
+    return formatRpcError(e);
+  } finally {
+    await conn.close();
+    try { store.close(); } catch {}
+  }
+}
+
+export interface GroupBanArgs extends GroupCommonOpts {
+  from: string;
+  groupId: string;
+  memberAid: string;
+  durationSeconds?: number;
+}
+
+export async function groupBan(args: GroupBanArgs): Promise<GroupSimpleResult | MsgError> {
+  const conn = await createShortConnection(args.from, { aunPath: args.aunPath, slotId: args.slotId });
+  try {
+    const params: Record<string, unknown> = { group_id: args.groupId, aid: args.memberAid };
+    if (args.durationSeconds !== undefined) params.duration_seconds = args.durationSeconds;
+    const result = await conn.call('group.ban', params);
+    return { ok: true, group_id: args.groupId, data: result };
+  } catch (e: any) {
+    return formatRpcError(e);
+  } finally {
+    await conn.close();
+  }
+}
+
+export interface GroupUnbanArgs extends GroupCommonOpts {
+  from: string;
+  groupId: string;
+  memberAid: string;
+}
+
+export async function groupUnban(args: GroupUnbanArgs): Promise<GroupSimpleResult | MsgError> {
+  const conn = await createShortConnection(args.from, { aunPath: args.aunPath, slotId: args.slotId });
+  try {
+    const result = await conn.call('group.unban', { group_id: args.groupId, aid: args.memberAid });
+    return { ok: true, group_id: args.groupId, data: result };
+  } catch (e: any) {
+    return formatRpcError(e);
+  } finally {
+    await conn.close();
+  }
+}
+
+export interface GroupBanlistArgs extends GroupCommonOpts {
+  from: string;
+  groupId: string;
+}
+
+export async function groupBanlist(args: GroupBanlistArgs): Promise<GroupBanlistResult | MsgError> {
+  const conn = await createShortConnection(args.from, { aunPath: args.aunPath, slotId: args.slotId });
+  try {
+    const result = await conn.call('group.get_banlist', { group_id: args.groupId });
+    return {
+      ok: true,
+      group_id: result?.group_id ?? args.groupId,
+      items: result?.items ?? [],
+    };
+  } catch (e: any) {
+    return formatRpcError(e);
+  } finally {
+    await conn.close();
+  }
+}
+
+// ==================== Rules ====================
+
+export interface GroupRulesArgs extends GroupCommonOpts {
+  from: string;
+  groupId: string;
+}
+
+export async function groupRules(args: GroupRulesArgs): Promise<GroupRulesResult | MsgError> {
+  const conn = await createShortConnection(args.from, { aunPath: args.aunPath, slotId: args.slotId });
+  try {
+    const result = await conn.call('group.get_rules', { group_id: args.groupId });
+    return {
+      ok: true,
+      group_id: result?.group_id ?? args.groupId,
+      rules: result?.rules ?? result ?? {},
+    };
+  } catch (e: any) {
+    if (e?.code === -32000 && String(e?.message ?? '').toLowerCase().includes('rules not found')) {
+      return { ok: true, group_id: args.groupId, rules: {} };
+    }
+    return formatRpcError(e);
+  } finally {
+    await conn.close();
+  }
+}
+
+export interface GroupUpdateRulesArgs extends GroupCommonOpts {
+  from: string;
+  groupId: string;
+  mode?: 'open' | 'approval' | 'invite_only' | 'closed';
+  question?: string;
+  autoApprovePatterns?: string[];
+  maxPending?: number;
+}
+
+export async function groupUpdateRules(args: GroupUpdateRulesArgs): Promise<GroupRulesResult | MsgError> {
+  const conn = await createShortConnection(args.from, { aunPath: args.aunPath, slotId: args.slotId });
+  try {
+    const params: Record<string, unknown> = { group_id: args.groupId };
+    if (args.mode !== undefined) params.mode = args.mode;
+    if (args.question !== undefined) params.question = args.question;
+    if (args.autoApprovePatterns !== undefined) params.auto_approve_patterns = args.autoApprovePatterns;
+    if (args.maxPending !== undefined) params.max_pending = args.maxPending;
+    const result = await conn.call('group.update_rules', params);
+    return {
+      ok: true,
+      group_id: result?.group_id ?? args.groupId,
+      rules: result?.rules ?? result ?? {},
+    };
+  } catch (e: any) {
+    return formatRpcError(e);
+  } finally {
+    await conn.close();
+  }
+}
+
 // ==================== Internal ====================
 
 function formatRpcError(e: any): MsgError {
@@ -501,4 +767,29 @@ function formatRpcError(e: any): MsgError {
     return { ok: false, error: String(e.message), code: e.code };
   }
   return { ok: false, error: String(e?.message ?? e) };
+}
+
+function normalizeRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' ? value as Record<string, unknown> : { value };
+}
+
+function ownerTransferNeedsCompletion(value: unknown): boolean {
+  if (!value || typeof value !== 'object') return false;
+  const data = value as Record<string, unknown>;
+  const status = String(data.status ?? data.transfer_status ?? '').toLowerCase();
+  return status === 'pending_rekey' || status === 'requires_ca_rekey' || data.requires_ca_rekey === true;
+}
+
+function errorMessage(e: unknown): string {
+  if (e && typeof e === 'object' && 'message' in e) return String((e as { message?: unknown }).message);
+  return String(e);
+}
+
+function groupNameFromGroupId(groupId?: string): string | undefined {
+  if (!groupId) return undefined;
+  const raw = String(groupId).trim().toLowerCase();
+  const first = raw.split(/[.@/]/, 1)[0] ?? '';
+  const slug = first.startsWith('g-') ? first.slice(2) : first;
+  if (/^[a-z0-9][a-z0-9_-]{3,63}$/.test(slug)) return slug;
+  return undefined;
 }

@@ -173,6 +173,8 @@ const PARAM_DESCRIPTIONS: Record<string, string> = {
   clientType: '客户端类型（desktop/web/mobile）',
   permissionMode: '权限模式（auto/bypass/request/edit/plan/noask/readonly）',
   capabilities: '当前渠道支持的能力列表',
+  fileCapable: '当前交互模式下是否支持用文件标记发送文件（兼容别名）',
+  supportsFileMarker: '当前交互模式下是否支持用文件标记发送文件',
   project: '当前项目目录名',
   sessionId: 'evolclaw 会话 ID',
   sessionName: '会话名称',

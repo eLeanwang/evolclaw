@@ -20,19 +20,34 @@ const ABSOLUTE_FORBIDDEN = [
   /\bdd\s+if=.*of=\/dev/,     // dd 写入磁盘设备（读取操作允许）
 ];
 
+export type DangerousCommandKind =
+  | 'rm-rf'
+  | 'sudo'
+  | 'chmod-777'
+  | 'device-redirect'
+  | 'windows-rd'
+  | 'windows-del'
+  | 'reg-delete'
+  | 'net-stop'
+  | 'process-kill';
+
 // 危险操作（需要用户审批才能执行）
 // 这些操作有合理使用场景，但需要用户明确授权
-const DANGEROUS_PATTERNS = [
-  /\brm\s+-\w*r\w*f/,        // rm -rf (递归删除)
-  /\bsudo\b/,                 // sudo (提权执行)
-  /\bchmod\s+777/,            // chmod 777 (危险权限)
-  />\s*\/dev\/(?!null\b)/,    // 重定向到设备文件（排除 /dev/null）
-  /\brd\s+\/s/i,              // rd /s (Windows 递归删除目录)
-  /\bdel\s+\/[sfq]/i,        // del /f, /s, /q (Windows 强制删除)
-  /\breg\s+delete/i,          // reg delete (Windows 删除注册表)
-  /\bnet\s+stop/i,            // net stop (停止服务)
-  /\bpkill\b/,                // pkill (批量终止进程)
-  /\bkillall\b/,              // killall (批量终止进程)
+const DANGEROUS_PATTERNS: Array<{
+  kind: DangerousCommandKind;
+  pattern: RegExp;
+  reason: string;
+}> = [
+  { kind: 'rm-rf', pattern: /\brm\s+-\w*r\w*f/, reason: '递归删除文件/目录，操作不可逆' },
+  { kind: 'sudo', pattern: /\bsudo\b/, reason: '以超级用户权限执行命令' },
+  { kind: 'chmod-777', pattern: /\bchmod\s+777/, reason: '设置文件为完全开放权限（安全风险）' },
+  { kind: 'device-redirect', pattern: />\s*\/dev\/(?!null\b)/, reason: '写入设备文件（可能影响系统）' },
+  { kind: 'windows-rd', pattern: /\brd\s+\/s/i, reason: '递归删除目录，操作不可逆' },
+  { kind: 'windows-del', pattern: /\bdel\s+\/[sfq]/i, reason: '强制/递归删除文件，操作不可逆' },
+  { kind: 'reg-delete', pattern: /\breg\s+delete/i, reason: '删除注册表项（Windows 系统配置）' },
+  { kind: 'net-stop', pattern: /\bnet\s+stop/i, reason: '停止系统服务（可能影响系统稳定性）' },
+  { kind: 'process-kill', pattern: /\bpkill\b/, reason: '批量终止进程（可能影响系统稳定性）' },
+  { kind: 'process-kill', pattern: /\bkillall\b/, reason: '批量终止进程（可能影响系统稳定性）' },
 ];
 
 // 只读模式写入命令黑名单
@@ -205,7 +220,7 @@ export async function checkBlacklist(
 export function checkDangerousCommand(
   toolName: string,
   input: Record<string, unknown>
-): { isDangerous: false } | { isDangerous: true; command: string; reason: string } {
+): { isDangerous: false } | { isDangerous: true; kind: DangerousCommandKind; cacheKey: string; command: string; reason: string } {
   if (toolName !== 'Bash') {
     return { isDangerous: false };
   }
@@ -216,30 +231,16 @@ export function checkDangerousCommand(
   }
 
   // 检查危险操作模式
-  for (const pattern of DANGEROUS_PATTERNS) {
-    if (pattern.test(cmd)) {
+  for (const rule of DANGEROUS_PATTERNS) {
+    if (rule.pattern.test(cmd)) {
       const cmdPreview = cmd.length > 80 ? cmd.substring(0, 80) + '...' : cmd;
-      let reason = '此操作有潜在风险';
-
-      // 根据匹配的模式给出具体的风险说明
-      if (/\brm\s+-\w*r\w*f/.test(cmd)) {
-        reason = '递归删除文件/目录，操作不可逆';
-      } else if (/\bsudo\b/.test(cmd)) {
-        reason = '以超级用户权限执行命令';
-      } else if (/\bchmod\s+777/.test(cmd)) {
-        reason = '设置文件为完全开放权限（安全风险）';
-      } else if (/>\s*\/dev\/(?!null\b)/.test(cmd)) {
-        reason = '写入设备文件（可能影响系统）';
-      } else if (/\b(pkill|killall)\b/.test(cmd)) {
-        reason = '批量终止进程（可能影响系统稳定性）';
-      } else if (/\breg\s+delete/i.test(cmd)) {
-        reason = '删除注册表项（Windows 系统配置）';
-      }
 
       return {
         isDangerous: true,
+        kind: rule.kind,
+        cacheKey: `dangerous:${toolName}:${rule.kind}`,
         command: cmdPreview,
-        reason
+        reason: rule.reason
       };
     }
   }
@@ -288,6 +289,53 @@ export function isEvolclawSendCommandForSession(
 }
 
 export type PermissionDecision = 'allow' | 'always' | 'deny';
+
+export interface PermissionRequestContext {
+  adapter?: ChannelAdapter;
+  channelId?: string;
+  replyContext?: ReplyContext;
+  interactionRouter?: InteractionRouter;
+  userId?: string;
+  channel?: string;
+  agentName?: string;
+  taskId?: string;
+  chatmode?: 'interactive' | 'proactive';
+  flushPending?: () => Promise<void>;
+}
+
+export async function requestDangerousCommandPermission(
+  gateway: PermissionGateway | undefined,
+  sessionId: string,
+  toolName: string,
+  input: Record<string, unknown>,
+  sendPrompt: ((text: string) => Promise<void>) | undefined,
+  context?: PermissionRequestContext
+): Promise<{ matched: false } | { matched: true; decision: PermissionDecision }> {
+  const dangerCheck = checkDangerousCommand(toolName, input);
+  if (!dangerCheck.isDangerous) {
+    return { matched: false };
+  }
+
+  if (gateway?.isAlwaysAllowed(dangerCheck.cacheKey)) {
+    return { matched: true, decision: 'always' };
+  }
+
+  if (!gateway || !sendPrompt) {
+    return { matched: true, decision: 'allow' };
+  }
+
+  const decision = await gateway.requestPermission(
+    sessionId,
+    dangerCheck.cacheKey,
+    input,
+    sendPrompt,
+    context,
+    `⚠️ ${dangerCheck.command}`,
+    dangerCheck.reason
+  );
+
+  return { matched: true, decision };
+}
 
 interface PendingPermission {
   sessionId: string;

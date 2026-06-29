@@ -1061,6 +1061,9 @@ export async function cmdGroup(args: string[]): Promise<void> {
   info <from> <group-id>                                查看群详情
   update <from> <group-id> [--name N] [--description D] 修改群信息
   dissolve <from> <group-id>                            解散群
+  suspend <from> <group-id>                             暂停群
+  resume <from> <group-id>                              恢复群
+  rules <from> <group-id> [--mode M] [--question Q] [--max-pending N]  查看/更新规则
 
 成员:
   join <from> <group-id> [--message M] [--answer A]    申请加入
@@ -1069,6 +1072,10 @@ export async function cmdGroup(args: string[]): Promise<void> {
   kick <from> <group-id> <member-aid>                  踢出成员
   members <from> <group-id> [--page N] [--size N]      列出群成员
   online <from> <group-id>                             查看在线成员
+  role <from> <group-id> <member-aid> <admin|member>   设置成员角色
+  owner <from> <group-id> <new-owner-aid>               转让群主
+  ban <from> <group-id> [<member-aid>] [--duration N]   封禁成员；不带 member-aid 时列出封禁
+  unban <from> <group-id> <member-aid>                  解封成员
 
 Options:
   --app <name>          指定应用 slot（独立消费通道，不影响 daemon）
@@ -1104,7 +1111,10 @@ Options:
   const {
     groupSend, groupPull, groupAck,
     groupCreate, groupInfo, groupList, groupUpdate, groupDissolve,
+    groupSuspend, groupResume,
     groupJoin, groupLeave, groupInvite, groupKick, groupMembers, groupOnline,
+    groupSetRole, groupTransferOwner, groupBan, groupUnban, groupBanlist,
+    groupRules, groupUpdateRules,
   } = await import('../aun/msg/index.js');
   const commonOpts = { aunPath, slotId: appSlot };
 
@@ -1154,6 +1164,47 @@ Options:
     } else {
       successHuman();
     }
+  };
+
+  const parseNumberFlag = (flag: string, label: string): number | undefined => {
+    const value = getArgValue(args, flag);
+    if (value === undefined) return undefined;
+    if (value.startsWith('--')) {
+      console.error(`❌ ${label} 后面缺少数值`);
+      process.exit(1);
+    }
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed)) {
+      console.error(`❌ ${label} 必须是数字: ${value}`);
+      process.exit(1);
+    }
+    return parsed;
+  };
+
+  const requireFlagValue = (flag: string, label: string): string => {
+    const value = getArgValue(args, flag);
+    if (value === undefined || value.startsWith('--')) {
+      console.error(`❌ ${label} 后面缺少值`);
+      process.exit(1);
+    }
+    return value;
+  };
+
+  const prettyJson = (value: unknown, indent = '  '): string => {
+    const json = JSON.stringify(value ?? null, null, 2) ?? 'null';
+    return json.split('\n').map(line => indent + line).join('\n');
+  };
+
+  const renderBanItem = (item: unknown): string => {
+    if (!item || typeof item !== 'object') return String(item);
+    const data = item as Record<string, unknown>;
+    const aid = String(data.aid ?? data.member_aid ?? data.target_aid ?? data.user_id ?? data.peer_id ?? '-');
+    const reason = data.reason ?? data.note ?? data.message ?? data.remark;
+    const until = data.until ?? data.expire_at ?? data.expires_at ?? data.ban_until ?? data.duration_seconds;
+    const parts = [aid];
+    if (until !== undefined && until !== null && until !== '') parts.push(`until=${until}`);
+    if (reason !== undefined && reason !== null && reason !== '') parts.push(`reason=${reason}`);
+    return parts.join(' ');
   };
 
   // ---- 消息 ----
@@ -1340,6 +1391,61 @@ Options:
     return;
   }
 
+  if (sub === 'suspend') {
+    const groupId = requireGroupId();
+    const result = await groupSuspend({ from, groupId, ...commonOpts });
+    outputResult(result, () => {
+      console.log(`✓ 已暂停 ${groupId}`);
+    });
+    return;
+  }
+
+  if (sub === 'resume') {
+    const groupId = requireGroupId();
+    const result = await groupResume({ from, groupId, ...commonOpts });
+    outputResult(result, () => {
+      console.log(`✓ 已恢复 ${groupId}`);
+    });
+    return;
+  }
+
+  if (sub === 'rules') {
+    const groupId = requireGroupId();
+    const wantsUpdate = args.includes('--mode') || args.includes('--question') || args.includes('--max-pending');
+    if (!wantsUpdate) {
+      const result = await groupRules({ from, groupId, ...commonOpts });
+      outputResult(result, () => {
+        const r = result as any;
+        console.log(`Rules: ${r.group_id}`);
+        console.log(prettyJson(r.rules));
+      });
+      return;
+    }
+
+    const modeRaw = args.includes('--mode') ? requireFlagValue('--mode', '--mode') : undefined;
+    const mode = modeRaw ? modeRaw.toLowerCase() : undefined;
+    if (mode && !['open', 'approval', 'invite_only', 'closed'].includes(mode)) {
+      console.error('❌ --mode 必须是 open|approval|invite_only|closed');
+      process.exit(1);
+    }
+    const question = args.includes('--question') ? requireFlagValue('--question', '--question') : undefined;
+    const maxPending = parseNumberFlag('--max-pending', '--max-pending');
+    const result = await groupUpdateRules({
+      from,
+      groupId,
+      mode: mode as any,
+      question,
+      maxPending,
+      ...commonOpts,
+    });
+    outputResult(result, () => {
+      const r = result as any;
+      console.log(`✓ 已更新规则 ${r.group_id}`);
+      console.log(prettyJson(r.rules));
+    });
+    return;
+  }
+
   // ---- 成员 ----
 
   if (sub === 'join') {
@@ -1435,7 +1541,110 @@ Options:
     return;
   }
 
-  console.error(`未知子命令: ${sub}\n用法: evolclaw group [send|pull|ack|create|list|info|update|dissolve|join|leave|invite|kick|members|online]`);
+  if (sub === 'role') {
+    const groupId = requireGroupId();
+    const values = collectPositional(args, 3);
+    if (values.length !== 2) {
+      console.error('用法: evolclaw group role <from> <group-id> <member-aid> <admin|member>');
+      process.exit(1);
+    }
+    const [memberAid, roleRaw] = values;
+    if (!isValidAid(memberAid)) {
+      console.error(`❌ 无效 AID: ${memberAid}`);
+      process.exit(1);
+    }
+    const role = roleRaw.toLowerCase();
+    if (role !== 'admin' && role !== 'member') {
+      console.error('❌ 角色必须是 admin 或 member');
+      process.exit(1);
+    }
+    const result = await groupSetRole({ from, groupId, memberAid, role: role as 'admin' | 'member', ...commonOpts });
+    outputResult(result, () => {
+      console.log(`✓ 已将 ${memberAid} 设为 ${role}`);
+    });
+    return;
+  }
+
+  if (sub === 'owner') {
+    const groupId = requireGroupId();
+    const values = collectPositional(args, 3);
+    if (values.length !== 1) {
+      console.error('用法: evolclaw group owner <from> <group-id> <new-owner-aid>');
+      process.exit(1);
+    }
+    const [newOwner] = values;
+    if (!isValidAid(newOwner)) {
+      console.error(`❌ 无效 AID: ${newOwner}`);
+      process.exit(1);
+    }
+    const result = await groupTransferOwner({ from, groupId, newOwner, ...commonOpts });
+    outputResult(result, () => {
+      const data = (result as any).data ?? {};
+      if (data.status === 'pending_rekey') {
+        console.log(`✓ 已发起群主转让，等待 ${newOwner} 完成 rekey`);
+        if (data.complete_error) console.log(`  自动完成失败: ${data.complete_error}`);
+        return;
+      }
+      console.log(`✓ 已将群主转让给 ${newOwner}${data.auto_completed ? '（已自动完成 rekey）' : ''}`);
+    });
+    return;
+  }
+
+  if (sub === 'ban') {
+    const groupId = requireGroupId();
+    const values = collectPositional(args, 3, new Set(['--duration']));
+    if (values.length === 0) {
+      const result = await groupBanlist({ from, groupId, ...commonOpts });
+      outputResult(result, () => {
+        const r = result as any;
+        if (r.items.length === 0) {
+          console.log('(没有封禁成员)');
+          return;
+        }
+        console.log(`共 ${r.items.length} 条封禁:`);
+        for (const item of r.items) {
+          console.log(`  ${renderBanItem(item)}`);
+        }
+      });
+      return;
+    }
+    if (values.length !== 1) {
+      console.error('用法: evolclaw group ban <from> <group-id> [<member-aid>] [--duration <seconds>]');
+      process.exit(1);
+    }
+    const [memberAid] = values;
+    if (!isValidAid(memberAid)) {
+      console.error(`❌ 无效 AID: ${memberAid}`);
+      process.exit(1);
+    }
+    const durationSeconds = parseNumberFlag('--duration', '--duration');
+    const result = await groupBan({ from, groupId, memberAid, durationSeconds, ...commonOpts });
+    outputResult(result, () => {
+      console.log(`✓ 已封禁 ${memberAid}${durationSeconds !== undefined ? ` (${durationSeconds}s)` : ''}`);
+    });
+    return;
+  }
+
+  if (sub === 'unban') {
+    const groupId = requireGroupId();
+    const values = collectPositional(args, 3);
+    if (values.length !== 1) {
+      console.error('用法: evolclaw group unban <from> <group-id> <member-aid>');
+      process.exit(1);
+    }
+    const [memberAid] = values;
+    if (!isValidAid(memberAid)) {
+      console.error(`❌ 无效 AID: ${memberAid}`);
+      process.exit(1);
+    }
+    const result = await groupUnban({ from, groupId, memberAid, ...commonOpts });
+    outputResult(result, () => {
+      console.log(`✓ 已解封 ${memberAid}`);
+    });
+    return;
+  }
+
+  console.error(`未知子命令: ${sub}\n用法: evolclaw group [send|pull|ack|create|list|info|update|dissolve|suspend|resume|rules|join|leave|invite|kick|members|online|role|owner|ban|unban]`);
   process.exit(1);
 }
 
@@ -1464,14 +1673,14 @@ const VALUE_FLAGS = new Set([
 const BOOLEAN_FLAGS = new Set([
   '--encrypt', '--no-encrypt', '--mention-all',
 ]);
-function collectPositional(args: string[], startIdx: number): string[] {
+function collectPositional(args: string[], startIdx: number, extraValueFlags?: ReadonlySet<string>): string[] {
   const out: string[] = [];
   let endOfFlags = false;
   for (let i = startIdx; i < args.length; i++) {
     const a = args[i];
     if (endOfFlags) { out.push(a); continue; }
     if (a === '--') { endOfFlags = true; continue; }
-    if (VALUE_FLAGS.has(a)) { i++; continue; }   // 精确匹配取值 flag：跳过其值
+    if (VALUE_FLAGS.has(a) || extraValueFlags?.has(a)) { i++; continue; }   // 精确匹配取值 flag：跳过其值
     if (BOOLEAN_FLAGS.has(a)) { continue; }       // 精确匹配开关 flag：仅跳过自身
     out.push(a);                                  // 其余（含以 -- 开头的未知 token）= 正文
   }

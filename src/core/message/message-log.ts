@@ -137,7 +137,7 @@ export function buildOutboundEntry(opts: {
   encrypt?: boolean;
   chatmode?: string;
   peerType?: string;
-  msgType?: 'text' | 'thought';
+  msgType?: 'text' | 'image' | 'file' | 'thought';
   source?: 'daemon' | 'cli' | 'msg' | 'ctl' | 'owner-inject';
 }): MessageLogEntry {
   const ts = opts.timestamp || Date.now();

@@ -34,6 +34,7 @@ import { ccProjectsDir } from './paths.js';
 import { roleAssignmentsSource, handleRoleAssignmentsApi, handlePeerRoleApi } from './sources/role-assignments.js';
 import { roleDefinitionsSource, handleRoleDefinitionsApi } from './sources/role-definitions.js';
 import { handleModelsApi } from './sources/models.js';
+import { detectBaseAgents } from './sources/baseagent-detector.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const STATIC_DIR = path.join(__dirname, 'static');
@@ -461,7 +462,8 @@ function handleConnection(ws: WebSocket, req: http.IncomingMessage, log: (s: str
       if (msg.sessionId) params.sessionId = msg.sessionId;
       if (msg.project) params.project = msg.project;
       if (msg.agent) params.agent = msg.agent;
-      dlog(`▸ 订阅 ${msg.view}${msg.aid ? ` aid=${String(msg.aid).split('.')[0]}` : ''}${msg.peer ? ` peer=${String(msg.peer).split('.')[0]}` : ''}${msg.sessionId ? ` session=${String(msg.sessionId).slice(0, 8)}` : ''} from ${ip}`);
+      if (msg.baseagent) params.baseagent = msg.baseagent;
+      dlog(`▸ 订阅 ${msg.view}${msg.aid ? ` aid=${String(msg.aid).split('.')[0]}` : ''}${msg.peer ? ` peer=${String(msg.peer).split('.')[0]}` : ''}${msg.sessionId ? ` session=${String(msg.sessionId).slice(0, 8)}` : ''}${msg.baseagent ? ` baseagent=${msg.baseagent}` : ''} from ${ip}`);
       await switchSubscription(msg.view as ViewKind, params);
       return;
     }
@@ -587,7 +589,12 @@ export async function startWatchWebServer(opts: { port?: number; log?: (s: strin
   }
 
   const server = http.createServer((req, res) => {
-    if (req.method === 'GET' && (req.url || '') === '/api/pair-code') {
+    if (req.method === 'GET' && (req.url || '') === '/api/available-baseagents') {
+      // Base agent 可用性检测 API
+      const available = detectBaseAgents();
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(available));
+    } else if (req.method === 'GET' && (req.url || '') === '/api/pair-code') {
       // 取码 API：仅真本地直连可用（socket 回环 + 无 x-aun-provider-aid）。
       // 隧道回连虽然 socket 也是 127.0.0.1，但有 x-aun-provider-aid 头 → 拒绝，
       // 防止远程访客通过隧道拿到配对码（安全漏洞）。
