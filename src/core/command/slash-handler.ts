@@ -68,40 +68,58 @@ function getAgentBusyCount(handler: any, aid: string | undefined, excludeSession
   return getAgentBusyInfo(handler, aid, excludeSessionKey)?.count ?? null;
 }
 
-async function analyzeWorktreeStatus(projectPath: string): Promise<string | null> {
+async function getCurrentWorktreeInfo(projectPath: string): Promise<string | null> {
   try {
     const { execFileSync } = await import('child_process');
-    const output = execFileSync('git', ['worktree', 'list'], {
+
+    // 使用 --porcelain 格式获取详细信息
+    const output = execFileSync('git', ['worktree', 'list', '--porcelain'], {
       cwd: projectPath,
       encoding: 'utf8',
       timeout: 5000
     });
 
     const lines = output.trim().split('\n');
-    if (lines.length <= 1) return null; // 只有主仓库，没有 worktree
+    const worktrees: Array<{
+      path: string;
+      head: string;
+      branch: string;
+      locked?: string;
+    }> = [];
 
-    // 分析 worktree 信息
-    const worktrees = lines.slice(1).map(line => {
-      const match = line.match(/^(.+?)\s+([a-f0-9]+)\s+\[(.+?)\](?:\s+(.+))?$/);
-      if (!match) return null;
-      return {
-        path: match[1],
-        commit: match[2].substring(0, 7),
-        branch: match[3],
-        status: match[4] || '',
-      };
-    }).filter(Boolean);
+    let current: any = {};
+    for (const line of lines) {
+      if (line.startsWith('worktree ')) {
+        if (current.path) worktrees.push(current);
+        current = { path: line.slice(9) };
+      } else if (line.startsWith('HEAD ')) {
+        current.head = line.slice(5).substring(0, 7);
+      } else if (line.startsWith('branch ')) {
+        current.branch = line.slice(7).replace('refs/heads/', '');
+      } else if (line.startsWith('locked ')) {
+        current.locked = line.slice(7);
+      }
+    }
+    if (current.path) worktrees.push(current);
 
-    if (worktrees.length === 0) return null;
+    // 找到当前工作目录对应的 worktree
+    const normalizedProjectPath = path.resolve(projectPath);
+    const currentWorktree = worktrees.find(w => path.resolve(w.path) === normalizedProjectPath);
 
-    const locked = worktrees.filter(w => w!.status.includes('locked'));
-    const active = worktrees.filter(w => w && !w.status.includes('locked') && !w.status.includes('prunable'));
+    if (!currentWorktree) return null;
 
-    const parts: string[] = [];
-    if (active.length > 0) parts.push(`${active.length}个活跃`);
-    if (locked.length > 0) parts.push(`${locked.length}个已锁定`);
+    // 如果是主仓库（main/master 分支且不在 .claude/worktrees 下）
+    const isMainRepo = !currentWorktree.path.includes('.claude/worktrees');
+    if (isMainRepo) return null;
 
-    return parts.join(', ');
+    // 返回当前 worktree 信息
+    const parts = [currentWorktree.branch];
+    if (currentWorktree.locked) {
+      parts.push('🔒');
+    }
+    parts.push(`@${currentWorktree.head}`);
+
+    return parts.join(' ');
   } catch (err) {
     return null; // git worktree 不可用或出错时静默失败
   }
@@ -1452,8 +1470,8 @@ export async function handleSlashCommand(this: any,
       }
     }
 
-    // 获取 worktree 信息
-    const worktreeInfo = await analyzeWorktreeStatus(session.projectPath);
+    // 获取当前 worktree 信息
+    const worktreeInfo = await getCurrentWorktreeInfo(session.projectPath);
 
     const lines: string[] = [];
     const chatMode = session.chatMode || 'interactive';
