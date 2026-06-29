@@ -68,6 +68,45 @@ function getAgentBusyCount(handler: any, aid: string | undefined, excludeSession
   return getAgentBusyInfo(handler, aid, excludeSessionKey)?.count ?? null;
 }
 
+async function analyzeWorktreeStatus(projectPath: string): Promise<string | null> {
+  try {
+    const { execFileSync } = await import('child_process');
+    const output = execFileSync('git', ['worktree', 'list'], {
+      cwd: projectPath,
+      encoding: 'utf8',
+      timeout: 5000
+    });
+
+    const lines = output.trim().split('\n');
+    if (lines.length <= 1) return null; // 只有主仓库，没有 worktree
+
+    // 分析 worktree 信息
+    const worktrees = lines.slice(1).map(line => {
+      const match = line.match(/^(.+?)\s+([a-f0-9]+)\s+\[(.+?)\](?:\s+(.+))?$/);
+      if (!match) return null;
+      return {
+        path: match[1],
+        commit: match[2].substring(0, 7),
+        branch: match[3],
+        status: match[4] || '',
+      };
+    }).filter(Boolean);
+
+    if (worktrees.length === 0) return null;
+
+    const locked = worktrees.filter(w => w!.status.includes('locked'));
+    const active = worktrees.filter(w => w && !w.status.includes('locked') && !w.status.includes('prunable'));
+
+    const parts: string[] = [];
+    if (active.length > 0) parts.push(`${active.length}个活跃`);
+    if (locked.length > 0) parts.push(`${locked.length}个已锁定`);
+
+    return parts.join(', ');
+  } catch (err) {
+    return null; // git worktree 不可用或出错时静默失败
+  }
+}
+
 export async function handleSlashCommand(this: any, 
   content: string,
   channel: string,
@@ -1413,6 +1452,9 @@ export async function handleSlashCommand(this: any,
       }
     }
 
+    // 获取 worktree 信息
+    const worktreeInfo = await analyzeWorktreeStatus(session.projectPath);
+
     const lines: string[] = [];
     const chatMode = session.chatMode || 'interactive';
     const dispatchMode = session.metadata?.dispatchModeOverride ?? session.metadata?.dispatchMode ?? '未设置（跟随群设置）';
@@ -1424,10 +1466,14 @@ export async function handleSlashCommand(this: any,
         `渠道: ${this.resolveChannelType(channel)} / 项目: ${projectName} / 会话: ${displaySessionTitle(session.name, '(未命名)')}`,
         `会话ID: ${session.id}`,
         `项目路径: ${session.projectPath}`,
-        `会话状态: ${sessionStatus}`,
+      );
+      if (worktreeInfo) {
+        lines.push(`Worktree: ${worktreeInfo}`);
+      }
+      lines.push(
+        `会话状态: ${sessionStatus} / 轮数: ${sessionTurns}`,
         chatModeLine,
         ...(dispatchModeLine ? [dispatchModeLine] : []),
-        `会话轮数: ${sessionTurns}`,
       );
       if (health.consecutiveErrors > 0) {
         lines.push(`异常计数: ${health.consecutiveErrors}`);
@@ -1442,10 +1488,14 @@ export async function handleSlashCommand(this: any,
       lines.push(
         `📊 ${isThread ? '话题' : '会话'}状态 (Agent: ${agentName})：`,
         `渠道: ${channel} / 项目: ${projectName} / ${session.baseagent}会话`,
-        `状态: ${sessionStatus}`,
+      );
+      if (worktreeInfo) {
+        lines.push(`Worktree: ${worktreeInfo}`);
+      }
+      lines.push(
+        `状态: ${sessionStatus} / 轮数: ${sessionTurns}`,
         chatModeLine,
         ...(dispatchModeLine ? [dispatchModeLine] : []),
-        `会话轮数: ${sessionTurns}`,
         `最后活跃: ${timeStr}`
       );
     }

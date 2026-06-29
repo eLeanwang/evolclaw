@@ -1487,6 +1487,12 @@ export class ResponseEngine implements IMessageProcessor {
               }
               await recordRetryHealthError(retryError);
               if (consecutiveRetryFailures < MAX_RETRIES) {
+                // 检查中断状态：如果任务已被中断（/stop 或新消息），立即退出重试循环
+                const interruptReason = this.interruptedSessions.get(session.id);
+                if (interruptReason) {
+                  logger.info(`[ResponseEngine] Task interrupted during retry wait (reason=${interruptReason}), aborting retry loop session=${session.id}`);
+                  throw new Error('TASK_INTERRUPTED');
+                }
                 const delay = RETRY_DELAYS_MS[consecutiveRetryFailures];
                 const nextRetryNumber = consecutiveRetryFailures + 1;
                 consecutiveRetryFailures++;
@@ -1494,6 +1500,12 @@ export class ResponseEngine implements IMessageProcessor {
                 renderer.addNotice(`API 不可用，${delay / 1000}秒后重试 ${nextRetryNumber}/${MAX_RETRIES}`, 'warn', 'retry', true);
                 await renderer.flush();
                 await new Promise(resolve => setTimeout(resolve, delay));
+                // 延迟后再次检查中断状态（延迟期间可能收到中断信号）
+                const postDelayInterrupt = this.interruptedSessions.get(session.id);
+                if (postDelayInterrupt) {
+                  logger.info(`[ResponseEngine] Task interrupted after retry delay (reason=${postDelayInterrupt}), aborting retry loop session=${session.id}`);
+                  throw new Error('TASK_INTERRUPTED');
+                }
                 runAttempt++;
                 continue;
               }
