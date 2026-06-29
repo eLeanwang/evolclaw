@@ -127,6 +127,28 @@ async function getGitWorkingDirInfo(projectPath: string): Promise<string | null>
       }
     }
 
+    // 获取 ahead/behind 信息
+    try {
+      const revOutput = execFileSync(
+        'git',
+        ['rev-list', '--left-right', '--count', '@{upstream}...HEAD'],
+        { cwd: projectPath, timeout: 1000, encoding: 'utf8' }
+      );
+      const revParts = revOutput.trim().split(/\s+/);
+      if (revParts.length === 2) {
+        const behind = parseInt(revParts[0], 10) || 0;
+        const ahead = parseInt(revParts[1], 10) || 0;
+        if (ahead > 0 || behind > 0) {
+          const aheadBehind: string[] = [];
+          if (ahead > 0) aheadBehind.push(`↑${ahead}`);
+          if (behind > 0) aheadBehind.push(`↓${behind}`);
+          parts.push(aheadBehind.join(' '));
+        }
+      }
+    } catch {
+      // No upstream or error, skip ahead/behind
+    }
+
     return parts.join(' ');
   } catch (err) {
     return null; // git 命令失败时静默返回 null
