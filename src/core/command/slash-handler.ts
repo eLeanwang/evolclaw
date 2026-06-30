@@ -69,6 +69,93 @@ function getAgentBusyCount(handler: any, aid: string | undefined, excludeSession
   return getAgentBusyInfo(handler, aid, excludeSessionKey)?.count ?? null;
 }
 
+async function getGitWorkingDirInfo(projectPath: string): Promise<string | null> {
+  try {
+    const { execFileSync } = await import('child_process');
+
+    // 获取分支名
+    const branchOutput = execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], {
+      cwd: projectPath,
+      encoding: 'utf8',
+      timeout: 1000
+    });
+    const branch = branchOutput.trim();
+    if (!branch) return null;
+
+    // 检查文件状态
+    const statusOutput = execFileSync('git', ['--no-optional-locks', 'status', '--porcelain'], {
+      cwd: projectPath,
+      encoding: 'utf8',
+      timeout: 1000
+    });
+
+    // 解析文件状态统计
+    const stats = { modified: 0, added: 0, deleted: 0, untracked: 0 };
+    const lines = statusOutput.trim().split('\n').filter(Boolean);
+
+    for (const line of lines) {
+      if (line.length < 2) continue;
+
+      const index = line[0];    // staged status
+      const worktree = line[1]; // unstaged status
+
+      if (line.startsWith('??')) {
+        stats.untracked++;
+      } else if (index === 'A') {
+        stats.added++;
+      } else if (index === 'D' || worktree === 'D') {
+        stats.deleted++;
+      } else if (index === 'M' || worktree === 'M' || index === 'R' || index === 'C') {
+        stats.modified++;
+      }
+    }
+
+    // 组装显示信息
+    const parts: string[] = [branch];
+
+    const isDirty = lines.length > 0;
+    if (isDirty) {
+      parts[0] = branch + '*'; // 分支名后加 * 表示有修改
+
+      const fileParts: string[] = [];
+      if (stats.modified > 0) fileParts.push(`!${stats.modified}`);
+      if (stats.added > 0) fileParts.push(`+${stats.added}`);
+      if (stats.deleted > 0) fileParts.push(`-${stats.deleted}`);
+      if (stats.untracked > 0) fileParts.push(`?${stats.untracked}`);
+
+      if (fileParts.length > 0) {
+        parts.push(`[${fileParts.join(' ')}]`);
+      }
+    }
+
+    // 获取 ahead/behind 信息
+    try {
+      const revOutput = execFileSync(
+        'git',
+        ['rev-list', '--left-right', '--count', '@{upstream}...HEAD'],
+        { cwd: projectPath, timeout: 1000, encoding: 'utf8' }
+      );
+      const revParts = revOutput.trim().split(/\s+/);
+      if (revParts.length === 2) {
+        const behind = parseInt(revParts[0], 10) || 0;
+        const ahead = parseInt(revParts[1], 10) || 0;
+        if (ahead > 0 || behind > 0) {
+          const aheadBehind: string[] = [];
+          if (ahead > 0) aheadBehind.push(`↑${ahead}`);
+          if (behind > 0) aheadBehind.push(`↓${behind}`);
+          parts.push(aheadBehind.join(' '));
+        }
+      }
+    } catch {
+      // No upstream or error, skip ahead/behind
+    }
+
+    return parts.join(' ');
+  } catch (err) {
+    return null; // git 命令失败时静默返回 null
+  }
+}
+
 export async function handleSlashCommand(this: any, 
   content: string,
   channel: string,
@@ -1437,6 +1524,9 @@ export async function handleSlashCommand(this: any,
       }
     }
 
+    // 获取 git 工作目录信息
+    const gitInfo = await getGitWorkingDirInfo(session.projectPath);
+
     const lines: string[] = [];
     const chatMode = session.chatMode || 'interactive';
     const dispatchMode = session.metadata?.dispatchModeOverride ?? session.metadata?.dispatchMode ?? '未设置（跟随群设置）';
@@ -1448,10 +1538,14 @@ export async function handleSlashCommand(this: any,
         `渠道: ${this.resolveChannelType(channel)} / 项目: ${projectName} / 会话: ${displaySessionTitle(session.name, '(未命名)')}`,
         `会话ID: ${session.id}`,
         `项目路径: ${session.projectPath}`,
-        `会话状态: ${sessionStatus}`,
+      );
+      if (gitInfo) {
+        lines.push(`Git: ${gitInfo}`);
+      }
+      lines.push(
+        `会话状态: ${sessionStatus} / 轮数: ${sessionTurns}`,
         chatModeLine,
         ...(dispatchModeLine ? [dispatchModeLine] : []),
-        `会话轮数: ${sessionTurns}`,
       );
       if (health.consecutiveErrors > 0) {
         lines.push(`异常计数: ${health.consecutiveErrors}`);
@@ -1466,10 +1560,14 @@ export async function handleSlashCommand(this: any,
       lines.push(
         `📊 ${isThread ? '话题' : '会话'}状态 (Agent: ${agentName})：`,
         `渠道: ${channel} / 项目: ${projectName} / ${session.baseagent}会话`,
-        `状态: ${sessionStatus}`,
+      );
+      if (gitInfo) {
+        lines.push(`Git: ${gitInfo}`);
+      }
+      lines.push(
+        `状态: ${sessionStatus} / 轮数: ${sessionTurns}`,
         chatModeLine,
         ...(dispatchModeLine ? [dispatchModeLine] : []),
-        `会话轮数: ${sessionTurns}`,
         `最后活跃: ${timeStr}`
       );
     }

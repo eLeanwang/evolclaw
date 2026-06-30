@@ -338,6 +338,7 @@ export class MessageBridge {
     agent: '/agent',
     trigger: '/trigger',
     file: '/file',
+    capability: '/capability',
   };
 
   private extractTopicName(msg: InboundMessage): string | undefined {

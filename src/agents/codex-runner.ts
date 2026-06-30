@@ -11,11 +11,12 @@ import type { AgentPlugin, AgentInstance, AgentCallbacks } from '../core/baseage
 import type { AgentEvent, AgentRunnerFull, ModelSwitcher, PermissionContext, PermissionModeInfo } from './runner-types.js';
 import { checkBlacklist, checkReadonly, checkDangerousCommand, parseEvolclawSendCommand, requestDangerousCommandPermission, type PermissionGateway } from '../core/permission.js';
 import { CodexAppServerClient, type CodexServerNotification, type CodexServerRequest, type CodexThreadResponse, type CodexTurnItem } from './codex-app-server-client.js';
-import { resolveOpenaiConfig } from './baseagent.js';
+import { resolveOpenaiConfig, type OpenaiResolved } from './baseagent.js';
 import { logger } from '../utils/logger.js';
 import { isRetryableError } from '../utils/error-utils.js';
 import { renderActionAsText } from '../core/interaction-router.js';
 import { buildEnvelope, sendInteractionPayload } from '../core/message/message-utils.js';
+import { resolveCodexCapabilityThreadConfigForProject } from '../core/capability/capability-manager.js';
 import { compareVersions } from '../utils/npm-ops.js';
 import { resolveRoot } from '../paths.js';
 import { execFileSync } from 'child_process';
@@ -86,6 +87,8 @@ interface AppServerStreamState {
 type CompleteAgentEvent = Extract<AgentEvent, { type: 'complete' }>;
 type NormalizedTokenUsage = NonNullable<CompleteAgentEvent['tokenUsage']>;
 type NormalizedContextUsage = NonNullable<CompleteAgentEvent['contextUsage']>;
+type CodexJsonValue = null | boolean | number | string | CodexJsonValue[] | { [key: string]: CodexJsonValue };
+type CodexJsonObject = { [key: string]: CodexJsonValue };
 
 const CODEX_CATALOG_FALLBACK: CodexModelInfo[] = [
   { slug: 'gpt-5.5', efforts: ['low', 'medium', 'high', 'xhigh'] },
@@ -205,11 +208,13 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
   private permissionGateway?: PermissionGateway;
   private sendPromptFn?: (text: string) => Promise<void>;
   private permissionContexts = new Map<string, PermissionContext>();
-  private resolvedConfig: { apiKey: string; baseUrl?: string; model: string; effort?: string; enableRequestUserInput?: boolean; approvalsReviewer?: string };
+  private resolvedConfig: OpenaiResolved;
   private readonly pendingInterruptTtlMs = 30_000;
 
   constructor(config: Config, callbacks: AgentCallbacks) {
     this.resolvedConfig = resolveOpenaiConfig(config);
+    this.resolvedConfig.evolclawAgentAid = config.agents?.codex?.evolclawAgentAid;
+    this.resolvedConfig.evolclawAgentConfig = config.agents?.codex?.evolclawAgentConfig;
     this.capabilities = {
       clear: false,
       compact: true,
@@ -247,6 +252,40 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
     client?.close().catch(error => {
       logger.debug(`[CodexRunner] Failed to close stale app-server client: ${error}`);
     });
+  }
+
+  private mergeThreadConfig(...configs: Array<Record<string, unknown> | null | undefined>): CodexJsonObject | null {
+    const merged: CodexJsonObject = {};
+    for (const config of configs) {
+      if (!config) continue;
+      for (const [key, value] of Object.entries(config)) {
+        const current = merged[key];
+        if (
+          value
+          && typeof value === 'object'
+          && !Array.isArray(value)
+          && current
+          && typeof current === 'object'
+          && !Array.isArray(current)
+        ) {
+          merged[key] = this.mergeThreadConfig(current as Record<string, unknown>, value as Record<string, unknown>) ?? {};
+        } else {
+          merged[key] = value as CodexJsonValue;
+        }
+      }
+    }
+    return Object.keys(merged).length > 0 ? merged : null;
+  }
+
+  private async resolveCapabilityThreadConfig(projectPath: string): Promise<Record<string, unknown>> {
+    const agentConfig = this.resolvedConfig.evolclawAgentConfig;
+    if (!agentConfig) return {};
+    try {
+      return await resolveCodexCapabilityThreadConfigForProject(agentConfig, projectPath, 'codex');
+    } catch (error) {
+      logger.warn(`[CodexRunner] Failed to resolve Codex capability thread config: ${error}`);
+      return {};
+    }
   }
 
   // ── ModelSwitcher ──
@@ -368,13 +407,17 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
       logger.info(`[CodexRunner] Proactive mode: upgraded approvalPolicy from ${callApprovalPolicy} to ${effectiveApprovalPolicy} for session=${sessionId}`);
     }
 
+    const capabilityConfig = await this.resolveCapabilityThreadConfig(projectPath);
     const threadOptions = {
       model: callModel,
       effort: callEffort,
       approvalPolicy: effectiveApprovalPolicy,
       approvalsReviewer: this.resolvedConfig.approvalsReviewer,
       sandbox: callSandboxMode,
-      config: this.buildEvolclawShellEnvironmentConfig(sessionId),
+      config: this.mergeThreadConfig(
+        this.buildEvolclawShellEnvironmentConfig(sessionId),
+        capabilityConfig,
+      ),
       ...(systemPromptAppend ? { developerInstructions: systemPromptAppend } : {}),
     };
 
@@ -584,13 +627,17 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
         const compactApprovalPolicy = (ctx?.policyHook && compactPolicy === 'never')
           ? 'on-request'
           : compactPolicy;
+        const capabilityConfig = await this.resolveCapabilityThreadConfig(_projectPath);
         await appServer.threadResume(agentSessionId, _projectPath, {
           model: this.model,
           effort: this.effort,
           approvalPolicy: compactApprovalPolicy,
           approvalsReviewer: this.resolvedConfig.approvalsReviewer,
           sandbox: this.toSandboxMode(compactMode),
-          config: this.buildEvolclawShellEnvironmentConfig(_sessionId),
+          config: this.mergeThreadConfig(
+            this.buildEvolclawShellEnvironmentConfig(_sessionId),
+            capabilityConfig,
+          ),
         });
         return await this.startAndWaitForCompact(appServer, agentSessionId);
       }
@@ -1650,7 +1697,13 @@ export class CodexAgentPlugin implements AgentPlugin {
     }
     const override = agent.config.baseagents?.codex as any;
     const merged: Config = {
-      agents: { codex: { ...(override || {}) } },
+      agents: {
+        codex: {
+          ...(override || {}),
+          evolclawAgentAid: agent.config.aid,
+          evolclawAgentConfig: agent.config,
+        },
+      },
     } as Config;
     return { evolagentName: agent.name, baseagent: 'codex', agent: new CodexRunner(merged, callbacks) };
   }

@@ -452,6 +452,7 @@ export function resolveEffective(sel: Selector, opts: ReadOpts = {}): EffectiveA
     channels: config.channels ?? [],
     models: config.models,
     projects: config.projects,
+    capabilities: config.capabilities,
     debug: config.debug,
     observable: config.observable,
     extra_backup: config.extra_backup,

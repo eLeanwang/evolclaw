@@ -84,7 +84,7 @@ export type AgentLifecycleEvent =
   | { type: 'agent:created'; aid: string; name?: string; baseagent?: string; projectPath?: string; owner?: string; timestamp?: number }
   | { type: 'agent:bootstrap-started'; aid: string; channel?: string; timestamp?: number }
   | { type: 'agent:bootstrap-complete'; aid: string; timestamp?: number }
-  | { type: 'agent:updated'; aid: string; timestamp?: number }
+  | { type: 'agent:updated'; aid: string; nameChanged?: boolean; timestamp?: number }
   | { type: 'agent:avatar_updated'; aid: string; avatar: string; timestamp?: number }
   | { type: 'agent:reloaded'; aid: string; timestamp?: number }
   | { type: 'agent:enabled'; aid: string; reloaded?: boolean; timestamp?: number }

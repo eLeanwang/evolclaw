@@ -70,6 +70,50 @@
         }
       }
     },
+    "capabilities": {
+      "type": "object",
+      "description": "EvolClaw 层能力策略（baseagent → type → mode/overrides）",
+      "x-merge": "dict",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "skill": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "mode": { "type": "string", "enum": ["inherit", "all", "none"] },
+              "overrides": {
+                "type": "object",
+                "additionalProperties": { "type": "string", "enum": ["enabled", "disabled"] }
+              }
+            }
+          },
+          "mcp": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "mode": { "type": "string", "enum": ["inherit", "all", "none"] },
+              "overrides": {
+                "type": "object",
+                "additionalProperties": { "type": "string", "enum": ["enabled", "disabled"] }
+              }
+            }
+          },
+          "plugin": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "mode": { "type": "string", "enum": ["inherit", "all", "none"] },
+              "overrides": {
+                "type": "object",
+                "additionalProperties": { "type": "string", "enum": ["enabled", "disabled"] }
+              }
+            }
+          }
+        }
+      }
+    },
     "debug": {
       "type": "object",
       "description": "调试配置",

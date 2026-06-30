@@ -140,9 +140,25 @@ export class CommandHandler {
     return `❌ 当前会话绑定的 baseagent 不可用: ${error.baseagent}\nAgent: ${error.evolagentName}\n可用: ${available}\n请使用 /baseagent 切换到可用后端。`;
   }
 
-  /** Return the list of baseagents available to a given channel (per-EvolAgent isolation). */
+  /**
+   * Return the list of baseagents available to a given channel.
+   *
+   * Agent channels stay isolated to their owning EvolAgent. Control/daemon
+   * channels are virtual and have no owner, so expose the loaded runner types
+   * globally for menu.options(name=baseagent).
+   */
   private getAvailableBaseagents(channel: string): string[] {
-    const evolName = this.agentRegistry?.resolveByChannel(channel)?.name || '<unknown>';
+    const owner = this.agentRegistry?.resolveByChannel(channel);
+    if (!owner) {
+      const result = new Set<string>();
+      for (const key of this.agentMap.keys()) {
+        const idx = key.indexOf('::');
+        result.add(idx >= 0 ? key.slice(idx + 2) : key);
+      }
+      return [...result];
+    }
+
+    const evolName = owner.name || '<unknown>';
     const prefix = `${evolName}::`;
     const result: string[] = [];
     for (const key of this.agentMap.keys()) {
@@ -264,6 +280,7 @@ export class CommandHandler {
       failCount: stats.failCount,
       lastFiredAt: stats.lastFiredAt,
       lastResult: stats.lastResult,
+      lastScheduledAt: schedulerDetails?.schedule?.lastScheduledAt,
       createdAt: definition.createdAt,
       updatedAt: definition.updatedAt,
       status: definition.enabled ? 'active' : 'disabled',

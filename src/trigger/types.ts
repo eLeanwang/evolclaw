@@ -163,6 +163,8 @@ export interface TriggerScheduleState {
   nextFireAt: number;
   updatedAt: number;
   sourceSignature: string;
+  lastScheduledAt?: number;
+  lastFiredAt?: number;
 }
 
 export interface TriggerSourceRunInfo {

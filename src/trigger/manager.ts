@@ -11,10 +11,13 @@ import type {
   TriggerDefinition,
 } from './types.js';
 import { atomicWriteJson } from '../core/session/session-fs-store.js';
+import type { TriggerRunStats } from './audit.js';
 
 export interface TriggerListOptions {
   all?: boolean;
 }
+
+type LegacyTriggerStats = TriggerRunStats;
 
 export class TriggerDefinitionManager {
   constructor(
@@ -122,6 +125,37 @@ export class TriggerDefinitionManager {
     return JSON.parse(fs.readFileSync(this.definitionPath(triggerId), 'utf-8'));
   }
 
+  legacyStats(triggerId: string): LegacyTriggerStats | undefined {
+    const snapshots = this.listLegacyMigrationFiles();
+    const stats: LegacyTriggerStats = { fireCount: 0, failCount: 0 };
+    let matched = false;
+    let latestAt = -1;
+
+    for (const file of snapshots) {
+      const record = this.readLegacyTriggerRecord(file, triggerId);
+      if (!record) continue;
+      matched = true;
+      const fireCount = nonNegativeInteger(record.fireCount);
+      const failCount = nonNegativeInteger(record.failCount);
+      if (fireCount !== undefined) stats.fireCount = Math.max(stats.fireCount, fireCount);
+      if (failCount !== undefined) stats.failCount = Math.max(stats.failCount, failCount);
+
+      const lastFiredAt = finiteNumber(record.lastFiredAt);
+      const lastResult = record.lastResult === 'failed'
+        ? 'failed'
+        : record.lastResult === 'completed'
+          ? 'completed'
+          : undefined;
+      if (lastFiredAt !== undefined && lastFiredAt > latestAt) {
+        latestAt = lastFiredAt;
+        stats.lastFiredAt = lastFiredAt;
+        if (lastResult) stats.lastResult = lastResult;
+      }
+    }
+
+    return matched ? stats : undefined;
+  }
+
   importFromPath(inputPath: string, opts: { enable?: boolean } = {}): TriggerDefinition {
     const stat = fs.statSync(inputPath);
     const sourceDir = stat.isDirectory() ? inputPath : path.dirname(inputPath);
@@ -151,6 +185,24 @@ export class TriggerDefinitionManager {
     let entries: fs.Dirent[];
     try { entries = fs.readdirSync(this.rootDir, { withFileTypes: true }); } catch { return []; }
     return entries.filter(e => e.isDirectory()).map(e => e.name);
+  }
+
+  private listLegacyMigrationFiles(): string[] {
+    let entries: fs.Dirent[];
+    try { entries = fs.readdirSync(this.rootDir, { withFileTypes: true }); } catch { return []; }
+    return entries
+      .filter(e => e.isFile() && /^triggers\.legacy\.migrated\.\d+\.json$/.test(e.name))
+      .map(e => path.join(this.rootDir, e.name))
+      .sort();
+  }
+
+  private readLegacyTriggerRecord(file: string, triggerId: string): Record<string, unknown> | undefined {
+    let parsed: unknown;
+    try { parsed = JSON.parse(fs.readFileSync(file, 'utf-8')); } catch { return undefined; }
+    if (!isRecord(parsed)) return undefined;
+    const triggers = isRecord(parsed.triggers) ? parsed.triggers : parsed;
+    const record = triggers[triggerId];
+    return isRecord(record) ? record : undefined;
   }
 
   private writeFiles(dir: string, files: TriggerCreateFile[]): void {
@@ -190,4 +242,16 @@ export class TriggerDefinitionManager {
     }
   }
 
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+function finiteNumber(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+}
+
+function nonNegativeInteger(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 0 ? value : undefined;
 }

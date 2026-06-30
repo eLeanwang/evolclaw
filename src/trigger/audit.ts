@@ -69,6 +69,26 @@ export class TriggerAuditLogger {
     return out;
   }
 
+  hasSkippedSchedule(triggerId: string, scheduledAt: number): boolean {
+    for (const file of this.listLogFiles()) {
+      let lines: string[];
+      try { lines = fs.readFileSync(file, 'utf-8').split('\n'); } catch { continue; }
+      for (const line of lines) {
+        if (!line) continue;
+        let record: TriggerAuditRecord;
+        try { record = JSON.parse(line) as TriggerAuditRecord; } catch { continue; }
+        if (
+          record.triggerId === triggerId
+          && record.status === 'skipped'
+          && record.source.scheduledAt === scheduledAt
+        ) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
   /** 列出所有 trigger-runs 日志文件（活跃 + 归档切片），用于跨切片统计。 */
   private listLogFiles(): string[] {
     let entries: string[];
