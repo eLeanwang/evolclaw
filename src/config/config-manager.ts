@@ -38,6 +38,10 @@ import { mergeWithRoleConstraints } from './role-constraints.js';
 import { mergeRolesConfig, diffRolesConfig } from './roles-merge.js';
 import { getBuiltinRolesConfig } from './builtin-roles.js';
 import { clearRolesCache } from './roles-cache.js';
+import {
+  normalizeRelationBehaviorForAssignedRole,
+  syncNoOverrideRoleModelsForAllAgents,
+} from './role-model-sync.js';
 import type {
   ProcessConfig,
   DefaultsConfig,
@@ -88,6 +92,10 @@ export function initConfigManager(): void {
   if (_initialized) return;
   // 初始化逻辑（如需要）
   _initialized = true;
+}
+
+function configWarn(...args: unknown[]): void {
+  console.warn(...args);
 }
 
 // ── 路径解析 ──────────────────────────────────────────────────────────────
@@ -191,9 +199,12 @@ export function write<T = any>(target: ConfigTarget, value: T, sel?: Selector, o
   const schema = loadSchema(TARGET_SCHEMA[target]);
   const withVer = ensureSchemaVersion(value as any, schema.version);
   const file = targetPath(target, sel);
-  const normalized = target === ConfigTarget.Roles
+  const migrated = target === ConfigTarget.Roles
     ? migrateIfNeeded(target, withVer, file)
     : withVer;
+  const normalized = target === ConfigTarget.RelationBehavior && sel?.self && sel?.peerKey
+    ? normalizeRelationBehaviorForAssignedRole(sel.self, sel.peerKey, migrated as any, resolveRoles({ cache: true })) as T
+    : migrated;
 
   // 1. Schema 校验
   if (!opts.skipValidate) {
@@ -256,6 +267,7 @@ export function writeRoles(full: RolesConfig, opts: WriteOpts = {}): void {
   const diff = diffRolesConfig(getBuiltinRolesConfig(), full);
   write(ConfigTarget.Roles, diff, undefined, opts);
   clearRolesCache();
+  syncNoOverrideRoleModelsForAllAgents(full);
 }
 
 function validateOrThrow(schema: SchemaEntry, value: unknown, target: ConfigTarget): void {
@@ -322,6 +334,12 @@ function migrateIfNeeded<T>(target: ConfigTarget, raw: T, file: string): T {
         migrated = migrateRolesToV3(migrated as any, file) as T;
       }
       migrated = migrateRolesToV4(migrated as any, file) as T;
+      try {
+        atomicWriteJson(file, migrated as any);
+        if (fileCacheAvailable()) fileCache.invalidate(file);
+      } catch (err) {
+        configWarn(`[config] roles.json migration write-back failed:`, err);
+      }
     }
     return migrated;
   }
@@ -331,7 +349,7 @@ function migrateIfNeeded<T>(target: ConfigTarget, raw: T, file: string): T {
   const have = (raw as any)?.$schema_version;
   if (typeof have === 'number' && have < cur) {
     // P0：迁移函数尚未存在（全 v1）。留 seam：未来在此 require migrations/{logical}.{N}-to-{N+1}.
-    console.warn(`[config] ${file}: $schema_version ${have} < current ${cur} for "${logical}" — migration pending (seam)`);
+    configWarn(`[config] ${file}: $schema_version ${have} < current ${cur} for "${logical}" — migration pending (seam)`);
   }
   return raw;
 }
@@ -369,18 +387,18 @@ function migrateRolesToOverlay(raw: RolesConfig, file: string): RolesConfig {
   try {
     const backup = `${file}.pre-overlay.${Date.now()}`;
     fs.copyFileSync(file, backup);
-    console.log(`[config] roles.json 全量→overlay 迁移：备份 ${backup}`);
+    configWarn(`[config] roles.json 全量→overlay 迁移：备份 ${backup}`);
   } catch (err) {
-    console.warn(`[config] roles.json 迁移备份失败:`, err);
+    configWarn(`[config] roles.json 迁移备份失败:`, err);
   }
 
   // 直接写回 overlay（绕过 write 避免递归触发 migrateIfNeeded）
   try {
     atomicWriteJson(file, overlay);
     if (fileCacheAvailable()) fileCache.invalidate(file);
-    console.log(`[config] roles.json 已转为 overlay 格式（${Object.keys(overlay.roles).length} 个角色含改动）`);
+    configWarn(`[config] roles.json 已转为 overlay 格式（${Object.keys(overlay.roles).length} 个角色含改动）`);
   } catch (err) {
-    console.warn(`[config] roles.json overlay 写回失败:`, err);
+    configWarn(`[config] roles.json overlay 写回失败:`, err);
   }
 
   return overlay;
@@ -392,7 +410,7 @@ function migrateRolesToOverlay(raw: RolesConfig, file: string): RolesConfig {
  * 迁移策略：overlay 里只存用户改动，未改的字段继承内置。所以只需升 $schema_version，字段留空让合并时从 builtin 补全。
  */
 function migrateRolesToV3(raw: any, file: string): RolesConfig {
-  console.log(`[config] roles.json -> v3 migration: ${file}`);
+  configWarn(`[config] roles.json -> v3 migration: ${file}`);
   const migrated: RolesConfig = {
     ...raw,
     $schema_version: 3,
@@ -412,7 +430,7 @@ function migrateRolesToV3(raw: any, file: string): RolesConfig {
  * commandPermissions 留空让合并时从 builtin 补全。
  */
 function migrateRolesToV4(raw: any, file: string): RolesConfig {
-  console.log(`[config] roles.json -> v4 migration: ${file}`);
+  configWarn(`[config] roles.json -> v4 migration: ${file}`);
   const migrated: RolesConfig = {
     ...raw,
     $schema_version: 4,

@@ -55,6 +55,16 @@ async function getRoleConstraintsModule() {
   };
 }
 
+async function getOperationRegistryModule() {
+  const registryPath = resolveParentDistModule('core', 'command', 'operation-registry.js');
+
+  const mod = await import(toFileUrl(registryPath));
+  if (!mod.listOperations) throw new Error('listOperations not found in operation-registry.js');
+  return {
+    listOperations: mod.listOperations as () => any[],
+  };
+}
+
 interface RoleWriteAuth {
   localDirect?: boolean;
   actorAid?: string | null;
@@ -72,6 +82,42 @@ function canManageRoleDefinitions(processConfig: any, auth: RoleWriteAuth): bool
 
 const MODEL_PERMISSION_FIELD = 'baseagents.claude.model';
 const MODEL_PATTERN_OPTIONS = ['*', 'claude-opus-*', 'claude-sonnet-*', 'claude-haiku-*'];
+const COMMAND_PERMISSION_SCOPES = new Set(['relation', 'role', 'agent', 'process', 'filesystem', 'control', 'raw-cli']);
+const COMMAND_CONSTRAINT_KEYS = new Set([
+  'ownPeerOnly',
+  'ownAgentOnly',
+  'privateOnly',
+  'groupOnly',
+  'requireDaemonOwner',
+  'requireControlChannel',
+  'requireExplicitDangerousGrant',
+  'requireFieldOverride',
+  'allowedArgs',
+  'deniedArgs',
+  'forbiddenFlags',
+  'allowedConfigKeys',
+  'allowedPrefixes',
+  'timeoutMs',
+  'outputLimitBytes',
+  'cwdPolicy',
+  'envAllowlist',
+]);
+const COMMAND_BOOLEAN_CONSTRAINTS = new Set([
+  'ownPeerOnly',
+  'ownAgentOnly',
+  'privateOnly',
+  'groupOnly',
+  'requireDaemonOwner',
+  'requireControlChannel',
+  'requireExplicitDangerousGrant',
+]);
+const COMMAND_STRING_ARRAY_CONSTRAINTS = new Set([
+  'forbiddenFlags',
+  'allowedConfigKeys',
+  'allowedPrefixes',
+  'envAllowlist',
+]);
+const COMMAND_INTEGER_CONSTRAINTS = new Set(['timeoutMs', 'outputLimitBytes']);
 
 type SelectionMode = 'pattern' | 'explicit' | 'mixed';
 
@@ -127,6 +173,99 @@ function normalizeStringList(value: any): string[] | null {
     }
   }
   return out;
+}
+
+function isRecord(value: any): value is Record<string, any> {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+function validateScalarArrayMap(value: any, label: string, errors: string[]): void {
+  if (!isRecord(value)) {
+    errors.push(`${label} must be an object`);
+    return;
+  }
+  for (const [argName, allowedValues] of Object.entries(value)) {
+    if (!Array.isArray(allowedValues)) {
+      errors.push(`${label}.${argName} must be an array`);
+      continue;
+    }
+    for (const item of allowedValues) {
+      if (!['string', 'number', 'boolean'].includes(typeof item)) {
+        errors.push(`${label}.${argName} entries must be string, number, or boolean`);
+      }
+    }
+  }
+}
+
+function validateCommandPermissionConstraints(rule: string, constraints: any, errors: string[]): void {
+  if (!isRecord(constraints)) {
+    errors.push(`${rule}.constraints must be an object`);
+    return;
+  }
+
+  for (const [key, value] of Object.entries(constraints)) {
+    const label = `${rule}.constraints.${key}`;
+    if (!COMMAND_CONSTRAINT_KEYS.has(key)) {
+      errors.push(`${label} is not supported`);
+      continue;
+    }
+    if (COMMAND_BOOLEAN_CONSTRAINTS.has(key) && typeof value !== 'boolean') {
+      errors.push(`${label} must be a boolean`);
+    } else if (key === 'requireFieldOverride' && typeof value !== 'string') {
+      errors.push(`${label} must be a string`);
+    } else if (COMMAND_STRING_ARRAY_CONSTRAINTS.has(key)) {
+      if (!Array.isArray(value) || !value.every(item => typeof item === 'string')) {
+        errors.push(`${label} must be a string array`);
+      }
+    } else if (COMMAND_INTEGER_CONSTRAINTS.has(key)) {
+      if (!Number.isInteger(value) || value < 0) errors.push(`${label} must be a non-negative integer`);
+    } else if (key === 'cwdPolicy' && !['agentProject', 'evolclawHome', 'none'].includes(String(value))) {
+      errors.push(`${label} must be agentProject, evolclawHome, or none`);
+    } else if (key === 'allowedArgs' || key === 'deniedArgs') {
+      validateScalarArrayMap(value, label, errors);
+    }
+  }
+}
+
+function validateCommandPermissions(value: any): { ok: boolean; errors: string[] } {
+  const errors: string[] = [];
+  if (value === undefined) return { ok: true, errors };
+  if (!isRecord(value)) {
+    return { ok: false, errors: ['commandPermissions must be an object'] };
+  }
+
+  for (const [rule, permission] of Object.entries(value)) {
+    if (!isRecord(permission)) {
+      errors.push(`${rule} must be an object`);
+      continue;
+    }
+
+    if (typeof permission.allow !== 'boolean') {
+      errors.push(`${rule}.allow must be a boolean`);
+    }
+    if (permission.dangerous !== undefined && typeof permission.dangerous !== 'boolean') {
+      errors.push(`${rule}.dangerous must be a boolean`);
+    }
+    if (permission.reason !== undefined && typeof permission.reason !== 'string') {
+      errors.push(`${rule}.reason must be a string`);
+    }
+    if (permission.scopes !== undefined) {
+      if (!Array.isArray(permission.scopes)) {
+        errors.push(`${rule}.scopes must be an array`);
+      } else {
+        for (const scope of permission.scopes) {
+          if (typeof scope !== 'string' || !COMMAND_PERMISSION_SCOPES.has(scope)) {
+            errors.push(`${rule}.scopes contains unsupported scope: ${String(scope)}`);
+          }
+        }
+      }
+    }
+    if (permission.constraints !== undefined) {
+      validateCommandPermissionConstraints(rule, permission.constraints, errors);
+    }
+  }
+
+  return { ok: errors.length === 0, errors };
 }
 
 function getModelPermission(roleDef: any): any {
@@ -306,6 +445,12 @@ export async function handleRoleDefinitionsApi(req: any, res: any, auth: RoleWri
       return;
     }
 
+    if (req.method === 'GET' && urlPath === '/api/role-definitions/operations') {
+      const { listOperations } = await getOperationRegistryModule();
+      sendJson(res, 200, { operations: listOperations() });
+      return;
+    }
+
     if (req.method === 'PUT' && urlPath === '/api/role-definitions') {
       try {
         const incoming = await readJsonBody(req);
@@ -332,6 +477,14 @@ export async function handleRoleDefinitionsApi(req: any, res: any, auth: RoleWri
               });
               return;
             }
+            const commandValidation = validateCommandPermissions((roleDef as any)?.commandPermissions);
+            if (!commandValidation.ok) {
+              sendJson(res, 400, {
+                error: `Invalid command permissions for role ${roleName}`,
+                errors: commandValidation.errors
+              });
+              return;
+            }
           }
           config.roles = incoming.roles;
         }
@@ -348,7 +501,7 @@ export async function handleRoleDefinitionsApi(req: any, res: any, auth: RoleWri
     if (req.method === 'POST' && urlPath === '/api/role-definitions') {
       try {
         const data = await readJsonBody(req);
-        const { name, description, permissions } = data;
+        const { name, description, permissions, commandPermissions } = data;
 
         if (!name || !/^[a-z0-9_-]+$/.test(name)) {
           sendJson(res, 400, { error: 'Invalid role name' });
@@ -364,11 +517,17 @@ export async function handleRoleDefinitionsApi(req: any, res: any, auth: RoleWri
         const newRole = {
           description: typeof description === 'string' ? description : '',
           allowAccess: typeof data.allowAccess === 'boolean' ? data.allowAccess : true,
-          permissions: permissions && typeof permissions === 'object' ? permissions : {}
+          permissions: isRecord(permissions) ? permissions : {},
+          commandPermissions: isRecord(commandPermissions) ? commandPermissions : {}
         };
         const validation = await validateRoleModelPermission(newRole);
         if (!validation.ok) {
           sendJson(res, 400, { error: 'Invalid model permissions', errors: validation.errors });
+          return;
+        }
+        const commandValidation = validateCommandPermissions(newRole.commandPermissions);
+        if (!commandValidation.ok) {
+          sendJson(res, 400, { error: 'Invalid command permissions', errors: commandValidation.errors });
           return;
         }
 
@@ -534,6 +693,15 @@ export async function handleRoleDefinitionsApi(req: any, res: any, auth: RoleWri
             }
           }
           nextRole.permissions = mergedPermissions;
+        }
+
+        if (Object.prototype.hasOwnProperty.call(updates, 'commandPermissions')) {
+          const commandValidation = validateCommandPermissions(updates.commandPermissions);
+          if (!commandValidation.ok) {
+            sendJson(res, 400, { error: 'Invalid command permissions', errors: commandValidation.errors });
+            return;
+          }
+          nextRole.commandPermissions = updates.commandPermissions;
         }
 
         const validation = await validateRoleModelPermission(nextRole);

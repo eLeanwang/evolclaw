@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { parseCliIntent, rawCliIntent } from '../cli-intent-parser.js';
+import { parseCliIntent, rawCliIntent, withDefaultRelationContext } from '../cli-intent-parser.js';
 
 describe('CLI Intent Parser', () => {
   describe('Model commands', () => {
@@ -38,6 +38,24 @@ describe('CLI Intent Parser', () => {
       if (result.kind === 'invalid') {
         expect(result.code).toBe('FORBIDDEN_FLAG');
       }
+    });
+
+    it('should add current relation context for menu cli model list', () => {
+      const argv = withDefaultRelationContext(['model', 'list'], { self: 'agent1', peer: 'aun#user1' });
+      expect(argv).toEqual(['model', 'list', '--self', 'agent1', '--peer', 'aun#user1']);
+
+      const result = parseCliIntent(argv);
+      expect(result.kind).toBe('recognized');
+      if (result.kind === 'recognized') {
+        expect(result.intent.operation).toBe('model.list');
+        expect(result.intent.scope).toBe('relation');
+        expect(result.intent.args).toEqual({ self: 'agent1', peer: 'aun#user1' });
+      }
+    });
+
+    it('should not override explicit model command scope', () => {
+      const argv = withDefaultRelationContext(['model', 'list', '--self', 'agent2'], { self: 'agent1', peer: 'aun#user1' });
+      expect(argv).toEqual(['model', 'list', '--self', 'agent2']);
     });
   });
 

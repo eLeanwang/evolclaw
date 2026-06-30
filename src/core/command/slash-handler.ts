@@ -61,6 +61,7 @@ async function authorizeSlashIntent(params: {
   intent: CommandIntent;
   identity: import('../../types.js').SessionIdentity;
   session?: Session | null;
+  explicitChatType?: 'private' | 'group';
   channel: string;
   channelId: string;
   userId?: string;
@@ -68,7 +69,7 @@ async function authorizeSlashIntent(params: {
   isDaemonOwner: boolean;
 }): Promise<{ kind: 'command.error'; text: string } | null> {
   const { intent, identity, session, channel, channelId, userId, selfAid, isDaemonOwner } = params;
-  const chatType = session?.chatType as 'private' | 'group' | undefined;
+  const chatType = (session?.chatType as 'private' | 'group' | undefined) ?? params.explicitChatType;
   const peerKeyId = chatType === 'group'
     ? (session?.metadata?.groupId || channelId)
     : userId;
@@ -135,6 +136,56 @@ async function authorizeSlashIntent(params: {
   }
 
   return null;
+}
+
+function buildSlashRelationIntentArgs(params: {
+  args?: Record<string, unknown>;
+  selfAid?: string;
+  peerKey?: string;
+}): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...(params.args ?? {}) };
+  if (params.selfAid && out.self === undefined) out.self = params.selfAid;
+  if (params.peerKey && out.peer === undefined && out.peerKey === undefined) out.peer = params.peerKey;
+  return out;
+}
+
+async function canReadSlashModelList(params: {
+  identity: import('../../types.js').SessionIdentity;
+  session?: Session | null;
+  explicitChatType?: 'private' | 'group';
+  channel: string;
+  channelId: string;
+  userId?: string;
+  selfAid?: string;
+  isDaemonOwner: boolean;
+}): Promise<boolean> {
+  const { identity, session, channel, channelId, userId, selfAid, isDaemonOwner } = params;
+  const chatType = (session?.chatType as 'private' | 'group' | undefined) ?? params.explicitChatType;
+  const peerKeyId = chatType === 'group'
+    ? (session?.metadata?.groupId || channelId)
+    : userId;
+  const channelType = channel.split('#')[0];
+  const peerKey = channelType && peerKeyId ? formatPeerKey(channelType, peerKeyId) : undefined;
+  const intent: CommandIntent = {
+    operation: 'model.list',
+    scope: 'relation',
+    source: 'slash',
+    args: buildSlashRelationIntentArgs({ selfAid, peerKey }),
+  };
+  const decision = authorizeCommand({
+    intent,
+    actorId: userId,
+    channel,
+    channelId,
+    chatType,
+    selfAid,
+    peerKey,
+    role: identity.role,
+    isDaemonOwner,
+    fromControlChannel: false,
+    source: 'slash',
+  });
+  return decision.allow;
 }
 
 function getAgentBusyInfo(handler: any, aid: string | undefined, excludeSessionKey?: string): { count: number; processing: Array<{ queueKey: string; agentName: string }>; agentName: string } | null {
@@ -853,11 +904,6 @@ export async function handleSlashCommand(this: any,
   if (normalizedContent.startsWith('/model')) {
     const args = normalizedContent.slice(6).trim();
 
-    // 带参（切换/调整）需 admin+；无参查询仍允许低权限查看当前模型。
-    // Must happen before runner lookup so unavailable-session recovery errors
-    // do not mask authorization failures.
-    if (args && !isAdmin) return { kind: 'command.error' as const, text: '❌ 无权限：切换模型仅限管理员使用' };
-
     if (!args) {
       const modelSession = await getExistingSessionForCommand();
       const fallbackBaseagent = modelSession?.baseagent || this.agentRegistry?.resolveByChannel(channel)?.baseagent || this.parseDefaultBaseagent();
@@ -878,9 +924,19 @@ export async function handleSlashCommand(this: any,
       const currentModel = hasModelSwitcher(modelAgent) ? (modelState.model || modelAgent.getModel()) : modelAgent.name;
       const efforts = getAvailableEfforts(modelAgent, currentModel);
       const currentEffort = modelState.effort || 'auto';
+      const canReadModelList = await canReadSlashModelList({
+        identity,
+        session: modelSession,
+        explicitChatType: chatType === 'private' || chatType === 'group' ? chatType : undefined,
+        channel,
+        channelId,
+        userId,
+        selfAid: selfAID ?? this.resolveSelfAID(channel),
+        isDaemonOwner,
+      });
 
       // 尝试发送 CommandCard 卡片
-      if (this.interactionRouter && models.length > 0) {
+      if (canReadModelList && this.interactionRouter && models.length > 0) {
         const interaction: InteractionRequest = {
           type: 'interaction',
           id: `model-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`,
@@ -913,8 +969,9 @@ export async function handleSlashCommand(this: any,
       const effortHint = efforts.length > 0
         ? `\n推理强度: ${currentEffort === 'auto' ? 'auto (SDK默认)' : currentEffort}  (使用 /effort 调整)`
         : '';
-      if (isAdmin) {
-        return { kind: 'command.result' as const, text: `当前模型: ${modelDisplayLabel(modelAgent, currentModel)}${effortHint}\n\n可用模型：\n${modelList}\n\n用法: /model <模型>` };
+      if (canReadModelList) {
+        const usage = isAdmin ? '\n\n用法: /model <模型>' : '';
+        return { kind: 'command.result' as const, text: `当前模型: ${modelDisplayLabel(modelAgent, currentModel)}${effortHint}\n\n可用模型：\n${modelList}${usage}` };
       }
       return { kind: 'command.result' as const, text: `当前模型: ${modelDisplayLabel(modelAgent, currentModel)}${effortHint}` };
     }
@@ -988,6 +1045,35 @@ export async function handleSlashCommand(this: any,
     // 运行时 model/effort 切换已通过 EvolAgent.setBaseagentModel/setBaseagentEffort 持久化
 
     if (newModel) {
+      const modelChatType = (modelSession?.chatType as 'private' | 'group' | undefined)
+        ?? (chatType === 'private' || chatType === 'group' ? chatType : undefined);
+      const peerKeyId = modelChatType === 'group'
+        ? (modelSession?.metadata?.groupId || channelId)
+        : userId;
+      const channelType = this.resolveChannelType(channel);
+      const peerKey = channelType && peerKeyId ? formatPeerKey(channelType, peerKeyId) : undefined;
+      const useAuthDenied = await authorizeSlashIntent({
+        intent: {
+          operation: 'model.use',
+          scope: 'relation',
+          source: 'slash',
+          args: buildSlashRelationIntentArgs({
+            args: { model: newModel },
+            selfAid: selfAID ?? this.resolveSelfAID(channel),
+            peerKey,
+          }),
+        },
+        identity,
+        session: modelSession,
+        explicitChatType: modelChatType,
+        channel,
+        channelId,
+        userId,
+        selfAid: selfAID ?? this.resolveSelfAID(channel),
+        isDaemonOwner,
+      });
+      if (useAuthDenied) return useAuthDenied;
+
       const decision = validateModelSelectionForRole({
         role: identity.role,
         baseagent: fallbackBaseagent,

@@ -5,6 +5,30 @@ export type CliIntentParseResult =
   | { kind: 'raw'; intent: CommandIntent; reason: string }
   | { kind: 'invalid'; code: string; reason: string };
 
+export interface DefaultRelationContext {
+  self?: string;
+  peer?: string;
+}
+
+const MODEL_RELATION_DEFAULT_SUBCOMMANDS = new Set(['list', 'current', 'info', 'use', 'effort', 'reset']);
+
+export function withDefaultRelationContext(
+  argv: string[],
+  defaults: DefaultRelationContext
+): string[] {
+  if (!argv || argv[0] !== 'model' || !MODEL_RELATION_DEFAULT_SUBCOMMANDS.has(argv[1] || '')) {
+    return argv;
+  }
+  if (!defaults.self || !defaults.peer) return argv;
+
+  const parsed = parseArgs(argv.slice(2));
+  if (parsed.args.self !== undefined || parsed.args.peer !== undefined || parsed.args.role !== undefined) {
+    return argv;
+  }
+
+  return [...argv, '--self', defaults.self, '--peer', defaults.peer];
+}
+
 export function parseCliIntent(
   argv: string[],
   source: CommandSource = 'menu.cli'

@@ -1,5 +1,6 @@
 import { ConfigTarget, ensureFile, read, write } from './config-manager.js';
 import { readRolesConfig } from './roles.js';
+import { syncNoOverrideRoleModelsForAgent } from './role-model-sync.js';
 import type { RoleAssignment, RoleAssignmentsConfig, RoleAssignmentScope } from '../types.js';
 
 export interface RoleAssignmentFilter {
@@ -49,6 +50,7 @@ export function writeRoleAssignments(aid: string, config: RoleAssignmentsConfig)
   validateAssignments(config);
   ensureFile(ConfigTarget.RoleAssignments, { self: aid });
   write(ConfigTarget.RoleAssignments, config, { self: aid });
+  syncNoOverrideRoleModelsForAgent(aid, readRolesConfig());
 }
 
 function setScopedRoleAssignment(

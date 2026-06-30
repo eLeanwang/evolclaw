@@ -121,6 +121,23 @@ describe('Command Permission', () => {
         expect(decision.code).toBe('ARGUMENT_MISMATCH');
       }
     });
+
+    it('should deny guest model.list when cli scope falls back to agent', () => {
+      const ctx: CommandAuthorizationContext = {
+        ...baseContext,
+        intent: {
+          operation: 'model.list',
+          scope: 'agent',
+          source: 'menu.cli',
+          args: {},
+        },
+      };
+      const decision = authorizeCommand(ctx);
+      expect(decision.allow).toBe(false);
+      if (!decision.allow) {
+        expect(decision.code).toBe('SCOPE_MISMATCH');
+      }
+    });
   });
 
   describe('Owner role permissions', () => {

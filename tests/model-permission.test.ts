@@ -5,7 +5,8 @@ import {
   isModelAllowedForRoleBaseagent,
   validateModelSelectionForRole,
 } from '../src/core/model/model-permission.js';
-import { clearRolesCache } from '../src/config/roles.js';
+import { clearRolesCache, getBuiltinRolesConfig } from '../src/config/roles.js';
+import { writeRoles } from '../src/config/config-manager.js';
 
 describe('model permission helpers', () => {
   beforeEach(() => {
@@ -51,7 +52,7 @@ describe('model permission helpers', () => {
     })).toMatchObject({ ok: false, code: 'MODEL_NOT_ALLOWED' });
   });
 
-  it('forces default model when override is disabled', () => {
+  it('rejects model switching when override is disabled', () => {
     expect(filterModelsForRole('guest', 'claude', catalog)).toEqual(['claude-haiku-4-5-20251001']);
     expect(validateModelSelectionForRole({
       role: 'guest',
@@ -64,6 +65,28 @@ describe('model permission helpers', () => {
       baseagent: 'claude',
       model: 'claude-opus-4-8',
     })).toEqual({ model: 'claude-haiku-4-5-20251001', constrained: true });
+  });
+
+  it('lists all allowed models even when override is disabled', () => {
+    const roles = getBuiltinRolesConfig();
+    roles.roles.guest.permissions['baseagents.claude.model'] = {
+      default: 'claude-haiku-4-5-20251001',
+      allowOverride: false,
+      allowedModels: ['claude-haiku-*', 'claude-opus-4-8'],
+    };
+    writeRoles(roles);
+    clearRolesCache();
+
+    expect(filterModelsForRole('guest', 'claude', catalog)).toEqual([
+      'claude-opus-4-8',
+      'claude-haiku-4-5-20251001',
+    ]);
+    expect(validateModelSelectionForRole({
+      role: 'guest',
+      baseagent: 'claude',
+      requestedModel: 'claude-opus-4-8',
+      models: catalog,
+    })).toMatchObject({ ok: false, code: 'MODEL_OVERRIDE_DISABLED' });
   });
 
   it('does not constrain non-claude baseagents without role permissions', () => {

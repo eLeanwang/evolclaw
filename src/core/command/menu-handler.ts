@@ -27,7 +27,7 @@ import {
   resolveCapabilityContext,
   updateCapabilityPolicy,
 } from '../capability/capability-manager.js';
-import { parseCliIntent, rawCliIntent } from './cli-intent-parser.js';
+import { parseCliIntent, rawCliIntent, withDefaultRelationContext } from './cli-intent-parser.js';
 import { authorizeCommand } from './command-permission.js';
 import { auditCommandAuthorization, hashArgv } from './command-audit.js';
 import type { CommandAuthorizationContext, CommandIntent, CommandScope } from '../../types.js';
@@ -499,12 +499,67 @@ function buildMenuIntent(
   return null;
 }
 
+function buildRelationIntentArgs(params: {
+  args?: Record<string, any>;
+  selfAid?: string;
+  peerKey?: string;
+}): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...(params.args ?? {}) };
+  if (params.selfAid && out.self === undefined) out.self = params.selfAid;
+  if (params.peerKey && out.peer === undefined && out.peerKey === undefined) out.peer = params.peerKey;
+  return out;
+}
+
+function buildMenuAuthContext(
+  owner: any,
+  params: {
+    intent: CommandIntent;
+    identity: import('../../types.js').SessionIdentity;
+    session?: Session | null;
+    explicitChatType?: MenuChatType;
+    channel: string;
+    channelId: string;
+    userId?: string;
+    source: 'menu' | 'menu.cli';
+    fromControlChannel: boolean;
+  },
+): CommandAuthorizationContext {
+  const agent = owner.getOwningAgent?.(params.channel);
+  const selfAid = agent?.aid;
+  const channelType = owner.resolveChannelType?.(params.channel);
+  const chatType = (params.session?.chatType as 'private' | 'group' | undefined) ?? params.explicitChatType;
+  const peerKeyId = chatType === 'group'
+    ? (params.session?.metadata?.groupId || params.channelId)
+    : params.userId;
+  const peerKey = channelType && peerKeyId ? formatPeerKey(channelType, peerKeyId) : undefined;
+  const isDaemonOwner = isProcessLevelOwner(params.userId, loadEvolclawConfig().owners);
+
+  return {
+    intent: params.intent,
+    actorId: params.userId,
+    channel: params.channel,
+    channelId: params.channelId,
+    chatType,
+    selfAid,
+    peerKey,
+    role: params.identity.role,
+    isDaemonOwner,
+    fromControlChannel: params.fromControlChannel,
+    source: params.source,
+  };
+}
+
+function authorizeMenuContext(authCtx: CommandAuthorizationContext): ReturnType<typeof authorizeCommand> {
+  return authorizeCommand(authCtx);
+}
+
 async function authorizeMenuIntent(
   this: any,
   params: {
     intent: CommandIntent | null;
     identity: import('../../types.js').SessionIdentity;
     session?: Session | null;
+    explicitChatType?: MenuChatType;
     channel: string;
     channelId: string;
     userId?: string;
@@ -514,30 +569,26 @@ async function authorizeMenuIntent(
   const { intent, identity, session, channel, channelId, userId, fromControlChannel } = params;
   if (!intent) return null;
 
-  const agent = this.getOwningAgent?.(channel);
-  const selfAid = agent?.aid;
-  const channelType = this.resolveChannelType?.(channel);
-  const peerKeyId = session?.chatType === 'group'
-    ? (session?.metadata?.groupId || channelId)
-    : userId;
-  const peerKey = channelType && peerKeyId ? formatPeerKey(channelType, peerKeyId) : undefined;
-  const isDaemonOwner = isProcessLevelOwner(userId, loadEvolclawConfig().owners);
-
-  const authCtx: CommandAuthorizationContext = {
+  const authCtx = buildMenuAuthContext(this, {
     intent,
-    actorId: userId,
+    identity,
+    session,
+    explicitChatType: params.explicitChatType,
     channel,
     channelId,
-    chatType: session?.chatType as 'private' | 'group' | undefined,
-    selfAid,
-    peerKey,
-    role: identity.role,
-    isDaemonOwner,
-    fromControlChannel,
+    userId,
     source: 'menu',
-  };
+    fromControlChannel,
+  });
+  if (authCtx.intent.scope === 'relation') {
+    authCtx.intent.args = buildRelationIntentArgs({
+      args: authCtx.intent.args as Record<string, any>,
+      selfAid: authCtx.selfAid,
+      peerKey: authCtx.peerKey,
+    });
+  }
 
-  const decision = authorizeCommand(authCtx);
+  const decision = authorizeMenuContext(authCtx);
   if (!decision.allow) {
     await auditCommandAuthorization({
       ts: Date.now(),
@@ -546,12 +597,12 @@ async function authorizeMenuIntent(
       scope: intent.scope,
       dangerous: intent.dangerous ?? false,
       actorId: userId,
-      selfAid,
-      peerKey,
+      selfAid: authCtx.selfAid,
+      peerKey: authCtx.peerKey,
       channel,
       channelId,
       role: identity.role,
-      isDaemonOwner,
+      isDaemonOwner: authCtx.isDaemonOwner,
       fromControlChannel,
       decision: 'deny',
       code: decision.code,
@@ -570,12 +621,12 @@ async function authorizeMenuIntent(
       scope: intent.scope,
       dangerous: true,
       actorId: userId,
-      selfAid,
-      peerKey,
+      selfAid: authCtx.selfAid,
+      peerKey: authCtx.peerKey,
       channel,
       channelId,
       role: identity.role,
-      isDaemonOwner,
+      isDaemonOwner: authCtx.isDaemonOwner,
       fromControlChannel,
       decision: 'allow',
       matchedRule: decision.matchedRule,
@@ -741,7 +792,7 @@ export function getMenuItems(this: any, role: string, chatType: string = 'privat
 }
 
 /** 动态子菜单：根据 cmd 路径返回选项列表（供 menu.query + cmd 使用） */
-export async function getSubMenuItems(this: any, cmd: string, channel: string, channelId: string, userId?: string, args?: Record<string, any>, overrideIdentity?: import('../../types.js').SessionIdentity, _explicitChatType?: MenuChatType, fromControlChannel = false): Promise<MenuItem[] | null> {
+export async function getSubMenuItems(this: any, cmd: string, channel: string, channelId: string, userId?: string, args?: Record<string, any>, overrideIdentity?: import('../../types.js').SessionIdentity, explicitChatType?: MenuChatType, fromControlChannel = false): Promise<MenuItem[] | null> {
   const session = await this.sessionManager.getActiveSession(channel, channelId);
 
   const cmdBase0 = cmd.trim().split(' ')[0];
@@ -854,7 +905,29 @@ export async function getSubMenuItems(this: any, cmd: string, channel: string, c
   if (cmd === '/model') {
     const agent = this.getAgent(channel, session?.baseagent);
     if (hasModelSwitcher(agent) && agent.listModels) {
-      const role = (overrideIdentity ?? this.sessionManager.resolveIdentity(channel, userId)).role;
+      const identity = overrideIdentity ?? this.sessionManager.resolveIdentity(channel, userId);
+      const role = identity.role;
+      const authIntent: CommandIntent = {
+        operation: 'model.list',
+        scope: 'relation',
+        source: 'menu',
+        args: {},
+      };
+      const authCtx = buildMenuAuthContext(this, {
+        intent: authIntent,
+        identity,
+        session,
+        explicitChatType,
+        channel,
+        channelId,
+        userId,
+        source: 'menu',
+        fromControlChannel,
+      });
+      authIntent.args = buildRelationIntentArgs({ args, selfAid: authCtx.selfAid, peerKey: authCtx.peerKey });
+      const decision = authorizeMenuContext(authCtx);
+      if (!decision.allow) throw { code: decision.code, message: decision.reason };
+
       const rawModels = await agent.listModels() ?? [];
       const models = filterModelsForRole(role, session?.baseagent || (agent as any).name, rawModels, (agent as any).resolveModelId?.bind(agent));
       const state = resolveCommandModelResolution({
@@ -967,7 +1040,7 @@ export async function getSubMenuItems(this: any, cmd: string, channel: string, c
 
 /** menu.query — 查询当前值。 */
 export async function execMenuQuery(this: any,
-  cmd: string, channel: string, channelId: string, userId?: string, args?: Record<string, any>, _explicitChatType?: MenuChatType, fromControlChannel = false, overrideIdentity?: import('../../types.js').SessionIdentity
+  cmd: string, channel: string, channelId: string, userId?: string, args?: Record<string, any>, explicitChatType?: MenuChatType, fromControlChannel = false, overrideIdentity?: import('../../types.js').SessionIdentity
 ): Promise<{ data: any } | { error: string; code?: string }> {
   const cmdBase = cmd.trim().split(' ')[0];
   if (!cmdBase) return { error: '缺少命令', code: 'MISSING_CMD' };
@@ -979,6 +1052,7 @@ export async function execMenuQuery(this: any,
     intent: buildMenuIntent('query', cmdBase, args, undefined, undefined, fromControlChannel),
     identity,
     session,
+    explicitChatType,
     channel,
     channelId,
     userId,
@@ -1432,7 +1506,6 @@ export async function execMenuUpdate(this: any,
   }
 
   if (cmdBase === '/model') {
-    if (!isAdmin) return { error: '无权限', code: 'NO_PERMISSION' };
     const agent = this.getAgent(channel, session?.baseagent);
     let targetModel = arg;
     if (hasModelSwitcher(agent)) {
@@ -1600,6 +1673,7 @@ export async function execMenuAction(this: any,
     intent: buildMenuIntent('action', cmdBase, args, action, undefined, fromControlChannel),
     identity: authIdentity,
     session: authSession,
+    explicitChatType,
     channel,
     channelId,
     userId,
@@ -1969,10 +2043,22 @@ export async function execMenuAction(this: any,
   if (cmdBase === '/cli') {
     if (action !== 'exec') return { error: `不支持的 cli action: ${action}`, code: 'NOT_SUPPORTED' };
 
-    const argv = Array.isArray(args?.argv) ? args.argv.map((x: any) => String(x))
+    let argv = Array.isArray(args?.argv) ? args.argv.map((x: any) => String(x))
                : typeof args?.command === 'string' ? [args.command]
                : null;
     if (!argv || argv.length === 0) return { error: '缺少 argv 或 command', code: 'MISSING_VALUE' };
+
+    const cliAgent = this.getOwningAgent?.(channel);
+    const cliSelfAid = cliAgent?.aid;
+    const cliChannelType = this.resolveChannelType?.(channel);
+    const cliChatType = (session?.chatType as 'private' | 'group' | undefined) ?? explicitChatType;
+    const cliPeerKeyId = cliChatType === 'group'
+      ? (session?.metadata?.groupId || channelId)
+      : userId;
+    const cliPeerKey = cliChannelType && cliPeerKeyId ? formatPeerKey(cliChannelType, cliPeerKeyId) : undefined;
+    if (Array.isArray(args?.argv)) {
+      argv = withDefaultRelationContext(argv, { self: cliSelfAid, peer: cliPeerKey });
+    }
 
     // 解析 CLI intent
     const parseResult = Array.isArray(args?.argv)
@@ -1983,28 +2069,23 @@ export async function execMenuAction(this: any,
     }
 
     // 构造授权上下文
-    const agent = this.getOwningAgent?.(channel);
-    const selfAid = agent?.aid;
-    const channelType = this.resolveChannelType?.(channel);
-    const peerKey = channelType && userId ? formatPeerKey(channelType, userId) : undefined;
-    const isDaemonOwner = isProcessLevelOwner(userId, loadEvolclawConfig().owners);
-
-    const authCtx: CommandAuthorizationContext = {
+    const authCtx = buildMenuAuthContext(this, {
       intent: parseResult.intent,
-      actorId: userId,
+      identity,
+      session,
+      explicitChatType,
       channel,
       channelId,
-      chatType: session?.chatType as 'private' | 'group' | undefined,
-      selfAid,
-      peerKey,
-      role: identity.role,
-      isDaemonOwner,
-      fromControlChannel: fromControlChannel ?? false,
+      userId,
       source: 'menu.cli',
-    };
+      fromControlChannel: fromControlChannel ?? false,
+    });
+    const selfAid = authCtx.selfAid;
+    const peerKey = authCtx.peerKey;
+    const isDaemonOwner = authCtx.isDaemonOwner;
 
     // 授权检查
-    const decision = authorizeCommand(authCtx);
+    const decision = authorizeMenuContext(authCtx);
     if (!decision.allow) {
       await auditCommandAuthorization({
         ts: Date.now(),

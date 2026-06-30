@@ -4489,6 +4489,408 @@ function renderDefaultRoleSelector(data) {
   groupSelect.onchange = save;
 }
 
+const COMMAND_PERMISSION_SCOPE_VALUES = ['relation', 'role', 'agent', 'process', 'filesystem', 'control', 'raw-cli'];
+const COMMAND_PERMISSION_CATEGORY_ORDER = ['read', 'diagnose', 'write-own', 'write-agent', 'process', 'dangerous'];
+const COMMAND_PERMISSION_BOOLEAN_CONSTRAINTS = [
+  'ownPeerOnly',
+  'ownAgentOnly',
+  'privateOnly',
+  'groupOnly',
+  'requireDaemonOwner',
+  'requireControlChannel',
+  'requireExplicitDangerousGrant'
+];
+let roleOperationsCache = null;
+
+function getCommandPermissionsObject(commandPermissions) {
+  return commandPermissions && typeof commandPermissions === 'object' && !Array.isArray(commandPermissions)
+    ? commandPermissions
+    : {};
+}
+
+function getCommandPermissionStats(commandPermissions) {
+  const entries = Object.values(getCommandPermissionsObject(commandPermissions));
+  return entries.reduce((stats, permission) => {
+    const perm = permission && typeof permission === 'object' ? permission : {};
+    stats.total += 1;
+    if (perm.allow === true) stats.allow += 1;
+    else if (perm.allow === false) stats.deny += 1;
+    if (perm.dangerous === true) stats.dangerous += 1;
+    return stats;
+  }, { total: 0, allow: 0, deny: 0, dangerous: 0 });
+}
+
+function formatCommandPermissions(commandPermissions) {
+  return JSON.stringify(getCommandPermissionsObject(commandPermissions), null, 2);
+}
+
+async function fetchRoleOperationsCatalog() {
+  if (roleOperationsCache) return roleOperationsCache;
+  const token = localStorage.getItem(TOKEN_KEY);
+  const res = await fetch(apiUrl('api/role-definitions/operations'), {
+    headers: { 'Authorization': `Bearer ${token}` }
+  });
+  if (!res.ok) throw new Error('Failed to load CLI operation catalog');
+  const json = await res.json();
+  roleOperationsCache = Array.isArray(json.operations) ? json.operations : [];
+  return roleOperationsCache;
+}
+
+async function loadRoleOperationsForEditor() {
+  try {
+    return await fetchRoleOperationsCatalog();
+  } catch (err) {
+    console.error('[roleDefinitions] Failed to load CLI operation catalog:', err);
+    alert('CLI operation catalog failed to load. The CLI permission tab will be empty.');
+    return [];
+  }
+}
+
+function commandCategoryLabel(category) {
+  const labels = {
+    read: currentLang === 'zh-CN' ? '读取' : 'Read',
+    diagnose: currentLang === 'zh-CN' ? '诊断' : 'Diagnose',
+    'write-own': currentLang === 'zh-CN' ? '写入本人范围' : 'Write Own',
+    'write-agent': currentLang === 'zh-CN' ? '写入 Agent' : 'Write Agent',
+    process: currentLang === 'zh-CN' ? '进程/系统' : 'Process',
+    dangerous: currentLang === 'zh-CN' ? '危险操作' : 'Dangerous',
+  };
+  return labels[category] || category;
+}
+
+function commandConstraintLabel(key) {
+  const labels = {
+    ownPeerOnly: currentLang === 'zh-CN' ? '仅本人 Peer' : 'Own peer only',
+    ownAgentOnly: currentLang === 'zh-CN' ? '仅当前 Agent' : 'Own agent only',
+    privateOnly: currentLang === 'zh-CN' ? '仅私聊' : 'Private only',
+    groupOnly: currentLang === 'zh-CN' ? '仅群聊' : 'Group only',
+    requireDaemonOwner: currentLang === 'zh-CN' ? '需要 daemon owner' : 'Require daemon owner',
+    requireControlChannel: currentLang === 'zh-CN' ? '需要控制通道' : 'Require control channel',
+    requireExplicitDangerousGrant: currentLang === 'zh-CN' ? '需要危险授权' : 'Require dangerous grant',
+  };
+  return labels[key] || key;
+}
+
+function getCommandRuleRank(rule, permission, operation) {
+  const namespace = operation.id.split('.')[0];
+  const denyOffset = permission?.allow ? 0 : 1;
+  if (rule === operation.id) return 1000 + denyOffset;
+  if (rule === `${namespace}.*`) return 800 + denyOffset;
+  if (rule.startsWith('category:') && rule.slice('category:'.length) === operation.category) return 600 + denyOffset;
+  if (rule === 'dangerous:*' && operation.dangerous) return 400 + denyOffset;
+  if (rule === '*' && !operation.dangerous) return 200 + denyOffset;
+  return 0;
+}
+
+function getEffectiveCommandPermission(operation, commandPermissions) {
+  const permissions = getCommandPermissionsObject(commandPermissions);
+  let best = null;
+  Object.entries(permissions).forEach(([rule, permission]) => {
+    if (!permission || typeof permission !== 'object') return;
+    const rank = getCommandRuleRank(rule, permission, operation);
+    if (rank > 0 && (!best || rank > best.rank)) {
+      best = { rule, permission, rank };
+    }
+  });
+  return best;
+}
+
+function getCommandPermissionScopes(operation, permission) {
+  const scopes = Array.isArray(permission?.scopes) && permission.scopes.length
+    ? permission.scopes
+    : (Array.isArray(operation.defaultScopes) ? operation.defaultScopes : []);
+  return new Set(scopes);
+}
+
+function renderCommandScopeControls(operation, permission) {
+  const selected = getCommandPermissionScopes(operation, permission);
+  return COMMAND_PERMISSION_SCOPE_VALUES.map(scope => `
+    <label class="cli-scope-option">
+      <input type="checkbox"
+             data-command-scope="${esc(scope)}"
+             ${selected.has(scope) ? 'checked' : ''}>
+      <span>${esc(scope)}</span>
+    </label>
+  `).join('');
+}
+
+function renderCommandConstraintControls(permission) {
+  const constraints = permission?.constraints && typeof permission.constraints === 'object'
+    ? permission.constraints
+    : {};
+  return `
+    <div class="cli-constraint-grid">
+      ${COMMAND_PERMISSION_BOOLEAN_CONSTRAINTS.map(key => `
+        <label class="cli-constraint-option">
+          <input type="checkbox"
+                 data-command-constraint="${esc(key)}"
+                 ${constraints[key] ? 'checked' : ''}>
+          <span>${esc(commandConstraintLabel(key))}</span>
+        </label>
+      `).join('')}
+    </div>
+    <label class="cli-field-row">
+      <span>requireFieldOverride</span>
+      <input type="text"
+             class="form-input"
+             data-command-field="requireFieldOverride"
+             value="${esc(constraints.requireFieldOverride || '')}"
+             placeholder="baseagents.claude.model">
+    </label>
+  `;
+}
+
+function groupCommandOperations(operations) {
+  const groups = new Map();
+  COMMAND_PERMISSION_CATEGORY_ORDER.forEach(category => groups.set(category, []));
+  (operations || []).forEach(operation => {
+    const category = operation.category || 'other';
+    if (!groups.has(category)) groups.set(category, []);
+    groups.get(category).push(operation);
+  });
+  return [...groups.entries()].filter(([, items]) => items.length > 0);
+}
+
+function renderCommandPermissionRow(operation, commandPermissions, readonly = false) {
+  const match = getEffectiveCommandPermission(operation, commandPermissions);
+  const permission = match?.permission || {};
+  const allowed = permission.allow === true;
+  const denied = match ? permission.allow === false : true;
+  const status = allowed ? 'allow' : 'deny';
+  const statusText = allowed
+    ? (currentLang === 'zh-CN' ? '允许' : 'Allowed')
+    : (denied && match ? (currentLang === 'zh-CN' ? '拒绝' : 'Denied') : (currentLang === 'zh-CN' ? '未授权' : 'No rule'));
+  const scopes = getCommandPermissionScopes(operation, permission);
+  const sourceText = Array.isArray(operation.sources) ? operation.sources.join(', ') : '—';
+  const matchedRule = match?.rule || '—';
+  const description = operation.description || '';
+
+  if (readonly) {
+    return `
+      <div class="cli-permission-row readonly ${status}">
+        <div class="cli-op-main">
+          <div class="cli-op-title">
+            <code>${esc(operation.id)}</code>
+            <span class="cli-status ${status}">${esc(statusText)}</span>
+            ${operation.dangerous ? '<span class="cli-danger">dangerous</span>' : ''}
+          </div>
+          <div class="cli-op-desc">${esc(description)}</div>
+          <div class="cli-op-meta">category=${esc(operation.category)} · scopes=${esc([...scopes].join(', ') || '—')} · sources=${esc(sourceText)} · rule=${esc(matchedRule)}</div>
+        </div>
+      </div>
+    `;
+  }
+
+  return `
+    <div class="cli-permission-row ${status}"
+         data-command-operation="${esc(operation.id)}"
+         data-command-dangerous="${operation.dangerous ? 'true' : 'false'}">
+      <div class="cli-op-main">
+        <div class="cli-op-title">
+          <code>${esc(operation.id)}</code>
+          <span class="cli-status ${status}">${esc(statusText)}</span>
+          ${operation.dangerous ? '<span class="cli-danger">dangerous</span>' : ''}
+        </div>
+        <div class="cli-op-desc">${esc(description)}</div>
+        <div class="cli-op-meta">category=${esc(operation.category)} · sources=${esc(sourceText)} · matched rule=${esc(matchedRule)}</div>
+      </div>
+      <div class="cli-op-controls">
+        <label class="cli-field-row compact">
+          <span>${currentLang === 'zh-CN' ? '授权' : 'Grant'}</span>
+          <select class="form-select" data-command-field="decision">
+            <option value="keep">${currentLang === 'zh-CN' ? '保持当前' : 'Keep current'}</option>
+            <option value="allow">${currentLang === 'zh-CN' ? '允许' : 'Allow'}</option>
+            <option value="deny">${currentLang === 'zh-CN' ? '拒绝' : 'Deny'}</option>
+            <option value="remove">${currentLang === 'zh-CN' ? '移除精确规则' : 'Remove exact rule'}</option>
+          </select>
+        </label>
+        <label class="cli-danger-grant">
+          <input type="checkbox"
+                 data-command-field="dangerousGrant"
+                 ${operation.dangerous && (permission.dangerous || allowed) ? 'checked' : ''}
+                 ${operation.dangerous ? '' : 'disabled'}>
+          <span>${currentLang === 'zh-CN' ? '危险授权' : 'Dangerous grant'}</span>
+        </label>
+      </div>
+      <details class="cli-advanced">
+        <summary>${currentLang === 'zh-CN' ? 'Scopes 与约束' : 'Scopes and constraints'}</summary>
+        <div class="cli-advanced-grid">
+          <div>
+            <div class="cli-subtitle">Scopes</div>
+            <div class="cli-scope-grid">${renderCommandScopeControls(operation, permission)}</div>
+          </div>
+          <div>
+            <div class="cli-subtitle">${currentLang === 'zh-CN' ? '约束' : 'Constraints'}</div>
+            ${renderCommandConstraintControls(permission)}
+          </div>
+          <label class="cli-field-row cli-reason">
+            <span>Reason</span>
+            <input type="text"
+                   class="form-input"
+                   data-command-field="reason"
+                   value="${esc(permission.reason || '')}">
+          </label>
+        </div>
+      </details>
+    </div>
+  `;
+}
+
+function renderCommandPermissionsList(roleDef, operations, readonly = false) {
+  if (!operations || operations.length === 0) {
+    return `<div class="model-empty">${currentLang === 'zh-CN' ? '未加载到 CLI 清单' : 'No CLI operations loaded.'}</div>`;
+  }
+
+  const commandPermissions = getCommandPermissionsObject(roleDef?.commandPermissions);
+  return groupCommandOperations(operations).map(([category, items]) => `
+    <section class="cli-category-section">
+      <h5>${esc(commandCategoryLabel(category))} <span>${items.length}</span></h5>
+      <div class="cli-permission-list">
+        ${items.map(operation => renderCommandPermissionRow(operation, commandPermissions, readonly)).join('')}
+      </div>
+    </section>
+  `).join('');
+}
+
+function renderCommandPermissionsEditor(roleDef, operations) {
+  const stats = getCommandPermissionStats(roleDef?.commandPermissions);
+  return `
+    <div class="form-section command-permissions-section">
+      <h4>Command / CLI Permissions</h4>
+      <div class="cli-summary">
+        <span>${stats.total} rules</span>
+        <span>${stats.allow} allow</span>
+        <span>${stats.deny} deny</span>
+        <span>${stats.dangerous} dangerous</span>
+      </div>
+      <div class="cli-help">
+        ${currentLang === 'zh-CN'
+          ? '清单来自后端 operation registry。每行显示当前有效权限和命中的规则；修改后会写入精确 operation 规则。若要撤销内置继承规则，请对同名 operation 设置“拒绝”。'
+          : 'The list comes from the backend operation registry. Each row shows the current effective permission and matched rule. Changes are saved as exact operation rules.'}
+      </div>
+      ${renderCommandPermissionsList(roleDef, operations, false)}
+    </div>
+  `;
+}
+
+function validateCommandPermissionsClient(commandPermissions) {
+  if (!commandPermissions || typeof commandPermissions !== 'object' || Array.isArray(commandPermissions)) {
+    return 'Command permissions must be a JSON object.';
+  }
+
+  for (const [rule, permission] of Object.entries(commandPermissions)) {
+    if (!permission || typeof permission !== 'object' || Array.isArray(permission)) {
+      return `Command permission "${rule}" must be an object.`;
+    }
+    if (typeof permission.allow !== 'boolean') {
+      return `Command permission "${rule}" must include boolean allow.`;
+    }
+    if (permission.dangerous !== undefined && typeof permission.dangerous !== 'boolean') {
+      return `Command permission "${rule}" dangerous must be a boolean.`;
+    }
+    if (permission.scopes !== undefined) {
+      if (!Array.isArray(permission.scopes)) {
+        return `Command permission "${rule}" scopes must be an array.`;
+      }
+      const badScope = permission.scopes.find(scope => !COMMAND_PERMISSION_SCOPE_VALUES.includes(scope));
+      if (badScope) return `Command permission "${rule}" has unsupported scope: ${badScope}.`;
+    }
+    if (permission.constraints !== undefined && (
+      !permission.constraints ||
+      typeof permission.constraints !== 'object' ||
+      Array.isArray(permission.constraints)
+    )) {
+      return `Command permission "${rule}" constraints must be an object.`;
+    }
+  }
+
+  return '';
+}
+
+function collectCommandPermissions(container, fallback = {}) {
+  const rows = Array.from(container.querySelectorAll('[data-command-operation]'));
+  if (rows.length === 0) {
+    const input = container.querySelector('#edit-commandPermissions');
+    if (!input) return { ok: true, value: getCommandPermissionsObject(fallback) };
+    try {
+      const parsed = JSON.parse(input.value.trim() || '{}');
+      const validationError = validateCommandPermissionsClient(parsed);
+      if (validationError) return { ok: false, error: validationError };
+      return { ok: true, value: parsed };
+    } catch (err) {
+      return { ok: false, error: `Command permissions JSON is invalid: ${err.message}` };
+    }
+  }
+
+  const operationsById = new Map((roleOperationsCache || []).map(operation => [operation.id, operation]));
+  const commandPermissions = { ...getCommandPermissionsObject(fallback) };
+
+  for (const row of rows) {
+    const operationId = row.dataset.commandOperation;
+    const operation = operationsById.get(operationId);
+    if (!operation) continue;
+
+    const decision = row.querySelector('[data-command-field="decision"]')?.value || 'keep';
+    const dirty = row.dataset.commandDirty === 'true';
+    if (decision === 'keep' && !dirty) continue;
+
+    if (decision === 'remove') {
+      delete commandPermissions[operationId];
+      continue;
+    }
+
+    const match = getEffectiveCommandPermission(operation, commandPermissions);
+    const basePermission = commandPermissions[operationId] || match?.permission || {};
+    const nextAllow = decision === 'allow'
+      ? true
+      : decision === 'deny'
+        ? false
+        : basePermission.allow === true;
+
+    const scopes = Array.from(row.querySelectorAll('[data-command-scope]:checked'))
+      .map(input => input.dataset.commandScope)
+      .filter(Boolean);
+    if (nextAllow && scopes.length === 0) {
+      return { ok: false, error: `Command permission "${operationId}" must allow at least one scope.` };
+    }
+
+    const constraints = { ...(basePermission.constraints || {}) };
+    COMMAND_PERMISSION_BOOLEAN_CONSTRAINTS.forEach(key => {
+      delete constraints[key];
+    });
+    row.querySelectorAll('[data-command-constraint]').forEach(input => {
+      const key = input.dataset.commandConstraint;
+      if (key && input.checked) constraints[key] = true;
+    });
+
+    const requireFieldOverride = row.querySelector('[data-command-field="requireFieldOverride"]')?.value.trim();
+    if (requireFieldOverride) constraints.requireFieldOverride = requireFieldOverride;
+    else delete constraints.requireFieldOverride;
+
+    const dangerousGrant = !!row.querySelector('[data-command-field="dangerousGrant"]')?.checked;
+    const reason = row.querySelector('[data-command-field="reason"]')?.value.trim();
+
+    const nextPermission = {
+      ...basePermission,
+      allow: nextAllow,
+    };
+    if (nextAllow) nextPermission.scopes = scopes;
+    else delete nextPermission.scopes;
+    if (operation.dangerous || dangerousGrant) nextPermission.dangerous = operation.dangerous ? true : dangerousGrant;
+    else delete nextPermission.dangerous;
+    if (Object.keys(constraints).length) nextPermission.constraints = constraints;
+    else delete nextPermission.constraints;
+    if (reason) nextPermission.reason = reason;
+    else delete nextPermission.reason;
+
+    commandPermissions[operationId] = nextPermission;
+  }
+
+  const validationError = validateCommandPermissionsClient(commandPermissions);
+  if (validationError) return { ok: false, error: validationError };
+  return { ok: true, value: commandPermissions };
+}
+
 function createRoleCard(roleName, roleDef) {
   const card = document.createElement('div');
   card.className = `role-card role-${roleName}`;
@@ -4497,6 +4899,7 @@ function createRoleCard(roleName, roleDef) {
   const nameKey = ROLE_NAMES[roleName] || roleName;
   const permMode = roleDef.permissions?.permissionMode?.default || '—';
   const model = roleDef.permissions?.['baseagents.claude.model']?.default || '—';
+  const commandStats = getCommandPermissionStats(roleDef.commandPermissions);
 
   // 判断是否为内置角色
   const builtinRoles = ['owner', 'admin', 'member', 'guest', 'anonymous'];
@@ -4517,6 +4920,14 @@ function createRoleCard(roleName, roleDef) {
       <div class="role-preview-item">
         <span class="label">${t('roleDefs.model')}:</span>
         <span class="value">${esc(model)}</span>
+      </div>
+      <div class="role-preview-item">
+        <span class="label">CLI rules:</span>
+        <span class="value">${commandStats.total} (${commandStats.allow} allow / ${commandStats.deny} deny)</span>
+      </div>
+      <div class="role-preview-item">
+        <span class="label">Dangerous:</span>
+        <span class="value">${commandStats.dangerous}</span>
       </div>
     </div>
     <div class="role-card-actions">
@@ -5006,7 +5417,7 @@ async function initRoleModelPermissionEditor(container, roleName, roleDef) {
   updateRoleModelPreview(section, roleName);
 }
 
-function showNewRoleModal() {
+async function showNewRoleModal() {
   const modal = $('#role-edit-modal');
   const title = $('#role-edit-title');
   const body = $('#role-edit-body');
@@ -5025,8 +5436,15 @@ function showNewRoleModal() {
       permissionMode: { default: 'request', allowOverride: false },
       'baseagents.claude.model': { default: 'claude-sonnet-4', allowOverride: false, allowedModels: ['claude-sonnet-*', 'claude-haiku-*'] },
       dispatch: { default: 'mention', allowOverride: false }
+    },
+    commandPermissions: {
+      'category:read': { allow: true },
+      'category:write-own': { allow: true },
+      'model.*': { allow: true, scopes: ['relation', 'agent'], constraints: { ownPeerOnly: true, ownAgentOnly: true } },
+      'cli.exec.raw': { allow: false, dangerous: true }
     }
   };
+  const operations = await loadRoleOperationsForEditor();
 
   body.innerHTML = `
     <div class="role-edit-form">
@@ -5055,8 +5473,14 @@ function showNewRoleModal() {
         <small style="color: var(--dim);">${currentLang === 'zh-CN' ? '拒绝时，该角色用户访问将收到"暂无权限"提示' : 'When denied, users with this role will receive "no permission" message'}</small>
       </div>
 
-      <div class="form-section">
-        <h4>权限配置</h4>
+      <div class="role-editor-tabs" role="tablist">
+        <button type="button" class="role-editor-tab active" data-role-tab="fields">Field Permissions</button>
+        <button type="button" class="role-editor-tab" data-role-tab="cli">CLI Permissions</button>
+      </div>
+
+      <div class="role-editor-tab-panel active" data-role-tab-panel="fields">
+        <div class="form-section">
+          <h4>权限配置</h4>
   `;
 
   const permissions = defaultDef.permissions;
@@ -5230,9 +5654,15 @@ function showNewRoleModal() {
     body.innerHTML += `</div>`;
   });
 
-  body.innerHTML += `</div></div>`;
+  body.innerHTML += `</div></div>
+      <div class="role-editor-tab-panel" data-role-tab-panel="cli">
+        ${renderCommandPermissionsEditor(defaultDef, operations)}
+      </div>
+    </div>`;
 
   bindTagsInputEvents(body);
+  initRoleEditorTabs(body);
+  initCommandPermissionEditor(body);
   initRoleModelPermissionEditor(body, '__new__', defaultDef);
 
   modal.style.display = 'flex';
@@ -5241,7 +5671,7 @@ function showNewRoleModal() {
   setTimeout(() => $('#new-role-name')?.focus(), 100);
 }
 
-function showRoleDetailsModal(roleName, roleDef) {
+async function showRoleDetailsModal(roleName, roleDef) {
   const modal = $('#role-edit-modal');
   const title = $('#role-edit-title');
   const body = $('#role-edit-body');
@@ -5251,14 +5681,18 @@ function showRoleDetailsModal(roleName, roleDef) {
 
   title.textContent = `${t(ROLE_NAMES[roleName] || roleName)} - ${t('roleDefs.viewDetails')}`;
   saveBtn.style.display = 'none'; // 只读模式隐藏保存按钮
+  const operations = await loadRoleOperationsForEditor();
 
   body.innerHTML = `
     <div class="role-edit-form">
       <h4>${t('roleDefs.description')}</h4>
       <p>${esc(roleDef.description)}</p>
 
-      <h4>${t('common.operating')}</h4>
-      <pre>${JSON.stringify(roleDef.permissions, null, 2)}</pre>
+      <h4>Field Permissions</h4>
+      <pre>${JSON.stringify(roleDef.permissions || {}, null, 2)}</pre>
+
+      <h4>Command / CLI Permissions</h4>
+      ${renderCommandPermissionsList(roleDef, operations, true)}
     </div>
   `;
 
@@ -5302,6 +5736,35 @@ function bindTagsInputEvents(container) {
     if (e.target.classList.contains('tag-remove')) {
       e.target.closest('.tag').remove();
     }
+  });
+}
+
+function initRoleEditorTabs(container) {
+  container.querySelectorAll('[data-role-tab]').forEach(tab => {
+    tab.addEventListener('click', () => {
+      const target = tab.dataset.roleTab;
+      container.querySelectorAll('[data-role-tab]').forEach(item => {
+        item.classList.toggle('active', item.dataset.roleTab === target);
+      });
+      container.querySelectorAll('[data-role-tab-panel]').forEach(panel => {
+        panel.classList.toggle('active', panel.dataset.roleTabPanel === target);
+      });
+    });
+  });
+}
+
+function initCommandPermissionEditor(container) {
+  container.querySelectorAll('[data-command-operation]').forEach(row => {
+    row.addEventListener('change', (e) => {
+      if (e.target?.matches?.('[data-command-field="decision"]')) {
+        row.dataset.commandDecision = e.target.value;
+      } else {
+        row.dataset.commandDirty = 'true';
+      }
+    });
+    row.addEventListener('input', () => {
+      row.dataset.commandDirty = 'true';
+    });
   });
 }
 
@@ -5357,6 +5820,12 @@ async function saveRoleDefinition() {
         permissionMode: { default: 'request', allowOverride: false },
         [CLAUDE_MODEL_PERMISSION_KEY]: { default: 'claude-sonnet-4', allowOverride: false, allowedModels: ['claude-sonnet-*', 'claude-haiku-*'] },
         dispatch: { default: 'mention', allowOverride: false }
+      },
+      commandPermissions: {
+        'category:read': { allow: true },
+        'category:write-own': { allow: true },
+        'model.*': { allow: true, scopes: ['relation', 'agent'], constraints: { ownPeerOnly: true, ownAgentOnly: true } },
+        'cli.exec.raw': { allow: false, dangerous: true }
       }
     })
     : (state.roleDefinitions?.roles[actualRoleName] || {});
@@ -5436,10 +5905,17 @@ async function saveRoleDefinition() {
     delete permissions[CLAUDE_MODEL_PERMISSION_KEY].selectionMode;
   }
 
+  const commandPermissionsResult = collectCommandPermissions(body, currentDef.commandPermissions);
+  if (!commandPermissionsResult.ok) {
+    alert(commandPermissionsResult.error);
+    return;
+  }
+
   const updates = {
     description,
     allowAccess,
-    permissions
+    permissions,
+    commandPermissions: commandPermissionsResult.value
   };
 
   try {
@@ -5469,7 +5945,7 @@ async function saveRoleDefinition() {
   }
 }
 
-function showRoleEditModal(roleName, roleDef) {
+async function showRoleEditModal(roleName, roleDef) {
   const modal = $('#role-edit-modal');
   const title = $('#role-edit-title');
   const body = $('#role-edit-body');
@@ -5480,6 +5956,7 @@ function showRoleEditModal(roleName, roleDef) {
   title.textContent = `${t(ROLE_NAMES[roleName] || roleName)} - ${t('roleDefs.edit')}`;
   saveBtn.style.display = 'inline-block';
   saveBtn.dataset.role = roleName;
+  const operations = await loadRoleOperationsForEditor();
 
   // 构建完整的编辑表单
   let formHtml = `<div class="role-edit-form">`;
@@ -5506,8 +5983,15 @@ function showRoleEditModal(roleName, roleDef) {
   `;
 
   // 2. 权限配置
-  formHtml += `<div class="form-section">
-    <h4>权限配置</h4>
+  formHtml += `
+    <div class="role-editor-tabs" role="tablist">
+      <button type="button" class="role-editor-tab active" data-role-tab="fields">Field Permissions</button>
+      <button type="button" class="role-editor-tab" data-role-tab="cli">CLI Permissions</button>
+    </div>
+
+    <div class="role-editor-tab-panel active" data-role-tab-panel="fields">
+      <div class="form-section">
+        <h4>权限配置</h4>
   `;
 
   const permissions = roleDef.permissions || {};
@@ -5689,12 +6173,18 @@ function showRoleEditModal(roleName, roleDef) {
     formHtml += `</div>`;
   });
 
-  formHtml += `</div></div>`;
+  formHtml += `</div></div>
+    <div class="role-editor-tab-panel" data-role-tab-panel="cli">
+      ${renderCommandPermissionsEditor(roleDef, operations)}
+    </div>
+  </div>`;
 
   body.innerHTML = formHtml;
 
   // 绑定标签输入事件
   bindTagsInputEvents(body);
+  initRoleEditorTabs(body);
+  initCommandPermissionEditor(body);
   initRoleModelPermissionEditor(body, roleName, roleDef);
 
   modal.style.display = 'flex';

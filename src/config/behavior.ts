@@ -5,6 +5,8 @@ import { atomicReadJson, atomicWriteJson } from '../utils/atomic-write.js';
 import { fileCache } from '../core/daemon-file-cache.js';
 import { loadSchema, currentVersion } from './schema-registry.js';
 import { mergeLayers } from './merge.js';
+import { readRolesConfig } from './roles.js';
+import { normalizeRelationBehaviorForAssignedRole } from './role-model-sync.js';
 import type { AgentConfig, EffectiveAgentConfig, RelationConfig } from '../types.js';
 
 export type BehaviorConfig = Partial<Pick<
@@ -42,7 +44,8 @@ export function readRelationBehavior(aid: string, peerKey: string, opts: Behavio
 }
 
 export function writeRelationBehavior(aid: string, peerKey: string, value: BehaviorConfig): void {
-  writeBehaviorFile(agentRelationBehaviorConfig(aid, peerKey), value);
+  const normalized = normalizeRelationBehaviorForAssignedRole(aid, peerKey, value, readRolesConfig());
+  writeBehaviorFile(agentRelationBehaviorConfig(aid, peerKey), normalized);
 }
 
 export function ensureAgentBehavior(aid: string): void {

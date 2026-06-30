@@ -4,9 +4,11 @@
 
 import { describe, it, expect } from 'vitest';
 import { mergeRolesConfig, diffRolesConfig } from '../src/config/roles-merge.js';
-import { writeRoles } from '../src/config/config-manager.js';
+import { ConfigTarget, read, writeRoles } from '../src/config/config-manager.js';
 import { rolesConfig } from '../src/paths.js';
 import { getBuiltinRolesConfig } from '../src/config/roles.js';
+import { readRelationBehavior, writeRelationBehavior } from '../src/config/behavior.js';
+import { setPrivateRoleAssignment } from '../src/config/role-assignments.js';
 import fs from 'fs';
 import type { RolesConfig } from '../src/types.js';
 
@@ -215,5 +217,52 @@ describe('writeRoles', () => {
     const raw = JSON.parse(fs.readFileSync(rolesConfig(), 'utf-8')) as RolesConfig;
     expect(raw.defaultRoles).toBeUndefined();
     expect(raw.roles.member.permissions['baseagents.claude.model'].allowedModels).toEqual(['claude-haiku-*']);
+  });
+
+  it('writes back migrated roles schema so json cli stdout is not polluted repeatedly', () => {
+    const legacyOverlay: RolesConfig = {
+      $schema_version: 3,
+      roles: {
+        anonymous: {
+          description: 'legacy anonymous override',
+          permissions: {
+            'baseagents.claude.model': {
+              default: 'claude-haiku-4-5-20251001',
+              allowOverride: false,
+              allowedModels: ['claude-haiku-*', 'deepseek-v4-pro'],
+            },
+          },
+        },
+      },
+    };
+    fs.writeFileSync(rolesConfig(), JSON.stringify(legacyOverlay, null, 2), 'utf-8');
+
+    const migrated = read<RolesConfig>(ConfigTarget.Roles);
+
+    expect(migrated?.$schema_version).toBe(4);
+    const raw = JSON.parse(fs.readFileSync(rolesConfig(), 'utf-8')) as RolesConfig;
+    expect(raw.$schema_version).toBe(4);
+    expect(raw.roles.anonymous.permissions['baseagents.claude.model'].allowedModels).toEqual(['claude-haiku-*', 'deepseek-v4-pro']);
+  });
+
+  it('normalizes assigned relation models when role model override is disabled', () => {
+    const aid = 'sync-role-model.agentid.pub';
+    const peerId = 'guest-peer.agentid.pub';
+    const peerKey = `aun#${peerId}`;
+    setPrivateRoleAssignment(aid, peerId, 'guest');
+    writeRelationBehavior(aid, peerKey, {
+      baseagents: { claude: { model: 'claude-opus-4-8' } },
+    });
+
+    const full = getBuiltinRolesConfig();
+    full.roles.guest.permissions['baseagents.claude.model'] = {
+      default: 'claude-haiku-4-5-20251001',
+      allowOverride: false,
+      allowedModels: ['claude-haiku-*', 'claude-opus-4-8'],
+    };
+    writeRoles(full);
+
+    expect(readRelationBehavior(aid, peerKey)?.baseagents?.claude?.model)
+      .toBe('claude-haiku-4-5-20251001');
   });
 });

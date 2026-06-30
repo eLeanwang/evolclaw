@@ -68,14 +68,6 @@ export function filterModelsForRole(
   const permission = getRoleModelPermission(role, baseagent);
   if (!permission.constrained) return models;
 
-  if (!permission.allowOverride) {
-    const fallback = permission.defaultModel;
-    if (!fallback) return [];
-    const resolvedFallback = resolveCandidateModel(fallback, resolveModelId);
-    const catalogHit = models.find(model => model === fallback || model === resolvedFallback || resolveCandidateModel(model, resolveModelId) === resolvedFallback);
-    return catalogHit ? [catalogHit] : [fallback];
-  }
-
   return models.filter(model => isModelAllowedForRoleBaseagent(role, baseagent, model, resolveModelId));
 }
 
