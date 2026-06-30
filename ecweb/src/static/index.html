@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="zh-CN" data-theme="light">
+<html lang="zh-CN" data-theme="dark">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -12,7 +12,7 @@
   <!-- 配对页 -->
   <div id="pair-page" class="pair-page">
     <div class="pair-box">
-      <h1 data-i18n="pair.title">🔭 EvolClaw Watch</h1>
+      <h1 data-i18n="pair.title">EvolClaw Watch</h1>
       <p class="pair-hint" data-i18n="pair.hint">输入终端显示的 6 位配对码</p>
       <input id="pair-input" type="text" inputmode="numeric" maxlength="6" placeholder="000000" data-i18n="pair.placeholder" autocomplete="off">
       <button id="pair-btn" data-i18n="action.pair">配对</button>
@@ -23,7 +23,7 @@
   <!-- 主面板 -->
   <div id="app" class="app" style="display:none">
     <header class="topbar">
-      <span class="brand">🔭 EvolClaw Watch</span>
+      <span class="brand"><span class="brand-mark"></span><span>EvolClaw Watch</span></span>
       <nav class="tabs">
         <button class="tab active" data-view="agents" data-i18n="tab.agents">Agents</button>
         <button class="tab" data-view="msg" data-i18n="tab.messages">Messages</button>
@@ -41,8 +41,8 @@
       <span style="flex:1"></span>
       <span class="build-ts" style="font-size:10px;color:var(--dim)" data-i18n-title="common.buildTime" title="构建时间">2026-06-07 21:55</span>
       <span id="conn-status" class="conn-status" data-i18n="status.connecting">连接中…</span>
-      <button id="lang-btn" class="theme-btn" title="Switch Language / 切换语言">🌐</button>
-      <button id="theme-btn" class="theme-btn" title="Toggle Theme / 切换主题">🌗</button>
+      <button id="lang-btn" class="theme-btn" title="Switch Language / 切换语言">LANG</button>
+      <button id="theme-btn" class="theme-btn" title="Toggle Theme / 切换主题">DARK</button>
       <button id="logout-btn" class="logout-btn" data-i18n="action.logout" title="退出配对">退出</button>
     </header>
 

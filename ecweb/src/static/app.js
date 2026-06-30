@@ -145,7 +145,7 @@ const translations = {
     'action.query': '查询',
 
     // Pair page
-    'pair.title': '🔭 EvolClaw Watch',
+    'pair.title': 'EvolClaw Watch',
     'pair.hint': '输入终端显示的 6 位配对码',
     'pair.placeholder': '000000',
     'pair.error.length': '请输入 6 位配对码',
@@ -522,7 +522,7 @@ const translations = {
     'action.query': 'Query',
 
     // Pair page
-    'pair.title': '🔭 EvolClaw Watch',
+    'pair.title': 'EvolClaw Watch',
     'pair.hint': 'Enter the 6-digit pairing code shown in terminal',
     'pair.placeholder': '000000',
     'pair.error.length': 'Please enter 6-digit pairing code',
@@ -2680,25 +2680,68 @@ function startApp() {
 
 // ── 主题切换 ──
 function initTheme() {
-  const saved = localStorage.getItem('ecTheme') || 'light';
+  const saved = localStorage.getItem('ecTheme') || 'dark';
   document.documentElement.setAttribute('data-theme', saved);
   const btn = $('#theme-btn');
+  const setThemeLabel = (theme) => {
+    if (btn) btn.textContent = theme === 'dark' ? 'DARK' : 'LIGHT';
+  };
   if (btn) {
-    btn.textContent = saved === 'dark' ? '☀️' : '🌙';
+    setThemeLabel(saved);
     btn.onclick = () => {
       const cur = document.documentElement.getAttribute('data-theme');
       const next = cur === 'dark' ? 'light' : 'dark';
       document.documentElement.setAttribute('data-theme', next);
       localStorage.setItem('ecTheme', next);
-      btn.textContent = next === 'dark' ? '☀️' : '🌙';
-      if (_hourlyChart) { _hourlyChart.dispose(); _hourlyChart = null; }
-      if (_modelChart) { _modelChart.dispose(); _modelChart = null; }
+      setThemeLabel(next);
+      if (window._hourlyChart) { window._hourlyChart.dispose(); window._hourlyChart = null; }
+      if (window._modelChart) { window._modelChart.dispose(); window._modelChart = null; }
+      if (_explorerChart) { _explorerChart.dispose(); _explorerChart = null; }
       ['_monCpu', '_monMem', '_monMsg', '_monErr'].forEach(function (k) {
         if (window[k]) { window[k].dispose(); window[k] = null; }
       });
       if (currentView === 'monitor') renderMonitor(state.monitor);
+      if (currentView === 'usage') {
+        if (document.querySelector('#usage-explorer.active')) runExplorerQuery();
+        else loadUsageOverview();
+      }
     };
   }
+}
+
+function cssVar(name) {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+}
+
+function chartTheme() {
+  const isDark = document.documentElement.getAttribute('data-theme') === 'dark';
+  const fg = cssVar('--fg') || (isDark ? '#e5edf7' : '#0f172a');
+  const dim = cssVar('--dim') || (isDark ? '#8fa3b8' : '#64748b');
+  const border = cssVar('--border') || (isDark ? 'rgba(148,163,184,.2)' : 'rgba(51,65,85,.16)');
+  const bg2 = cssVar('--bg2') || (isDark ? '#0f172a' : '#ffffff');
+  return {
+    isDark,
+    fg,
+    dim,
+    border,
+    bg2,
+    accent: cssVar('--accent') || '#22d3ee',
+    green: cssVar('--green') || '#22c55e',
+    orange: cssVar('--orange') || '#f59e0b',
+    blue: cssVar('--blue') || '#38bdf8',
+    red: cssVar('--red') || '#ef4444',
+    magenta: cssVar('--magenta') || '#a78bfa',
+  };
+}
+
+function themedTooltip() {
+  const c = chartTheme();
+  return {
+    backgroundColor: c.bg2,
+    borderColor: c.border,
+    textStyle: { color: c.fg, fontSize: 12 },
+    extraCssText: 'box-shadow: 0 14px 36px rgba(0,0,0,.28); border-radius: 8px;',
+  };
 }
 
 // ── Usage 相关函数 ──
@@ -3685,19 +3728,31 @@ async function runExplorerQuery() {
   // Chart
   var chartEl = $('#usage-explorer-chart');
   if (chartEl) {
-    var isDark = document.documentElement.getAttribute('data-theme') === 'dark';
+    var theme = chartTheme();
     if (_explorerChart) { _explorerChart.dispose(); _explorerChart = null; }
-    _explorerChart = echarts.init(chartEl, isDark ? 'dark' : null);
+    _explorerChart = echarts.init(chartEl, theme.isDark ? 'dark' : null);
     var periods = data.map(function(r) { return r.period; });
     _explorerChart.setOption({
-      tooltip: { trigger: 'axis' },
-      legend: { data: [t('usage.card.input'), t('usage.card.output')], top: 0, textStyle: { fontSize: 11 } },
+      color: [theme.accent, theme.green],
+      tooltip: Object.assign({ trigger: 'axis' }, themedTooltip()),
+      legend: { data: [t('usage.card.input'), t('usage.card.output')], top: 0, textStyle: { fontSize: 11, color: theme.dim } },
       grid: { top: 30, bottom: 30, left: 60, right: 16 },
-      xAxis: { type: 'category', data: periods, axisLabel: { fontSize: 10, rotate: 30 } },
-      yAxis: { type: 'value', axisLabel: { formatter: function(v) { return fmtTokens(v); } } },
+      xAxis: {
+        type: 'category',
+        data: periods,
+        axisLabel: { fontSize: 10, rotate: 30, color: theme.dim },
+        axisLine: { lineStyle: { color: theme.border } },
+        splitLine: { show: false }
+      },
+      yAxis: {
+        type: 'value',
+        axisLabel: { formatter: function(v) { return fmtTokens(v); }, color: theme.dim },
+        axisLine: { lineStyle: { color: theme.border } },
+        splitLine: { lineStyle: { color: theme.border } }
+      },
       series: [
-        { name: t('usage.card.input'), type: 'line', data: data.map(function(r) { return r.input_tokens; }), smooth: true, areaStyle: { opacity: 0.15 }, itemStyle: { color: '#4f6ef7' } },
-        { name: t('usage.card.output'), type: 'line', data: data.map(function(r) { return r.output_tokens; }), smooth: true, areaStyle: { opacity: 0.15 }, itemStyle: { color: '#38a169' } },
+        { name: t('usage.card.input'), type: 'line', data: data.map(function(r) { return r.input_tokens; }), smooth: true, symbol: 'none', lineStyle: { width: 2, color: theme.accent }, areaStyle: { opacity: 0.13, color: theme.accent }, itemStyle: { color: theme.accent } },
+        { name: t('usage.card.output'), type: 'line', data: data.map(function(r) { return r.output_tokens; }), smooth: true, symbol: 'none', lineStyle: { width: 2, color: theme.green }, areaStyle: { opacity: 0.1, color: theme.green }, itemStyle: { color: theme.green } },
       ]
     });
   }
@@ -3776,10 +3831,11 @@ function renderMonitor(data) {
     return '<div class="usage-card"><div class="card-value">' + c[1] + '</div><div class="card-label">' + c[0] + '</div></div>';
   }).join('');
 
-  var isDark = document.documentElement.getAttribute('data-theme') === 'dark';
+  var theme = chartTheme();
+  var isDark = theme.isDark;
   var ts = h.map(function (p) { return new Date(p.ts).toLocaleTimeString(); });
-  var css = function (v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); };
-  var cProc = css('--accent'), cSys = css('--orange');
+  var css = cssVar;
+  var cProc = theme.accent, cSys = theme.orange;
 
   // ── CPU dual-line：进程 vs 系统 ──
   monDualLine('mon-cpu-chart', '_monCpu', ts, isDark, 'CPU 占用',
@@ -3802,19 +3858,29 @@ function renderMonitor(data) {
   if (msgEl) {
     if (!window._monMsg) window._monMsg = echarts.init(msgEl, isDark ? 'dark' : null);
     window._monMsg.setOption({
-      title: { text: '近一小时活动', left: 'center', top: 4, textStyle: { fontSize: 12, color: isDark ? '#e6edf3' : '#1a202c' } },
-      tooltip: { trigger: 'axis' },
+      title: { text: '近一小时活动', left: 'center', top: 4, textStyle: { fontSize: 12, color: theme.fg } },
+      tooltip: Object.assign({ trigger: 'axis' }, themedTooltip()),
       grid: { top: 36, bottom: 24, left: 44, right: 12 },
-      xAxis: { type: 'category', data: ['Received', 'Completed', 'Errors', 'Interrupts', 'ToolErr'], axisLabel: { fontSize: 9 } },
-      yAxis: { type: 'value', minInterval: 1 },
+      xAxis: {
+        type: 'category',
+        data: ['Received', 'Completed', 'Errors', 'Interrupts', 'ToolErr'],
+        axisLabel: { fontSize: 9, color: theme.dim },
+        axisLine: { lineStyle: { color: theme.border } }
+      },
+      yAxis: {
+        type: 'value',
+        minInterval: 1,
+        axisLabel: { color: theme.dim },
+        splitLine: { lineStyle: { color: theme.border } }
+      },
       series: [{
         type: 'bar', barWidth: '45%',
         data: [
-          { value: lh.received || 0, itemStyle: { color: css('--accent') } },
-          { value: lh.completed || 0, itemStyle: { color: css('--green') } },
-          { value: lh.errors || 0, itemStyle: { color: css('--red') } },
-          { value: lh.interrupts || 0, itemStyle: { color: css('--orange') } },
-          { value: lh.toolErrors || 0, itemStyle: { color: css('--blue') } },
+          { value: lh.received || 0, itemStyle: { color: theme.accent } },
+          { value: lh.completed || 0, itemStyle: { color: theme.green } },
+          { value: lh.errors || 0, itemStyle: { color: theme.red } },
+          { value: lh.interrupts || 0, itemStyle: { color: theme.orange } },
+          { value: lh.toolErrors || 0, itemStyle: { color: theme.blue } },
         ],
       }],
       animation: false,
@@ -3828,11 +3894,12 @@ function renderMonitor(data) {
     if (errEntries.length) {
       if (!window._monErr) window._monErr = echarts.init(errEl, isDark ? 'dark' : null);
       window._monErr.setOption({
-        title: { text: '错误分布', left: 'center', top: 4, textStyle: { fontSize: 12, color: isDark ? '#e6edf3' : '#1a202c' } },
-        tooltip: { trigger: 'item', formatter: '{b}: {c} ({d}%)' },
+        color: [theme.red, theme.orange, theme.magenta, theme.blue, theme.accent],
+        title: { text: '错误分布', left: 'center', top: 4, textStyle: { fontSize: 12, color: theme.fg } },
+        tooltip: Object.assign({ trigger: 'item', formatter: '{b}: {c} ({d}%)' }, themedTooltip()),
         series: [{
           type: 'pie', radius: ['32%', '64%'], center: ['50%', '56%'],
-          label: { fontSize: 10 },
+          label: { fontSize: 10, color: theme.dim },
           data: errEntries.map(function (e) { return { name: e[0], value: e[1] }; }),
         }],
         animation: false,
@@ -3893,11 +3960,12 @@ function renderMonitor(data) {
 function monDualLine(elId, varKey, times, isDark, title, series, fmtY, yRange) {
   var el = $('#' + elId);
   if (!el) return;
+  var theme = chartTheme();
   if (!window[varKey]) window[varKey] = echarts.init(el, isDark ? 'dark' : null);
   window[varKey].setOption({
-    title: { text: title, left: 'center', top: 4, textStyle: { fontSize: 12, color: isDark ? '#e6edf3' : '#1a202c' } },
+    title: { text: title, left: 'center', top: 4, textStyle: { fontSize: 12, color: theme.fg } },
     legend: { show: false },
-    tooltip: {
+    tooltip: Object.assign({
       trigger: 'axis',
       formatter: function (params) {
         var lines = [params[0].axisValue];
@@ -3907,14 +3975,22 @@ function monDualLine(elId, varKey, times, isDark, title, series, fmtY, yRange) {
         });
         return lines.join('<br/>');
       },
-    },
+    }, themedTooltip()),
     grid: { top: 36, bottom: 24, left: 56, right: 12 },
-    xAxis: { type: 'category', data: times, boundaryGap: false, axisLabel: { fontSize: 9 } },
+    xAxis: {
+      type: 'category',
+      data: times,
+      boundaryGap: false,
+      axisLabel: { fontSize: 9, color: theme.dim },
+      axisLine: { lineStyle: { color: theme.border } },
+      splitLine: { show: false }
+    },
     yAxis: {
       type: 'value',
       min: (yRange ? yRange[0] : 0),
       max: (yRange ? yRange[1] : undefined),
-      axisLabel: { formatter: fmtY ? function (v) { return fmtY(v); } : '{value}' },
+      axisLabel: { formatter: fmtY ? function (v) { return fmtY(v); } : '{value}', color: theme.dim },
+      splitLine: { lineStyle: { color: theme.border } }
     },
     series: series.map(function (sr) {
       return {
