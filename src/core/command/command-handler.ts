@@ -123,6 +123,9 @@ export class CommandHandler {
       if (owner) {
         throw new BaseagentRunnerUnavailableError(evolName, baseagent, this.getAvailableBaseagentsForOwner(evolName));
       }
+      const globalRunner = [...this.agentMap.entries()]
+        .find(([runnerKey]) => runnerKey === baseagent || runnerKey.endsWith(`::${baseagent}`));
+      if (globalRunner) return globalRunner[1];
     }
     if (this.agentMap.has(this.primaryRunnerKey)) return this.agentMap.get(this.primaryRunnerKey)!;
     return this.agentMap.values().next().value!;
@@ -271,6 +274,8 @@ export class CommandHandler {
       targetSessionStrategy: definition.execution.session.strategy,
       targetThreadId: definition.execution.session.threadId,
       boundSessionId: definition.execution.session.sessionId,
+      model: definition.execution.model,
+      effort: definition.execution.effort,
       permissionMode: definition.execution.permissionMode,
       prompt: this.triggerPrompt(definition),
       createdByPeerId: definition.origin?.peerId ?? '',
@@ -467,6 +472,8 @@ export class CommandHandler {
           ...(strategy === 'current' && activeSession ? { sessionId: activeSession.id } : {}),
           ...(strategy === 'thread' ? { threadId: target.threadId } : {}),
         },
+        model: parsed.model,
+        effort: parsed.effort,
         permissionMode,
         onError: 'retry',
         noopSentinel: '[[NOOP]]',
@@ -1163,6 +1170,8 @@ export class CommandHandler {
       output += `状态: ${definition.enabled ? 'active' : 'disabled'}\n`;
       output += `调度: ${view.scheduleType} | 下次: ${nextStr}\n`;
       output += `处理: ${definition.execution.mode}\n`;
+      output += `模型: ${definition.execution.model ?? 'inherit'}\n`;
+      output += `推理强度: ${definition.execution.effort ?? 'inherit'}\n`;
       output += `权限: ${definition.execution.permissionMode ?? 'inherit'}\n`;
       output += `反馈: ${this.primaryFeedbackDisposition(definition).kind}\n`;
       output += `失败通知: ${this.failureFeedbackDisposition(definition).kind === 'silent' ? 'silent' : 'notify'}\n`;
@@ -1257,6 +1266,7 @@ export class CommandHandler {
 /trigger list [--all] — 查看所有触发器
 /trigger set <参数> — 注册触发器
 /trigger update <名称|ID> <参数> — 修改触发器
+常用参数：--delay/--at/--cron/--every、--prompt、--model、--effort、--permission
 /trigger enable <名称|ID> — 启用触发器
 /trigger disable <名称|ID> — 暂停触发器
 /trigger show <名称|ID> — 查看触发器详情
@@ -1406,6 +1416,9 @@ export class CommandHandler {
             timeoutMs: updated.execution.mode === 'script' ? updated.execution.script!.timeoutMs ?? 30_000 : 30_000,
           },
           session: updated.execution.session,
+          model: updated.execution.model,
+          effort: updated.execution.effort,
+          permissionMode: updated.execution.permissionMode,
           onError: 'retry',
           noopSentinel: '[[NOOP]]',
         };
@@ -1419,6 +1432,9 @@ export class CommandHandler {
           mode: 'agent',
           prompt: this.triggerPrompt(definition),
           session: updated.execution.session,
+          model: updated.execution.model,
+          effort: updated.execution.effort,
+          permissionMode: updated.execution.permissionMode,
           onError: 'retry',
           noopSentinel: '[[NOOP]]',
         };
@@ -1478,6 +1494,14 @@ export class CommandHandler {
       if (patch.maxRuns !== undefined) limits.maxRuns = Number(patch.maxRuns);
       if (patch.maxDuration !== undefined) limits.maxDuration = String(patch.maxDuration);
       updated.limits = Object.keys(limits).length > 0 ? limits : undefined;
+    }
+
+    if (patch.model !== undefined) {
+      updated.execution.model = String(patch.model);
+    }
+
+    if (patch.effort !== undefined) {
+      updated.execution.effort = patch.effort as TriggerDefinition['execution']['effort'];
     }
 
     if (patch.permissionMode !== undefined) {

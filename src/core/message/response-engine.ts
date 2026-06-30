@@ -1214,6 +1214,8 @@ export class ResponseEngine implements IMessageProcessor {
         // 不缓存、不绑会话——改关系级/agent级后该范围所有会话的下条消息即时生效；
         // 多对端并发各自独立解析、各自传参，无共享状态可被污染。
         let effectiveModel: string | undefined;
+        const triggerModelOverride = message.triggerMeta?.modelOverride;
+        const triggerEffortOverride = message.triggerMeta?.effortOverride;
 
         // 取降级状态，按退避策略决定是否跳过 evolclaw 作用域模型
         const fbState = this.modelFallbackMap.get(session.id) ?? {
@@ -1244,6 +1246,15 @@ export class ResponseEngine implements IMessageProcessor {
             logger.warn(`[ResponseEngine] resolveEffectiveModel failed: ${e instanceof Error ? e.message : String(e)}`);
           }
           modelOverride = evolclawModelOverride;
+        }
+
+        if (triggerModelOverride || triggerEffortOverride) {
+          modelOverride = {
+            ...(modelOverride || {}),
+            ...(triggerModelOverride ? { model: triggerModelOverride } : {}),
+            ...(triggerEffortOverride ? { effort: triggerEffortOverride } : {}),
+          };
+          if (triggerModelOverride) effectiveModel = triggerModelOverride;
         }
 
         // permissionMode 始终随 per-call override 传入（与 model/effort 解耦：
@@ -1500,7 +1511,7 @@ export class ResponseEngine implements IMessageProcessor {
               agent.cleanupStream(streamKey);
             }
             // 模型不可用：累计计数，本次切换到 baseAgentModel 立即重试，不让用户看到失败
-            if (classifyError(retryError) === ErrorType.MODEL_UNAVAILABLE && evolclawModelOverride?.model) {
+            if (classifyError(retryError) === ErrorType.MODEL_UNAVAILABLE && !triggerModelOverride && evolclawModelOverride?.model) {
               fbState.failCount++;
               if (fbState.failCount >= 2) {
                 fbState.fallbackActive = true;
@@ -1511,7 +1522,10 @@ export class ResponseEngine implements IMessageProcessor {
               logger.warn(`[ResponseEngine] Model unavailable: ${evolclawModelOverride.model}, failCount=${fbState.failCount}, fallbackActive=${fbState.fallbackActive}`);
               // 切换到 baseAgentModel 重试（清除 model/effort，让 runQuery 使用 this.model；
               // 保留 permissionMode —— 它与模型无关，不能因模型降级而丢失）
-              modelOverride = { permissionMode: effectivePermissionMode };
+              modelOverride = {
+                ...(triggerEffortOverride ? { effort: triggerEffortOverride } : {}),
+                permissionMode: effectivePermissionMode,
+              };
               usedFallback = true;
               runAttempt++;
               continue;

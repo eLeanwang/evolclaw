@@ -25,7 +25,6 @@
         "properties": {
           "model": { "type": "string" },
           "effort": { "type": "string" },
-          "reasoning": { "type": "string" },
           "agentProgressSummaries": { "type": "boolean" },
           "excludeDynamicSections": { "type": "boolean" },
           "enableRequestUserInput": { "type": "boolean" },

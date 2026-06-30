@@ -1,6 +1,6 @@
 import { CronExpressionParser } from 'cron-parser';
 import type { TriggerScheduleType, TriggerSessionStrategy } from '../types.js';
-import type { TriggerPermissionMode } from './types.js';
+import type { TriggerEffort, TriggerPermissionMode } from './types.js';
 
 export interface ParsedTriggerSet {
   scheduleType: TriggerScheduleType;
@@ -21,6 +21,8 @@ export interface ParsedTriggerSet {
   onNoop?: 'notify' | 'silent';
   maxRuns?: number;
   maxDuration?: string;
+  model?: string;
+  effort?: TriggerEffort;
   permissionMode?: TriggerPermissionMode;
 }
 
@@ -101,6 +103,8 @@ const PERMISSION_MODES = new Set<TriggerPermissionMode>([
   'noask',
 ]);
 
+const TRIGGER_EFFORTS = new Set<TriggerEffort>(['low', 'medium', 'high', 'xhigh', 'max']);
+
 function parsePermissionModeFlag(flags: Map<string, string | true>): { ok: true; value?: TriggerPermissionMode } | { ok: false; error: string } {
   if (!flags.has('permission')) return { ok: true };
   const raw = flags.get('permission');
@@ -109,6 +113,23 @@ function parsePermissionModeFlag(flags: Map<string, string | true>): { ok: true;
     return { ok: false, error: '--permission 只接受 auto、bypass、readonly、plan、edit、request 或 noask' };
   }
   return { ok: true, value: raw as TriggerPermissionMode };
+}
+
+function parseModelFlag(flags: Map<string, string | true>): { ok: true; value?: string } | { ok: false; error: string } {
+  if (!flags.has('model')) return { ok: true };
+  const raw = flags.get('model');
+  if (!raw || raw === true) return { ok: false, error: '--model 不能为空' };
+  return { ok: true, value: raw as string };
+}
+
+function parseEffortFlag(flags: Map<string, string | true>): { ok: true; value?: TriggerEffort } | { ok: false; error: string } {
+  if (!flags.has('effort')) return { ok: true };
+  const raw = flags.get('effort');
+  if (!raw || raw === true) return { ok: false, error: '--effort 不能为空' };
+  if (!TRIGGER_EFFORTS.has(raw as TriggerEffort)) {
+    return { ok: false, error: '--effort 只接受 low、medium、high、xhigh 或 max' };
+  }
+  return { ok: true, value: raw as TriggerEffort };
 }
 
 export interface ParsedTriggerUpdate {
@@ -133,6 +154,8 @@ export interface ParsedTriggerUpdate {
   onNoop?: 'notify' | 'silent';
   maxRuns?: number;
   maxDuration?: string;
+  model?: string;
+  effort?: TriggerEffort;
   permissionMode?: TriggerPermissionMode;
 }
 
@@ -319,6 +342,14 @@ export function parseTriggerUpdate(args: string): UpdateParseResult {
   if (!maxDuration.ok) return maxDuration;
   if (maxDuration.value !== undefined) result.maxDuration = maxDuration.value;
 
+  const model = parseModelFlag(flags);
+  if (!model.ok) return model;
+  if (model.value !== undefined) result.model = model.value;
+
+  const effort = parseEffortFlag(flags);
+  if (!effort.ok) return effort;
+  if (effort.value !== undefined) result.effort = effort.value;
+
   const permissionMode = parsePermissionModeFlag(flags);
   if (!permissionMode.ok) return permissionMode;
   if (permissionMode.value !== undefined) result.permissionMode = permissionMode.value;
@@ -493,6 +524,12 @@ export function parseTriggerSet(args: string): ParseResult {
   const maxDuration = parseLimitDurationFlag(flags, 'max-duration', '--max-duration');
   if (!maxDuration.ok) return maxDuration;
 
+  const model = parseModelFlag(flags);
+  if (!model.ok) return model;
+
+  const effort = parseEffortFlag(flags);
+  if (!effort.ok) return effort;
+
   const permissionMode = parsePermissionModeFlag(flags);
   if (!permissionMode.ok) return permissionMode;
 
@@ -517,6 +554,8 @@ export function parseTriggerSet(args: string): ParseResult {
       onNoop,
       maxRuns: maxRuns.value,
       maxDuration: maxDuration.value,
+      model: model.value,
+      effort: effort.value,
       permissionMode: permissionMode.value,
     },
   };

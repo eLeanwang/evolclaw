@@ -114,7 +114,7 @@ export function mergeForAgent(...) {  // @deprecated
 ### 阻塞 ① 数据迁移未完成
 `validateAgentConfig()` 注释指出：
 - 现有 `agent config.json` 仍混有 behavior(HA) 字段（`active_baseagent` / `baseagents` 等）
-- 还有 schema 未定义的子字段（`projects.autoCreate` / `projects.list` 等）
+- 仍可能有少量历史/实验字段残留
 - `agent-config` schema 是 `additionalProperties:false`
 - **此刻切到 schema 校验会让所有现存 agent 加载失败**
 

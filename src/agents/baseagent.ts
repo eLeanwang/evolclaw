@@ -196,7 +196,7 @@ export function resolveOpenaiConfig(
   const effort = override?.effort
     || override?.reasoning
     || config.agents?.codex?.effort
-    || config.agents?.codex?.reasoning
+    || (config.agents?.codex as any)?.reasoning
     || undefined;
 
   const enableRequestUserInput = override?.enableRequestUserInput

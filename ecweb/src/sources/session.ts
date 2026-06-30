@@ -33,7 +33,7 @@ interface TranscriptMeta {
   userMsgs: number; totalMsgs: number; sizeKB: number; lastActivity: number;
 }
 
-const CACHE_VERSION = 2;
+const CACHE_VERSION = 4;
 const _metaCache = new Map<string, { mtime: number; meta: TranscriptMeta }>();
 
 function cacheDir(encoded: string): string {
@@ -66,6 +66,31 @@ function writeDiskCache(encoded: string, id: string, mtime: number, size: number
   } catch {}
 }
 
+function extractMessageText(content: any): string {
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return '';
+  return content
+    .filter((x: any) => x?.type === 'text' && typeof x.text === 'string')
+    .map((x: any) => x.text)
+    .join('\n');
+}
+
+function isToolResultOnly(content: any): boolean {
+  return Array.isArray(content) && content.length > 0 && content.every((x: any) => x?.type === 'tool_result');
+}
+
+function isPureUserText(text: string): boolean {
+  const t = text.trimStart();
+  return !!t && !t.startsWith('<');
+}
+
+function isCountableUserMessage(event: any, sessionId: string): boolean {
+  if (sessionId.startsWith('agent-') || event?.isSidechain) return false;
+  const content = event?.message?.content;
+  if (isToolResultOnly(content)) return false;
+  return isPureUserText(extractMessageText(content));
+}
+
 function extractMeta(file: string, id: string, stat: fs.Stats): TranscriptMeta {
   let raw = '';
   try { raw = fs.readFileSync(file, 'utf-8'); } catch {}
@@ -74,18 +99,26 @@ function extractMeta(file: string, id: string, stat: fs.Stats): TranscriptMeta {
     if (!line) continue;
     const isAsst = line.indexOf('"type":"assistant"') !== -1;
     const isUser = !isAsst && line.indexOf('"type":"user"') !== -1;
+    let o: any;
+    const needsParse = isUser || (!gitBranch || !version || !firstUser) && (line.indexOf('gitBranch') !== -1 || line.indexOf('"version"') !== -1 || line.indexOf('ai-title') !== -1);
+    if (needsParse) {
+      try { o = JSON.parse(line); } catch { o = null; }
+    }
     if (isAsst) totalMsgs++;
-    else if (isUser) { totalMsgs++; if (line.indexOf('"tool_result"') === -1) userMsgs++; }
+    else if (isUser) {
+      totalMsgs++;
+      if (o && isCountableUserMessage(o, id)) userMsgs++;
+    }
     if ((!gitBranch || !version || !firstUser) && (line.indexOf('gitBranch') !== -1 || line.indexOf('"version"') !== -1 || line.indexOf('ai-title') !== -1 || (isUser && !firstUser))) {
-      let o: any;
-      try { o = JSON.parse(line); } catch { continue; }
+      if (!o) {
+        try { o = JSON.parse(line); } catch { continue; }
+      }
       if (!gitBranch && o.gitBranch) gitBranch = o.gitBranch;
       if (!version && o.version) version = o.version;
       if (o.type === 'ai-title' && o.title) title = o.title;
       if (!firstUser && o.type === 'user' && o.message) {
-        const c = o.message.content;
-        const t = typeof c === 'string' ? c : (Array.isArray(c) ? ((c.find((x: any) => x?.type === 'text') || {}).text || '') : '');
-        if (t && !t.startsWith('<')) firstUser = t.replace(/\s+/g, ' ').trim().slice(0, 120);
+        const t = extractMessageText(o.message.content);
+        if (isPureUserText(t)) firstUser = t.replace(/\s+/g, ' ').trim().slice(0, 120);
       }
     }
   }
@@ -216,9 +249,9 @@ function readTranscriptFile(file: string): any {
     if (!line.trim()) continue;
     const isAsst = line.indexOf('"type":"assistant"') !== -1;
     const isUser = !isAsst && line.indexOf('"type":"user"') !== -1;
-    if (isAsst) totalMsgs++; else if (isUser) { totalMsgs++; if (line.indexOf('"tool_result"') === -1) userMsgs++; }
     let o: any;
     try { o = JSON.parse(line); } catch { continue; }
+    if (isAsst) totalMsgs++; else if (isUser) { totalMsgs++; if (isCountableUserMessage(o, path.basename(file, '.jsonl'))) userMsgs++; }
     if (!branch && o.gitBranch) branch = o.gitBranch;
     if (!version && o.version) version = o.version;
     if (!cwd && o.cwd) cwd = o.cwd;

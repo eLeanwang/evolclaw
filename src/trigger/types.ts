@@ -41,6 +41,7 @@ export type TriggerFeedbackBranch = 'onReply' | 'onNoop' | 'default';
 export type TriggerRunPhase = 'running' | 'feedback-pending';
 export type TriggerRunStatus = 'completed' | 'noop' | 'skipped' | 'failed' | 'dry-run';
 export type TriggerPermissionMode = PermissionMode;
+export type TriggerEffort = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 
 export interface TriggerOrigin {
   channel?: string;
@@ -70,6 +71,8 @@ export interface TriggerExecution {
   prompt?: string;
   script?: TriggerScriptConfig;
   session: TriggerExecutionSession;
+  model?: string;
+  effort?: TriggerEffort;
   permissionMode?: TriggerPermissionMode;
   onError: 'fail' | 'retry';
   noopSentinel: string;

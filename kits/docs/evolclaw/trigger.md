@@ -32,6 +32,7 @@ Flag 模式适合 agent 现场创建常规 trigger：
 ec trigger create --agent <aid> \
   --cron '0 9 * * *' \
   --prompt '生成昨日摘要并发送给我' \
+  --model <model> --effort high \
   --channel <channelKey> --channelid <channelId> \
   --name daily-summary \
   --enable
@@ -47,6 +48,15 @@ ec trigger create --agent <aid> \
 ```
 
 `--cron` 表达式必须加引号，避免被 shell 拆成多个参数。`--every` 是固定间隔，`--cron` 是日历调度。
+
+执行模型可按 trigger 单独覆盖：
+
+```bash
+--model <模型>
+--effort <low|medium|high|xhigh|max>
+```
+
+`--model` / `--effort` 只覆盖本 trigger 执行时传给 base agent 的模型与推理强度。baseagent 不在 trigger 中指定，始终沿用该 trigger 所属 agent 当前 active baseagent；未设置时继承当前关系级 / agent 级 / 全局模型配置。
 
 ## 目标与会话
 
@@ -167,6 +177,7 @@ ec trigger create --agent <aid> --cron '30 9 * * *' \
 ec trigger create --agent <aid> --every 4h \
   --max-runs 10 --max-duration 3d \
   --permission bypass \
+  --model <model> --effort high \
   --prompt '尝试执行升级检查；成功后调用 ec trigger disable --agent <aid> auto-updater；无变化输出 [[NOOP]]' \
   --channel <channelKey> --channelid <channelId> \
   --name auto-updater --enable

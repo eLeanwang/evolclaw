@@ -85,6 +85,7 @@ Flag 模式支持的参数（与 /trigger 命令一致）:
   --prompt <文本>
   --script <路径> --runtime <node|python|bash>
   --mode <agent|direct>
+  --model <模型>  --effort <low|medium|high|xhigh|max>
   --on-fail <notify|silent>  --on-noop <notify|silent>
   --max-runs <次数>  --max-duration <时长: 30m|12h|3d>
   --permission <auto|bypass|readonly|plan|edit|request|noask>
@@ -138,6 +139,8 @@ async function showTrigger(args: string[], json: boolean): Promise<void> {
     console.log(`limit state: ${parts.join(', ')}`);
   }
   if (t.execution.mode === 'script') console.log(`script: ${t.execution.script!.runtime} ${t.execution.script!.path}`);
+  console.log(`model: ${t.execution.model ?? 'inherit'}`);
+  console.log(`effort: ${t.execution.effort ?? 'inherit'}`);
   console.log(`permission: ${t.execution.permissionMode ?? 'inherit'}`);
   console.log(`feedback: reply=${t.feedback.onReply.kind}, noop=${t.feedback.onNoop.kind}, default=${t.feedback.default.kind}`);
   const active = Array.isArray(res.active) ? res.active : [];
@@ -224,6 +227,8 @@ async function createTrigger(args: string[], json: boolean): Promise<void> {
       mode: script ? 'script' : 'agent',
       ...(script ? { script } : { prompt: parsed.prompt }),
       session,
+      ...(parsed.model ? { model: parsed.model } : {}),
+      ...(parsed.effort ? { effort: parsed.effort } : {}),
       ...(parsed.permissionMode ? { permissionMode: parsed.permissionMode } : {}),
       onError: 'retry',
       noopSentinel: '[[NOOP]]',
