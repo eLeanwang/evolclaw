@@ -1,9 +1,9 @@
 /**
- * Triggers 数据源 — 按 agent 钻取触发器。
+ * Triggers 数据源 — 默认聚合全部 agent，也可按 agent 钻取触发器。
  *
  * snapshot:
  *   - agents: menu.options name=agent（agent 列表，同 Agents 页数据源）
- *   - triggers: 选中 agent 时 menu.options name=trigger（带 options=all），并带 agent 参数解析其 triggerManager
+ *   - triggers: 未选 agent 时遍历所有 agent 聚合；选中 agent 时只查该 agent
  *
  * subscribe: 2s 轮询 + JSON diff，仅变化时 push。
  */
@@ -20,17 +20,46 @@ async function menuExec(payload: any): Promise<any> {
   return r?.ok ? r.response : null;
 }
 
+function normalizeAgent(item: any): { aid: string; label: string } | null {
+  const aid = String(item?.value || item?.aid || '').trim();
+  if (!aid) return null;
+  const label = String(item?.label || item?.name || aid).trim() || aid;
+  return { aid, label };
+}
+
+async function listTriggersForAgent(agentAid: string, agentLabel: string): Promise<any[]> {
+  const resp = await menuExec({
+    type: 'menu.options',
+    id: `tr-list-${agentAid}`,
+    name: 'trigger',
+    args: { options: 'all' },
+    agent: agentAid,
+  });
+  const items = Array.isArray(resp?.data) ? resp.data : [];
+  return items.map((trigger: any) => ({
+    ...trigger,
+    agentAid: trigger.agentAid || trigger.schedulerAid || agentAid,
+    agentLabel: trigger.agentLabel || agentLabel,
+  }));
+}
+
 async function buildSnapshot(params: Record<string, any>): Promise<any> {
-  const agent = params?.agent ?? null;
-  const [agentsResp, triggersResp] = await Promise.all([
-    menuExec({ type: 'menu.options', id: 'tr-agents', name: 'agent' }),
-    agent
-      ? menuExec({ type: 'menu.options', id: 'tr-list', name: 'trigger', args: { options: 'all' }, agent })
-      : Promise.resolve(null),
-  ]);
+  const agent = typeof params?.agent === 'string' && params.agent ? params.agent : null;
+  const agentsResp = await menuExec({ type: 'menu.options', id: 'tr-agents', name: 'agent' });
   // menu.options 响应形如 { type:'menu.response', id, name, data: MenuItem[] }
-  const agents = Array.isArray(agentsResp?.data) ? agentsResp.data : [];
-  const triggers = Array.isArray(triggersResp?.data) ? triggersResp.data : [];
+  const agents: any[] = Array.isArray(agentsResp?.data) ? agentsResp.data : [];
+  const agentInfos: Array<{ aid: string; label: string }> = agents
+    .map(normalizeAgent)
+    .filter((x: { aid: string; label: string } | null): x is { aid: string; label: string } => !!x);
+
+  if (agent) {
+    const found = agentInfos.find((x: { aid: string; label: string }) => x.aid === agent);
+    const triggers = await listTriggersForAgent(agent, found?.label || agent);
+    return { agents, triggers, selectedAgent: agent };
+  }
+
+  const batches = await Promise.all(agentInfos.map((x: { aid: string; label: string }) => listTriggersForAgent(x.aid, x.label)));
+  const triggers = batches.flat();
   return { agents, triggers, selectedAgent: agent };
 }
 

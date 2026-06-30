@@ -793,8 +793,9 @@ setInterval(() => {
 let msgSel = { aid: null, peer: null };
 let sessSel = { sessionId: null, project: null, baseagent: null };
 let trigSel = { agent: null };
+let trigAgentsCollapsed = false;
 let sessSearch = '';
-let sessFilterNormal = false; // true=只显示有效会话（userMsgs >= 2）
+let sessFilterNormal = false; // true=只显示有效会话（userMsgs >= 1）
 let sessChatMode = false;   // false=完整视图，true=对话视图（折叠处理过程）
 let monRange = '2m';        // Monitor 时间窗口：2m / 10m / 1h
 let availableBaseagents = { claude: false, codex: false }; // 可用的 baseagent
@@ -890,9 +891,8 @@ function compareVer(a, b) {
 
 // ── Agents 视图（对齐终端 watch aid：状态点前置 + 名字为主 + 两行 + 工作态着色 + 顶部统计条）──
 
-// 逐 AID 异步操作状态（取代全局 _agentBusy）：aid → 操作中的描述文字
+// 逐 AID 异步操作状态：aid → 操作中的描述文字
 const _agentOps = new Map(); // Map<aid, string>
-let _agentBusy = false;  // 保留兼容旧引用，不再用于阻塞渲染
 let _agSubtab = 'enabled'; // 'enabled' | 'disabled'
 
 // 工作状态徽标：一旦收到过消息就不再回 connected。
@@ -1080,10 +1080,26 @@ function agentQueueHtml(s) {
   return `<span class="ag-queue-num">${processing}/${queued}</span>`;
 }
 
+function agentOpsBusyHtml(aid, label) {
+  return `<div class="agent-ops agent-ops-busy" data-aid="${esc(aid)}"><span class="ops-busy-label">${esc(label || t('common.operating'))}</span></div>`;
+}
+
+function agentDisabledOpsHtml(aid) {
+  return `<div class="agent-ops agent-ops-disabled" data-aid="${esc(aid)}" data-status="disabled">` +
+    `<button class="ctrl-btn ops-enable" data-op="toggle">${t('action.enable')}</button>` +
+    `<div class="ops-more"><button class="ctrl-btn ops-more-btn" data-op="more">···</button>` +
+    `<div class="ops-dropdown">` +
+    `<button class="ops-dd-item" data-op="edit">${t('action.edit')}</button>` +
+    `<a class="ops-dd-item" href="https://${esc(aid)}/agent.md" target="_blank" rel="noopener">${t('agents.op.viewAgentMd')}</a>` +
+    `<button class="ops-dd-item danger" data-op="delete">${t('action.delete')}</button>` +
+    `</div></div>` +
+    `</div>`;
+}
+
 // 操作列 HTML（启用页）：停止/启动 + 清空队列(conditional) + ···(禁用/重载/编辑/md/删除)
 function agentOpsHtml(aid, ag, s) {
   if (_agentOps.has(aid)) {
-    return `<div class="agent-ops agent-ops-busy"><span class="ops-busy-label">${esc(_agentOps.get(aid) || t('common.operating'))}</span></div>`;
+    return agentOpsBusyHtml(aid, _agentOps.get(aid));
   }
   const queued = s.queued || 0;
   const running = ag.status === 'running';
@@ -1126,7 +1142,7 @@ function renderAgents(data) {
     `<button class="ag-subtab${_agSubtab === 'enabled' ? ' active' : ''}" data-subtab="enabled">${t('agents.subtitle.enabled')} (${enabledCount})</button>` +
     `<button class="ag-subtab${_agSubtab === 'disabled' ? ' active' : ''}" data-subtab="disabled">${t('agents.subtitle.disabled')} (${disabledCount})</button>` +
     `</div>` +
-    `<button class="ctrl-btn" id="agent-new-btn">${t('action.new')}</button>` +
+    `<button class="ctrl-btn agent-new-btn" id="agent-new-btn">${t('action.new')}</button>` +
     '</div>';
 
   if (!data.daemonRunning) {
@@ -1142,8 +1158,8 @@ function renderAgents(data) {
       for (const ag of disabledAgents) {
         const busy = _agentOps.has(ag.aid);
         const ops = busy
-          ? `<div class="agent-ops agent-ops-busy"><span class="ops-busy-label">${esc(_agentOps.get(ag.aid) || t('common.operating'))}</span></div>`
-          : `<div class="agent-ops" data-aid="${esc(ag.aid)}" data-status="disabled"><button class="ctrl-btn ops-enable" data-op="toggle">${t('action.enable')}</button></div>`;
+          ? agentOpsBusyHtml(ag.aid, _agentOps.get(ag.aid))
+          : agentDisabledOpsHtml(ag.aid);
         html += `<tr class="ag-main">` +
           `<td><div class="ag-id"><span class="dot off"></span><span class="ag-id-text"><span class="ag-name">${esc(ag.displayName || shortAid(ag.aid))}</span><span class="ag-aid">${esc(ag.aid)}</span></span></div></td>` +
           `<td style="font-size:11px;font-family:monospace">${esc(ag.projectPath || '—')}</td>` +
@@ -1438,11 +1454,9 @@ function renderSession(data) {
     return;
   }
 
-  // 搜索过滤
-  const q = sessSearch.trim().toLowerCase();
+  // 有效筛选
   const filtered = transcripts
-    .filter(t => !sessFilterNormal || (t.userMsgs || 0) >= 2)
-    .filter(t => !q || (t.title || '').toLowerCase().includes(q) || (t.firstUser || '').toLowerCase().includes(q));
+    .filter(t => !sessFilterNormal || (t.userMsgs || 0) >= 1);
 
   // 左栏：过滤条 + 列表
   const projOpts = projects.map(p =>
@@ -1458,13 +1472,20 @@ function renderSession(data) {
     baseagentOpts += `<option value="codex"${sessSel.baseagent === 'codex' ? ' selected' : ''}>Codex</option>`;
   }
 
-  const normalCount = transcripts.filter(t => (t.userMsgs || 0) >= 2).length;
+  const normalCount = transcripts.filter(t => (t.userMsgs || 0) >= 1).length;
   let listHtml = '<div class="sess-filter">' +
-    `<select id="sess-baseagent" title="Base Agent">${baseagentOpts}</select>` +
-    `<select id="sess-project">${projOpts}</select>` +
-    `<input id="sess-search" type="text" placeholder="搜索标题/首条消息…" value="${esc(sessSearch)}">` +
-    `<button id="sess-filter-btn" class="ctrl-btn${sessFilterNormal ? ' active' : ''}" title="只显示有效会话（≥2 条用户消息）">有效 ${normalCount}</button>` +
-    `<div class="sess-count">${filtered.length} / ${transcripts.length} 个会话</div></div>` +
+    '<div class="sess-select-row">' +
+      `<select id="sess-baseagent" title="Base Agent">${baseagentOpts}</select>` +
+      `<select id="sess-project" title="项目">${projOpts}</select>` +
+    '</div>' +
+    '<div class="sess-filter-row">' +
+      `<div class="sess-count">${filtered.length} / ${transcripts.length} 个会话</div>` +
+      `<label class="sess-switch" title="只显示有效会话（≥1 条用户消息）">` +
+        `<span>有效</span>` +
+        `<input id="sess-filter-toggle" type="checkbox"${sessFilterNormal ? ' checked' : ''}>` +
+        '<span class="sess-switch-track" aria-hidden="true"><span class="sess-switch-thumb"></span></span>' +
+      '</label>' +
+    '</div></div>' +
     '<div class="sess-items">';
 
   if (!filtered.length) {
@@ -1487,28 +1508,21 @@ function renderSession(data) {
   listHtml += '</div>';
   $('#sess-list').innerHTML = listHtml;
 
-  // 绑定交互（注意保持搜索框焦点）
+  // 绑定交互
   const baseagentSel = $('#sess-baseagent');
   if (baseagentSel) baseagentSel.onchange = () => {
     console.log('[ecweb] Baseagent changed to:', baseagentSel.value);
     sessSel = { sessionId: null, project: null, baseagent: baseagentSel.value };
-    sessSearch = '';
     console.log('[ecweb] Subscribing to session with baseagent:', sessSel.baseagent);
     subscribe('session', { baseagent: sessSel.baseagent });
   };
   const projSel = $('#sess-project');
   if (projSel) projSel.onchange = () => {
     sessSel = { sessionId: null, project: projSel.value, baseagent: sessSel.baseagent };
-    sessSearch = '';
     subscribe('session', { project: sessSel.project, baseagent: sessSel.baseagent });
   };
-  const filterBtn = $('#sess-filter-btn');
-  if (filterBtn) filterBtn.onclick = () => { sessFilterNormal = !sessFilterNormal; renderSession(state.session); };
-  const searchEl = $('#sess-search');
-  if (searchEl) {
-    searchEl.oninput = () => { sessSearch = searchEl.value; renderSession(state.session); };
-    if (q) { searchEl.focus(); searchEl.setSelectionRange(searchEl.value.length, searchEl.value.length); }
-  }
+  const filterToggle = $('#sess-filter-toggle');
+  if (filterToggle) filterToggle.onchange = () => { sessFilterNormal = filterToggle.checked; renderSession(state.session); };
   $('#sess-list').querySelectorAll('.list-item').forEach(item => {
     item.onclick = () => { sessSel = { sessionId: item.dataset.sid, project: sessSel.project, baseagent: sessSel.baseagent }; subscribe('session', sessSel); };
   });
@@ -1617,7 +1631,7 @@ const CAT_META = {
 
 function renderSessHeader(h) {
   if (!h || !h.sessionId) return '';
-  const title = h.title || h.sessionId.slice(0, 8);
+  const title = h.title || h.sessionId;
   const tok = (h.inputTokens || h.outputTokens)
     ? `<span class="sh-stat">🔢 in ${fmtNum(h.inputTokens)} / out ${fmtNum(h.outputTokens)}</span>` : '';
   const ctx = h.contextTokens
@@ -1640,7 +1654,6 @@ function renderSessHeader(h) {
     bind +
     '</div>' +
     renderCatBar(h.counts) +
-    `<div class="sh-path" title="${esc(h.cwd || '')}">${esc(h.cwd || '')}</div>` +
     '</div>';
 }
 
@@ -1719,7 +1732,6 @@ function toast(text, isErr) {
 }
 
 // ── Agents 操作 ──
-// （_agentBusy 已在 Agents 视图顶部声明，仅 agentOpNew 仍在用）
 
 // 设置某 aid 的操作状态并立即刷新对应行的按钮区（不重渲整表）
 function setAgentOp(aid, label) {
@@ -1729,10 +1741,10 @@ function setAgentOp(aid, label) {
   const ag = (state.agents.agents || []).find(x => x.aid === aid);
   if (!ag) return;
   if (ag.status === 'disabled') {
-    // 禁用页：只有启用按钮 / 操作中态
+    // 禁用页：启用 + 只保留配置/agent.md/删除操作
     cell.innerHTML = _agentOps.has(aid)
-      ? `<div class="agent-ops agent-ops-busy"><span class="ops-busy-label">${esc(_agentOps.get(aid) || t('common.operating'))}</span></div>`
-      : `<div class="agent-ops" data-aid="${esc(aid)}" data-status="disabled"><button class="ctrl-btn ops-enable" data-op="toggle">${t('action.enable')}</button></div>`;
+      ? agentOpsBusyHtml(aid, _agentOps.get(aid))
+      : agentDisabledOpsHtml(aid);
   } else {
     const statsByAid = {};
     for (const s of (state.agents.stats || [])) statsByAid[s.aid] = s;
@@ -1904,38 +1916,918 @@ async function agentOpUnmute(aid) {
   });
 }
 
-async function agentOpNew() {
-  const aid = prompt('Agent AID（如 mybot.agentid.pub）：');
-  if (!aid) return;
-  const name = prompt('显示名：') || aid.split('.')[0];
-  const baseagent = prompt('后端（claude / codex / gemini）：', 'claude') || 'claude';
-  _agentBusy = true;
+function agentOpNew() {
+  document.querySelectorAll('.ops-more.open').forEach(m => m.classList.remove('open'));
+  openAgentCreateDrawer();
+}
+
+const AGENT_BASEAGENT_TYPES = ['claude', 'codex', 'gemini'];
+const AGENT_EFFORT_FALLBACK = {
+  claude: ['low', 'medium', 'high', 'xhigh', 'max'],
+  codex: ['low', 'medium', 'high'],
+  gemini: [],
+};
+const AGENT_AID_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?){2,}$/;
+let _agentEdit = null;
+let _agentCreate = null;
+
+function cloneJson(value) {
+  try { return JSON.parse(JSON.stringify(value || {})); }
+  catch { return {}; }
+}
+
+function agentSafeConfig(data) {
+  return (data && typeof data.safeConfig === 'object' && data.safeConfig) ? data.safeConfig : {};
+}
+
+function agentActiveBaseagent(data) {
+  const safe = agentSafeConfig(data);
+  return String(safe.active_baseagent || data?.config?.active_baseagent || data?.config?.baseagent || 'claude');
+}
+
+function agentBaseagentBlock(data, type) {
+  const safe = agentSafeConfig(data);
+  const blocks = (safe.baseagents && typeof safe.baseagents === 'object') ? safe.baseagents : (data?.config?.baseagents || {});
+  const block = (blocks && typeof blocks === 'object' && blocks[type] && typeof blocks[type] === 'object') ? blocks[type] : {};
+  const fallback = {};
+  if (type === agentActiveBaseagent(data)) {
+    if (data?.config?.model != null) fallback.model = data.config.model;
+    if (data?.config?.effort != null) fallback.effort = data.config.effort;
+  }
+  return { ...fallback, ...block };
+}
+
+function agentOriginalEditState(aid, data) {
+  const safe = agentSafeConfig(data);
+  const active = agentActiveBaseagent(data);
+  const block = agentBaseagentBlock(data, active);
+  const owners = Array.isArray(safe.owners)
+    ? safe.owners
+    : (Array.isArray(data?.config?.owners) ? data.config.owners : []);
+  const projectPath = String(safe.projects?.defaultPath || data?.config?.projects?.defaultPath || data?.paths?.project || '');
+  return {
+    name: String(data?.identity?.name || data?.displayName || shortAid(aid)),
+    owners: owners.map(String),
+    projectPath,
+    activeBaseagent: active,
+    model: block.model == null ? '' : String(block.model),
+    effort: block.effort == null ? '' : String(block.effort),
+  };
+}
+
+function agentOwnersFromText(text) {
+  return String(text || '')
+    .split(/[\s,，]+/)
+    .map(s => s.trim())
+    .filter(Boolean);
+}
+
+function sameStringArray(a, b) {
+  if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (String(a[i]) !== String(b[i])) return false;
+  return true;
+}
+
+function agentBaseagentOptions(active) {
+  const list = AGENT_BASEAGENT_TYPES.includes(active) ? AGENT_BASEAGENT_TYPES : [active, ...AGENT_BASEAGENT_TYPES].filter(Boolean);
+  return list.map(type => {
+    const label = AGENT_BASEAGENT_TYPES.includes(type) ? type : `${type}（当前）`;
+    return `<option value="${esc(type)}"${type === active ? ' selected' : ''}>${esc(label)}</option>`;
+  }).join('');
+}
+
+function agentListValues(value) {
+  if (Array.isArray(value)) return value;
+  if (typeof value === 'string') return value.split(/[\s,，]+/);
+  return [];
+}
+
+function agentChannelOwners(item) {
+  if (!item || typeof item !== 'object') return [];
+  const owners = [];
+  owners.push(...agentListValues(item.owners));
+  owners.push(...agentListValues(item.admins));
+  owners.push(...agentListValues(item.ownerIds));
+  owners.push(...agentListValues(item.ownerAids));
+  if (item.owner) owners.push(item.owner);
+  if (item.ownerId) owners.push(item.ownerId);
+  if (item.ownerAid) owners.push(item.ownerAid);
+  return [...new Set(owners.map(String).map(s => s.trim()).filter(Boolean))];
+}
+
+function agentChannelStatus(item) {
+  if (!item || typeof item !== 'object') return 'unknown';
+  const raw = item.status ?? item.state ?? item.aidStatus;
+  if (typeof raw === 'string' && raw.trim()) return raw.trim();
+  if (item.enabled === false || item.disabled === true) return 'disabled';
+  if (item.connected === true || item.ready === true || item.enabled === true) return 'active';
+  if (item.connected === false) return 'inactive';
+  return 'unknown';
+}
+
+function agentChannelStatusLabel(status) {
+  const s = String(status || 'unknown').toLowerCase();
+  if (['active', 'enabled', 'running', 'connected', 'ready', 'ok'].includes(s)) return '启用';
+  if (['disabled', 'stopped', 'off'].includes(s)) return '停用';
+  if (['inactive', 'disconnected', 'error', 'failed', 'kicked'].includes(s)) return s;
+  return '未知';
+}
+
+function agentChannelStatusClass(status) {
+  const s = String(status || 'unknown').toLowerCase();
+  if (['active', 'enabled', 'running', 'connected', 'ready', 'ok'].includes(s)) return 'active';
+  if (['disabled', 'stopped', 'off'].includes(s)) return 'disabled';
+  if (['inactive', 'disconnected', 'error', 'failed', 'kicked'].includes(s)) return 'inactive';
+  return 'unknown';
+}
+
+function agentChannelRow(type, item, idx) {
+  if (typeof item === 'string') {
+    const parts = item.split(/[\/#]/);
+    const itemType = parts[0] || type || 'channel';
+    const itemName = parts.slice(1).join('/') || item;
+    return {
+      type: itemType,
+      name: itemName,
+      owners: [],
+      status: 'unknown',
+      runtimeName: item,
+      key: item,
+    };
+  }
+  if (item && typeof item === 'object') {
+    return {
+      type: String(item.type || item.channelType || type || 'channel'),
+      name: String(item.name || item.instName || item.instanceName || item.channel || item.id || `${type || 'channel'}-${idx + 1}`),
+      owners: agentChannelOwners(item),
+      status: agentChannelStatus(item),
+      key: String(item.name || item.instName || item.id || `${type || 'channel'}-${idx}`),
+    };
+  }
+  return null;
+}
+
+function agentChannelsFromConfig(channels) {
+  if (Array.isArray(channels)) {
+    return channels.map((item, idx) => agentChannelRow('', item, idx)).filter(Boolean);
+  }
+  if (channels && typeof channels === 'object') {
+    const rows = [];
+    for (const [type, value] of Object.entries(channels)) {
+      if (Array.isArray(value)) {
+        value.forEach((item, idx) => {
+          const row = agentChannelRow(type, item, idx);
+          if (row) rows.push(row);
+        });
+      } else if (value && typeof value === 'object') {
+        const row = agentChannelRow(type, value, 0);
+        if (row) rows.push(row);
+      } else if (value === true || value === false) {
+        rows.push({ type, name: type, owners: [], status: value ? 'active' : 'disabled', key: type });
+      }
+    }
+    return rows;
+  }
+  return [];
+}
+
+function agentRuntimeChannelRow(channel, idx) {
+  const raw = String(channel || '');
+  if (!raw) return null;
+  const parts = raw.split(/[\/#]/);
+  const type = parts[0] || 'channel';
+  const rawName = parts[parts.length - 1] || raw;
+  const name = parts.length >= 3 ? `${parts.slice(1, -1).join('/')}/${rawName}` : (parts.slice(1).join('/') || raw);
+  return { type, name, rawName, owners: [], status: 'active', runtimeName: raw, key: raw || `${type}-${idx}` };
+}
+
+function agentChannelMatches(configRow, runtimeRow) {
+  if (!configRow || !runtimeRow) return false;
+  if (configRow.runtimeName && configRow.runtimeName === runtimeRow.runtimeName) return true;
+  if (configRow.type !== runtimeRow.type) return false;
+  return configRow.name === runtimeRow.name || configRow.name === runtimeRow.rawName || runtimeRow.name.endsWith(`/${configRow.name}`);
+}
+
+function agentMergeChannelRows(configRows, runtimeRows) {
+  const rows = [];
+  const usedConfig = new Set();
+  for (const runtimeRow of runtimeRows) {
+    const idx = configRows.findIndex((row, i) => !usedConfig.has(i) && agentChannelMatches(row, runtimeRow));
+    if (idx >= 0) {
+      usedConfig.add(idx);
+      rows.push({
+        ...runtimeRow,
+        owners: configRows[idx].owners,
+        status: configRows[idx].status === 'unknown' ? runtimeRow.status : configRows[idx].status,
+      });
+    } else {
+      rows.push(runtimeRow);
+    }
+  }
+  configRows.forEach((row, idx) => {
+    if (!usedConfig.has(idx)) rows.push(row);
+  });
+  return rows;
+}
+
+function agentChannelsToRows(data) {
+  const safe = agentSafeConfig(data);
+  const configRows = agentChannelsFromConfig(safe.channels || data?.config?.channels || []);
+  const runtimeChannels = [];
+  if (Array.isArray(data?.channels)) runtimeChannels.push(...data.channels);
+  if (Array.isArray(data?.config?.channels)) runtimeChannels.push(...data.config.channels);
+  const runtimeRows = runtimeChannels
+    .filter(item => typeof item === 'string')
+    .map(agentRuntimeChannelRow)
+    .filter(Boolean)
+    .filter((row, idx, rows) => rows.findIndex(other => other.runtimeName === row.runtimeName) === idx);
+  return agentMergeChannelRows(configRows, runtimeRows);
+}
+
+function agentChannelsHtml(data) {
+  const safe = agentSafeConfig(data);
+  const rows = agentChannelsToRows(data);
+  const fallbackOwners = Array.isArray(safe.owners)
+    ? safe.owners.map(String)
+    : (Array.isArray(data?.config?.owners) ? data.config.owners.map(String) : []);
+  if (!rows.length) return '<div class="ag-edit-empty">暂无渠道</div>';
+  let html = '<div class="ag-edit-channel-list">';
+  for (const row of rows) {
+    const displayOwners = row.owners.length ? row.owners : (row.type === 'aun' ? fallbackOwners : []);
+    const owners = displayOwners.length ? displayOwners.map(String).join(', ') : '未配置';
+    const statusLabel = agentChannelStatusLabel(row.status);
+    const statusClass = agentChannelStatusClass(row.status);
+    html += `<div class="ag-edit-channel" title="${esc(row.type + '/' + row.name)}">` +
+      `<span class="ag-edit-channel-type">${esc(row.type)}</span>` +
+      `<span class="ag-edit-channel-owners" title="${esc(displayOwners.join(', '))}">${esc(owners)}</span>` +
+      `<span class="ag-edit-channel-status ${esc(statusClass)}">${esc(statusLabel)}</span>` +
+      `</div>`;
+  }
+  return html + '</div>';
+}
+
+function agentCapabilityConfigBlock(data, baseagent) {
+  const safe = agentSafeConfig(data);
+  const blocks = (safe.capabilities && typeof safe.capabilities === 'object')
+    ? safe.capabilities
+    : (data?.config?.capabilities || {});
+  const block = blocks && typeof blocks === 'object' && blocks[baseagent] && typeof blocks[baseagent] === 'object'
+    ? blocks[baseagent]
+    : {};
+  return block || {};
+}
+
+function agentCapabilityModeLabel(mode) {
+  if (mode === 'all') return '全部启用';
+  if (mode === 'none') return '全部关闭';
+  return '继承';
+}
+
+function agentCapabilityTypeLabel(type) {
+  if (type === 'skill') return 'Skills';
+  if (type === 'mcp') return 'MCP';
+  if (type === 'plugin') return 'Plugins';
+  return type;
+}
+
+function agentCapabilityEnabledLabel(value) {
+  if (value === true) return '启用';
+  if (value === false) return '关闭';
+  return '继承';
+}
+
+function agentCapabilityEnabledClass(value) {
+  if (value === true) return 'ok';
+  if (value === false) return 'off';
+  return 'inherit';
+}
+
+function agentCapabilityOverrideLabel(value) {
+  if (value === 'enabled') return '显式启用';
+  if (value === 'disabled') return '显式关闭';
+  return '无覆盖';
+}
+
+function agentCapabilitySourceLabel(value) {
+  const map = {
+    project: 'project',
+    user: 'user',
+    plugin: 'plugin',
+    marketplace: 'market',
+    bundled: 'bundled',
+    system: 'system',
+    unknown: 'unknown',
+  };
+  return map[value] || value || 'unknown';
+}
+
+function agentCapabilityOverridesCount(data, baseagent, type) {
+  const block = agentCapabilityConfigBlock(data, baseagent);
+  const overrides = block?.[type]?.overrides;
+  return overrides && typeof overrides === 'object' ? Object.keys(overrides).length : 0;
+}
+
+function agentCapabilityPlaceholderHtml(text = '加载中…') {
+  return `<div class="ag-edit-cap-empty">${esc(text)}</div>`;
+}
+
+function agentCapabilityItemsHtml(items) {
+  if (!Array.isArray(items) || !items.length) return agentCapabilityPlaceholderHtml('暂无条目');
+  let html = '<div class="ag-edit-cap-items-list">';
+  for (const item of items) {
+    const value = agentOptionValue(item);
+    const label = agentOptionLabel(item) || value;
+    const enabled = item?.enabled;
+    const enabledClass = agentCapabilityEnabledClass(enabled);
+    const meta = [
+      agentCapabilitySourceLabel(item?.source),
+      agentCapabilityOverrideLabel(item?.override),
+      item?.runtimeEnabled === true ? '运行中启用' : (item?.runtimeEnabled === false ? '运行中关闭' : ''),
+      item?.status ? String(item.status) : '',
+    ].filter(Boolean).join(' · ');
+    html += `<div class="ag-edit-cap-item">` +
+      `<div class="ag-edit-cap-item-main">` +
+        `<span class="ag-edit-cap-item-name" title="${esc(value)}">${esc(label)}</span>` +
+        `<span class="ag-edit-cap-item-state ${esc(enabledClass)}">${esc(agentCapabilityEnabledLabel(enabled))}</span>` +
+      `</div>` +
+      `<div class="ag-edit-cap-item-meta">${esc(meta || '—')}</div>` +
+      `${item?.desc ? `<div class="ag-edit-cap-item-desc">${esc(item.desc)}</div>` : ''}` +
+    `</div>`;
+  }
+  return html + '</div>';
+}
+
+function agentCapabilityHtml(data, capData, baseagent) {
+  if (!capData || !capData.capabilities || typeof capData.capabilities !== 'object') {
+    return agentCapabilityPlaceholderHtml('暂无能力信息');
+  }
+  const types = ['skill', 'mcp', 'plugin'];
+  let html = '<div class="ag-edit-cap-list">';
+  for (const type of types) {
+    const state = capData.capabilities[type] || {};
+    const canUpdate = state.canUpdate !== false;
+    const overrideCount = agentCapabilityOverridesCount(data, baseagent, type);
+    const reason = state.reason ? ` title="${esc(state.reason)}"` : '';
+    html += `<details class="ag-edit-cap-details" data-cap-type="${esc(type)}"${reason}>` +
+      `<summary class="ag-edit-cap-row">` +
+        `<span class="ag-edit-cap-type">${esc(agentCapabilityTypeLabel(type))}</span>` +
+        `<span class="ag-edit-cap-mode">${esc(agentCapabilityModeLabel(state.mode))}</span>` +
+        `<span class="ag-edit-cap-overrides">${overrideCount ? esc(`${overrideCount} 覆盖`) : '无覆盖'}</span>` +
+        `<span class="ag-edit-cap-state ${canUpdate ? 'ok' : 'off'}">${canUpdate ? '可更新' : '不支持'}</span>` +
+      `</summary>` +
+      `<div class="ag-edit-cap-items" data-cap-items="${esc(type)}">${agentCapabilityPlaceholderHtml('展开后加载')}</div>` +
+    `</details>`;
+  }
+  html += '</div>';
+  return html;
+}
+
+function agentOptionValue(item) {
+  if (item == null) return '';
+  if (typeof item === 'string') return item;
+  return String(item.value ?? item.id ?? item.name ?? item.label ?? '');
+}
+
+function agentOptionLabel(item) {
+  if (item == null) return '';
+  if (typeof item === 'string') return item;
+  return String(item.label ?? item.name ?? item.value ?? item.id ?? '');
+}
+
+function agentSelectOptions(items, current, emptyLabel) {
+  const selected = String(current || '');
+  const seen = new Set();
+  let html = `<option value=""${selected ? '' : ' selected'}>${esc(emptyLabel)}</option>`;
+  for (const item of items || []) {
+    const value = agentOptionValue(item).trim();
+    if (!value || seen.has(value)) continue;
+    seen.add(value);
+    const label = agentOptionLabel(item).trim() || value;
+    const isSelected = value === selected;
+    html += `<option value="${esc(value)}"${isSelected ? ' selected' : ''}>${esc(label)}</option>`;
+  }
+  if (selected && !seen.has(selected)) {
+    html += `<option value="${esc(selected)}" selected>${esc(selected)}（当前）</option>`;
+  }
+  return html;
+}
+
+async function agentFetchOptions(name, aid, args) {
+  const payload = { type: 'menu.options', name, args };
+  if (aid) payload.agent = aid;
+  const r = mResp(await menuSend(payload));
+  if (r.error) throw new Error(r.error.message || r.error.code);
+  return Array.isArray(r.data) ? r.data : [];
+}
+
+function setAgentSelectLoading(select, current, label) {
+  if (!select) return;
+  select.disabled = true;
+  select.innerHTML = `<option value="${esc(current || '')}" selected>${esc(label)}</option>`;
+}
+
+function setAgentSelectError(select, current) {
+  if (!select) return;
+  select.innerHTML = agentSelectOptions([], current, '默认');
+}
+
+function agentCreateDefaultBaseagent() {
+  return AGENT_BASEAGENT_TYPES.find(type => availableBaseagents && availableBaseagents[type] === true) || 'claude';
+}
+
+function readAgentCreateValues(root) {
+  const aid = (root.querySelector('#ag-create-aid')?.value || '').trim();
+  return {
+    aid,
+    name: (root.querySelector('#ag-create-name')?.value || '').trim() || shortAid(aid),
+    owner: (root.querySelector('#ag-create-owner')?.value || '').trim(),
+    baseagent: root.querySelector('#ag-create-baseagent')?.value || agentCreateDefaultBaseagent(),
+    project: (root.querySelector('#ag-create-project')?.value || '').trim(),
+    model: root.querySelector('#ag-create-model')?.value || '',
+    effort: root.querySelector('#ag-create-effort')?.value || '',
+  };
+}
+
+function validateAgentCreateValues(values) {
+  if (!values.aid) return '请填写 Agent AID';
+  if (!AGENT_AID_RE.test(values.aid)) return 'Agent AID 需类似 mybot.agentid.pub';
+  if (!values.name) return '请填写显示名';
+  if (!values.owner) return '请填写 Owner AID';
+  if (!AGENT_AID_RE.test(values.owner)) return 'Owner AID 需类似 alice.agentid.pub';
+  if (!AGENT_BASEAGENT_TYPES.includes(values.baseagent)) return `无效 Baseagent: ${values.baseagent}`;
+  return '';
+}
+
+function setAgentCreateSaving(ctx, saving) {
+  ctx.saving = saving;
+  ctx.backdrop.querySelectorAll('button, input, select').forEach(el => { el.disabled = saving; });
+  const submit = ctx.backdrop.querySelector('#ag-create-submit');
+  if (submit) submit.textContent = saving ? '创建中…' : '创建';
+}
+
+function closeAgentCreateDrawer() {
+  const ctx = _agentCreate;
+  if (!ctx) return;
+  document.removeEventListener('keydown', ctx.onKeydown);
+  try { ctx.backdrop.remove(); } catch {}
+  _agentCreate = null;
+}
+
+async function syncAgentCreateOptionFields(ctx, values) {
+  const modelSelect = ctx.backdrop.querySelector('#ag-create-model');
+  const effortSelect = ctx.backdrop.querySelector('#ag-create-effort');
+  const baseSelect = ctx.backdrop.querySelector('#ag-create-baseagent');
+  const baseagent = values.baseagent || baseSelect?.value || agentCreateDefaultBaseagent();
+  const currentModel = values.model || '';
+  const currentEffort = values.effort || '';
+  const token = (ctx.optionLoadToken || 0) + 1;
+  ctx.optionLoadToken = token;
+
+  setAgentSelectLoading(modelSelect, currentModel, currentModel ? `${currentModel}（加载中）` : '加载模型中');
+  setAgentSelectLoading(effortSelect, currentEffort, currentEffort ? `${currentEffort}（加载中）` : '加载 Effort 中');
+
   try {
-    const r = mResp(await menuSend({ type: 'menu.action', name: 'agent', action: 'create', args: { aid, name, baseagent } }));
-    if (r.error) { toast(r.error.message || r.error.code, true); return; }
+    const models = await agentFetchOptions('model', '', { baseagent, model: currentModel });
+    if (_agentCreate !== ctx || ctx.optionLoadToken !== token) return;
+    modelSelect.innerHTML = agentSelectOptions(models, currentModel, '默认模型');
+  } catch (e) {
+    if (_agentCreate === ctx && ctx.optionLoadToken === token) {
+      setAgentSelectError(modelSelect, currentModel);
+      toast(e.message || String(e), true);
+    }
+  } finally {
+    if (_agentCreate === ctx && ctx.optionLoadToken === token) modelSelect.disabled = Boolean(ctx.saving);
+  }
+
+  const selectedModel = modelSelect?.value || currentModel;
+  await syncAgentCreateEffortOptions(ctx, baseagent, selectedModel, currentEffort, token);
+}
+
+async function syncAgentCreateEffortOptions(ctx, baseagent, model, currentEffort, token) {
+  const effortSelect = ctx.backdrop.querySelector('#ag-create-effort');
+  if (!effortSelect) return;
+  setAgentSelectLoading(effortSelect, currentEffort, currentEffort ? `${currentEffort}（加载中）` : '加载 Effort 中');
+  try {
+    let efforts = await agentFetchOptions('effort', '', { baseagent, model, effort: currentEffort || 'auto' });
+    if (!efforts.length && AGENT_EFFORT_FALLBACK[baseagent]) efforts = AGENT_EFFORT_FALLBACK[baseagent];
+    if (_agentCreate !== ctx || ctx.optionLoadToken !== token) return;
+    effortSelect.innerHTML = agentSelectOptions(efforts, currentEffort, '默认');
+  } catch (e) {
+    if (_agentCreate === ctx && ctx.optionLoadToken === token) {
+      const fallback = AGENT_EFFORT_FALLBACK[baseagent] || [];
+      effortSelect.innerHTML = agentSelectOptions(fallback, currentEffort, '默认');
+      toast(e.message || String(e), true);
+    }
+  } finally {
+    if (_agentCreate === ctx && ctx.optionLoadToken === token) effortSelect.disabled = Boolean(ctx.saving);
+  }
+}
+
+async function submitAgentCreateDrawer(ctx) {
+  const values = readAgentCreateValues(ctx.backdrop);
+  const error = validateAgentCreateValues(values);
+  if (error) { toast(error, true); return; }
+
+  const args = {
+    aid: values.aid,
+    name: values.name,
+    owner: values.owner,
+    baseagent: values.baseagent,
+  };
+  if (values.project) args.project = values.project;
+  if (values.model) args.model = values.model;
+  if (values.effort && values.effort !== 'auto') args.effort = values.effort;
+
+  setAgentCreateSaving(ctx, true);
+  try {
+    const r = mResp(await menuSend({ type: 'menu.action', name: 'agent', action: 'create', args }));
+    if (r.error) throw new Error(r.error.message || r.error.code);
+    closeAgentCreateDrawer();
+    _agSubtab = 'enabled';
     toast('✓ 创建请求已受理，稍后刷新查看');
+    subscribe('agents', {});
     setTimeout(() => subscribe('agents', {}), 3000);
-  } catch (e) { toast(e.message, true); }
-  finally { _agentBusy = false; }
+  } catch (e) {
+    toast(e.message || String(e), true);
+    if (_agentCreate === ctx) setAgentCreateSaving(ctx, false);
+  }
+}
+
+function openAgentCreateDrawer() {
+  closeAgentConfigDrawer();
+  closeAgentCreateDrawer();
+  const baseagent = agentCreateDefaultBaseagent();
+  const html = `<div class="ag-edit-backdrop" id="ag-create-backdrop">` +
+    `<aside class="ag-edit-drawer" role="dialog" aria-modal="true" aria-labelledby="ag-create-title">` +
+      `<header class="ag-edit-head">` +
+        `<div class="ag-edit-title-wrap">` +
+          `<div id="ag-create-title" class="ag-edit-title">新建 Agent</div>` +
+          `<div class="ag-edit-subtitle"><span>创建新的智能体配置</span></div>` +
+        `</div>` +
+        `<button class="ag-edit-close" id="ag-create-close" type="button" aria-label="关闭">×</button>` +
+      `</header>` +
+      `<form id="ag-create-form" class="ag-create-form">` +
+        `<div class="ag-edit-body">` +
+          `<section class="ag-edit-section">` +
+            `<h3>基础信息</h3>` +
+            `<div class="ag-edit-grid ag-create-grid">` +
+              `<label class="ag-edit-field"><span>Agent AID</span><input id="ag-create-aid" type="text" autocomplete="off" spellcheck="false" placeholder="mybot.agentid.pub"></label>` +
+              `<label class="ag-edit-field"><span>显示名</span><input id="ag-create-name" type="text" autocomplete="off" placeholder="mybot"></label>` +
+              `<label class="ag-edit-field"><span>Owner AID</span><input id="ag-create-owner" type="text" autocomplete="off" spellcheck="false" placeholder="alice.agentid.pub"></label>` +
+              `<label class="ag-edit-field ag-edit-field-wide"><span>项目路径</span><input id="ag-create-project" type="text" autocomplete="off" spellcheck="false" placeholder="留空使用默认项目路径"></label>` +
+            `</div>` +
+          `</section>` +
+          `<section class="ag-edit-section">` +
+            `<h3>运行配置</h3>` +
+            `<div class="ag-edit-grid ag-create-grid">` +
+              `<label class="ag-edit-field"><span>Baseagent</span><select id="ag-create-baseagent">${agentBaseagentOptions(baseagent)}</select></label>` +
+              `<label class="ag-edit-field"><span>模型</span><select id="ag-create-model">${agentSelectOptions([], '', '默认模型')}</select></label>` +
+              `<label class="ag-edit-field"><span>Effort</span><select id="ag-create-effort">${agentSelectOptions([], '', '默认')}</select></label>` +
+            `</div>` +
+          `</section>` +
+        `</div>` +
+      `</form>` +
+      `<footer class="ag-edit-actions">` +
+        `<button class="ctrl-btn" id="ag-create-cancel" type="button">取消</button>` +
+        `<button class="ctrl-btn primary" id="ag-create-submit" type="submit" form="ag-create-form">创建</button>` +
+      `</footer>` +
+    `</aside>` +
+  `</div>`;
+
+  const wrap = document.createElement('div');
+  wrap.innerHTML = html;
+  const backdrop = wrap.firstChild;
+  document.body.appendChild(backdrop);
+
+  const ctx = {
+    backdrop,
+    onKeydown: (e) => { if (e.key === 'Escape') closeAgentCreateDrawer(); },
+  };
+  _agentCreate = ctx;
+
+  const aidInput = backdrop.querySelector('#ag-create-aid');
+  const nameInput = backdrop.querySelector('#ag-create-name');
+  let nameTouched = false;
+  nameInput.addEventListener('input', () => { nameTouched = true; });
+  aidInput.addEventListener('input', () => {
+    if (!nameTouched) nameInput.value = shortAid(aidInput.value.trim());
+  });
+
+  backdrop.addEventListener('click', (e) => { if (e.target === backdrop) closeAgentCreateDrawer(); });
+  backdrop.querySelector('#ag-create-close').addEventListener('click', closeAgentCreateDrawer);
+  backdrop.querySelector('#ag-create-cancel').addEventListener('click', closeAgentCreateDrawer);
+  backdrop.querySelector('#ag-create-baseagent').addEventListener('change', () => {
+    syncAgentCreateOptionFields(ctx, {
+      baseagent: backdrop.querySelector('#ag-create-baseagent')?.value || agentCreateDefaultBaseagent(),
+      model: '',
+      effort: '',
+    });
+  });
+  backdrop.querySelector('#ag-create-model').addEventListener('change', () => {
+    const baseagent = backdrop.querySelector('#ag-create-baseagent')?.value || agentCreateDefaultBaseagent();
+    const effort = backdrop.querySelector('#ag-create-effort')?.value || '';
+    const token = (ctx.optionLoadToken || 0) + 1;
+    ctx.optionLoadToken = token;
+    syncAgentCreateEffortOptions(ctx, baseagent, backdrop.querySelector('#ag-create-model')?.value || '', effort, token);
+  });
+  backdrop.querySelector('#ag-create-form').addEventListener('submit', (e) => {
+    e.preventDefault();
+    submitAgentCreateDrawer(ctx);
+  });
+  document.addEventListener('keydown', ctx.onKeydown);
+  syncAgentCreateOptionFields(ctx, { baseagent, model: '', effort: '' });
+  setTimeout(() => aidInput?.focus(), 0);
+}
+
+function readAgentEditValues(root) {
+  return {
+    owners: agentOwnersFromText(root.querySelector('#ag-edit-owners')?.value || ''),
+    activeBaseagent: root.querySelector('#ag-edit-active')?.value || 'claude',
+    model: root.querySelector('#ag-edit-model')?.value.trim() || '',
+    effort: root.querySelector('#ag-edit-effort')?.value.trim() || '',
+  };
+}
+
+function collectAgentEditPatch(ctx) {
+  const values = readAgentEditValues(ctx.backdrop);
+  const configPatch = {};
+
+  if (!sameStringArray(values.owners, ctx.original.owners)) configPatch.owners = values.owners;
+  if (values.activeBaseagent !== ctx.original.activeBaseagent) {
+    if (!AGENT_BASEAGENT_TYPES.includes(values.activeBaseagent)) return { error: `当前 baseagent 不可写: ${values.activeBaseagent}` };
+    configPatch.active_baseagent = values.activeBaseagent;
+  }
+
+  const originalBlock = agentBaseagentBlock(ctx.data, values.activeBaseagent);
+  const originalModel = originalBlock.model == null ? '' : String(originalBlock.model);
+  const originalEffort = originalBlock.effort == null ? '' : String(originalBlock.effort);
+  const baseagentPatch = {};
+  if (values.model !== originalModel) baseagentPatch.model = values.model || null;
+  if (values.effort !== originalEffort) baseagentPatch.effort = values.effort || null;
+  if (Object.keys(baseagentPatch).length > 0) configPatch.baseagents = { [values.activeBaseagent]: baseagentPatch };
+
+  return {
+    configPatch,
+    changed: Object.keys(configPatch).length > 0,
+  };
+}
+
+function setAgentEditSaving(ctx, saving) {
+  ctx.backdrop.querySelectorAll('button, input, textarea, select').forEach(el => { el.disabled = saving; });
+  const save = ctx.backdrop.querySelector('#ag-edit-save');
+  const saveReload = ctx.backdrop.querySelector('#ag-edit-save-reload');
+  if (save) save.textContent = saving ? '保存中…' : '保存';
+  if (saveReload) saveReload.textContent = saving ? '保存中…' : '保存并重载';
+}
+
+function closeAgentConfigDrawer() {
+  const ctx = _agentEdit;
+  if (!ctx) return;
+  document.removeEventListener('keydown', ctx.onKeydown);
+  try { ctx.backdrop.remove(); } catch {}
+  _agentEdit = null;
+}
+
+async function saveAgentConfigDrawer(ctx, reloadAfter) {
+  const collected = collectAgentEditPatch(ctx);
+  if (collected.error) { toast(collected.error, true); return; }
+  if (!collected.changed) { toast('没有需要保存的改动'); return; }
+
+  setAgentEditSaving(ctx, true);
+  let requiresReload = false;
+  try {
+    if (Object.keys(collected.configPatch).length > 0) {
+      const r = mResp(await menuSend({
+        type: 'menu.action',
+        name: 'agent',
+        action: 'update',
+        args: { aid: ctx.aid, patch: collected.configPatch },
+      }));
+      if (r.error) throw new Error(r.error.message || r.error.code);
+      requiresReload = Boolean(r.data?.requiresReload);
+    }
+
+    closeAgentConfigDrawer();
+    if (reloadAfter && requiresReload) {
+      await agentOpReload(ctx.aid);
+    } else {
+      toast(requiresReload ? t('agents.op.saved') : '✓ 配置已保存');
+      subscribe('agents', {});
+    }
+  } catch (e) {
+    toast(e.message || String(e), true);
+    if (_agentEdit === ctx) setAgentEditSaving(ctx, false);
+  }
+}
+
+function syncAgentBaseagentFields(ctx) {
+  const active = ctx.backdrop.querySelector('#ag-edit-active')?.value || ctx.original.activeBaseagent;
+  const block = agentBaseagentBlock(ctx.data, active);
+  syncAgentOptionFields(ctx, {
+    baseagent: active,
+    model: block.model == null ? '' : String(block.model),
+    effort: block.effort == null ? '' : String(block.effort),
+  });
+  syncAgentCapabilityInfo(ctx, active);
+}
+
+async function syncAgentCapabilityInfo(ctx, baseagent) {
+  const box = ctx.backdrop.querySelector('#ag-edit-capability');
+  if (!box) return;
+  const token = (ctx.capabilityLoadToken || 0) + 1;
+  ctx.capabilityLoadToken = token;
+  box.innerHTML = agentCapabilityPlaceholderHtml();
+  try {
+    const r = mResp(await menuSend({
+      type: 'menu.query',
+      name: 'capability',
+      agent: ctx.aid,
+      args: { aid: ctx.aid, baseagent },
+    }));
+    if (_agentEdit !== ctx || ctx.capabilityLoadToken !== token) return;
+    if (r.error) throw new Error(r.error.message || r.error.code);
+    box.innerHTML = agentCapabilityHtml(ctx.data, r.data, baseagent);
+    bindAgentCapabilityDetails(ctx, baseagent);
+  } catch (e) {
+    if (_agentEdit === ctx && ctx.capabilityLoadToken === token) {
+      box.innerHTML = agentCapabilityPlaceholderHtml(e.message || '能力信息加载失败');
+    }
+  }
+}
+
+function bindAgentCapabilityDetails(ctx, baseagent) {
+  const box = ctx.backdrop.querySelector('#ag-edit-capability');
+  if (!box) return;
+  box.querySelectorAll('.ag-edit-cap-details').forEach(details => {
+    details.addEventListener('toggle', () => {
+      if (!details.open || details.dataset.loaded === '1') return;
+      loadAgentCapabilityItems(ctx, baseagent, details.dataset.capType, details);
+    });
+  });
+}
+
+async function loadAgentCapabilityItems(ctx, baseagent, type, details) {
+  const target = details?.querySelector('.ag-edit-cap-items');
+  if (!target || !type) return;
+  target.innerHTML = agentCapabilityPlaceholderHtml('加载中…');
+  try {
+    const r = mResp(await menuSend({
+      type: 'menu.options',
+      name: 'capability',
+      agent: ctx.aid,
+      args: { aid: ctx.aid, baseagent, type },
+    }));
+    if (_agentEdit !== ctx) return;
+    if (r.error) throw new Error(r.error.message || r.error.code);
+    target.innerHTML = agentCapabilityItemsHtml(r.data);
+    details.dataset.loaded = '1';
+  } catch (e) {
+    if (_agentEdit === ctx) target.innerHTML = agentCapabilityPlaceholderHtml(e.message || '能力条目加载失败');
+  }
+}
+
+async function syncAgentOptionFields(ctx, values) {
+  const modelSelect = ctx.backdrop.querySelector('#ag-edit-model');
+  const effortSelect = ctx.backdrop.querySelector('#ag-edit-effort');
+  const activeSelect = ctx.backdrop.querySelector('#ag-edit-active');
+  const baseagent = values.baseagent || activeSelect?.value || ctx.original.activeBaseagent;
+  const currentModel = values.model || '';
+  const currentEffort = values.effort || '';
+  const token = (ctx.optionLoadToken || 0) + 1;
+  ctx.optionLoadToken = token;
+
+  setAgentSelectLoading(modelSelect, currentModel, currentModel ? `${currentModel}（加载中）` : '加载模型中');
+  setAgentSelectLoading(effortSelect, currentEffort, currentEffort ? `${currentEffort}（加载中）` : '加载 Effort 中');
+
+  try {
+    const models = await agentFetchOptions('model', ctx.aid, { baseagent, model: currentModel });
+    if (_agentEdit !== ctx || ctx.optionLoadToken !== token) return;
+    modelSelect.innerHTML = agentSelectOptions(models, currentModel, '默认模型');
+  } catch (e) {
+    if (_agentEdit === ctx && ctx.optionLoadToken === token) {
+      setAgentSelectError(modelSelect, currentModel);
+      toast(e.message || String(e), true);
+    }
+  } finally {
+    if (_agentEdit === ctx && ctx.optionLoadToken === token) modelSelect.disabled = false;
+  }
+
+  const selectedModel = modelSelect?.value || currentModel;
+  await syncAgentEffortOptions(ctx, baseagent, selectedModel, currentEffort, token);
+}
+
+async function syncAgentEffortOptions(ctx, baseagent, model, currentEffort, token) {
+  const effortSelect = ctx.backdrop.querySelector('#ag-edit-effort');
+  if (!effortSelect) return;
+  setAgentSelectLoading(effortSelect, currentEffort, currentEffort ? `${currentEffort}（加载中）` : '加载 Effort 中');
+  try {
+    let efforts = await agentFetchOptions('effort', ctx.aid, { baseagent, model, effort: currentEffort || 'auto' });
+    if (!efforts.length && AGENT_EFFORT_FALLBACK[baseagent]) efforts = AGENT_EFFORT_FALLBACK[baseagent];
+    if (_agentEdit !== ctx || ctx.optionLoadToken !== token) return;
+    effortSelect.innerHTML = agentSelectOptions(efforts, currentEffort, '默认');
+  } catch (e) {
+    if (_agentEdit === ctx && ctx.optionLoadToken === token) {
+      const fallback = AGENT_EFFORT_FALLBACK[baseagent] || [];
+      effortSelect.innerHTML = agentSelectOptions(fallback, currentEffort, '默认');
+      toast(e.message || String(e), true);
+    }
+  } finally {
+    if (_agentEdit === ctx && ctx.optionLoadToken === token) effortSelect.disabled = false;
+  }
+}
+
+function openAgentConfigDrawer(aid, data) {
+  closeAgentConfigDrawer();
+  const safe = agentSafeConfig(data);
+  const original = agentOriginalEditState(aid, data);
+  const active = original.activeBaseagent;
+  const titleName = original.name || shortAid(aid);
+  const jsonText = esc(JSON.stringify(safe, null, 2));
+
+  const html = `<div class="ag-edit-backdrop" id="ag-edit-backdrop">` +
+    `<aside class="ag-edit-drawer" role="dialog" aria-modal="true" aria-labelledby="ag-edit-title">` +
+      `<header class="ag-edit-head">` +
+        `<div class="ag-edit-title-wrap">` +
+          `<div id="ag-edit-title" class="ag-edit-title">编辑 Agent 配置</div>` +
+          `<div class="ag-edit-subtitle"><span>${esc(titleName)}</span><code>${esc(aid)}</code><span class="ag-edit-subtitle-path" title="${esc(original.projectPath)}">${esc(original.projectPath || '—')}</span></div>` +
+        `</div>` +
+        `<button class="ag-edit-close" id="ag-edit-close" type="button" aria-label="关闭">×</button>` +
+      `</header>` +
+      `<div class="ag-edit-body">` +
+        `<section class="ag-edit-section">` +
+          `<label class="ag-edit-field"><span>Owners</span><textarea id="ag-edit-owners" rows="2" spellcheck="false">${esc(original.owners.join('\n'))}</textarea></label>` +
+        `</section>` +
+        `<section class="ag-edit-section">` +
+          `<h3>运行配置</h3>` +
+          `<div class="ag-edit-grid">` +
+            `<label class="ag-edit-field"><span>当前 Baseagent</span><select id="ag-edit-active">${agentBaseagentOptions(active)}</select></label>` +
+            `<label class="ag-edit-field"><span>模型</span><select id="ag-edit-model">${agentSelectOptions([], original.model, '默认模型')}</select></label>` +
+            `<label class="ag-edit-field"><span>Effort</span><select id="ag-edit-effort">${agentSelectOptions([], original.effort, '默认')}</select></label>` +
+          `</div>` +
+        `</section>` +
+        `<section class="ag-edit-section">` +
+          `<h3>渠道</h3>` +
+          `${agentChannelsHtml(data)}` +
+        `</section>` +
+        `<section class="ag-edit-section">` +
+          `<h3>能力</h3>` +
+          `<div id="ag-edit-capability">${agentCapabilityPlaceholderHtml()}</div>` +
+        `</section>` +
+        `<section class="ag-edit-section ag-edit-section-json">` +
+          `<details open>` +
+            `<summary>原始 JSON 预览</summary>` +
+            `<textarea id="ag-edit-json" class="ag-edit-json" readonly spellcheck="false">${jsonText}</textarea>` +
+          `</details>` +
+        `</section>` +
+      `</div>` +
+      `<footer class="ag-edit-actions">` +
+        `<button class="ctrl-btn" id="ag-edit-cancel" type="button">取消</button>` +
+        `<button class="ctrl-btn" id="ag-edit-save-reload" type="button">保存并重载</button>` +
+        `<button class="ctrl-btn primary" id="ag-edit-save" type="button">保存</button>` +
+      `</footer>` +
+    `</aside>` +
+  `</div>`;
+
+  const wrap = document.createElement('div');
+  wrap.innerHTML = html;
+  const backdrop = wrap.firstChild;
+  document.body.appendChild(backdrop);
+
+  const ctx = {
+    aid,
+    data,
+    safeConfig: safe,
+    original,
+    backdrop,
+    onKeydown: (e) => { if (e.key === 'Escape') closeAgentConfigDrawer(); },
+  };
+  _agentEdit = ctx;
+
+  backdrop.addEventListener('click', (e) => { if (e.target === backdrop) closeAgentConfigDrawer(); });
+  backdrop.querySelector('#ag-edit-close').addEventListener('click', closeAgentConfigDrawer);
+  backdrop.querySelector('#ag-edit-cancel').addEventListener('click', closeAgentConfigDrawer);
+  backdrop.querySelector('#ag-edit-save').addEventListener('click', () => saveAgentConfigDrawer(ctx, false));
+  backdrop.querySelector('#ag-edit-save-reload').addEventListener('click', () => saveAgentConfigDrawer(ctx, true));
+  backdrop.querySelector('#ag-edit-active').addEventListener('change', () => syncAgentBaseagentFields(ctx));
+  backdrop.querySelector('#ag-edit-model').addEventListener('change', () => {
+    const baseagent = backdrop.querySelector('#ag-edit-active')?.value || ctx.original.activeBaseagent;
+    const effort = backdrop.querySelector('#ag-edit-effort')?.value || '';
+    const token = (ctx.optionLoadToken || 0) + 1;
+    ctx.optionLoadToken = token;
+    syncAgentEffortOptions(ctx, baseagent, backdrop.querySelector('#ag-edit-model')?.value || '', effort, token);
+  });
+  document.addEventListener('keydown', ctx.onKeydown);
+  syncAgentBaseagentFields(ctx);
+  setTimeout(() => backdrop.querySelector('#ag-edit-owners')?.focus(), 0);
 }
 
 async function agentOpEdit(aid) {
   await withAgentOp(aid, t('common.operating'), async () => {
+    document.querySelectorAll('.ops-more.open').forEach(m => m.classList.remove('open'));
     const qr = await menuSend({ type: 'menu.query', name: 'agent', args: { aid } });
     const q = mResp(qr);
     if (q.error) { toast(q.error.message || q.error.code, true); return; }
-    const cfg = q.data;
-    setAgentOp(aid, null); // 查询完毕先恢复，等用户填完 prompt
-    const projectRaw = prompt('项目路径：', cfg.config?.projects?.defaultPath || '');
-    const ownersRaw = prompt('Owners（逗号分隔 AID）：', (cfg.config?.owners || []).join(', '));
-    const patch = {};
-    if (projectRaw !== null) patch.projects = { defaultPath: projectRaw };
-    if (ownersRaw !== null) patch.owners = ownersRaw.split(',').map(s => s.trim()).filter(Boolean);
-    if (!Object.keys(patch).length) return;
-    setAgentOp(aid, t('common.operating'));
-    const r = mResp(await menuSend({ type: 'menu.action', name: 'agent', action: 'update', args: { aid, patch } }));
-    if (r.error) toast(r.error.message || r.error.code, true);
-    else toast(t('agents.op.saved'));
+    openAgentConfigDrawer(aid, q.data);
   });
 }
 
@@ -2106,7 +2998,6 @@ const GATEWAY_FIELDS = {
     { key: 'baseUrl', label: 'Base URL', placeholder: 'https://gateway.example.com（留空=官方）' },
     { key: 'model', label: '默认模型', placeholder: 'gpt-5.2-codex / ...' },
     { key: 'effort', label: 'Effort', placeholder: 'low / medium / high' },
-    { key: 'reasoning', label: 'Reasoning', placeholder: '（可选）' },
   ],
   gemini: [
     { key: 'model', label: '默认模型', placeholder: 'gemini-2.5-flash / ...' },
@@ -2223,7 +3114,6 @@ function gatewayCard(g) {
   rows.push(['默认模型', g.model ? esc(g.model) : '<span class="gw-dim">—</span>']);
   rows.push(['API Key', keyHtml]);
   if (g.effort) rows.push(['Effort', esc(g.effort)]);
-  if (g.reasoning) rows.push(['Reasoning', esc(g.reasoning)]);
   if (g.mode) rows.push(['模式', esc(g.mode)]);
   if (g.cliPath) rows.push(['CLI 路径', esc(g.cliPath)]);
   if (g.project) rows.push(['Project', esc(g.project)]);
@@ -2377,29 +3267,55 @@ function renderTriggers(data) {
   if (!data) { $('#view-triggers').innerHTML = '<div class="empty">加载中…</div>'; return; }
   const agents = data.agents || [];
   const triggers = data.triggers || [];
-  const selAid = data.selectedAgent;
+  const selAid = data.selectedAgent || null;
 
   // 左列：agent 列表（仿 msg list-item 风格）
-  let aHtml = '<div class="col-title">Agent</div>';
-  if (!agents.length) aHtml += '<div class="empty">暂无 Agent</div>';
-  for (const ag of agents) {
-    const sel = ag.value === selAid ? ' sel' : '';
-    aHtml += `<div class="list-item${sel}" data-aid="${esc(ag.value)}">` +
-      `<div class="name">${esc(ag.label)}</div>` +
-      `<div class="sub">${esc(ag.value)}</div></div>`;
+  let aHtml = '<div class="col-title trig-title">' +
+    '<span>Agent</span>' +
+    `<button id="trig-agents-toggle" class="trig-collapse-btn" title="${trigAgentsCollapsed ? '展开 Agent 列表' : '收起 Agent 列表'}">${trigAgentsCollapsed ? '›' : '‹'}</button>` +
+    '</div>';
+  if (!trigAgentsCollapsed) {
+    if (!agents.length) aHtml += '<div class="empty">暂无 Agent</div>';
+    for (const ag of agents) {
+      const sel = ag.value === selAid ? ' sel' : '';
+      aHtml += `<div class="list-item${sel}" data-aid="${esc(ag.value)}">` +
+        `<div class="name">${esc(ag.label)}</div>` +
+        `<div class="sub">${esc(ag.value)}</div></div>`;
+    }
   }
-  $('#trig-agents').innerHTML = aHtml;
-  $('#trig-agents').querySelectorAll('.list-item').forEach(item => {
-    item.onclick = () => { trigSel.agent = item.dataset.aid; subscribe('triggers', { agent: trigSel.agent }); };
+  const agentCol = $('#trig-agents');
+  agentCol.classList.toggle('collapsed', trigAgentsCollapsed);
+  agentCol.innerHTML = aHtml;
+  const collapseBtn = $('#trig-agents-toggle');
+  if (collapseBtn) collapseBtn.onclick = (e) => {
+    e.stopPropagation();
+    trigAgentsCollapsed = !trigAgentsCollapsed;
+    renderTriggers(data);
+  };
+  agentCol.onclick = (e) => {
+    if (e.target.closest('.list-item')) return;
+    if (e.target.closest('.col-title, .empty')) return;
+    if (trigAgentsCollapsed) return;
+    if (!trigSel.agent) return;
+    trigSel.agent = null;
+    subscribe('triggers', {});
+  };
+  agentCol.querySelectorAll('.list-item').forEach(item => {
+    item.onclick = () => {
+      trigSel.agent = item.dataset.aid;
+      subscribe('triggers', { agent: trigSel.agent });
+    };
   });
 
   // 右列：table，每字段一列
   const el = $('#trig-table');
-  if (!selAid) { el.innerHTML = '<div class="empty" style="padding:16px">← 选择 Agent 查看触发器</div>'; return; }
-  if (!triggers.length) { el.innerHTML = '<div class="empty" style="padding:16px">该 Agent 暂无触发器</div>'; return; }
+  if (!triggers.length) {
+    el.innerHTML = `<div class="empty" style="padding:16px">${selAid ? '该 Agent 暂无触发器' : '暂无触发器'}</div>`;
+    return;
+  }
 
   let html = '<table><thead><tr>' +
-    '<th>状态</th><th>名称</th><th>ID</th><th>类型</th><th>表达式</th>' +
+    '<th>Agent</th><th>状态</th><th>名称</th><th>ID</th><th>类型</th><th>表达式</th>' +
     '<th>上次触发</th><th>下次触发</th><th>触发次数</th><th>失败次数</th><th>最后结果</th><th>Session 策略</th>' +
     '<th>目标渠道</th><th>渠道 ID</th><th>渠道类型</th>' +
     '<th>创建者</th><th>创建渠道</th><th>创建时间</th><th>操作</th>' +
@@ -2409,7 +3325,10 @@ function renderTriggers(data) {
     const active = status === 'active';
     const lastFireTime = t.lastFiredAt || t.lastScheduledAt;
     const lastResult = t.lastResult || (t.lastScheduledAt ? '未记录' : '');
+    const agentAid = t.agentAid || t.schedulerAid || selAid || '';
+    const agentLabel = t.agentLabel || (agentAid ? shortAid(agentAid) : '');
     html += `<tr class="${active ? '' : 'trig-done'}">` +
+      `<td title="${esc(agentAid)}">${esc(agentLabel)}</td>` +
       `<td>${trigStatusBadge(status)}</td>` +
       `<td>${esc(t.name ?? t.label ?? '')}</td>` +
       `<td>${esc(t.id ?? t.value ?? '')}</td>` +
@@ -2428,7 +3347,7 @@ function renderTriggers(data) {
       `<td>${esc(t.createdByChannel ?? '')}</td>` +
       `<td>${t.createdAt ? fmtTime(t.createdAt) : '—'}</td>` +
       `<td>${active
-        ? `<button class="ctrl-btn danger" data-trigid="${esc(t.id ?? t.value ?? '')}" data-trigname="${esc(t.name ?? t.label ?? '')}">取消</button>`
+        ? `<button class="ctrl-btn danger" data-trigid="${esc(t.id ?? t.value ?? '')}" data-trigname="${esc(t.name ?? t.label ?? '')}" data-agent="${esc(agentAid)}">取消</button>`
         : '—'}</td>` +
       '</tr>';
   }
@@ -2439,14 +3358,15 @@ function renderTriggers(data) {
     btn.addEventListener('click', async () => {
       const nameOrId = btn.dataset.trigid;
       const label = btn.dataset.trigname;
+      const agent = btn.dataset.agent || trigSel.agent;
       if (!confirm(`取消触发器「${label}」？`)) return;
       try {
         const r = mResp(await menuSend({
           type: 'menu.action', name: 'trigger', action: 'cancel',
-          args: { nameOrId }, agent: selAid,
+          args: { nameOrId }, agent,
         }));
         if (r.error) toast(r.error.message || r.error.code, true);
-        else { toast('✓ 已取消'); subscribe('triggers', { agent: trigSel.agent }); }
+        else { toast('✓ 已取消'); subscribe('triggers', trigSel.agent ? { agent: trigSel.agent } : {}); }
       } catch (e) { toast(e.message, true); }
     });
   });
