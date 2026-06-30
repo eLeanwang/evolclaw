@@ -1,4 +1,4 @@
-import { ChannelAdapter, Session, ChannelPolicy, InteractionRequest, ReplyContext, type OutboundPayload, type EvolAgentRegistryHandle, type EvolAgentHandle } from '../../types.js';
+import { ChannelAdapter, Session, ChannelPolicy, InteractionRequest, ReplyContext, type OutboundPayload, type EvolAgentRegistryHandle, type EvolAgentHandle, type SessionIdentity } from '../../types.js';
 import { SessionManager } from '../session/session-manager.js';
 import { BaseagentRunnerUnavailableError, type AgentRunnerFull } from '../../agents/runner-types.js';
 import { MessageCache } from '../message/message-cache.js';
@@ -12,6 +12,7 @@ import { renderCommandCardAsText } from '../interaction-router.js';
 import { buildEnvelope, sendInteractionPayload } from '../message/message-utils.js';
 import { resolvePaths, getPackageRoot } from '../../paths.js';
 import { logger } from '../../utils/logger.js';
+import { resolvePeerRoleDetail, roleToSessionIdentity } from '../../config/peer-role-resolver.js';
 import crypto from 'crypto';
 import path from 'path';
 import fs from 'fs';
@@ -703,6 +704,35 @@ export class CommandHandler {
    */
   private resolveSelfAID(channel: string): string | undefined {
     return tryParseChannelKey(channel)?.selfAID;
+  }
+
+  private resolveCtlIdentity(session: Session, userId?: string): SessionIdentity {
+    const parsed = tryParseChannelKey(session.channel);
+    const owningAgent = this.getOwningAgent(session.channel);
+    const selfAid = session.selfAID || owningAgent?.aid || parsed?.selfAID;
+    const channelType = session.channelType || parsed?.type || this.resolveChannelType(session.channel);
+    const chatType = session.chatType === 'group' ? 'group' : 'private';
+    const actorId = userId || session.metadata?.peerId;
+    const conversationId = chatType === 'group'
+      ? (session.metadata?.groupId || session.channelId)
+      : actorId;
+
+    if (!selfAid || !actorId || !conversationId) {
+      const fallback = session.identity ?? this.sessionManager.resolveIdentity(session.channel, userId);
+      logger.info(`[ctl] identity fallback: sessionId=${session.id} role=${fallback.role} selfAid=${selfAid ?? 'none'} actor=${actorId ?? 'none'} conversation=${conversationId ?? 'none'}`);
+      return fallback;
+    }
+
+    const detail = resolvePeerRoleDetail({
+      selfAid,
+      channelType,
+      chatType,
+      actorId,
+      conversationId,
+      peerType: (session.metadata as any)?.peerType,
+    });
+    logger.info(`[ctl] identity resolved: sessionId=${session.id} role=${detail.effectiveRole} source=${detail.source} selfAid=${selfAid} actor=${actorId} conversation=${conversationId}`);
+    return roleToSessionIdentity(detail.effectiveRole);
   }
 
   registerPolicy(channelName: string, policy: ChannelPolicy): void {
@@ -1626,7 +1656,7 @@ export class CommandHandler {
 
   private static readonly CTL_COMMANDS = [
     '/help', '/status', '/check', '/pwd',
-    '/model', '/effort', '/perm', '/agent', '/baseagent',
+    '/model', '/setmodel', '/effort', '/perm', '/agent', '/baseagent',
     '/compact', '/file', '/send', '/restart', '/aid', '/rpc', '/storage',
     '/rename', '/name', '/trigger',
     '/chatmode', '/dispatch', '/activity',
@@ -1634,7 +1664,7 @@ export class CommandHandler {
   ];
 
   /** ctl 中仅允许查询形态的指令；写形态（带参）一律拒绝 */
-  private static readonly CTL_READONLY = new Set(['/baseagent']);
+  private static readonly CTL_READONLY = new Set(['/baseagent', '/setmodel']);
 
   /**
    * 从 session 恢复 ReplyContext，用于 ctl send 主动发送文本时的路由
@@ -1695,6 +1725,7 @@ export class CommandHandler {
 
     // 3. 从 session.metadata.peerId 获取 userId（用于权限判断）
     const userId = session.metadata?.peerId;
+    const ctlIdentity = this.resolveCtlIdentity(session, userId);
 
     // 3.1 /agent: EvolAgent 管理（转发到 CLI）
     if (cmd === '/agent' || cmd.startsWith('/agent ')) {
@@ -1793,11 +1824,8 @@ export class CommandHandler {
         cmd === '/rpc' || cmd.startsWith('/rpc ') ||
         cmd === '/storage' || cmd.startsWith('/storage ')) {
       // 权限检查：仅 owner
-      if (userId) {
-        const identity = this.sessionManager.resolveIdentity(session.channel, userId);
-        if (identity.role !== 'owner') {
-          return { ok: false, error: '无权限：此命令仅限 owner 使用' };
-        }
+      if (ctlIdentity.role !== 'owner') {
+        return { ok: false, error: '无权限：此命令仅限 owner 使用' };
       }
 
       // 无参数时返回用法说明
@@ -1842,12 +1870,18 @@ export class CommandHandler {
 
     // 6. 调用现有 handle()，不传 sendMessage 回调（结果直接返回）
     try {
-      const result = await this.handle(
+      const result = await this._handleInternal(
         cmd,
         session.channel,
         session.channelId,
         undefined,  // 不发送消息
         userId,
+        session.threadId || undefined,
+        session.chatType,
+        undefined,
+        undefined,
+        session.selfAID,
+        ctlIdentity,
       );
       const text = typeof result === 'string' ? result : (result && 'text' in result ? result.text : '(无输出)');
       return { ok: true, result: text || '(无输出)' };

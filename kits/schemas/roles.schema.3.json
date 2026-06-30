@@ -7,7 +7,7 @@
   "x-permission": "H",
   "x-scope": "roles",
   "type": "object",
-  "required": ["$schema_version", "defaultRoles", "roles"],
+  "required": ["$schema_version", "roles"],
   "additionalProperties": false,
   "properties": {
     "$schema_version": {

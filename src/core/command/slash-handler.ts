@@ -16,6 +16,7 @@ import { execAgentAction } from '../message/command-handler-agent-control.js';
 import { resolvePermissionMode, writeRelationPermissionMode } from '../model/config-scope.js';
 import { formatPeerKey } from '../relation/peer-identity.js';
 import { modelMatches, resolveCommandModelResolution } from './model-resolve.js';
+import { filterModelsForRole, validateModelSelectionForRole } from '../model/model-permission.js';
 import { displaySessionTitle } from '../session/session-title.js';
 import {
   guardIdleCommand,
@@ -662,7 +663,10 @@ export async function handleSlashCommand(this: any,
     const currentEffort = setmodelState.effort || 'auto';
 
     const now = Math.floor(Date.now() / 1000);
-    const modelIds = hasModelSwitcher(setmodelAgent) ? await setmodelAgent.listModels() : [];
+    const rawModelIds = hasModelSwitcher(setmodelAgent) ? await setmodelAgent.listModels() : [];
+    const modelIds = hasModelSwitcher(setmodelAgent)
+      ? filterModelsForRole(identity.role, fallbackBaseagent, rawModelIds, (setmodelAgent as any).resolveModelId?.bind(setmodelAgent))
+      : rawModelIds;
     const modelListData = {
       object: 'list',
       data: modelIds.map(id => ({ id, object: 'model', created: now, owned_by: setmodelAgent.name === 'codex' ? 'openai' : 'anthropic' })),
@@ -698,7 +702,10 @@ export async function handleSlashCommand(this: any,
         userId,
         role: identity.role,
       });
-      const models = hasModelSwitcher(modelAgent) ? await modelAgent.listModels() : [];
+      const rawModels = hasModelSwitcher(modelAgent) ? await modelAgent.listModels() : [];
+      const models = hasModelSwitcher(modelAgent)
+        ? filterModelsForRole(identity.role, fallbackBaseagent, rawModels, (modelAgent as any).resolveModelId?.bind(modelAgent))
+        : rawModels;
       const currentModel = hasModelSwitcher(modelAgent) ? (modelState.model || modelAgent.getModel()) : modelAgent.name;
       const efforts = getAvailableEfforts(modelAgent, currentModel);
       const currentEffort = modelState.effort || 'auto';
@@ -758,6 +765,9 @@ export async function handleSlashCommand(this: any,
     });
 
     const models = hasModelSwitcher(modelAgent) ? await modelAgent.listModels() : [];
+    const allowedModels = hasModelSwitcher(modelAgent)
+      ? filterModelsForRole(identity.role, fallbackBaseagent, models, (modelAgent as any).resolveModelId?.bind(modelAgent))
+      : models;
 
     const parts = args.split(/\s+/);
     let newModel: string | undefined;
@@ -780,7 +790,7 @@ export async function handleSlashCommand(this: any,
         } else if (models.includes(arg)) {
           newModel = arg;
         } else {
-          const modelList = models.map((m: string) => `  ${modelMatches(modelAgent, m, currentModel) ? '✓' : ' '} ${modelDisplayLabel(modelAgent, m)}`).join('\n');
+          const modelList = allowedModels.map((m: string) => `  ${modelMatches(modelAgent, m, currentModel) ? '✓' : ' '} ${modelDisplayLabel(modelAgent, m)}`).join('\n');
           const effortHint = efforts.length > 0 ? `\n\n推理强度请使用 /effort 命令` : '';
           return { kind: 'command.error' as const, text: `❌ 无效参数: ${arg}\n\n可用模型：\n${modelList}${effortHint}` };
         }
@@ -807,6 +817,20 @@ export async function handleSlashCommand(this: any,
     }
 
     // 运行时 model/effort 切换已通过 EvolAgent.setBaseagentModel/setBaseagentEffort 持久化
+
+    if (newModel) {
+      const decision = validateModelSelectionForRole({
+        role: identity.role,
+        baseagent: fallbackBaseagent,
+        requestedModel: newModel,
+        models,
+        resolveModelId: (modelAgent as any).resolveModelId?.bind(modelAgent),
+      });
+      if (!decision.ok) {
+        return { kind: 'command.error' as const, text: decision.message || `invalid model: ${newModel}` };
+      }
+      newModel = decision.model || newModel;
+    }
 
     const isCodexAgent = modelAgent.name === 'codex';
     const changes: string[] = [];

@@ -12,28 +12,19 @@
  * - 推送：2秒轮询 + JSON diff
  */
 
-import fs from 'fs';
-import path from 'path';
 import type { WatchSource } from './types.js';
 import { getModelCatalogSnapshot, type ModelCatalogApiEntry } from './models.js';
+import { resolveParentDistModule, toFileUrl } from './parent-package.js';
 
 // 动态导入 evolclaw 主项目的角色配置模块
 async function getRolesModule() {
-  const rolesPath = path.join(process.cwd(), 'dist', 'config', 'roles.js');
-  const cmPath = path.join(process.cwd(), 'dist', 'config', 'config-manager.js');
-
-  if (!fs.existsSync(rolesPath) || !fs.existsSync(cmPath)) {
-    throw new Error(`Roles modules not found (roles.js / config-manager.js). Is evolclaw built? cwd=${process.cwd()}`);
-  }
+  const rolesPath = resolveParentDistModule('config', 'roles.js');
+  const cmPath = resolveParentDistModule('config', 'config-manager.js');
 
   // Windows 上需要转换为 file:// URL
-  const toUrl = (p: string) => process.platform === 'win32'
-    ? new URL('file:///' + p.replace(/\\/g, '/')).href
-    : p;
-
   try {
-    const rolesMod = await import(toUrl(rolesPath));
-    const cmMod = await import(toUrl(cmPath));
+    const rolesMod = await import(toFileUrl(rolesPath));
+    const cmMod = await import(toFileUrl(cmPath));
 
     if (!rolesMod.readRolesConfig) throw new Error('readRolesConfig not found in roles.js');
     if (!rolesMod.getBuiltinRolesConfig) throw new Error('getBuiltinRolesConfig not found in roles.js');
@@ -55,17 +46,9 @@ async function getRolesModule() {
 }
 
 async function getRoleConstraintsModule() {
-  const constraintsPath = path.join(process.cwd(), 'dist', 'config', 'role-constraints.js');
+  const constraintsPath = resolveParentDistModule('config', 'role-constraints.js');
 
-  if (!fs.existsSync(constraintsPath)) {
-    throw new Error(`Role constraints module not found. Is evolclaw built? cwd=${process.cwd()}`);
-  }
-
-  const toUrl = (p: string) => process.platform === 'win32'
-    ? new URL('file:///' + p.replace(/\\/g, '/')).href
-    : p;
-
-  const mod = await import(toUrl(constraintsPath));
+  const mod = await import(toFileUrl(constraintsPath));
   if (!mod.isModelAllowedByPatterns) throw new Error('isModelAllowedByPatterns not found in role-constraints.js');
   return {
     isModelAllowedByPatterns: mod.isModelAllowedByPatterns as (model: string, allowedModels: string[]) => boolean,

@@ -4,6 +4,10 @@
 
 import { describe, it, expect } from 'vitest';
 import { mergeRolesConfig, diffRolesConfig } from '../src/config/roles-merge.js';
+import { writeRoles } from '../src/config/config-manager.js';
+import { rolesConfig } from '../src/paths.js';
+import { getBuiltinRolesConfig } from '../src/config/roles.js';
+import fs from 'fs';
 import type { RolesConfig } from '../src/types.js';
 
 function baseConfig(): RolesConfig {
@@ -194,5 +198,22 @@ describe('diffRolesConfig', () => {
     expect(restored.roles.developer).toEqual(full.roles.developer);
     // 未改字段跟随内置
     expect(restored.roles.member.permissions.permissionMode).toEqual(builtin.roles.member.permissions.permissionMode);
+  });
+});
+
+describe('writeRoles', () => {
+  it('allows overlay diffs without defaultRoles when only role permissions change', () => {
+    const full = getBuiltinRolesConfig();
+    full.roles.member.permissions['baseagents.claude.model'] = {
+      ...full.roles.member.permissions['baseagents.claude.model'],
+      default: 'claude-haiku-4-5-20251001',
+      allowedModels: ['claude-haiku-*'],
+    };
+
+    expect(() => writeRoles(full)).not.toThrow();
+
+    const raw = JSON.parse(fs.readFileSync(rolesConfig(), 'utf-8')) as RolesConfig;
+    expect(raw.defaultRoles).toBeUndefined();
+    expect(raw.roles.member.permissions['baseagents.claude.model'].allowedModels).toEqual(['claude-haiku-*']);
   });
 });

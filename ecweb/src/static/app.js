@@ -4690,6 +4690,19 @@ function renderRoleModelPermissionSection(roleDef) {
              class="form-input">
       <datalist id="role-model-options"></datalist>
 
+      <label class="model-field-label">${t('roleDefs.allowedModels')}</label>
+      <div class="model-allowed-editor">
+        <div class="model-allowed-list" data-model-allowed-list></div>
+        <div class="model-allowed-add">
+          <input type="text"
+                 class="form-input model-allowed-input"
+                 data-model-allowed-input
+                 list="role-model-options"
+                 placeholder="${currentLang === 'zh-CN' ? '输入模型 ID 或通配模式' : 'Model ID or wildcard pattern'}">
+          <button type="button" class="btn-secondary" data-model-allowed-add>${currentLang === 'zh-CN' ? '添加' : 'Add'}</button>
+        </div>
+      </div>
+
       <div class="model-mode-tabs">
         ${['pattern', 'explicit', 'mixed'].map(mode => `
           <label class="model-mode-option">
@@ -4775,39 +4788,69 @@ function renderModelCatalogControls(section, models, allowedModels) {
   `).join('');
 }
 
+function getRoleAllowedModelsFromList(section) {
+  return normalizeAllowedModels(Array.from(section.querySelectorAll('[data-model-allowed-item]'))
+    .map(item => item.dataset.modelAllowedItem));
+}
+
+function syncModelSelectionMode(section, allowedModels = getRoleAllowedModelsFromList(section)) {
+  const mode = inferModelSelectionMode(allowedModels);
+  const radio = section.querySelector(`input[name="role-model-selection-mode"][value="${mode}"]`);
+  if (radio) radio.checked = true;
+}
+
+function syncModelCatalogChecks(section, allowedModels = getRoleAllowedModelsFromList(section)) {
+  const selected = new Set(allowedModels);
+  section.querySelectorAll('.model-pattern-checkbox, .model-explicit-checkbox').forEach(input => {
+    input.checked = selected.has(input.value);
+  });
+  syncModelSelectionMode(section, allowedModels);
+}
+
+function renderRoleAllowedModels(section, allowedModels) {
+  const list = section.querySelector('[data-model-allowed-list]');
+  if (!list) return;
+
+  const normalized = normalizeAllowedModels(allowedModels);
+  if (!normalized.length) {
+    list.innerHTML = `<div class="model-empty">${currentLang === 'zh-CN' ? '未配置可用模型' : 'No allowed models configured.'}</div>`;
+    syncModelCatalogChecks(section, normalized);
+    return;
+  }
+
+  list.innerHTML = normalized.map(model => `
+    <span class="model-allowed-chip" data-model-allowed-item="${esc(model)}">
+      <span>${esc(model)}</span>
+      <button type="button"
+              class="model-allowed-remove"
+              data-model-allowed-remove="${esc(model)}"
+              aria-label="${currentLang === 'zh-CN' ? '移除模型' : 'Remove model'}">x</button>
+    </span>
+  `).join('');
+  syncModelCatalogChecks(section, normalized);
+}
+
+function addRoleAllowedModel(section, value) {
+  const model = typeof value === 'string' ? value.trim() : '';
+  if (!model) return false;
+  const next = normalizeAllowedModels([...getRoleAllowedModelsFromList(section), model]);
+  renderRoleAllowedModels(section, next);
+  return true;
+}
+
 function collectRoleModelPermission(container) {
   const section = container.matches?.('[data-model-permissions]')
     ? container
     : container.querySelector('[data-model-permissions]');
   if (!section) return null;
 
-  const mode = section.querySelector('input[name="role-model-selection-mode"]:checked')?.value || 'explicit';
   const defaultInput = section.querySelector('[data-model-field="default"]');
   const overrideInput = section.querySelector('[data-model-field="allowOverride"]');
-  const allowedModels = [];
-  const explicitCheckboxes = Array.from(section.querySelectorAll('.model-explicit-checkbox'));
-
-  if (mode === 'pattern' || mode === 'mixed') {
-    section.querySelectorAll('.model-pattern-checkbox:checked').forEach(input => {
-      allowedModels.push(input.value);
-    });
-  }
-
-  if (mode === 'explicit' || mode === 'mixed') {
-    explicitCheckboxes.filter(input => input.checked).forEach(input => {
-      allowedModels.push(input.value);
-    });
-    if (explicitCheckboxes.length === 0) {
-      normalizeAllowedModels(section._initialAllowedModels)
-        .filter(model => model !== '*' && !model.endsWith('*'))
-        .forEach(model => allowedModels.push(model));
-    }
-  }
 
   return {
     default: defaultInput?.value.trim() || '',
     allowOverride: !!overrideInput?.checked,
-    allowedModels: normalizeAllowedModels(allowedModels)
+    allowedModels: getRoleAllowedModelsFromList(section)
   };
 }
 
@@ -4913,13 +4956,48 @@ async function initRoleModelPermissionEditor(container, roleName, roleDef) {
 
   section._modelCatalog = catalogModels;
   renderModelCatalogControls(section, catalogModels, initialAllowed);
+  renderRoleAllowedModels(section, initialAllowed);
   updateModelModeVisibility(section);
 
-  section.addEventListener('change', () => {
+  section.querySelector('[data-model-allowed-add]')?.addEventListener('click', () => {
+    const input = section.querySelector('[data-model-allowed-input]');
+    if (addRoleAllowedModel(section, input?.value || '')) {
+      if (input) input.value = '';
+      updateRoleModelPreview(section, roleName);
+    }
+  });
+
+  section.querySelector('[data-model-allowed-input]')?.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter') return;
+    e.preventDefault();
+    if (addRoleAllowedModel(section, e.currentTarget.value || '')) {
+      e.currentTarget.value = '';
+      updateRoleModelPreview(section, roleName);
+    }
+  });
+
+  section.addEventListener('click', (e) => {
+    const remove = e.target.closest?.('[data-model-allowed-remove]');
+    if (!remove) return;
+    const next = getRoleAllowedModelsFromList(section)
+      .filter(model => model !== remove.dataset.modelAllowedRemove);
+    renderRoleAllowedModels(section, next);
+    updateRoleModelPreview(section, roleName);
+  });
+
+  section.addEventListener('change', (e) => {
+    const target = e.target;
+    if (target?.classList?.contains('model-pattern-checkbox') || target?.classList?.contains('model-explicit-checkbox')) {
+      const allowed = new Set(getRoleAllowedModelsFromList(section));
+      if (target.checked) allowed.add(target.value);
+      else allowed.delete(target.value);
+      renderRoleAllowedModels(section, [...allowed]);
+    }
     updateModelModeVisibility(section);
     updateRoleModelPreview(section, roleName);
   });
-  section.addEventListener('input', () => {
+  section.addEventListener('input', (e) => {
+    if (e.target?.matches?.('[data-model-allowed-input]')) return;
     updateRoleModelPreview(section, roleName);
   });
 

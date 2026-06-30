@@ -10,6 +10,7 @@ import {
   type SessionFile,
 } from '../fs-utils.js';
 import type { WatchSource } from './types.js';
+import { resolveParentDistModule, toFileUrl } from './parent-package.js';
 
 interface RoleWriteAuth {
   localDirect?: boolean;
@@ -64,25 +65,14 @@ export interface ConversationSeed {
   members?: ConversationMemberSeed[];
 }
 
-function toUrl(p: string): string {
-  return process.platform === 'win32'
-    ? new URL('file:///' + p.replace(/\\/g, '/')).href
-    : p;
-}
-
 async function getParentModules() {
-  const dist = path.join(process.cwd(), 'dist', 'config');
-  const assignmentsPath = path.join(dist, 'role-assignments.js');
-  const rolesPath = path.join(dist, 'roles.js');
-  const resolverPath = path.join(dist, 'peer-role-resolver.js');
+  const assignmentsPath = resolveParentDistModule('config', 'role-assignments.js');
+  const rolesPath = resolveParentDistModule('config', 'roles.js');
+  const resolverPath = resolveParentDistModule('config', 'peer-role-resolver.js');
 
-  for (const p of [assignmentsPath, rolesPath, resolverPath]) {
-    if (!fs.existsSync(p)) throw new Error(`module not found: ${p}. Is evolclaw built?`);
-  }
-
-  const assignments = await import(toUrl(assignmentsPath));
-  const roles = await import(toUrl(rolesPath));
-  const resolver = await import(toUrl(resolverPath));
+  const assignments = await import(toFileUrl(assignmentsPath));
+  const roles = await import(toFileUrl(rolesPath));
+  const resolver = await import(toFileUrl(resolverPath));
   return { assignments, roles, resolver };
 }
 

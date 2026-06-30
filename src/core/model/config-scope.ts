@@ -29,6 +29,7 @@ import {
   type BehaviorConfig,
 } from '../../config/behavior.js';
 import { mergeWithRoleConstraints } from '../../config/role-constraints.js';
+import { constrainResolvedModelForRole } from './model-permission.js';
 import type { AgentConfig, RelationConfig, RoleOverride } from '../../types.js';
 
 export type ModelScope = 'global' | 'agent' | 'role' | 'relation';
@@ -370,8 +371,12 @@ export function resolveEffectiveModel(sel: ScopeSelector, ba?: string): Resolved
     }
   }
 
+  const constrainedModel = sel.role
+    ? constrainResolvedModelForRole({ role: sel.role, baseagent, model: finalModel }).model
+    : finalModel;
+
   return {
-    model: finalModel,
+    model: constrainedModel,
     effort: finalEffort,
     source: modelSource,
     effortSource,

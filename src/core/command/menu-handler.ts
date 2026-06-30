@@ -2,6 +2,7 @@ import { type Session } from '../../types.js';
 import { resolvePermissionMode } from '../model/config-scope.js';
 import { formatPeerKey } from '../relation/peer-identity.js';
 import { modelMatches, resolveCommandModelResolution } from './model-resolve.js';
+import { filterModelsForRole, validateModelSelectionForRole } from '../model/model-permission.js';
 import { type AgentRunnerFull, hasModelSwitcher, hasPermissionController } from '../../agents/runner-types.js';
 import { getCodexEfforts } from '../../agents/codex-runner.js';
 import { resolvePaths, getPackageRoot } from '../../paths.js';
@@ -619,7 +620,9 @@ export async function getSubMenuItems(this: any, cmd: string, channel: string, c
   if (cmd === '/model') {
     const agent = this.getAgent(channel, session?.baseagent);
     if (hasModelSwitcher(agent) && agent.listModels) {
-      const models = await agent.listModels() ?? [];
+      const role = (overrideIdentity ?? this.sessionManager.resolveIdentity(channel, userId)).role;
+      const rawModels = await agent.listModels() ?? [];
+      const models = filterModelsForRole(role, session?.baseagent || (agent as any).name, rawModels, (agent as any).resolveModelId?.bind(agent));
       const state = resolveCommandModelResolution({
         agent,
         session,
@@ -627,7 +630,7 @@ export async function getSubMenuItems(this: any, cmd: string, channel: string, c
         channelType: this.resolveChannelType?.(channel),
         channelId,
         userId,
-        role: (overrideIdentity ?? this.sessionManager.resolveIdentity(channel, userId)).role,
+        role,
       });
       const currentModel = state.model || agent.getModel();
       if (models.length > 0) return models.map((m: string) => ({ value: m, label: modelDisplayLabel(agent, m), selected: modelMatches(agent, m, currentModel) }));
@@ -1132,23 +1135,33 @@ export async function execMenuUpdate(this: any,
   if (cmdBase === '/model') {
     if (!isAdmin) return { error: '无权限', code: 'NO_PERMISSION' };
     const agent = this.getAgent(channel, session?.baseagent);
+    let targetModel = arg;
     if (hasModelSwitcher(agent)) {
       const models = (await agent.listModels?.()) ?? [];
-      if (models.length && !models.includes(arg)) {
+      const decision = validateModelSelectionForRole({
+        role: identity.role,
+        baseagent: session?.baseagent || (agent as any).name,
+        requestedModel: arg,
+        models,
+        resolveModelId: (agent as any).resolveModelId?.bind(agent),
+      });
+      if (!decision.ok) return { error: decision.message || `invalid model: ${arg}`, code: decision.code || 'INVALID_VALUE' };
+      targetModel = decision.model || arg;
+      if (models.length && !models.includes(targetModel)) {
         return { error: `无效模型: ${arg}`, code: 'INVALID_VALUE' };
       }
-      agent.setModel(arg);
+      agent.setModel(targetModel);
     }
-    if (evolagent) evolagent.setBaseagentModel(arg, session?.baseagent || agent.name);
+    if (evolagent) evolagent.setBaseagentModel(targetModel, session?.baseagent || agent.name);
     this.eventBus.publish({
       type: 'runner:model-changed',
       sessionId: session?.id,
       agentName: evolagent?.name,
       baseagent: session?.baseagent || agent.name,
-      model: arg,
+      model: targetModel,
       timestamp: Date.now(),
     });
-    return { data: { model: arg } };
+    return { data: { model: targetModel } };
   }
 
   if (cmdBase === '/effort') {

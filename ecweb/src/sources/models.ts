@@ -1,5 +1,4 @@
-import fs from 'fs';
-import path from 'path';
+import { resolveParentDistModule, toFileUrl } from './parent-package.js';
 
 interface CatalogModule {
   getCatalog: (self?: string, ba?: string) => Promise<{ models: RawModelEntry[]; source: string }>;
@@ -22,22 +21,13 @@ export interface ModelCatalogApiEntry {
 
 export interface ModelCatalogSnapshot {
   models: ModelCatalogApiEntry[];
+  catalogModels: ModelCatalogApiEntry[];
   source: string;
   lastUpdate: string;
 }
 
-function toFileUrl(p: string): string {
-  return process.platform === 'win32'
-    ? new URL('file:///' + p.replace(/\\/g, '/')).href
-    : p;
-}
-
 async function getCatalogModule(): Promise<CatalogModule> {
-  const catalogPath = path.join(process.cwd(), 'dist', 'core', 'model', 'model-catalog.js');
-  if (!fs.existsSync(catalogPath)) {
-    throw new Error(`Model catalog module not found. Is evolclaw built? cwd=${process.cwd()}`);
-  }
-
+  const catalogPath = resolveParentDistModule('core', 'model', 'model-catalog.js');
   const mod = await import(toFileUrl(catalogPath));
   if (typeof mod.getCatalog !== 'function') {
     throw new Error('getCatalog not found in model-catalog.js');
@@ -82,8 +72,10 @@ export function normalizeModelEntries(models: RawModelEntry[]): ModelCatalogApiE
 export async function getModelCatalogSnapshot(baseagent = 'claude'): Promise<ModelCatalogSnapshot> {
   const { getCatalog } = await getCatalogModule();
   const catalog = await getCatalog(undefined, baseagent);
+  const normalized = normalizeModelEntries(catalog.models || []);
   return {
-    models: normalizeModelEntries(catalog.models || []),
+    models: normalized,
+    catalogModels: normalized,
     source: catalog.source || 'unknown',
     lastUpdate: new Date().toISOString()
   };

@@ -631,7 +631,7 @@ export async function startWatchWebServer(opts: { port?: number; log?: (s: strin
         return;
       }
       handleStatsApi(req, res);
-    } else if ((req.url || '') === '/api/models/catalog' || (req.url || '').startsWith('/api/models/catalog?')) {
+    } else if ((req.url || '').startsWith('/api/models/')) {
       const authHeader = req.headers.authorization || '';
       const bearerToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : '';
       const { query } = parseUrl(req.url || '');

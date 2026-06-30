@@ -157,10 +157,11 @@ export function mergeWithRoleConstraints(
  * @param model 模型名称
  * @returns 是否允许
  */
-export function isModelAllowedForRole(role: string, model: string): boolean {
-  const perm = getFieldPermission(role, 'baseagents.claude.model');
+export function isModelAllowedForRole(role: string, model: string, baseagent = 'claude'): boolean {
+  const perm = getFieldPermission(role, `baseagents.${baseagent}.model`)
+    ?? (baseagent === 'claude' ? getFieldPermission('member', 'baseagents.claude.model') : null);
   if (!perm || !perm.allowedModels) {
-    return false;
+    return baseagent !== 'claude';
   }
   return isModelAllowedByPatterns(model, perm.allowedModels);
 }

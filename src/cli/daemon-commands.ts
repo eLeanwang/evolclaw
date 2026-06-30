@@ -2612,6 +2612,10 @@ async function startEcwebIfEnabled(p: ReturnType<typeof resolvePaths>): Promise<
       detached: true,
       stdio: 'ignore',
       windowsHide: true,
+      env: {
+        ...process.env,
+        EVOLCLAW_PACKAGE_ROOT: getPackageRoot(),
+      },
     });
 
     child.unref();
