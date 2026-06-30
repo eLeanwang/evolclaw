@@ -66,14 +66,7 @@
       "description": "项目路径配置",
       "x-merge": "dict",
       "properties": {
-        "rootPath": { "type": "string", "description": "项目根路径" },
-        "defaultPath": { "type": "string", "description": "默认项目路径" },
-        "autoCreate": { "type": "boolean", "description": "自动创建项目" },
-        "list": {
-          "type": "object",
-          "description": "项目列表（名称→路径映射）",
-          "additionalProperties": { "type": "string" }
-        }
+        "defaultPath": { "type": "string", "description": "Agent 项目路径" }
       }
     },
     "debug": {

@@ -45,7 +45,6 @@
           "properties": {
             "model": { "type": "string", "description": "Codex 模型" },
             "effort": { "type": "string", "description": "Codex 推理强度" },
-            "reasoning": { "type": "string", "description": "Codex 推理模式" },
             "enableRequestUserInput": { "type": "boolean", "description": "启用用户输入请求" },
             "approvalsReviewer": { "type": "string", "enum": ["user", "auto_review", "guardian_subagent"], "description": "审批审查者" }
           }

@@ -1289,6 +1289,43 @@ create 涉及 AID 网络注册 + agent.md 上传 + 热加载，最坏 30s+。协
 
 `disable` 同 `enable`，`data.enabled` 为 `false`。错误码：`INVALID_ARGS`、`NOT_FOUND`、`CONFLICT`（已存在）、`INTERNAL`。
 
+#### query — 查询 agent 详情与安全配置
+
+```jsonc
+// →
+{ "type": "menu.query", "id": "a-204", "name": "agent",
+  "args": { "aid": "mybot.agentid.pub" } }
+
+// ← 成功（保留摘要 config，同时提供用于设置页的 safeConfig）
+{ "data": {
+    "aid": "mybot.agentid.pub",
+    "status": "running",
+    "identity": { "name": "MyBot", "description": null },
+    "config": {
+      "baseagent": "claude",
+      "active_baseagent": "claude",
+      "model": "opus",
+      "effort": "high",
+      "owners": ["owner.agentid.pub"],
+      "projects": { "defaultPath": "/home/u/proj" },
+      "baseagents": { "claude": { "model": "opus", "effort": "high" } },
+      "channels": ["feishu/main"]
+    },
+    "safeConfig": {
+      "aid": "mybot.agentid.pub",
+      "owners": ["owner.agentid.pub"],
+      "active_baseagent": "claude",
+      "projects": { "defaultPath": "/home/u/proj" },
+      "baseagents": { "claude": { "model": "opus", "effort": "high", "apiKey": "[hidden]" } },
+      "channels": [
+        { "type": "feishu", "name": "main", "enabled": true, "appId": "[hidden]", "appSecret": "[hidden]" }
+      ]
+    }
+  }}
+```
+
+`safeConfig` 是脱敏后的完整安全配置预览，至少包含 `projects`、`baseagents`、`channels`、`owners`、`active_baseagent`。`projects` 只保留 `defaultPath`；历史 `projects.rootPath/list/autoCreate` 不再是 agent 公开配置契约。
+
 #### reload / update — 本 agent 自管理
 
 ```jsonc
@@ -1298,10 +1335,20 @@ create 涉及 AID 网络注册 + agent.md 上传 + 热加载，最坏 30s+。协
 
 // update 自身配置（agent channel owner-only；控制 channel daemon owner 可指定任意 aid）
 { "type": "menu.action", "id": "a-206", "name": "agent", "action": "update",
-  "args": { "aid": "mybot.agentid.pub", "patch": { "name": "MyBot" } } }
+  "args": { "aid": "mybot.agentid.pub", "patch": {
+    "active_baseagent": "codex",
+    "baseagents": { "codex": { "model": "gpt-5.2-codex", "effort": "high" } },
+    "projects": { "defaultPath": "/home/u/proj" },
+    "owners": ["owner.agentid.pub"]
+  } } }
+
+// ← config patch 成功：保存后需 reload 才生效
+{ "data": { "aid": "mybot.agentid.pub", "saved": true, "requiresReload": true } }
 ```
 
 agent channel 入口强制 `aid` 等于当前 channel 绑定的 agent；跨 agent reload/update 仅允许控制 channel。
+
+config patch 可写字段为 `active_baseagent`、`baseagents`、`projects`、`owners`、`chatmode`、`channels`（非 AUN）。`active_baseagent` 只允许 `claude/codex/gemini`。`projects` 只接受 `defaultPath`，提交 `projects.rootPath`、`projects.list` 或 `projects.autoCreate` 返回 `INVALID_ARGS`。
 
 `patch.name` 与 `patch.avatar` 是特殊更新：它们写入 `agent.md` frontmatter，而不是
 `agents/<aid>/config.json`。`name` 会重新签名发布 `agent.md`；`avatar` 需要客户端传 data URL，
@@ -1400,6 +1447,8 @@ create 受理后，后台逐环节把进度写入 `agents/<aid>/create-status.js
 | `boundSessionId` | `current` strategy 注册时绑定的当前 active session |
 | `agentId` | 可选，指定 baseagent/runner |
 | `prompt` | 触发时发送给 agent 的内容 |
+| `model` | 可选，触发执行时覆盖模型 |
+| `effort` | 可选，触发执行时覆盖推理强度：`low` / `medium` / `high` / `xhigh` / `max` |
 | `createdByPeerId` / `createdByChannel` | scoped 鉴权依据 |
 
 #### set — 注册触发器
@@ -1416,7 +1465,9 @@ create 受理后，后台逐环节把进度写入 `agents/<aid>/create-status.js
     "targetChannelId": "chat-1",      // 可选；缺省为请求来源 channelId
     "targetThreadId": "thread-abc",   // 可选；指定已有话题
     "targetSessionStrategy": "latest", // 可选：latest（默认）/ current / thread
-    "agentId": "claude"               // 可选
+    "agentId": "claude",              // 可选
+    "model": "gpt-5.2-codex",         // 可选；仅覆盖本 trigger 执行模型
+    "effort": "high"                  // 可选：low / medium / high / xhigh / max
   }}
 
 // ← 成功
@@ -1443,6 +1494,8 @@ create 受理后，后台逐环节把进度写入 `agents/<aid>/create-status.js
 | `thread` | 触发时进入/创建 thread 会话 | 目标 adapter 不支持 thread 返回 `INVALID_ARGS`；AUN 会自动生成 `targetThreadId=trigger-<id>` |
 
 如果指定跨渠道目标，客户端应同时传 `targetChannel` 与 `targetChannelId`。服务端会保存 `targetChannelType`，供 scheduler 在触发时脱离当前请求上下文也能正确路由。
+
+`model` / `effort` 是 trigger 级执行覆盖；baseagent 不由 trigger 指定，触发时沿用 trigger 所属 agent 当前 active baseagent。未传时继承普通模型解析链。
 
 #### cancel — 取消触发器
 
@@ -1488,6 +1541,8 @@ create 受理后，后台逐环节把进度写入 `agents/<aid>/create-status.js
 | `scheduleType` | 可选；`delay` / `at` / `cron` |
 | `scheduleValue` | 可选；会转成字符串 |
 | `prompt` | 可选；会转成字符串 |
+| `model` | 可选；触发执行时覆盖模型 |
+| `effort` | 可选；`low` / `medium` / `high` / `xhigh` / `max` |
 
 改 `scheduleType` 或 `scheduleValue` 时，服务端先校验再重算 `nextFireAt`，非法值返回 `INVALID_ARGS`，不会写入 NaN 或污染 scheduler heap。更新成功后会调用 `scheduler.update(updated)`，替换内存调度项。
 
