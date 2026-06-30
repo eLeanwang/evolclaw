@@ -1,168 +1,408 @@
 # 命令执行角色权限设计
 
-> 文档版本：v0.1  
-> 日期：2026-06-29  
-> 状态：设计草案  
-> 相关背景：远程详情页通过 `menu.action name=cli action=exec` 获取模型列表时，guest 角色被 `/cli` owner-only 前置权限拦截，导致后续 CLI 内部的角色模型过滤没有机会生效。
+> 文档版本：v1.0  
+> 日期：2026-06-30  
+> 状态：✅ **已实施** (2026-06-30)  
+> 背景：远程详情页通过 `menu.action name=cli action=exec` 获取模型列表时，guest 角色在 `/cli` 入口被 `identity.role === 'owner'` 前置判断拦截，导致 `src/cli/model.ts` 内部已有的角色模型过滤没有机会执行。这个问题不是单点 bug，而是命令执行入口缺少统一角色权限模型的表现。
+
+---
+
+## 实施状态
+
+✅ **Phase 1: 基础架构** - 已完成
+- ✅ 类型定义 (src/types.ts)
+- ✅ Schema v4 (kits/schemas/roles.schema.4.json)
+- ✅ Operation Registry (src/core/command/operation-registry.ts)
+
+✅ **Phase 2: 解析与授权** - 已完成
+- ✅ CLI Intent Parser (src/core/command/cli-intent-parser.ts)
+- ✅ Command Permission (src/core/command/command-permission.ts)
+- ✅ Command Audit (src/core/command/command-audit.ts)
+
+✅ **Phase 3: 配置集成** - 已完成
+- ✅ roles.ts 升级到 v4
+- ✅ roles-merge.ts 支持 commandPermissions
+- ✅ config-manager.ts 添加 v3→v4 迁移
+
+✅ **Phase 4: 入口改造** - 已完成
+- ✅ menu-handler.ts /cli 入口改造
+
+✅ **Phase 5: 测试与文档** - 已完成
+- ✅ 单元测试
+- ✅ 文档更新
 
 ---
 
 ## 1. 结论
 
-各种命令执行权限需要纳入角色权限体系。即使是原始 CLI、shell 执行、远程命令执行这类高危能力，也不应该在代码里写死为某个角色专属，而应该作为独立能力点进入角色配置。
+命令执行权限需要一次性纳入统一角色权限体系，而不是只给 `/cli model list` 做特例。最终状态应该是：
 
-推荐方案是：
+1. 所有用户可触发的命令入口都先归一化为稳定的 `OperationId`。
+2. 所有入口都调用同一个 `authorizeCommand()`。
+3. 角色配置通过 `roles.schema.4.json` 的 `commandPermissions` 显式表达命令能力。
+4. 普通能力和高危能力都能授权给任意 role，但高危能力必须有 `dangerous=true` 元数据、显式 grant、审计日志和额外约束。
+5. 原始 `/cli exec` 不再是代码里的 owner-only 特例，而是 `cli.exec.raw` 这个高危 operation。
+6. 能安全解析的 CLI argv 必须映射到具体 operation；不能安全解析的 argv 一律映射到 `cli.exec.raw`。
+7. `model.use` 等写操作必须同时通过命令授权和字段权限约束，例如 `allowOverride`、`allowedModels`。
+8. 进程级能力必须区分 `daemon owner` 与普通 agent-channel `owner`，不能混用同一个字符串角色边界。
 
-1. 将命令能力抽象成稳定的“能力点 / 操作 ID”，例如 `model.list`、`model.current`、`model.use`、`file.list`、`trigger.create`。
-2. 角色只配置这些规范化能力点的允许、拒绝、作用域和约束。
-3. slash 命令、menu 协议、远程 CLI 透传、ctl/IPC 都先归一化为同一个能力点，再进入统一授权器判断。
-4. 通用 `/cli exec`、shell/RCE 等能力默认不授予普通角色，但可以通过显式高危能力点授权给任意角色。
-
-一句话：角色权限应该管理“用户能做什么”；`owner/admin/guest` 只是默认策略名，不应该成为代码里的硬边界。
+一句话：`owner/admin/member/guest/custom role` 只是默认策略名，不是代码硬边界；真正的权限边界应该是 operation、scope、constraints、dangerous metadata 和可审计授权决策。
 
 ---
 
-## 2. 当前问题
+## 2. 当前代码事实
 
-### 2.1 权限入口分散
+### 2.1 `/cli` 当前链路
 
-当前系统至少存在以下命令入口：
-
-| 入口 | 示例 | 当前主要权限来源 | 问题 |
-|---|---|---|---|
-| slash 命令 | `/model`、`/file`、`/trigger` | `guardRoleCommand` + handler 内部判断 | 规则分散，很多地方硬编码 owner/admin/guest |
-| menu.query/update/action | `menu.action name=file action=list` | `menu-handler.ts` 内部判断 | 与 slash 命令不完全对齐 |
-| 远程 CLI 透传 | `menu.action name=cli action=exec` | `/cli` owner-only + CLI 白名单 | 太粗：guest 无法执行安全的模型查询 |
-| 本地 CLI | `evolclaw model list` | 本地用户进程权限 + CLI 内部校验 | 与远程角色上下文需要桥接 |
-| ctl / IPC | `ctl setmodel` 等 | IPC/daemon 内部校验 | 需要和角色模型权限保持一致 |
-| baseagent 工具执行 | Claude/Codex tool call | `permissionMode`、dangerous command check | 这是运行时工具权限，不应和用户菜单命令混为一层 |
-
-### 2.2 `/cli` 透传粒度过粗
-
-目前 `/cli` 透传逻辑是：
+当前远程 menu action 入口大致为：
 
 ```text
-menu.action name=cli action=exec
-  -> /cli
-  -> identity.role 必须是 owner
+MessageBridge.handleMenuAction()
+  -> CommandHandler.execMenuAction()
+  -> src/core/command/menu-handler.ts
+  -> cmdBase === '/cli'
+  -> action 必须为 exec
+  -> identity.role 必须为 owner
   -> CLI_EXEC_WHITELIST
+  -> execCliPassthrough(argv)
   -> spawn node dist/cli/index.js ...
 ```
 
-这保证了安全，但也导致一个实际问题：
+当前白名单：
+
+```ts
+const CLI_EXEC_WHITELIST: Record<string, '*' | Set<string>> = {
+  status:  '*',
+  model:   '*',
+  stats:   '*',
+  agent:   new Set(['list', 'show', 'get']),
+  aid:     new Set(['list', 'show', 'lookup']),
+  storage: new Set(['ls', 'quota']),
+};
+```
+
+问题：
+
+1. `/cli` 在 argv 解析之前用 `identity.role === 'owner'` 拦截。
+2. `model list --self A --peer U` 这类只读、安全、可按 role 过滤的命令也被挡住。
+3. `model:*` 和 `stats:*` 白名单粒度过粗，一个顶层白名单同时包含读、写、诊断和高危 flags。
+4. 授权结果不可配置、不可审计、不可扩展到 custom role。
+
+### 2.2 进程级 owner 与 channel role 已经分层
+
+代码里已经有两类不同权限主体：
+
+| 主体 | 来源 | 用途 |
+|---|---|---|
+| channel role | `session.identity.role` / `resolvePeerRoleDetail()` | 关系级、agent 自管理、普通菜单/命令 |
+| daemon owner | `evolclaw.json.owners` | `/system` 等进程级操作、control channel |
+
+`/system` 已经改为查 `evolclaw.json.owners`，而 `/cli` 仍用 channel role owner-only。统一授权器必须把这两个主体都放进 context，而不是只传 `role`。
+
+### 2.3 ECWeb 与 control channel 当前不暴露 CLI
+
+当前代码：
 
 ```text
-guest 访问远程详情页
-  -> 前端发送 model list --self <agent> --peer <user>
-  -> /cli owner-only 拦截
-  -> CLI 内部的角色模型过滤不会执行
-  -> 前端可能显示缓存或默认全量列表
+execMenuForEcweb()   -> name=cli 直接 NOT_SUPPORTED
+execMenuForControl() -> name=cli 直接 NOT_SUPPORTED
 ```
 
-也就是说，我们已经在 CLI 内部实现了“按角色过滤模型”，但远程入口在进入 CLI 前被通用 `/cli` 权限挡住。
+一步到位方案不要求 ECWeb 复用 `/cli` RCE 通道。ECWeb 如果需要同类能力，应走同一个 `authorizeCommand()`，但可以通过专用 API 或 `menu.exec` 风格入口接入。
 
-### 2.3 角色配置目前主要管理“配置字段”
+### 2.4 模型 CLI 内部已有角色过滤，但信任 argv
 
-当前 `roles.schema.3.json` 的 `permissions` 更像字段权限：
+`src/cli/model.ts` 当前行为：
 
-```json
-{
-  "baseagents.claude.model": {
-    "default": "claude-haiku-4-5-20251001",
-    "allowOverride": false,
-    "allowedModels": ["claude-haiku-*"]
-  },
-  "permissionMode": {
-    "default": "readonly",
-    "allowOverride": false
-  }
-}
+1. `--self` 决定 agent。
+2. `--peer` 经 `normalizePeer()` 归一化；裸 AID 会变成 `aun#<aid>`。
+3. `--self + --peer` 可通过 `resolvePeerRoleDetail()` 推导 role。
+4. `model list/current/use/check` 走 role 相关逻辑。
+5. `model info` 当前只按 `modelId` 查询详情，没有按 role 做过滤。
+6. `--role` 是本地调试参数；远程受限 CLI 不能允许低权限用户传入该参数伪造 role。
+
+统一方案必须把 argv 参数纳入授权约束，尤其是 `--self`、`--peer`、`--role`、`--local`、`--sql`、`--rebuild`。
+
+### 2.5 model 的 global scope 已退场
+
+当前 `src/core/model/config-scope.ts` 中：
+
+```text
+relation > role > agent
+global model 作用域已退场，只读 agent 兜底
+write global 会抛 NO_GLOBAL_SCOPE
 ```
 
-这适合约束模型、effort、chatmode、dispatch 等行为配置，但不适合直接表达“是否可以执行某个命令动作”。
+因此新权限模型不再把 `model use <id>` 无 `--self` 当作可写 global scope。需要表达的是：
+
+```text
+model.use relation
+model.use role
+model.use agent
+```
+
+### 2.6 roles schema v3 只能表达字段权限
+
+当前 `roles.schema.3.json`：
+
+```text
+RoleDefinition = description + allowAccess + permissions
+additionalProperties: false
+```
+
+一步到位方案必须升级 `roles.schema.4.json`，并同时更新类型、内置角色、merge/diff、ConfigManager、ECWeb role API 和前端。
 
 ---
 
 ## 3. 设计目标
 
-1. 统一授权语义：同一个操作无论来自 slash、menu 还是受限 CLI，都应得到一致判断。
-2. 支持角色可配置：owner/admin/member/guest/custom role 都能配置命令能力。
-3. 高危能力显式化：任意 CLI、shell、RCE、文件删除、配置写入等都可以配置，但必须是独立能力点，不能被普通读写权限或隐式通配误放开。
-4. 支持参数级约束：例如 guest 可以 `model.list/current`，但 `model.use` 必须继续受 `allowedModels` 和 `allowOverride` 约束。
-5. 支持审计：授权决策应该能记录 actor、role、operation、scope、decision、reason。
-6. 向后兼容：首期不破坏现有 `roles.schema.3.json` 字段权限；可以先代码内置策略，再升级 schema。
+1. 一次性建立统一命令授权体系，不保留散落的入口级角色硬编码。
+2. 所有 slash/menu/CLI passthrough/ctl/IPC/ecweb/control 可触发动作都映射到 `OperationId`。
+3. 所有 operation 有元数据：category、defaultScopes、dangerous、description、argument policy。
+4. `roles.schema.4.json` 支持 `commandPermissions`。
+5. 任意 role string 都可配置命令能力，包括 custom role。
+6. 任意 role 都可以被显式授予高危能力，但高危能力必须额外标记、显式 grant、审计，并可要求 daemon owner/control channel。
+7. CLI argv 不作为权限配置单元，只作为解析输入。能识别的 argv 映射到具体 operation；不能识别的 argv 映射到 `cli.exec.raw`。
+8. 业务约束不被命令权限替代：`model.use` 仍要检查 `allowOverride` / `allowedModels`；file 要查路径沙箱；trigger 要查 ownership。
+9. 授权器支持审计和测试，拒绝原因结构化。
+10. 升级后 owner/admin 当前可用能力保持兼容，guest/member/custom role 可通过配置获得明确能力。
 
 ---
 
-## 4. 核心概念
+## 4. 身份主体、Scope 与上下文
 
-### 4.1 Operation ID
+### 4.1 授权上下文
 
-把所有外部命令归一化为稳定的操作 ID。
+```ts
+interface CommandAuthorizationContext {
+  intent: CommandIntent;
 
-示例：
+  actorId?: string;
+  channel?: string;
+  channelId?: string;
+  chatType?: 'private' | 'group';
 
-| Operation ID | 来源示例 | 说明 |
+  selfAid?: string;
+  peerKey?: string;
+  role: string;
+
+  isDaemonOwner?: boolean;
+  fromControlChannel?: boolean;
+  source: CommandSource;
+}
+```
+
+| 字段 | 来源 | 用途 |
 |---|---|---|
-| `model.list` | `/model` 查询、`model list`、模型选择页 | 查询可用模型 |
-| `model.current` | `model current` | 查询当前有效模型 |
-| `model.use` | `/model <id>`、`model use <id>` | 切换模型 |
-| `model.effort` | `/effort <level>`、`model effort <level>` | 切换 effort |
-| `session.list` | `/session`、`/slist` | 列会话 |
-| `session.create` | `/new` | 创建会话 |
-| `session.rename` | `/rename` | 重命名会话 |
-| `file.list` | `menu.action name=file action=list` | 目录列表 |
-| `file.fetch` | `menu.action name=file action=fetch` | 拉取文件 |
-| `trigger.list` | `/trigger list` | 查询 trigger |
-| `trigger.create` | `/trigger create` | 创建 trigger |
-| `agent.reload` | `/reload`、`menu.action name=agent action=reload` | 重载 agent |
-| `system.restart` | `/restart`、`menu.action name=system action=restart` | 重启 daemon |
-| `cli.exec.raw` | `/cli` 任意透传 | 原始 CLI 透传，高危能力点，默认只给 owner/admin，可显式授予任意角色 |
-| `shell.exec` | shell 命令执行 | 高危能力点；当前若没有入口，先作为预留权限模型 |
-| `rce.exec` | 任意远程命令执行 | 最高危能力点；用于未来显式开放完整 RCE 场景 |
-
-Operation ID 是角色权限的基本单元，不是 CLI argv。
+| `actorId` | 入站消息发送者，例如 `msg.peerId` | 判断 ownPeerOnly |
+| `channel/channelId/chatType` | 入站消息上下文 | 区分 private/group/control |
+| `selfAid` | 当前 channel 归属 agent AID | 判断 ownAgentOnly |
+| `peerKey` | `formatPeerKey(channelType, actorId/conversationId)` | 关系级 scope |
+| `role` | `resolvePeerRoleDetail()` 或 session identity | 角色权限匹配 |
+| `isDaemonOwner` | `evolclaw.json.owners.includes(actorId)` | 进程级/高危约束 |
+| `fromControlChannel` | control AID channel | 控制面约束 |
+| `source` | slash/menu/menu.cli/ctl/ecweb/control | 审计和差异约束 |
 
 ### 4.2 Scope
 
-每次授权需要明确操作作用域。
-
 | Scope | 含义 | 示例 |
 |---|---|---|
-| `relation` | 当前用户和当前 agent 的关系级 | `model.use --self A --peer U` |
-| `agent` | 当前 agent 级 | `model use --self A` |
-| `global` | daemon 全局 | 无 `--self` 的全局默认模型 |
-| `process` | daemon 进程级 | restart、upgrade、gateway 配置 |
-| `filesystem` | 文件系统读写 | file list/fetch |
-| `control` | 控制 AID / IPC 管理面 | agent create/reload、system config |
-
-首期应特别注意：
-
-```text
-guest 可以查询自己的 relation 级模型列表
-guest 默认不应借 CLI 参数查询或修改其他 peer 的 relation 配置，但可通过显式能力点和 scope 约束覆盖
-guest 默认不应修改 agent/global/process/control 级配置，但可通过显式授权覆盖
-```
-
-### 4.3 Action Type
-
-为了降低配置复杂度，可以给操作分类：
-
-| 类型 | 含义 | 默认策略 |
-|---|---|---|
-| `read` | 查询状态、列表、详情 | member/guest 可按范围开放 |
-| `write-own` | 写当前用户自己的关系级偏好 | 取决于字段 `allowOverride` 和具体约束 |
-| `write-agent` | 写 agent 默认配置 | admin/owner |
-| `process` | 进程级控制 | daemon owner |
-| `dangerous` | 原始 CLI、shell/RCE、网关凭证、任意文件/命令执行 | 默认关闭或仅给 owner/admin，但允许显式授予任意角色 |
+| `relation` | 当前 actor 与当前 agent 的关系级 | `model.list --self A --peer U` |
+| `role` | 当前 agent 下某个 role 默认行为 | `model use --self A --role member` |
+| `agent` | 当前 agent 默认配置 | `model use --self A` |
+| `process` | daemon 进程级 | restart、upgrade、gateway/config 管理 |
+| `filesystem` | 文件系统读写 | `file.list`、`file.fetch` |
+| `control` | 控制 AID / IPC 管理面 | agent create/delete/enable/disable |
+| `raw-cli` | 原始 CLI 透传 | 无法安全归一化的 `/cli exec` |
 
 ---
 
-## 5. 角色权限模型
+## 5. Operation Registry
 
-### 5.1 推荐新增字段
+新增：
 
-长期建议把命令能力作为角色定义的独立字段，而不是塞进现有 `permissions` 字段权限里。
+```text
+src/core/command/operation-registry.ts
+```
+
+核心类型：
+
+```ts
+type CommandSource = 'slash' | 'menu' | 'menu.cli' | 'ctl' | 'ipc' | 'ecweb' | 'control';
+
+type CommandScope =
+  | 'relation'
+  | 'role'
+  | 'agent'
+  | 'process'
+  | 'filesystem'
+  | 'control'
+  | 'raw-cli';
+
+type OperationCategory =
+  | 'read'
+  | 'diagnose'
+  | 'write-own'
+  | 'write-agent'
+  | 'process'
+  | 'dangerous';
+
+interface OperationMeta {
+  id: string;
+  category: OperationCategory;
+  dangerous: boolean;
+  defaultScopes: CommandScope[];
+  description: string;
+  sources?: CommandSource[];
+}
+```
+
+示例 registry：
+
+| Operation ID | 类型 | 高危 | 默认 scope | 来源示例 |
+|---|---|---:|---|---|
+| `model.list` | read | 否 | relation/role/agent | `/model`、`model list` |
+| `model.current` | read | 否 | relation/role/agent | `model current` |
+| `model.info` | read | 否 | relation/role/agent | `model info <id>` |
+| `model.check` | diagnose | 否 | agent | `model check` |
+| `model.use` | write-own/write-agent | 否 | relation/role/agent | `model use <id>` |
+| `model.effort` | write-own/write-agent | 否 | relation/role/agent | `model effort <level>` |
+| `model.reset` | write-own/write-agent | 否 | relation/role/agent | `model reset` |
+| `session.list` | read | 否 | relation | `/session`、`/slist` |
+| `session.create` | write-own | 否 | relation | `/new` |
+| `session.rename` | write-own | 否 | relation | `/rename` |
+| `session.delete` | write-own | 否 | relation | `/del` |
+| `file.list` | read/filesystem | 否 | filesystem | `menu.action name=file action=list` |
+| `file.fetch` | read/filesystem | 否 | filesystem | `menu.action name=file action=fetch` |
+| `trigger.list` | read | 否 | agent/relation | `/trigger list` |
+| `trigger.create` | write-agent | 否/谨慎 | agent | `/trigger create` |
+| `trigger.update` | write-agent | 否/谨慎 | agent | `/trigger update` |
+| `trigger.delete` | write-agent | 是 | agent | `/trigger cancel/delete` |
+| `agent.list` | read | 否/敏感 | control | `agent list` |
+| `agent.show` | read | 否/敏感 | control/agent | `agent show` |
+| `agent.getConfig` | read | 是 | control | `agent get` |
+| `agent.create` | process | 是 | control | `agent new/create` |
+| `agent.reload` | process | 是 | control/agent | `/reload`、`agent reload` |
+| `agent.delete` | dangerous | 是 | control | `agent delete --purge` |
+| `system.status` | read | 否/敏感 | process | `status` |
+| `system.restart` | process | 是 | process | `/restart` |
+| `system.upgrade` | process | 是 | process | `/upgrade` |
+| `stats.summary` | read | 否/敏感 | relation/control | `stats` |
+| `stats.sqlReadonly` | dangerous | 是 | control/raw-cli | `stats --sql` |
+| `stats.rebuild` | dangerous | 是 | process | `stats --rebuild` |
+| `aid.listLocal` | read | 是 | control | `aid list` |
+| `aid.showLocal` | read | 是 | control | `aid show` |
+| `aid.lookupRemote` | diagnose | 否/敏感 | control | `aid lookup` |
+| `storage.list` | read | 否/敏感 | control | `storage ls` |
+| `storage.quota` | read | 否/敏感 | control | `storage quota` |
+| `storage.upload` | write-agent | 是 | control | `storage upload` |
+| `storage.download` | write-agent | 是 | control | `storage download` |
+| `storage.delete` | dangerous | 是 | control | `storage rm` |
+| `gateway.read` | read | 是 | process | gateway config query |
+| `gateway.write` | process | 是 | process | gateway config update |
+| `config.read` | read | 是 | process | config query |
+| `config.write` | process | 是 | process | config update |
+| `cli.exec.raw` | dangerous | 是 | raw-cli | 无法归一化的 CLI argv |
+| `shell.exec` | dangerous | 是 | raw-cli | 预留 |
+| `rce.exec` | dangerous | 是 | raw-cli | 预留 |
+
+说明：
+
+1. “否/敏感”代表 operation 本身不是破坏性，但返回内容敏感，默认策略可以只给 owner/admin。
+2. `dangerous=true` 的 operation 不能被普通 `*` 隐式匹配。
+3. `model global` 不进入新 registry；当前已退场。
+
+---
+
+## 6. CLI Intent Parser
+
+新增：
+
+```text
+src/core/command/cli-intent-parser.ts
+```
+
+职责：
+
+1. 输入 `argv: string[]`。
+2. 解析为 `CommandIntent`。
+3. 不能可靠识别时返回 `cli.exec.raw`。
+4. 解析过程中保留 normalized args，不信任 argv 原值。
+
+```ts
+interface CommandIntent {
+  operation: string;
+  scope: CommandScope;
+  source: CommandSource;
+  args: Record<string, unknown>;
+  rawArgv?: string[];
+  dangerous?: boolean;
+}
+
+type CliIntentParseResult =
+  | { kind: 'recognized'; intent: CommandIntent }
+  | { kind: 'raw'; intent: CommandIntent; reason: string }
+  | { kind: 'invalid'; code: string; reason: string };
+```
+
+### 6.1 parser 覆盖范围
+
+一步到位不是只解析 `model list/current`，而是覆盖当前 `CLI_EXEC_WHITELIST` 中所有已允许远程透传的 CLI：
+
+```text
+status
+model *
+stats *
+agent list/show/get
+aid list/show/lookup
+storage ls/quota
+```
+
+覆盖方式：
+
+| CLI | 解析方式 |
+|---|---|
+| `status` | `system.status` |
+| `model list/current/info/check/use/effort/reset` | 明确解析子命令、scope、flags |
+| `stats ...flags` | 按 flags 映射到 stats operation |
+| `agent list/show/get` | 明确解析 aid/key |
+| `aid list/show/lookup` | 明确解析 aid |
+| `storage ls/quota` | 明确解析 aid/prefix |
+| 其他 argv | `cli.exec.raw` |
+
+现有白名单不再作为授权真相，只作为迁移参考。最终是否允许执行由 `authorizeCommand()` 决定。
+
+### 6.2 CLI 字符串命令
+
+`args.command` 字符串仍可支持，但必须作为 raw CLI 风险处理：
+
+```text
+args.argv:
+  可进入 cli-intent-parser 解析具体 operation
+
+args.command:
+  不做低权限受限解析
+  映射为 cli.exec.raw
+```
+
+原因：当前 `tokenizeArgv()` 是简化正则，不是完整 shell parser。允许低权限用户用字符串命令进入普通 operation 会增加解析歧义。
+
+### 6.3 远程 CLI 参数规则
+
+parser 必须处理：
+
+1. 禁止重复 flag，除非该命令明确允许多值。
+2. 禁止未知 flag 伪装为普通参数。
+3. 禁止低权限远程传 `--role`。
+4. `--self` 必须能映射到当前 channel owning agent，除非 operation 明确允许跨 agent 且授权通过。
+5. `--peer` 必须归一化为 peerKey 后参与 scope 校验。
+6. `--format json` 可强制要求，用于 menu protocol 稳定解析。
+
+---
+
+## 7. roles.schema.4.json
+
+### 7.1 RoleDefinition
 
 ```ts
 interface RoleDefinition {
@@ -175,22 +415,52 @@ interface RoleDefinition {
 interface CommandPermission {
   allow: boolean;
   dangerous?: boolean;
-  requireExplicitGrant?: boolean;
-  scopes?: Array<'relation' | 'agent' | 'global' | 'process' | 'filesystem' | 'control'>;
-  constraints?: {
-    ownPeerOnly?: boolean;
-    ownAgentOnly?: boolean;
-    readonly?: boolean;
-    requireFieldOverride?: string;
-    allowedArgs?: Record<string, string[]>;
-    argvAllowlist?: string[][];
-    commandPatterns?: string[];
-    cwdPolicy?: 'agentProject' | 'evolclawHome' | 'any';
-    envAllowlist?: string[];
-    timeoutMs?: number;
-  };
+  scopes?: CommandScope[];
+  constraints?: CommandPermissionConstraints;
   reason?: string;
 }
+
+interface CommandPermissionConstraints {
+  ownPeerOnly?: boolean;
+  ownAgentOnly?: boolean;
+  privateOnly?: boolean;
+  groupOnly?: boolean;
+  requireDaemonOwner?: boolean;
+  requireControlChannel?: boolean;
+  requireExplicitDangerousGrant?: boolean;
+  requireFieldOverride?: string;
+
+  allowedArgs?: Record<string, Array<string | number | boolean>>;
+  deniedArgs?: Record<string, Array<string | number | boolean>>;
+  forbiddenFlags?: string[];
+  allowedConfigKeys?: string[];
+  allowedPrefixes?: string[];
+
+  timeoutMs?: number;
+  outputLimitBytes?: number;
+  cwdPolicy?: 'agentProject' | 'evolclawHome' | 'none';
+  envAllowlist?: string[];
+}
+```
+
+### 7.2 通配匹配语义
+
+匹配顺序：
+
+```text
+1. exact operation，例如 model.list
+2. namespace wildcard，例如 model.*
+3. category wildcard，例如 category:read
+4. dangerous wildcard，例如 dangerous:*
+5. ordinary wildcard *
+```
+
+冲突处理：
+
+```text
+exact deny > exact allow > namespace deny > namespace allow > category > wildcard
+dangerous=true 的 operation 不匹配普通 "*"
+dangerous=true 的 operation 必须 exact 或 dangerous:* 显式授权
 ```
 
 示例：
@@ -216,7 +486,7 @@ interface CommandPermission {
           "constraints": {
             "ownPeerOnly": true,
             "ownAgentOnly": true,
-            "readonly": true
+            "privateOnly": true
           }
         },
         "model.current": {
@@ -225,7 +495,7 @@ interface CommandPermission {
           "constraints": {
             "ownPeerOnly": true,
             "ownAgentOnly": true,
-            "readonly": true
+            "privateOnly": true
           }
         },
         "model.use": {
@@ -234,14 +504,14 @@ interface CommandPermission {
           "constraints": {
             "ownPeerOnly": true,
             "ownAgentOnly": true,
+            "privateOnly": true,
             "requireFieldOverride": "baseagents.claude.model"
           }
         },
         "cli.exec.raw": {
           "allow": false,
           "dangerous": true,
-          "requireExplicitGrant": true,
-          "reason": "默认不授予原始 CLI 透传；如需要可显式打开"
+          "reason": "默认不允许原始 CLI 透传"
         }
       }
     }
@@ -249,640 +519,524 @@ interface CommandPermission {
 }
 ```
 
-如果确实希望 `guest` 拥有完整能力，也应该通过配置表达，而不是改代码里的角色判断：
+如果确实要给 guest 完整能力，也必须显式表达：
 
 ```json
 {
-  "$schema_version": 4,
-  "roles": {
-    "guest": {
-      "description": "访客，但被显式授予完整命令能力",
-      "allowAccess": true,
-      "permissions": {},
-      "commandPermissions": {
-        "*": {
-          "allow": true,
-          "reason": "允许所有普通命令能力"
-        },
-        "dangerous.*": {
-          "allow": true,
-          "dangerous": true,
-          "requireExplicitGrant": true,
-          "constraints": {
-            "timeoutMs": 15000
-          },
-          "reason": "显式允许高危命令能力"
-        }
-      }
+  "commandPermissions": {
+    "*": {
+      "allow": true,
+      "reason": "允许所有普通能力"
+    },
+    "dangerous:*": {
+      "allow": true,
+      "dangerous": true,
+      "constraints": {
+        "requireExplicitDangerousGrant": true,
+        "timeoutMs": 15000,
+        "outputLimitBytes": 131072
+      },
+      "reason": "显式允许高危能力"
     }
   }
 }
 ```
-
-这里的关键点是：允许 `guest` 全权限是合法配置；系统只负责确保这是显式授权，并留下可审计的能力点。
-
-### 5.2 为什么不复用现有 FieldPermission
-
-不建议这样写：
-
-```json
-{
-  "permissions": {
-    "commands.model.list": {
-      "default": true,
-      "allowOverride": false
-    }
-  }
-}
-```
-
-原因：
-
-1. `FieldPermission.default` 是字段默认值语义，不适合表达动作授权。
-2. 命令权限需要 scope、ownPeerOnly、ownAgentOnly、readonly 等约束。
-3. 字段权限和动作权限生命周期不同，混在一起会让 ecweb、schema、diff 逻辑变复杂。
-
-短期如果不想升级 schema，可以先用代码内置默认表实现；等策略稳定后再升 `roles.schema.4.json`。
 
 ---
 
-## 6. 默认权限建议
+## 8. 授权器
 
-### 6.1 内置角色默认操作矩阵
-
-| Operation | owner | admin | member | guest | anonymous |
-|---|---:|---:|---:|---:|---:|
-| `model.list` relation | allow | allow | allow | allow | deny |
-| `model.current` relation | allow | allow | allow | allow | deny |
-| `model.use` relation | allow | allow | allow if field allows | allow if field allows | deny |
-| `model.use` agent/global | allow | allow agent | deny | deny | deny |
-| `model.effort` relation | allow | allow | allow if field allows | allow if field allows | deny |
-| `session.list/create/rename/delete` own private | allow | allow | allow | allow | deny |
-| `file.list/fetch` project scope | allow | allow | optional | deny by default | deny |
-| `trigger.list` own | allow | allow | allow own | allow own | deny |
-| `trigger.create/update/delete` | allow | allow | optional | deny | deny |
-| `agent.reload` own agent | allow | allow own | deny | deny | deny |
-| `system.restart/upgrade` | allow | allow | deny | deny | deny |
-| `gateway.*` | allow | allow | deny | deny | deny |
-| `cli.exec.raw` | allow | allow | deny | deny | deny |
-| `shell.exec` / `rce.exec` | deny by default | deny by default | deny | deny | deny |
-
-说明：
-
-- owner/admin/member/guest 只是默认建议，自定义角色可覆盖。
-- 任何角色都可以被显式授予 `cli.exec.raw`、`shell.exec`、`rce.exec` 等高危能力；默认矩阵只定义出厂策略，不是代码硬限制。
-- `model.use relation` 即使操作权限 allow，也必须继续执行模型字段权限校验：`allowedModels`、`allowOverride`、当前 role 推导。
-- `process` 级操作应该优先看 daemon owner，而不是普通 agent role。
-
-### 6.2 模型相关首期策略
-
-为解决当前远程详情页模型列表问题，首期推荐：
-
-| CLI argv | 归一化操作 | guest 是否允许 | 附加校验 |
-|---|---|---:|---|
-| `model list --self A --peer U` | `model.list` | 是 | `A` 必须是当前 channel 的 owning agent，`U` 必须是当前请求用户 |
-| `model current --self A --peer U` | `model.current` | 是 | 同上 |
-| `model info <id>` | `model.info` | 是 | 只读；返回内容可按 role 过滤或只允许已授权模型 |
-| `model use <id> --self A --peer U` | `model.use` | 条件允许 | 先做 own scope 校验，再由 `validateModelSelectionForRole` 判断模型是否允许 |
-| `model use <id> --self A` | `model.use` agent scope | 默认否 | 默认 admin/owner；可显式授予 guest |
-| `model use <id>` | `model.use` global scope | 默认否 | 默认 admin/owner；可显式授予 guest |
-
-这能保证：
+新增：
 
 ```text
-guest 能看到自己的可用模型列表
-guest 看不到 owner/admin/member 才有的模型
-guest 默认不能通过 --peer 伪造去看别人；如授予跨 peer/scope 能力，则按显式授权执行
-guest 即使发 model use，也会被角色字段权限继续约束
+src/core/command/command-permission.ts
 ```
 
----
-
-## 7. 授权流程
-
-建议新增统一授权器：
+核心函数：
 
 ```ts
-authorizeCommand({
-  operation: 'model.list',
-  role: 'guest',
-  actorAid: 'user.agentid.pub',
-  selfAid: 'bot.agentid.pub',
-  peerAid: 'user.agentid.pub',
-  channel,
-  channelId,
-  source: 'menu.cli',
-  scope: 'relation',
-  args: { model: undefined }
-})
+function authorizeCommand(ctx: CommandAuthorizationContext): CommandAuthorizationDecision;
 ```
 
 返回：
 
 ```ts
 type CommandAuthorizationDecision =
-  | { allow: true; role: string; operation: string; scope: string }
-  | { allow: false; code: 'NO_PERMISSION' | 'NOT_ALLOWED' | 'SCOPE_MISMATCH'; reason: string };
+  | {
+      allow: true;
+      operation: string;
+      scope: CommandScope;
+      role: string;
+      dangerous: boolean;
+      matchedRule?: string;
+      constraints?: CommandPermissionConstraints;
+    }
+  | {
+      allow: false;
+      code:
+        | 'NO_PERMISSION'
+        | 'NOT_ALLOWED'
+        | 'SCOPE_MISMATCH'
+        | 'ARGUMENT_MISMATCH'
+        | 'DANGEROUS_NOT_GRANTED'
+        | 'ROLE_ACCESS_DENIED';
+      reason: string;
+      operation: string;
+      scope?: CommandScope;
+      role: string;
+      dangerous?: boolean;
+      matchedRule?: string;
+    };
 ```
 
-流程：
+### 8.1 决策步骤
 
 ```text
-1. 解析入口
-   slash/menu/cli/ctl -> CommandIntent
+1. 读取 operation metadata
+   unknown operation -> deny，除非被明确映射为 cli.exec.raw
 
-2. 归一化
-   CommandIntent -> operation + scope + normalized args
+2. 检查 role
+   role 不存在 -> anonymous
+   allowAccess=false -> deny
 
-3. 解析身份
-   selfAid + actorAid + conversation -> effective role
+3. 读取 commandPermissions
+   schema v4: roles[role].commandPermissions
+   无配置则使用内置默认策略
 
-4. 授权
-   commandPermissions / 内置默认策略
-   + scope 校验
-   + ownPeerOnly / ownAgentOnly 校验
+4. 匹配规则
+   exact -> namespace -> category -> wildcard
+   dangerous operation 不匹配普通 "*"
 
-5. 业务约束
-   model.use -> allowedModels / allowOverride
-   file.fetch -> path sandbox
-   trigger.* -> ownership
+5. 检查 allow/deny
+   deny 优先
 
-6. 执行
-   只在授权成功后进入 handler 或受限 CLI passthrough
+6. 检查 scope
+   requested scope 必须在 scopes 里
 
-7. 审计
-   记录 operation、role、actor、scope、allow/deny、reason
+7. 检查 constraints
+   ownPeerOnly
+   ownAgentOnly
+   privateOnly/groupOnly
+   requireDaemonOwner
+   requireControlChannel
+   allowedArgs/deniedArgs/forbiddenFlags
+
+8. 返回 allow/deny
 ```
 
----
+### 8.2 daemon owner 的使用方式
 
-## 8. `/cli` 透传改造方案
-
-### 8.1 将原始 `/cli` 作为高危能力点
-
-`cli.exec.raw` 代表“无法归一化或未受控的 CLI 执行”。它不应该写死 owner-only，而应该进入角色权限，作为默认高危能力点。
-
-例如：
-
-```text
-agent set ...
-storage upload ...
-gateway sync ...
-任何不在白名单内的 argv
-任何 command 字符串无法安全解析的请求
-```
-
-默认策略可以只给 owner/admin，但如果管理员把 `cli.exec.raw` 显式授予 guest，daemon 应该尊重配置。
-
-建议将高危能力点单独命名，避免被普通 `*` 隐式包含：
-
-```text
-cli.exec.raw
-shell.exec
-rce.exec
-stats.sqlReadonly
-stats.rebuild
-agent.delete
-storage.delete
-aid.delete
-```
+`daemon owner` 不是 role 的替代品，而是 context 里的额外事实。
 
 推荐规则：
 
 ```text
-"*"             只匹配普通能力
-"dangerous.*"   匹配高危能力
-"cli.exec.raw"  精确授予原始 CLI 透传
+process/control/dangerous operation:
+  默认约束 requireDaemonOwner 或 requireControlChannel
+
+relation/agent ordinary operation:
+  默认不需要 daemon owner
+
+自定义 role 可显式移除或增加 requireDaemonOwner 约束
 ```
 
-这样可以同时满足两点：
-
-1. guest 可以被配置成完全权限。
-2. 完全权限是否包含高危能力是可审计、可显式表达的。
-
-### 8.2 增加受限 CLI passthrough
-
-对 `name=cli action=exec` 的 argv 做分流：
-
-```text
-if argv 可识别为安全操作:
-  argv -> operation/scope/args
-  authorizeCommand()
-  执行业务 handler 或 execCliPassthrough
-else:
-  fallback 到 cli.exec.raw
-  authorizeCommand(operation=cli.exec.raw)
-```
-
-首期只建议支持模型相关：
-
-```text
-model list
-model current
-model info
-model check
-model use
-```
-
-不要首期泛化到所有 CLI 命令。
-
-### 8.3 参数防伪造
-
-远程 menu CLI 的 `--self`、`--peer` 不能完全信任前端。
-
-必须校验：
-
-```text
---self == 当前 channel 归属 agent 的 aid
---peer == 当前请求 actor 的 aid 或当前 conversation peer
-```
-
-拥有对应能力点的角色可以有更宽权限，但仍建议在审计中记录跨 scope 操作。
+这允许管理员配置“某个 custom role 可以执行 process 操作”，但配置必须显式，并且审计日志能看到它绕过了默认 daemon owner 约束。
 
 ---
 
-## 9. 当前 CLI 透传白名单盘点
+## 9. 业务约束层
 
-当前代码位置：`src/core/command/menu-handler.ts` 的 `CLI_EXEC_WHITELIST`。
+命令授权只决定“能不能发起动作”，不替代业务约束。
+
+### 9.1 model
+
+| Operation | 命令授权 | 业务约束 |
+|---|---|---|
+| `model.list` | relation/agent/role scope | 输出必须按 effective role 的 `allowedModels` 裁剪 |
+| `model.current` | relation/agent/role scope | 解析链必须带 role 约束 |
+| `model.info` | read scope | 只能查询当前 role 可见模型，或返回裁剪字段 |
+| `model.check` | diagnose scope | 可能触发网关探测，默认 admin/owner；低权限需显式授权 |
+| `model.use` | write scope | `allowOverride=true` 且 model 匹配 `allowedModels` |
+| `model.effort` | write scope | 对应 `baseagents.<ba>.effort/reasoning` 字段允许覆盖 |
+| `model.reset` | write scope | 只能 reset 已授权 scope，避免清 agent/role 配置 |
+
+### 9.2 file
+
+`file.list/fetch` 必须继续走路径沙箱：
+
+```text
+项目内路径 -> 按 file.list/file.fetch 授权
+项目外路径 -> 必须额外 dangerous 或 daemon owner/control 约束
+.. 穿越 -> 永远拒绝
+```
+
+### 9.3 stats
+
+`stats` 不能再用顶层 `*`。必须按 flags 解析：
+
+| Flags | Operation |
+|---|---|
+| 无 flags / `--today` / `--summary` | `stats.summary` |
+| `--peers` | `stats.peers` |
+| `--groups` | `stats.groups` |
+| `--session <id>` | `stats.session` |
+| `--context <id>` | `stats.context` |
+| `--sql <query>` | `stats.sqlReadonly` dangerous |
+| `--rebuild` | `stats.rebuild` dangerous |
+
+`stats.sqlReadonly` 即使只允许 SELECT，也必须是高危能力，因为它能绕过业务 API 进行任意数据枚举。
+
+### 9.4 agent/aid/storage
+
+`agent get`、`aid list/show`、`storage ls/quota` 都不是普通 read。它们可能暴露配置、身份、证书状态、对象名和路径结构。默认策略应只给 owner/admin 或 daemon owner；低权限开放必须配置 key/prefix/AID 范围。
+
+---
+
+## 10. 接入点改造
+
+### 10.1 `/cli`
+
+最终逻辑：
+
+```text
+if cmdBase === '/cli':
+  parse argv or command
+
+  if argv:
+    intent = parseCliIntent(argv)
+  else if command:
+    intent = cli.exec.raw
+  else:
+    MISSING_VALUE
+
+  decision = authorizeCommand(context + intent)
+  if deny:
+    return structured error
+
+  execute:
+    recognized operation 可继续 spawn CLI，也可逐步替换为 in-process handler
+    cli.exec.raw 走 execCliPassthrough
+```
+
+删除 `identity.role !== 'owner'` 的前置硬编码。owner/admin/guest/custom role 都由 `authorizeCommand()` 决定。
+
+### 10.2 menu query/update/action
+
+所有 menu name/action 映射到 operation：
+
+```text
+menu.query name=model       -> model.current/list/options
+menu.update name=model      -> model.use
+menu.action name=file list  -> file.list
+menu.action name=file fetch -> file.fetch
+menu.action name=system restart -> system.restart
+```
+
+handler 内部仍保留业务约束，但入口权限统一前置授权。
+
+### 10.3 slash
+
+`guardRoleCommand()` 不再作为最终权限真相。它可以保留为快速 UI/UX 预判，但所有实际 handler 必须调用 `authorizeCommand()`。
+
+例如：
+
+```text
+/model          -> model.list/model.current
+/model <id>     -> model.use relation
+/restart        -> system.restart process
+/reload         -> agent.reload
+/file <path>    -> file.fetch
+```
+
+### 10.4 ctl / IPC
+
+ctl 当前依赖 session context 推导 role。新方案中 ctl 也必须构造 `CommandAuthorizationContext`：
+
+```text
+sessionId -> session.identity.role
+session -> selfAid/peerKey/channel
+ctl cmd -> operation
+authorizeCommand()
+```
+
+### 10.5 ECWeb / control
+
+ECWeb/control 不必暴露 `/cli`，但如果提供等价操作，也应走 operation 授权：
+
+```text
+ECWeb role definitions 写入 -> roleDefinition.write 或 config.write
+ECWeb model query/update -> model.list/current/use
+control channel system restart -> system.restart
+```
+
+---
+
+## 11. 默认角色策略
+
+| Operation | owner | admin | member | guest | anonymous |
+|---|---:|---:|---:|---:|---:|
+| `model.list` relation | allow | allow | allow | allow | deny |
+| `model.current` relation | allow | allow | allow | allow | deny |
+| `model.info` relation | allow | allow | allow filtered | allow filtered | deny |
+| `model.check` | allow | allow | optional | deny | deny |
+| `model.use` relation | allow + field | allow + field | allow + field | allow + field | deny |
+| `model.use` role | allow | allow | deny | deny | deny |
+| `model.use` agent | allow | allow | deny | deny | deny |
+| `model.effort/reset` relation | allow + field | allow + field | optional + field | optional + field | deny |
+| `session.*` own private | allow | allow | allow | allow | deny |
+| `file.list/fetch` project | allow | allow | optional | deny by default | deny |
+| `trigger.list` own | allow | allow | allow own | allow own | deny |
+| `trigger.create/update` | allow | allow | optional | deny | deny |
+| `trigger.delete` | allow | allow | optional dangerous | deny | deny |
+| `agent.list/show` | allow | allow | deny by default | deny | deny |
+| `agent.getConfig` | allow dangerous | allow dangerous | deny | deny | deny |
+| `agent.create/delete/enable/disable` | daemon owner/default dangerous | daemon owner/default dangerous | deny | deny | deny |
+| `agent.reload` own | allow | allow own | deny | deny | deny |
+| `system.status` full | allow | allow | deny | deny | deny |
+| `system.status` cropped | allow | allow | optional | optional | deny |
+| `system.restart/upgrade` | daemon owner + dangerous | daemon owner + dangerous | deny | deny | deny |
+| `stats.summary` own/cropped | allow | allow | optional | optional | deny |
+| `stats.sqlReadonly` | dangerous | dangerous | deny | deny | deny |
+| `stats.rebuild` | dangerous | dangerous | deny | deny | deny |
+| `aid.* local` | dangerous | dangerous | deny | deny | deny |
+| `storage.list/quota` | allow | allow | optional scoped | optional scoped | deny |
+| `storage.upload/download/delete` | dangerous | dangerous | deny | deny | deny |
+| `gateway.*` / `config.*` | dangerous/process | dangerous/process | deny | deny | deny |
+| `cli.exec.raw` | dangerous | dangerous | deny by default | deny by default | deny |
+| `shell.exec` / `rce.exec` | deny by default | deny by default | deny | deny | deny |
+
+说明：
+
+1. 表格是内置默认策略，不是硬编码边界。
+2. `model.use relation` 对 guest 默认会被字段权限拒绝，因为当前 guest 的 `allowOverride=false`。
+3. 任意 role 都可通过 `commandPermissions` 显式覆盖默认策略。
+4. dangerous operation 默认不被普通 `*` 放开。
+
+---
+
+## 12. 审计
+
+新增统一审计事件：
 
 ```ts
-const CLI_EXEC_WHITELIST: Record<string, '*' | Set<string>> = {
-  status:  '*',
-  model:   '*',
-  stats:   '*',
-  agent:   new Set(['list', 'show', 'get']),
-  aid:     new Set(['list', 'show', 'lookup']),
-  storage: new Set(['ls', 'quota']),
-};
+interface CommandAuthorizationAuditEvent {
+  ts: number;
+  source: CommandSource;
+  operation: string;
+  scope: CommandScope;
+  dangerous: boolean;
+
+  actorId?: string;
+  selfAid?: string;
+  peerKey?: string;
+  channel?: string;
+  channelId?: string;
+  role: string;
+  isDaemonOwner?: boolean;
+  fromControlChannel?: boolean;
+
+  decision: 'allow' | 'deny';
+  code?: string;
+  reason?: string;
+  matchedRule?: string;
+
+  argvHash?: string;
+  argsSummary?: Record<string, unknown>;
+  durationMs?: number;
+  exitCode?: number;
+}
 ```
 
-注意：这是“当前 `/cli` 透传在代码硬限制下允许 owner 执行的 CLI 范围”，不是未来角色配置的最终形态。后续应取消基于角色名的硬限制，改为能力点授权。其中 `model:*` 和 `stats:*` 需要进一步拆成子命令 / 参数级能力点。
+要求：
 
-### 9.1 `status`
-
-| CLI | 当前白名单 | 操作 ID 建议 | 类型 | 建议角色策略 | 备注 |
-|---|---:|---|---|---|---|
-| `status` | 是，`*` | `system.status` | read | guest 可有限开放，admin/owner 全量 | 会暴露 daemon、实例、AID、运行路径等状态；对普通访客建议返回裁剪视图。 |
-
-示例：
-
-```json
-["status"]
-```
-
-### 9.2 `model`
-
-当前 `model` 在 `/cli` 白名单中是 `*`，实际子命令来自 `src/cli/model.ts`。
-
-| CLI | 当前白名单 | 操作 ID 建议 | 类型 | 建议角色策略 | 备注 |
-|---|---:|---|---|---|---|
-| `model list` | 是 | `model.list` | read | guest/member/admin/owner 可按 relation scope 开放 | 必须按推导角色过滤 `allowedModels`。 |
-| `model current` | 是 | `model.current` | read | guest/member/admin/owner 可按 relation scope 开放 | 查询当前有效模型和来源链。 |
-| `model info <model-id>` | 是 | `model.info` | read | 可开放，但建议只允许查询已授权模型或裁剪价格信息 | 避免低权限用户枚举全部高成本模型详情。 |
-| `model check` | 是 | `model.check` | read/diagnose | admin/owner 默认开放；guest 谨慎 | 会做网关连通性和模型可用性诊断，可能产生轻量调用。 |
-| `model use <model-id>` | 是 | `model.use` | write-own / write-agent / write-global | relation scope 可按 `allowOverride + allowedModels` 条件开放；agent/global scope 默认 admin/owner，可显式授予其他角色 | 当前问题的关键命令之一。 |
-| `model effort <level>` | 是 | `model.effort` | write-own / write-agent / write-global | 同 `model.use`，叠加 `baseagents.<ba>.effort` 字段权限 | `auto` 会清空显式 effort。 |
-| `model reset` | 是 | `model.reset` | write | relation scope 条件开放；agent/global scope 默认 admin/owner，可显式授予其他角色 | 会清除指定作用域配置，需防止误清 agent/global 默认值。 |
-
-常见 argv：
-
-```json
-["model", "list", "--self", "bot.agentid.pub", "--peer", "user.agentid.pub", "--format", "json"]
-["model", "current", "--self", "bot.agentid.pub", "--peer", "user.agentid.pub", "--format", "json"]
-["model", "use", "claude-haiku-4-5-20251001", "--self", "bot.agentid.pub", "--peer", "user.agentid.pub", "--format", "json"]
-```
-
-首期远程放行建议只覆盖：
-
-```text
-model.list/current/info/check/use
-```
-
-并强制：
-
-```text
---self == 当前 channel 归属 agent AID
---peer == 当前请求 actor AID
-scope == relation
-```
-
-`model effort/reset` 可以第二批再开放，因为它们更容易造成配置状态混乱。
-
-### 9.3 `stats`
-
-当前 `stats` 在 `/cli` 白名单中是 `*`，实际没有子命令，靠 flags 决定功能。这里风险比 `model` 更高，因为包含 `--rebuild` 写操作和 `--sql` 自定义 SQL。
-
-| CLI / flags | 当前白名单 | 操作 ID 建议 | 类型 | 建议角色策略 | 备注 |
-|---|---:|---|---|---|---|
-| `stats` / `stats --today` | 是 | `stats.summary.today` | read | admin/owner；member/guest 只可看自己 relation 的裁剪数据 | 默认今日概览。 |
-| `stats --hour/--week/--month` | 是 | `stats.summary.range` | read | 同上 | 时间范围汇总。 |
-| `stats --summary` | 是 | `stats.summary` | read | 同上 | 总 token / cost。 |
-| `stats --peers` | 是 | `stats.peers` | read | admin/owner | 会暴露对端列表和活跃信息。 |
-| `stats --groups` | 是 | `stats.groups` | read | admin/owner | 会暴露群列表和统计。 |
-| `stats --peer-detail <id>` | 是 | `stats.peerDetail` | read | admin/owner；relation owner 可看自己 | 需校验 peer 是否为当前 actor。 |
-| `stats --session <id>` | 是 | `stats.session` | read | 会话可见者 | 需校验 session ownership / relation。 |
-| `stats --session <id> --last` | 是 | `stats.sessionLast` | read | 会话可见者 | 用量详情。 |
-| `stats --context <id>` | 是 | `stats.context` | read | admin/owner | 会暴露上下文构成。 |
-| `stats --budget` | 是 | `stats.budget` | read | admin/owner；可考虑 relation 裁剪 | 预算状态。 |
-| `stats --top-peers` | 是 | `stats.topPeers` | read | admin/owner | 排行信息，不建议 guest。 |
-| `stats --top-models` | 是 | `stats.topModels` | read | admin/owner | 可暴露模型使用结构。 |
-| `stats --traffic` | 是 | `stats.traffic` | read | admin/owner | 网络流量统计。 |
-| `stats --task-calls <taskId>` | 是 | `stats.taskCalls` | read | admin/owner | 任务级模型调用明细。 |
-| `stats --session-calls <id>` | 是 | `stats.sessionCalls` | read | 会话可见者 | 会话模型调用明细。 |
-| `stats --sql "<select ...>"` | 是 | `stats.sqlReadonly` | read/dangerous | 默认 owner/admin；可显式授予任意角色 | 虽然只允许 SELECT，但仍是任意 SQL 查询，必须单独授权。 |
-| `stats --rebuild` | 是 | `stats.rebuild` | write/ops/dangerous | 默认 owner/admin；可显式授予任意角色 | 会回填 cost 并重建 `usage_daily`，必须从通配白名单中拆出。 |
-
-建议调整：
-
-```text
-不要继续把 stats:* 作为可角色化白名单。
-先按 flags 映射到明确 operation。
-stats --rebuild 和 stats --sql 必须是独立高危能力点，不能被 stats:* 隐式包含。
-```
-
-### 9.4 `agent`
-
-当前 `/cli` 白名单只允许 `agent list/show/get`，虽然 `agent` CLI 本身还支持 new/enable/disable/set/ready/reload/delete/rename。
-
-| CLI | 当前白名单 | 操作 ID 建议 | 类型 | 建议角色策略 | 备注 |
-|---|---:|---|---|---|---|
-| `agent list` | 是 | `agent.list` | read | admin/owner；member/guest 不建议全量 | 会暴露所有 agent、项目、通道、状态。 |
-| `agent show <aid>` | 是 | `agent.show` | read | own agent admin/owner；低权限只可看当前 agent 裁剪信息 | 会暴露身份、配置、连接、会话、路径。 |
-| `agent get <aid> <key>` | 是 | `agent.getConfig` | read | admin/owner；低权限仅允许安全 key 白名单 | 任意 key 读取可能暴露敏感配置。 |
-| `agent new` | 否 | `agent.create` | write/control | daemon owner | 创建 agent。 |
-| `agent enable <aid>` | 否 | `agent.enable` | write/control | daemon owner 或 agent owner/admin | 会热重载。 |
-| `agent disable <aid>` | 否 | `agent.disable` | write/control | daemon owner 或 agent owner/admin | 会下线 agent。 |
-| `agent set <aid> <key> <value>` | 否 | `agent.setConfig` | write/control/dangerous | 默认 owner/admin；可显式授予任意角色，建议严格 key 白名单 | 任意配置写入风险高。 |
-| `agent ready <aid>` | 否 | `agent.ready` | write/control | bootstrap 内部或 owner | 生命周期状态写入。 |
-| `agent reload [aid]` | 否 | `agent.reload` | process/control | 默认 daemon owner 或 agent owner/admin；可显式授予任意角色 | slash/menu 已有相关设计。 |
-| `agent delete <aid> [--purge]` | 否 | `agent.delete` | destructive/dangerous | 默认 owner/admin；可显式授予任意角色 | `--purge` 会删除运行时数据。 |
-| `agent rename` | 否 | `agent.rename` | deprecated | deny | 当前 CLI 已取消。 |
-
-建议调整：
-
-```text
-agent get 即使当前白名单允许，也不应保持任意 key 可远程读。
-后续应拆成 agent.getPublicProfile、agent.getRuntimeStatus、agent.getConfigKey 三类。
-```
-
-### 9.5 `aid`
-
-当前 `/cli` 白名单只允许 `aid list/show/lookup`。`aid new/delete/agentmd` 没有放行。
-
-| CLI | 当前白名单 | 操作 ID 建议 | 类型 | 建议角色策略 | 备注 |
-|---|---:|---|---|---|---|
-| `aid list` | 是 | `aid.listLocal` | read/sensitive | 默认 owner/admin；可显式授予任意角色 | 会列本地 AID、私钥/证书状态，建议单独授权。 |
-| `aid show <aid>` | 是 | `aid.showLocal` | read/sensitive | 默认 owner/admin；可显式授予任意角色，或仅允许 show 当前 self AID 的裁剪信息 | 会暴露私钥是否存在、证书、agent.md 状态。 |
-| `aid lookup <aid>` | 是 | `aid.lookupRemote` | read | admin/owner；低权限可考虑开放 | 远程探测 AID 是否存在 + 网关 + agent.md。 |
-| `aid new <aid>` | 否 | `aid.create` | write/identity/dangerous | 默认 owner/admin；可显式授予任意角色 | 创建本地身份。 |
-| `aid delete ...` | 否 | `aid.delete` | destructive/dangerous | 默认 owner/admin；可显式授予任意角色 | 删除本地 AID 或缓存。 |
-| `aid agentmd put <aid>` | 否 | `aid.agentmdPut` | write/network/dangerous | 默认 owner/admin；可显式授予任意角色 | 签名上传 agent.md。 |
-| `aid agentmd get <aid>` | 否 | `aid.agentmdGet` | write-local/read-network | 默认 owner/admin；可显式授予任意角色 | 下载并持久化 agent.md。 |
-
-建议调整：
-
-```text
-aid list/show 当前虽然在 owner-only /cli 下相对可控，但未来应作为敏感能力点配置。
-如果低权限需要身份信息，也可以做专门的 public profile API；如果确实要透传 aid show，则必须显式授权。
-```
-
-### 9.6 `storage`
-
-当前 `/cli` 白名单只允许 `storage ls/quota`。`upload/download/rm` 没有放行。
-
-| CLI | 当前白名单 | 操作 ID 建议 | 类型 | 建议角色策略 | 备注 |
-|---|---:|---|---|---|---|
-| `storage ls <aid> [prefix]` | 是 | `storage.list` | read | 默认 owner/admin；低权限如开放需限定 own AID / prefix | 会列对象名。 |
-| `storage quota <aid>` | 是 | `storage.quota` | read | 默认 owner/admin；低权限如开放只可查 own AID | 配额信息。 |
-| `storage upload <aid> ...` | 否 | `storage.upload` | write | 默认 owner/admin；可显式授予任意角色，建议强路径和大小限制 | 会上传文件。 |
-| `storage download <aid> ...` | 否 | `storage.download` | write-local/read | 默认 owner/admin；可显式授予任意角色 | 会写本地文件。 |
-| `storage rm <aid> <remote-path>` | 否 | `storage.delete` | destructive/dangerous | 默认 owner/admin；可显式授予任意角色 | 删除对象。 |
-
-建议调整：
-
-```text
-storage ls/quota 可保留为默认 owner/admin 远程运维能力。
-guest/member 是否通过 CLI 透传开放由角色配置决定；如果开放，必须限定 own AID / prefix。
-```
-
-### 9.7 当前白名单风险汇总
-
-| 模块 | 当前白名单粒度 | 主要风险 | 建议 |
-|---|---|---|---|
-| `status` | 顶层 `*` | 信息暴露 | 可保留 owner/admin；guest 用裁剪 API。 |
-| `model` | 顶层 `*` | 写 relation/agent/global 配置 | 立即拆成子命令 + scope 校验。 |
-| `stats` | 顶层 `*` | `--rebuild` 写库、`--sql` 任意 SELECT、统计隐私 | 必须拆 flags；`--rebuild`/`--sql` 作为高危能力点显式授权。 |
-| `agent` | 子命令白名单 | `get` 任意 key 读敏感配置 | 限 key 或拆 public/status/config。 |
-| `aid` | 子命令白名单 | 本地身份/私钥状态暴露 | 默认不授予普通角色；可显式授权。 |
-| `storage` | 子命令白名单 | 对象枚举 | 限 own AID / prefix。 |
-
-首期最小改动建议：
-
-```text
-1. 取消 `/cli` 基于角色名的硬编码 owner-only，改为 `authorizeCommand(operation)`。
-2. 首期先把 model list/current/info/check/use 映射成普通能力点。
-3. stats 暂缓全面角色化；先拆出 `stats.sqlReadonly`、`stats.rebuild` 两个高危能力点。
-4. agent/aid/storage 可以保持默认不授予普通角色，但不写死角色名；后续由配置显式开放。
-```
+1. 所有 deny 必须审计。
+2. dangerous allow 必须审计。
+3. `cli.exec.raw` 必须审计 argv hash，不记录完整敏感命令。
+4. stdout/stderr 不进授权审计，只记录大小、截断状态、exitCode。
 
 ---
 
-## 10. 和现有角色字段权限的关系
+## 13. 一步到位实施清单
 
-命令权限解决“能不能发起这个动作”。
+### 13.1 Schema 与类型
 
-字段权限解决“这个动作能写什么值”。
+1. 新增 `kits/schemas/roles.schema.4.json`。
+2. 更新 `kits/schemas/_meta.json`：roles currentVersion=4。
+3. `src/types.ts` 增加 `CommandPermission`、`CommandPermissionConstraints`、`CommandScope`。
+4. `RoleDefinition` 增加 `commandPermissions`。
 
-两者必须叠加：
+### 13.2 配置读写
 
-```text
-model.use
-  -> commandPermissions['model.use'] 允许 relation scope
-  -> baseagents.claude.model.allowOverride 为 true
-  -> target model 匹配 allowedModels
-  -> 写入 relation behavior
-```
+1. `src/config/roles.ts`
+   - 内置角色增加 `commandPermissions`。
+   - 提供 `getCommandPermissions(role)`。
 
-如果命令权限 allow，但字段权限 deny，仍然拒绝。
+2. `src/config/roles-merge.ts`
+   - merge/diff 支持 `commandPermissions`。
+   - overlay 迁移支持 v4。
 
-如果字段权限 allow，但命令权限 deny，也拒绝。
+3. `src/config/config-manager.ts`
+   - roles v3 -> v4 migration。
+   - `writeRoles()` 按 v4 schema 校验。
 
----
+4. 测试：
+   - schema v4 校验。
+   - merge/diff。
+   - v3 overlay 自动迁移。
 
-## 11. 与 permissionMode 的边界
+### 13.3 Operation 与授权器
 
-`permissionMode` 是 baseagent 工具执行策略，主要约束模型在执行任务时能否读写文件、执行危险命令、是否请求确认。
+1. 新增 `operation-registry.ts`。
+2. 新增 `command-permission.ts`。
+3. 实现 rule matching。
+4. 实现 dangerous 不匹配普通 `*`。
+5. 实现 constraints 检查。
+6. 实现审计事件。
 
-命令执行角色权限是用户对 daemon 的控制能力，主要约束用户能否通过 slash/menu/CLI 修改配置、查询信息、控制进程。
+### 13.4 CLI parser
 
-两者不能互相替代：
+1. 新增 `cli-intent-parser.ts`。
+2. 覆盖当前 `CLI_EXEC_WHITELIST` 中的所有命令。
+3. `args.command` 一律映射 `cli.exec.raw`。
+4. `stats --sql`、`stats --rebuild` 映射高危 operation。
+5. 禁止未知/重复/伪造 flags。
 
-| 能力 | 应由 command permission 管 | 应由 permissionMode 管 |
-|---|---:|---:|
-| guest 能否调用 `model list` | 是 | 否 |
-| guest 能否切换自己的 relation 模型 | 是 | 否 |
-| 模型执行 Bash `rm -rf` 是否拦截 | 否 | 是 |
-| Claude/Codex tool call 是否需要审批 | 否 | 是 |
-| daemon 是否允许远程 restart | 是 | 否 |
+### 13.5 入口接入
 
----
+1. `/cli` 删除 `identity.role === 'owner'` 前置判断，改为 `authorizeCommand()`。
+2. menu query/update/action 接入 operation 授权。
+3. slash handler 的实际执行路径接入 operation 授权。
+4. ctl/IPC 接入 operation 授权。
+5. ECWeb/control 对等操作接入 operation 授权；是否暴露 `/cli` 仍可保持不暴露。
 
-## 12. 实施计划
+### 13.6 ECWeb
 
-### 阶段 1：修复当前模型远程访问链路
+1. role definitions API 保留/校验 `commandPermissions`。
+2. 角色详情页新增命令权限配置区。
+3. 高危能力显示危险标识、默认折叠、二次确认。
+4. 支持按 operation 分类筛选。
+5. 支持查看 effective command permissions。
 
-目标：让远程详情页模型列表和角色权限真正挂钩。
+### 13.7 文档同步
 
-工作项：
-
-1. 新增 `CommandIntent` 和模型 CLI argv 解析函数。
-2. 将 `/cli` 入口改为先解析 operation，再调用 `authorizeCommand()`，不再使用 `identity.role === 'owner'` 硬编码判断。
-3. 校验 `--self` / `--peer` 只能指向当前 agent 和当前 actor。
-4. `model list/current/use/check` 继续使用 CLI 内部角色推导和模型权限校验。
-5. 增加日志：`menu.action cli` 的 operation、role、decision、reason。
-6. 增加测试：
-   - guest `model list --self A --peer U` 返回 guest 模型列表。
-   - guest `model list --self A --peer other` 拒绝。
-   - guest `model use` 不允许越过 `allowedModels`，除非该角色也被显式授予对应字段覆盖能力。
-   - admin/owner 行为保持兼容。
-
-### 阶段 2：抽出统一授权器
-
-目标：把 slash/menu/受限 CLI 的判断收口。
-
-工作项：
-
-1. 新增 `src/core/command/command-permission.ts`。
-2. 定义 `OperationId`、`CommandScope`、`CommandIntent`、`CommandPermission`。
-3. 先使用内置默认策略，不改 schema。
-4. 接入模型、file、trigger、session 的核心路径。
-5. 审计日志统一输出。
-
-### 阶段 3：升级 roles schema
-
-目标：允许 ecweb 编辑角色命令权限。
-
-工作项：
-
-1. 新增 `roles.schema.4.json`。
-2. `RoleDefinition` 增加 `commandPermissions`。
-3. `roles-merge` 支持 `commandPermissions` diff/merge。
-4. `ConfigManager.writeRoles()` 支持 schema v4 写入。
-5. ecweb 角色详情页增加“命令权限”配置区。
-
-### 阶段 4：扩展更多命令
-
-优先顺序：
-
-1. model
-2. session
-3. trigger
-4. file
-5. agent read-only
-6. dangerous/process/control 类命令
-
-dangerous/process/control 类命令进入配置后，默认只授予 owner/admin；如果业务需要，可以显式授予 guest/member/custom role。
+1. `docs/aun-menu-protocol-dev-guide-v2.5.md`
+2. `docs/menu-protocol-cli-exec-frontend.md`
+3. `docs/stats-frontend-guide.md`
+4. `docs/model-command-design.md`
+5. `docs/config/03-schema.md`
+6. ECWeb role management docs
 
 ---
 
-## 13. 风险与约束
+## 14. 验收测试
 
-### 13.1 不允许用字符串白名单替代能力点
+### 14.1 `/cli` 统一授权
 
-不建议这种设计：
+1. guest `model list --self A --peer U --format json` allow，返回 guest 可见模型。
+2. guest `model list --self A --peer other --format json` deny。
+3. guest `model list --self otherAgent --peer U --format json` deny。
+4. guest `model list --role owner ...` deny。
+5. guest `model use opus --self A --peer U` 因字段权限 deny。
+6. member `model use sonnet --self A --peer U` 在 `allowOverride=true` 且 `allowedModels` 匹配时 allow。
+7. guest `stats --sql "select ..."` deny。
+8. guest role 被显式授予 `stats.sqlReadonly` 后 allow，并产生 dangerous audit。
+9. guest `args.command="model list ..."` 映射 `cli.exec.raw`，默认 deny。
+10. guest 显式授予 `cli.exec.raw` 后 allow，并产生 dangerous audit。
+
+### 14.2 menu/slash/ctl 一致性
+
+1. slash `/model` 与 menu `model list` 对同一 actor 返回一致模型集合。
+2. menu `model use` 与 CLI `model use` 遵守同一字段权限。
+3. ctl setmodel 通过 session context 得到同一 role 约束。
+4. `/restart`、`system.restart`、control restart 都映射 `system.restart`。
+5. 非 daemon owner 即使 agent role 是 owner，也不能默认执行 process operation，除非 commandPermissions 显式覆盖。
+
+### 14.3 schema v4
+
+1. v3 roles.json 迁移到 v4 后行为不变。
+2. 自定义 role 可配置 `model.*`。
+3. 自定义 role 的 `"*"` 不包含 `cli.exec.raw`。
+4. `dangerous:*` 可以显式包含高危 operation。
+5. deny 规则优先于 allow 规则。
+
+### 14.4 审计
+
+1. 所有 deny 有审计记录。
+2. 所有 dangerous allow 有审计记录。
+3. raw CLI 审计不落完整命令，只落 argvHash/summary。
+4. 审计包含 actor、role、operation、scope、decision、reason。
+
+---
+
+## 15. 风险与约束
+
+### 15.1 不允许用 CLI 字符串白名单替代 operation
+
+不允许把角色配置设计成：
 
 ```json
 {
-  "allowedCli": [
-    "model *",
-    "agent *",
-    "storage *"
-  ]
+  "allowedCli": ["model *", "stats *", "agent *"]
 }
 ```
 
 原因：
 
-- argv 组合太多，容易漏掉写操作。
-- CLI 未来新增子命令会扩大权限面。
-- 参数伪造难审计。
-- 它无法区分普通能力和高危能力。
+1. CLI 新增子命令会扩大权限面。
+2. flags 组合会改变读写/高危属性。
+3. 参数伪造难审计。
+4. 无法表达 scope 和业务约束。
+5. 无法区分普通能力和高危能力。
 
-推荐把同样意图改成能力点：
+### 15.2 前端隐藏按钮不是权限
 
-```json
-{
-  "commandPermissions": {
-    "model.*": { "allow": true },
-    "agent.list": { "allow": true },
-    "agent.show": { "allow": true },
-    "storage.list": { "allow": true },
-    "storage.quota": { "allow": true },
-    "cli.exec.raw": {
-      "allow": true,
-      "dangerous": true,
-      "requireExplicitGrant": true
-    }
-  }
-}
-```
+前端可以根据 effective permissions 隐藏入口，但 daemon 必须最终授权。所有入口必须 fail-closed。
 
-### 13.2 不能只靠前端隐藏按钮
+### 15.3 permissionMode 不等于命令权限
 
-前端可以根据角色隐藏入口，但 daemon 必须做最终授权。
+`permissionMode` 管 baseagent 工具执行策略，例如模型是否能执行 Bash、读写文件、请求审批。
 
-当前问题正说明：前端发送了 `model list`，服务端路径没有正确进入角色模型过滤。权限必须在 daemon 侧闭环。
+`commandPermissions` 管用户能否控制 daemon，例如切模型、查文件、改配置、重启服务。
 
-### 13.3 自定义角色需要字符串 role 支持
+两者不能互相替代。
 
-授权器必须接受任意 role string，不能只写死 owner/admin/member/guest/anonymous。
+### 15.4 高危能力必须显式
 
-默认策略可以按以下方式 fallback：
+`dangerous=true` operation：
 
-```text
-unknown custom role
-  -> 读取 role definition
-  -> 没有 commandPermissions 时按 member 或最小权限 fallback
-```
-
-建议默认 fallback 到更保守的 `guest`，除非已有文档明确 custom role 继承 member。
+1. 不匹配普通 `"*"`。
+2. 必须 exact 或 `dangerous:*` 授权。
+3. 默认要求审计。
+4. 可默认要求 daemon owner/control channel。
+5. UI 必须明显标识。
 
 ---
 
-## 14. 推荐落地决策
+## 16. 当前模型问题在新方案下的链路
 
-1. 需要把命令执行能力纳入角色权限体系。
-2. 首期不要升级 schema，先用内置 `OperationId` 策略修复模型链路。
-3. `/cli` 不再保持 owner-only 硬编码，而是根据 `cli.exec.raw`、`model.*` 等能力点授权。
-4. 受限白名单必须做 `--self/--peer` 防伪造校验。
-5. `model.use` 必须同时经过命令授权和 `allowedModels` 字段权限校验。
-6. 后续再升级 `roles.schema.4.json`，把普通能力和高危能力都暴露给 ecweb，但高危能力必须有明确标识和审计。
-
----
-
-## 15. 当前模型问题的直接解释
-
-当前 guest 远程访问模型列表没有变化，根因是：
+当前失败链路：
 
 ```text
-前端 menu.action name=cli
-  -> daemon 收到请求
-  -> /cli 要求 identity.role === owner
-  -> guest 被 NO_PERMISSION 拦截
-  -> execCliPassthrough 没执行
-  -> model list 内部角色过滤没有机会运行
+menu.action name=cli action=exec argv=["model","list","--self",A,"--peer",U]
+  -> /cli owner-only
+  -> guest NO_PERMISSION
+  -> CLI 内部 role 过滤没有机会执行
 ```
 
-因此直接修 `src/cli/model.ts` 还不够，还必须修远程命令入口的授权分层。
-
-正确链路应该变成：
+一步到位后的链路：
 
 ```text
-前端 menu.action name=cli argv=["model","list","--self",A,"--peer",U]
-  -> 识别为 operation=model.list scope=relation
-  -> 校验 actor=U、self=A、role=guest
-  -> 授权通过
-  -> 执行 model list
-  -> CLI 内部按 guest allowedModels 过滤
-  -> 返回 guest 可用模型列表
+menu.action name=cli action=exec argv=["model","list","--self",A,"--peer",U,"--format","json"]
+  -> parseCliIntent()
+  -> operation=model.list
+  -> scope=relation
+  -> context: actor=U, self=A, role=guest
+  -> authorizeCommand()
+  -> commandPermissions['model.list'] allow relation + ownPeerOnly + ownAgentOnly
+  -> execCliPassthrough 或 in-process model handler
+  -> model list 内部继续按 guest allowedModels 过滤
+  -> 返回 guest 可见模型列表
 ```
+
+这不是 `/cli` 特例，而是统一命令授权体系的一个普通读操作。
+

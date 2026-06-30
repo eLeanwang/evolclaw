@@ -36,7 +36,8 @@ import { mergeBehaviorIntoEffective } from './behavior.js';
 import { normalizeAgentLifecycle } from './lifecycle.js';
 import { mergeWithRoleConstraints } from './role-constraints.js';
 import { mergeRolesConfig, diffRolesConfig } from './roles-merge.js';
-import { getBuiltinRolesConfig, clearRolesCache } from './roles.js';
+import { getBuiltinRolesConfig } from './builtin-roles.js';
+import { clearRolesCache } from './roles-cache.js';
 import type {
   ProcessConfig,
   DefaultsConfig,
@@ -189,16 +190,20 @@ export interface WriteOpts {
 export function write<T = any>(target: ConfigTarget, value: T, sel?: Selector, opts: WriteOpts = {}): void {
   const schema = loadSchema(TARGET_SCHEMA[target]);
   const withVer = ensureSchemaVersion(value as any, schema.version);
+  const file = targetPath(target, sel);
+  const normalized = target === ConfigTarget.Roles
+    ? migrateIfNeeded(target, withVer, file)
+    : withVer;
 
   // 1. Schema 校验
   if (!opts.skipValidate) {
-    validateOrThrow(schema, withVer, target);
+    validateOrThrow(schema, normalized, target);
   }
 
   // 2. 角色约束校验（仅对 RelationBehavior）
   if (target === ConfigTarget.RelationBehavior && sel?.self && sel?.peerKey) {
     try {
-      const validation = validateConfigWrite(target, withVer as any, sel);
+      const validation = validateConfigWrite(target, normalized as any, sel);
       if (!validation.valid) {
         console.warn(`[config-manager] Role constraint violations on write:`,
           validation.violations.map(v => `${v.field}: ${v.reason}`));
@@ -215,9 +220,8 @@ export function write<T = any>(target: ConfigTarget, value: T, sel?: Selector, o
   }
 
   // 3. 写入文件
-  const file = targetPath(target, sel);
   fs.mkdirSync(path.dirname(file), { recursive: true });
-  atomicWriteJson(file, withVer);
+  atomicWriteJson(file, normalized);
   if (fileCacheAvailable()) fileCache.invalidate(file);
 }
 
@@ -311,10 +315,13 @@ function migrateIfNeeded<T>(target: ConfigTarget, raw: T, file: string): T {
   // roles：格式迁移（全量 → overlay），与版本号无关
   if (target === ConfigTarget.Roles) {
     let migrated = migrateRolesToOverlay(raw as any, file) as T;
-    // v1 → v2 schema 版本迁移（添加 defaultRole / allowAccess 字段）
+    // v1 → v2 → v3 → v4 schema 版本迁移
     const have = (migrated as any)?.$schema_version;
-    if (typeof have === 'number' && have < 3) {
-      migrated = migrateRolesToV3(migrated as any, file) as T;
+    if (typeof have === 'number' && have < 4) {
+      if (have < 3) {
+        migrated = migrateRolesToV3(migrated as any, file) as T;
+      }
+      migrated = migrateRolesToV4(migrated as any, file) as T;
     }
     return migrated;
   }
@@ -395,6 +402,22 @@ function migrateRolesToV3(raw: any, file: string): RolesConfig {
     },
   };
   delete (migrated as any).defaultRole;
+  return migrated;
+}
+
+/**
+ * roles v3 → v4 schema 迁移：添加 commandPermissions 支持。
+ * v3 没有 commandPermissions 字段，v4 schema 为每个角色添加命令权限配置。
+ * 迁移策略：overlay 里只存用户改动，未改的字段继承内置。所以只需升 $schema_version，
+ * commandPermissions 留空让合并时从 builtin 补全。
+ */
+function migrateRolesToV4(raw: any, file: string): RolesConfig {
+  console.log(`[config] roles.json -> v4 migration: ${file}`);
+  const migrated: RolesConfig = {
+    ...raw,
+    $schema_version: 4,
+  };
+  // commandPermissions 字段留空，让 mergeRolesConfig 从内置基线补全
   return migrated;
 }
 

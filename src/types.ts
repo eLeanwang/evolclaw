@@ -552,6 +552,7 @@ export interface AgentInfo {
   baseagent: string;
   model?: string;
   effort?: string;
+  owners: string[];
   lastActivity?: number;
   activeSessions?: number;
   error?: string;
@@ -1165,6 +1166,146 @@ export interface MenuResponse {
   error?: { code: string; message: string };  // 失败（与 data 互斥）
 }
 
+// ── Command Authorization Types ──
+
+export type CommandSource = 'slash' | 'menu' | 'menu.cli' | 'ctl' | 'ipc' | 'ecweb' | 'control';
+
+export type CommandScope =
+  | 'relation'
+  | 'role'
+  | 'agent'
+  | 'process'
+  | 'filesystem'
+  | 'control'
+  | 'raw-cli';
+
+export type OperationCategory =
+  | 'read'
+  | 'diagnose'
+  | 'write-own'
+  | 'write-agent'
+  | 'process'
+  | 'dangerous';
+
+export interface OperationMeta {
+  id: string;
+  category: OperationCategory;
+  dangerous: boolean;
+  defaultScopes: CommandScope[];
+  description: string;
+  sources?: CommandSource[];
+}
+
+export interface CommandIntent {
+  operation: string;
+  scope: CommandScope;
+  source: CommandSource;
+  args: Record<string, unknown>;
+  rawArgv?: string[];
+  dangerous?: boolean;
+}
+
+export interface CommandAuthorizationContext {
+  intent: CommandIntent;
+
+  actorId?: string;
+  channel?: string;
+  channelId?: string;
+  chatType?: 'private' | 'group';
+
+  selfAid?: string;
+  peerKey?: string;
+  role: string;
+
+  isDaemonOwner?: boolean;
+  fromControlChannel?: boolean;
+  source: CommandSource;
+}
+
+export interface CommandPermissionConstraints {
+  ownPeerOnly?: boolean;
+  ownAgentOnly?: boolean;
+  privateOnly?: boolean;
+  groupOnly?: boolean;
+  requireDaemonOwner?: boolean;
+  requireControlChannel?: boolean;
+  requireExplicitDangerousGrant?: boolean;
+  requireFieldOverride?: string;
+
+  allowedArgs?: Record<string, Array<string | number | boolean>>;
+  deniedArgs?: Record<string, Array<string | number | boolean>>;
+  forbiddenFlags?: string[];
+  allowedConfigKeys?: string[];
+  allowedPrefixes?: string[];
+
+  timeoutMs?: number;
+  outputLimitBytes?: number;
+  cwdPolicy?: 'agentProject' | 'evolclawHome' | 'none';
+  envAllowlist?: string[];
+}
+
+export interface CommandPermission {
+  allow: boolean;
+  dangerous?: boolean;
+  scopes?: CommandScope[];
+  constraints?: CommandPermissionConstraints;
+  reason?: string;
+}
+
+export type CommandAuthorizationDecision =
+  | {
+      allow: true;
+      operation: string;
+      scope: CommandScope;
+      role: string;
+      dangerous: boolean;
+      matchedRule?: string;
+      constraints?: CommandPermissionConstraints;
+    }
+  | {
+      allow: false;
+      code:
+        | 'NO_PERMISSION'
+        | 'NOT_ALLOWED'
+        | 'SCOPE_MISMATCH'
+        | 'ARGUMENT_MISMATCH'
+        | 'DANGEROUS_NOT_GRANTED'
+        | 'ROLE_ACCESS_DENIED';
+      reason: string;
+      operation: string;
+      scope?: CommandScope;
+      role: string;
+      dangerous?: boolean;
+      matchedRule?: string;
+    };
+
+export interface CommandAuthorizationAuditEvent {
+  ts: number;
+  source: CommandSource;
+  operation: string;
+  scope: CommandScope;
+  dangerous: boolean;
+
+  actorId?: string;
+  selfAid?: string;
+  peerKey?: string;
+  channel?: string;
+  channelId?: string;
+  role: string;
+  isDaemonOwner?: boolean;
+  fromControlChannel?: boolean;
+
+  decision: 'allow' | 'deny';
+  code?: string;
+  reason?: string;
+  matchedRule?: string;
+
+  argvHash?: string;
+  argsSummary?: Record<string, unknown>;
+  durationMs?: number;
+  exitCode?: number;
+}
+
 // ── Role System Types ──
 
 export type BuiltinRole = 'owner' | 'admin' | 'member' | 'guest' | 'anonymous';
@@ -1182,6 +1323,7 @@ export interface RoleDefinition {
   description: string;
   allowAccess?: boolean;  // 该角色是否允许访问，默认 true（anonymous 默认 false）
   permissions: Record<string, FieldPermission>;
+  commandPermissions?: Record<string, CommandPermission>;  // 命令权限配置
 }
 
 export type RoleAssignmentScope = 'private' | 'group' | 'group-member';

@@ -11,6 +11,7 @@ import {
   validateAgentConfig,
 } from '../config-store.js';
 import { resolveEffective } from '../config/config-manager.js';
+import { listRoleAssignments } from '../config/role-assignments.js';
 import type {
   AgentInfo,
   AgentConfig,
@@ -518,6 +519,11 @@ export class EvolAgentRegistry {
     const responseModePrivate = rmConfig?.default_private || 'interactive';
     const responseModeGroup = rmConfig?.default_group || 'proactive';
 
+    // 从 role-assignments 系统读取 owners
+    const owners = listRoleAssignments(agent.aid, { scope: 'private', role: 'owner' })
+      .map(a => a.peerId)
+      .filter((peerId): peerId is string => !!peerId);
+
     return {
       name: displayName || agent.name || agent.aid,
       displayName,
@@ -529,7 +535,7 @@ export class EvolAgentRegistry {
       baseagent: agent.baseagent,
       model: agent.model,
       effort: agent.effort,
-      owners: agent.config.owners ?? [],
+      owners,
       lastActivity: agent.lastActivity,
       activeSessions: agent.activeSessions,
       error: agent.error,

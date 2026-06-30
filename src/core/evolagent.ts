@@ -6,6 +6,7 @@ import { agentPersonalDir } from '../paths.js';
 import { fileCache } from './daemon-file-cache.js';
 import { ConfigTarget, read as cfgRead, write as cfgWrite, ensureFile as cfgEnsure, resolveEffective } from '../config/config-manager.js';
 import { withLifecycleForWrite } from '../config/lifecycle.js';
+import { listRoleAssignments, setPrivateRoleAssignment } from '../config/role-assignments.js';
 import type {
   AgentConfig,
   AgentLifecycle,
@@ -150,6 +151,43 @@ export class EvolAgent {
   setShowActivities(_channelKey: string, mode: ShowActivitiesMode): void {
     this.merged.show_activities = mode;
     this.mutateBehavior(b => { b.show_activities = mode; });
+  }
+
+  // ── Role-based Access Control ─────────────────────────────────────────
+
+  /**
+   * Check if a user has owner role for this agent (private scope).
+   * Uses the role-assignments system.
+   */
+  isOwner(_channelKey: string, userId: string): boolean {
+    const assignments = listRoleAssignments(this.aid, { scope: 'private', role: 'owner', peerId: userId });
+    return assignments.length > 0;
+  }
+
+  /**
+   * Check if a user has admin role for this agent (private scope).
+   * Uses the role-assignments system.
+   */
+  isAdmin(_channelKey: string, userId: string): boolean {
+    const assignments = listRoleAssignments(this.aid, { scope: 'private', role: 'admin', peerId: userId });
+    return assignments.length > 0;
+  }
+
+  /**
+   * Get the first owner of this agent (private scope).
+   * Returns the peerId of the first owner assignment.
+   */
+  getOwner(_channelKey: string): string | undefined {
+    const owners = listRoleAssignments(this.aid, { scope: 'private', role: 'owner' });
+    return owners[0]?.peerId;
+  }
+
+  /**
+   * Set a user as owner for this agent (private scope).
+   * Creates a role assignment in the role-assignments system.
+   */
+  setOwner(_channelKey: string, userId: string): void {
+    setPrivateRoleAssignment(this.aid, userId, 'owner');
   }
 
   // ── Baseagent 字段写入 ────────────────────────────

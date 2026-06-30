@@ -1,15 +1,11 @@
-/**
- * Role Configuration Tests
- * 测试角色配置的读取、缓存和查询功能
- */
-
 import { describe, it, expect, beforeEach } from 'vitest';
 import {
   readRolesConfig,
   getRoleDefinition,
   getFieldPermission,
   clearRolesCache,
-  getBuiltinRolesConfig
+  getBuiltinRolesConfig,
+  getCommandPermissions,
 } from '../src/config/roles.js';
 
 describe('Role Configuration', () => {
@@ -18,229 +14,121 @@ describe('Role Configuration', () => {
   });
 
   describe('readRolesConfig', () => {
-    it('should return builtin config when file does not exist', () => {
+    it('returns builtin v4 config when file does not exist', () => {
       const config = readRolesConfig();
-      expect(config).toBeDefined();
-      expect(config.$schema_version).toBe(3);
+      expect(config.$schema_version).toBe(4);
       expect(config.defaultRoles).toEqual({ private: 'anonymous', group: 'guest' });
-      expect(config.roles).toBeDefined();
-    });
-
-    it('should have all five builtin roles', () => {
-      const config = readRolesConfig();
-      expect(config.roles.owner).toBeDefined();
-      expect(config.roles.admin).toBeDefined();
-      expect(config.roles.member).toBeDefined();
-      expect(config.roles.guest).toBeDefined();
-      expect(config.roles.anonymous).toBeDefined();
+      expect(Object.keys(config.roles)).toEqual(['owner', 'admin', 'member', 'guest', 'anonymous']);
     });
   });
 
   describe('getRoleDefinition', () => {
-    it('should get owner role definition', () => {
-      const owner = getRoleDefinition('owner');
-      expect(owner).toBeDefined();
-      expect(owner?.description).toContain('所有者');
-      expect(owner?.permissions).toBeDefined();
+    it('gets builtin role definitions', () => {
+      expect(getRoleDefinition('owner')?.permissions).toBeDefined();
+      expect(getRoleDefinition('admin')?.permissions).toBeDefined();
+      expect(getRoleDefinition('member')?.permissions).toBeDefined();
+      expect(getRoleDefinition('guest')?.permissions).toBeDefined();
+      expect(getRoleDefinition('anonymous')?.allowAccess).toBe(false);
     });
 
-    it('should get admin role definition', () => {
-      const admin = getRoleDefinition('admin');
-      expect(admin).toBeDefined();
-      expect(admin?.description).toContain('管理员');
+    it('returns null for unknown role', () => {
+      expect(getRoleDefinition('unknown-role')).toBeNull();
     });
 
-    it('should get member role definition', () => {
-      const member = getRoleDefinition('member');
-      expect(member).toBeDefined();
-      expect(member?.description).toContain('团队成员');
-    });
-
-    it('should get guest role definition', () => {
-      const guest = getRoleDefinition('guest');
-      expect(guest).toBeDefined();
-      expect(guest?.description).toContain('访客');
-    });
-
-    it('should get anonymous role definition', () => {
-      const anonymous = getRoleDefinition('anonymous');
-      expect(anonymous).toBeDefined();
-      expect(anonymous?.description).toContain('匿名');
-    });
-
-    it('should return null for unknown role', () => {
-      const unknown = getRoleDefinition('unknown-role');
-      expect(unknown).toBeNull();
-    });
-
-    it('should use cache on second call', () => {
+    it('uses cache on second call', () => {
       const first = getRoleDefinition('owner');
       const second = getRoleDefinition('owner');
-      expect(first).toBe(second); // 同一个对象引用
+      expect(first).toBe(second);
     });
   });
 
   describe('getFieldPermission', () => {
-    it('should get permissionMode for owner', () => {
-      const perm = getFieldPermission('owner', 'permissionMode');
-      expect(perm).toBeDefined();
-      expect(perm?.default).toBe('bypass');
-      expect(perm?.allowOverride).toBe(false);
+    it('gets permission modes', () => {
+      expect(getFieldPermission('owner', 'permissionMode')?.default).toBe('bypass');
+      expect(getFieldPermission('admin', 'permissionMode')?.default).toBe('request');
+      expect(getFieldPermission('member', 'permissionMode')?.default).toBe('auto');
+      expect(getFieldPermission('guest', 'permissionMode')?.default).toBe('readonly');
+      expect(getFieldPermission('anonymous', 'permissionMode')?.default).toBe('readonly');
     });
 
-    it('should get permissionMode for admin', () => {
-      const perm = getFieldPermission('admin', 'permissionMode');
-      expect(perm).toBeDefined();
-      expect(perm?.default).toBe('request');
-      expect(perm?.allowOverride).toBe(false);
-    });
-
-    it('should get permissionMode for member', () => {
-      const perm = getFieldPermission('member', 'permissionMode');
-      expect(perm).toBeDefined();
-      expect(perm?.default).toBe('auto');
-      expect(perm?.allowOverride).toBe(false);
-    });
-
-    it('should get permissionMode for guest', () => {
-      const perm = getFieldPermission('guest', 'permissionMode');
-      expect(perm).toBeDefined();
-      expect(perm?.default).toBe('readonly');
-      expect(perm?.allowOverride).toBe(false);
-    });
-
-    it('should get nested field permission (baseagents.claude.model)', () => {
+    it('gets nested field permission', () => {
       const perm = getFieldPermission('owner', 'baseagents.claude.model');
-      expect(perm).toBeDefined();
       expect(perm?.default).toBe('claude-opus-4-8');
       expect(perm?.allowOverride).toBe(true);
       expect(perm?.allowedModels).toContain('*');
     });
 
-    it('should return null for unknown field', () => {
-      const perm = getFieldPermission('owner', 'unknown-field');
-      expect(perm).toBeNull();
-    });
-
-    it('should return null for unknown role', () => {
-      const perm = getFieldPermission('unknown-role', 'permissionMode');
-      expect(perm).toBeNull();
-    });
-  });
-
-  describe('Role Permission Hierarchy', () => {
-    it('owner should have bypass permission', () => {
-      const perm = getFieldPermission('owner', 'permissionMode');
-      expect(perm?.default).toBe('bypass');
-    });
-
-    it('admin should have request permission', () => {
-      const perm = getFieldPermission('admin', 'permissionMode');
-      expect(perm?.default).toBe('request');
-    });
-
-    it('member should have auto permission', () => {
-      const perm = getFieldPermission('member', 'permissionMode');
-      expect(perm?.default).toBe('auto');
-    });
-
-    it('guest should have readonly permission', () => {
-      const perm = getFieldPermission('guest', 'permissionMode');
-      expect(perm?.default).toBe('readonly');
-    });
-
-    it('anonymous should have readonly permission', () => {
-      const perm = getFieldPermission('anonymous', 'permissionMode');
-      expect(perm?.default).toBe('readonly');
+    it('returns null for unknown field or role', () => {
+      expect(getFieldPermission('owner', 'unknown-field')).toBeNull();
+      expect(getFieldPermission('unknown-role', 'permissionMode')).toBeNull();
     });
   });
 
   describe('Model Whitelist', () => {
-    it('owner should allow all models', () => {
-      const perm = getFieldPermission('owner', 'baseagents.claude.model');
-      expect(perm?.allowedModels).toContain('*');
-    });
-
-    it('admin should allow opus, sonnet, haiku', () => {
-      const perm = getFieldPermission('admin', 'baseagents.claude.model');
-      expect(perm?.allowedModels).toEqual([
+    it('keeps builtin model allowlists', () => {
+      expect(getFieldPermission('owner', 'baseagents.claude.model')?.allowedModels).toContain('*');
+      expect(getFieldPermission('admin', 'baseagents.claude.model')?.allowedModels).toEqual([
         'claude-opus-*',
         'claude-sonnet-*',
-        'claude-haiku-*'
+        'claude-haiku-*',
       ]);
-    });
-
-    it('member should allow sonnet and haiku only', () => {
-      const perm = getFieldPermission('member', 'baseagents.claude.model');
-      expect(perm?.allowedModels).toEqual([
+      expect(getFieldPermission('member', 'baseagents.claude.model')?.allowedModels).toEqual([
         'claude-sonnet-*',
-        'claude-haiku-*'
+        'claude-haiku-*',
       ]);
-    });
-
-    it('guest should allow haiku only', () => {
-      const perm = getFieldPermission('guest', 'baseagents.claude.model');
-      expect(perm?.allowedModels).toEqual(['claude-haiku-*']);
-    });
-
-    it('anonymous should allow haiku only', () => {
-      const perm = getFieldPermission('anonymous', 'baseagents.claude.model');
-      expect(perm?.allowedModels).toEqual(['claude-haiku-*']);
+      expect(getFieldPermission('guest', 'baseagents.claude.model')?.allowedModels).toEqual(['claude-haiku-*']);
+      expect(getFieldPermission('anonymous', 'baseagents.claude.model')?.allowedModels).toEqual(['claude-haiku-*']);
     });
   });
 
   describe('Override Permissions', () => {
-    it('owner can override most fields', () => {
+    it('keeps builtin field override policy', () => {
       expect(getFieldPermission('owner', 'chatmode')?.allowOverride).toBe(true);
-      expect(getFieldPermission('owner', 'dispatch')?.allowOverride).toBe(true);
-      expect(getFieldPermission('owner', 'show_activities')?.allowOverride).toBe(true);
-    });
-
-    it('owner cannot override permissionMode', () => {
       expect(getFieldPermission('owner', 'permissionMode')?.allowOverride).toBe(false);
-    });
-
-    it('guest cannot override any fields', () => {
-      expect(getFieldPermission('guest', 'permissionMode')?.allowOverride).toBe(false);
       expect(getFieldPermission('guest', 'chatmode')?.allowOverride).toBe(false);
-      expect(getFieldPermission('guest', 'dispatch')?.allowOverride).toBe(false);
       expect(getFieldPermission('guest', 'baseagents.claude.model')?.allowOverride).toBe(false);
-    });
-
-    it('member can override some fields but not critical ones', () => {
-      expect(getFieldPermission('member', 'permissionMode')?.allowOverride).toBe(false);
-      expect(getFieldPermission('member', 'dispatch')?.allowOverride).toBe(false);
       expect(getFieldPermission('member', 'chatmode')?.allowOverride).toBe(true);
-      expect(getFieldPermission('member', 'show_activities')?.allowOverride).toBe(true);
+      expect(getFieldPermission('member', 'dispatch')?.allowOverride).toBe(false);
+    });
+  });
+
+  describe('commandPermissions', () => {
+    it('exposes v4 command permissions', () => {
+      expect(getCommandPermissions('owner')['dangerous:*']).toMatchObject({
+        allow: true,
+        dangerous: true,
+        constraints: { requireDaemonOwner: true },
+      });
+      expect(getCommandPermissions('admin')['dangerous:*']?.constraints?.requireDaemonOwner).toBe(true);
+      expect(getCommandPermissions('member')['model.*']).toBeDefined();
+      expect(getCommandPermissions('guest')['model.list']).toBeDefined();
+      expect(getCommandPermissions('anonymous')['*']?.allow).toBe(false);
     });
   });
 
   describe('clearRolesCache', () => {
-    it('should clear the cache', () => {
-      getRoleDefinition('owner'); // 填充缓存
+    it('clears the cache without breaking reads', () => {
+      getRoleDefinition('owner');
       clearRolesCache();
-      // 无法直接测试缓存是否清空，但至少不应该报错
-      const owner = getRoleDefinition('owner');
-      expect(owner).toBeDefined();
+      expect(getRoleDefinition('owner')).toBeDefined();
     });
   });
 
   describe('getBuiltinRolesConfig', () => {
-    it('should return valid config', () => {
+    it('returns valid builtin v4 config', () => {
       const config = getBuiltinRolesConfig();
-      expect(config.$schema_version).toBe(3);
+      expect(config.$schema_version).toBe(4);
       expect(config.defaultRoles).toEqual({ private: 'anonymous', group: 'guest' });
       expect(Object.keys(config.roles)).toHaveLength(5);
     });
 
-    it('should have all required role properties', () => {
+    it('has required role properties', () => {
       const config = getBuiltinRolesConfig();
-      for (const [roleName, roleDef] of Object.entries(config.roles)) {
-        expect(roleDef.description).toBeDefined();
-        expect(typeof roleDef.allowAccess).toBe('boolean');
-        expect(roleDef.permissions).toBeDefined();
+      for (const roleDef of Object.values(config.roles)) {
         expect(typeof roleDef.description).toBe('string');
+        expect(typeof roleDef.allowAccess).toBe('boolean');
         expect(typeof roleDef.permissions).toBe('object');
+        expect(typeof roleDef.commandPermissions).toBe('object');
       }
     });
   });

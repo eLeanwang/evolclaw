@@ -1,4 +1,4 @@
-import { type InteractionRequest, type OutboundPayload, type ReplyContext, type Session } from '../../types.js';
+import { type CommandAuthorizationContext, type CommandIntent, type InteractionRequest, type OutboundPayload, type ReplyContext, type Session } from '../../types.js';
 import type { PermissionDecision } from '../permission.js';
 import { hasModelSwitcher, hasPermissionController } from '../../agents/runner-types.js';
 import { getCodexEfforts } from '../../agents/codex-runner.js';
@@ -13,6 +13,8 @@ import { checkLatestVersion, getLocalVersion, isLinkedInstall, compareVersions }
 import { loadEvolclawConfig } from '../../config-store.js';
 import { isProcessLevelOwner } from './menu-handler.js';
 import { execAgentAction } from '../message/command-handler-agent-control.js';
+import { authorizeCommand } from './command-permission.js';
+import { auditCommandAuthorization } from './command-audit.js';
 import { resolvePermissionMode, writeRelationPermissionMode } from '../model/config-scope.js';
 import { formatPeerKey } from '../relation/peer-identity.js';
 import { modelMatches, resolveCommandModelResolution } from './model-resolve.js';
@@ -53,6 +55,86 @@ function formatIdleTime(ms: number): string {
   if (hours > 0) return `${hours}小时前`;
   if (minutes > 0) return `${minutes}分钟前`;
   return '刚刚';
+}
+
+async function authorizeSlashIntent(params: {
+  intent: CommandIntent;
+  identity: import('../../types.js').SessionIdentity;
+  session?: Session | null;
+  channel: string;
+  channelId: string;
+  userId?: string;
+  selfAid?: string;
+  isDaemonOwner: boolean;
+}): Promise<{ kind: 'command.error'; text: string } | null> {
+  const { intent, identity, session, channel, channelId, userId, selfAid, isDaemonOwner } = params;
+  const chatType = session?.chatType as 'private' | 'group' | undefined;
+  const peerKeyId = chatType === 'group'
+    ? (session?.metadata?.groupId || channelId)
+    : userId;
+  const channelType = channel.split('#')[0];
+  const peerKey = channelType && peerKeyId ? formatPeerKey(channelType, peerKeyId) : undefined;
+  const authCtx: CommandAuthorizationContext = {
+    intent,
+    actorId: userId,
+    channel,
+    channelId,
+    chatType,
+    selfAid,
+    peerKey,
+    role: identity.role,
+    isDaemonOwner,
+    fromControlChannel: false,
+    source: 'slash',
+  };
+
+  const decision = authorizeCommand(authCtx);
+  if (!decision.allow) {
+    await auditCommandAuthorization({
+      ts: Date.now(),
+      source: 'slash',
+      operation: intent.operation,
+      scope: intent.scope,
+      dangerous: intent.dangerous ?? false,
+      actorId: userId,
+      selfAid,
+      peerKey,
+      channel,
+      channelId,
+      role: identity.role,
+      isDaemonOwner,
+      fromControlChannel: false,
+      decision: 'deny',
+      code: decision.code,
+      reason: decision.reason,
+      matchedRule: decision.matchedRule,
+      argsSummary: intent.args,
+    });
+    return { kind: 'command.error', text: decision.reason };
+  }
+
+  if (decision.dangerous) {
+    await auditCommandAuthorization({
+      ts: Date.now(),
+      source: 'slash',
+      operation: intent.operation,
+      scope: intent.scope,
+      dangerous: true,
+      actorId: userId,
+      selfAid,
+      peerKey,
+      channel,
+      channelId,
+      role: identity.role,
+      isDaemonOwner,
+      fromControlChannel: false,
+      decision: 'allow',
+      matchedRule: decision.matchedRule,
+      argsSummary: intent.args,
+    });
+  }
+
+  return null;
 }
 
 function getAgentBusyInfo(handler: any, aid: string | undefined, excludeSessionKey?: string): { count: number; processing: Array<{ queueKey: string; agentName: string }>; agentName: string } | null {
@@ -1100,6 +1182,23 @@ export async function handleSlashCommand(this: any,
   if (normalizedContent === '/reload' || normalizedContent.startsWith('/reload ')) {
     const aidArg = normalizedContent.slice('/reload'.length).trim() || undefined;
     const selfAid = this.agentRegistry?.resolveByChannel(channel)?.aid;
+    const authDenied = await authorizeSlashIntent({
+      intent: {
+        operation: 'agent.reload',
+        scope: aidArg ? 'control' : 'agent',
+        source: 'slash',
+        args: { ...(aidArg ? { aid: aidArg } : {}), ...(selfAid ? { self: selfAid } : {}) },
+        dangerous: true,
+      },
+      identity,
+      session: activeSession,
+      channel,
+      channelId,
+      userId,
+      selfAid,
+      isDaemonOwner,
+    });
+    if (authDenied) return authDenied;
 
     // 权限判断：daemon owner 或 agent channel 的 owner/admin
     if (!isDaemonOwner && !isAdmin) {
@@ -1827,6 +1926,24 @@ export async function handleSlashCommand(this: any,
 
   // /restart 命令：重启服务（进程级，仅 daemon owner）
   if (normalizedContent === '/restart') {
+    const restartSelfAid = this.agentRegistry?.resolveByChannel(channel)?.aid;
+    const authDenied = await authorizeSlashIntent({
+      intent: {
+        operation: 'system.restart',
+        scope: 'process',
+        source: 'slash',
+        args: {},
+        dangerous: true,
+      },
+      identity,
+      session: activeSession,
+      channel,
+      channelId,
+      userId,
+      selfAid: restartSelfAid,
+      isDaemonOwner,
+    });
+    if (authDenied) return authDenied;
     // 进程级操作：必须是 daemon owner（evolclaw.json.owners），与 menu 协议 /system restart 一致。
     // agent-channel 的 owner 角色不足以重启整个 daemon。
     if (!isDaemonOwner) {

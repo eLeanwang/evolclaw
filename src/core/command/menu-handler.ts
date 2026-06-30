@@ -27,6 +27,10 @@ import {
   resolveCapabilityContext,
   updateCapabilityPolicy,
 } from '../capability/capability-manager.js';
+import { parseCliIntent, rawCliIntent } from './cli-intent-parser.js';
+import { authorizeCommand } from './command-permission.js';
+import { auditCommandAuthorization, hashArgv } from './command-audit.js';
+import type { CommandAuthorizationContext, CommandIntent, CommandScope } from '../../types.js';
 
 /**
  * 获取 baseagent CLI 的版本号（claude/gemini/codex）。
@@ -440,6 +444,148 @@ function gateControlScope(
   return null;
 }
 
+function buildMenuIntent(
+  verb: 'query' | 'update' | 'action',
+  cmdBase: string,
+  args?: Record<string, any>,
+  action?: string,
+  value?: unknown,
+  fromControlChannel = false,
+): CommandIntent | null {
+  const payload = { ...(args ?? {}), ...(value !== undefined ? { value } : {}) };
+  const intent = (operation: string, scope: CommandScope = 'relation', extra?: Record<string, unknown>): CommandIntent => ({
+    operation,
+    scope,
+    source: 'menu',
+    args: { ...payload, ...(extra ?? {}) },
+  });
+
+  if (verb === 'query') {
+    if (cmdBase === '/model') return intent('model.current');
+    if (cmdBase === '/effort') return intent('model.current');
+    if (cmdBase === '/gateway') return intent('gateway.read', 'process');
+    if (cmdBase === '/config') return intent('config.read', 'process');
+    if (cmdBase === '/system') return intent('system.status', 'process');
+    if (cmdBase === '/agent') {
+      return intent(fromControlChannel && !args?.aid ? 'agent.list' : 'agent.show', fromControlChannel ? 'control' : 'agent');
+    }
+  }
+
+  if (verb === 'update') {
+    if (cmdBase === '/model') return intent('model.use', 'relation', { model: value });
+    if (cmdBase === '/effort') return intent('model.effort', 'relation', { effort: value });
+    if (cmdBase === '/gateway') return intent('gateway.write', 'process');
+    if (cmdBase === '/config') return intent('config.write', 'process');
+  }
+
+  if (verb === 'action') {
+    if (cmdBase === '/file') {
+      if (action === 'list') return intent('file.list', 'filesystem');
+      if (action === 'fetch') return intent('file.fetch', 'filesystem');
+    }
+    if (cmdBase === '/gateway') return intent('gateway.write', 'process', { action });
+    if (cmdBase === '/system') {
+      if (action === 'restart') return intent('system.restart', 'process', { action });
+      if (action === 'upgrade') return intent('system.upgrade', 'process', { action });
+      if (action === 'check') return intent('system.status', 'process', { action });
+    }
+    if (cmdBase === '/agent') {
+      if (action === 'reload') return intent('agent.reload', fromControlChannel ? 'control' : 'agent', { action });
+      if (action === 'create') return intent('agent.create', 'control', { action });
+      if (action === 'delete' || action === 'disable') return intent('agent.delete', 'control', { action });
+    }
+  }
+
+  return null;
+}
+
+async function authorizeMenuIntent(
+  this: any,
+  params: {
+    intent: CommandIntent | null;
+    identity: import('../../types.js').SessionIdentity;
+    session?: Session | null;
+    channel: string;
+    channelId: string;
+    userId?: string;
+    fromControlChannel: boolean;
+  },
+): Promise<{ error: string; code?: string } | null> {
+  const { intent, identity, session, channel, channelId, userId, fromControlChannel } = params;
+  if (!intent) return null;
+
+  const agent = this.getOwningAgent?.(channel);
+  const selfAid = agent?.aid;
+  const channelType = this.resolveChannelType?.(channel);
+  const peerKeyId = session?.chatType === 'group'
+    ? (session?.metadata?.groupId || channelId)
+    : userId;
+  const peerKey = channelType && peerKeyId ? formatPeerKey(channelType, peerKeyId) : undefined;
+  const isDaemonOwner = isProcessLevelOwner(userId, loadEvolclawConfig().owners);
+
+  const authCtx: CommandAuthorizationContext = {
+    intent,
+    actorId: userId,
+    channel,
+    channelId,
+    chatType: session?.chatType as 'private' | 'group' | undefined,
+    selfAid,
+    peerKey,
+    role: identity.role,
+    isDaemonOwner,
+    fromControlChannel,
+    source: 'menu',
+  };
+
+  const decision = authorizeCommand(authCtx);
+  if (!decision.allow) {
+    await auditCommandAuthorization({
+      ts: Date.now(),
+      source: 'menu',
+      operation: intent.operation,
+      scope: intent.scope,
+      dangerous: intent.dangerous ?? false,
+      actorId: userId,
+      selfAid,
+      peerKey,
+      channel,
+      channelId,
+      role: identity.role,
+      isDaemonOwner,
+      fromControlChannel,
+      decision: 'deny',
+      code: decision.code,
+      reason: decision.reason,
+      matchedRule: decision.matchedRule,
+      argsSummary: intent.args,
+    });
+    return { error: decision.reason, code: decision.code };
+  }
+
+  if (decision.dangerous) {
+    await auditCommandAuthorization({
+      ts: Date.now(),
+      source: 'menu',
+      operation: intent.operation,
+      scope: intent.scope,
+      dangerous: true,
+      actorId: userId,
+      selfAid,
+      peerKey,
+      channel,
+      channelId,
+      role: identity.role,
+      isDaemonOwner,
+      fromControlChannel,
+      decision: 'allow',
+      matchedRule: decision.matchedRule,
+      argsSummary: intent.args,
+    });
+  }
+
+  return null;
+}
+
 
 function ecwebErr(id: string, name: string | undefined, code: string, message: string): import('../../types.js').MenuResponse {
   return { type: 'menu.response', id, ...(name ? { name } : {}), error: { code, message } };
@@ -829,6 +975,16 @@ export async function execMenuQuery(this: any,
   if (gated) return gated;
   const { session, evolagent } = await this.loadMenuContext(channel, channelId);
   const identity = overrideIdentity ?? this.sessionManager.resolveIdentity(channel, userId);
+  const authDenied = await authorizeMenuIntent.call(this, {
+    intent: buildMenuIntent('query', cmdBase, args, undefined, undefined, fromControlChannel),
+    identity,
+    session,
+    channel,
+    channelId,
+    userId,
+    fromControlChannel,
+  });
+  if (authDenied) return authDenied;
 
   // ── /agent 查询（只读） ──
   // 控制 channel：验 owners，按 args.aid 查任意 agent；agent channel：强制查自身。
@@ -1182,6 +1338,16 @@ export async function execMenuUpdate(this: any,
   const { session, evolagent } = await this.loadMenuContext(channel, channelId);
   const identity = overrideIdentity ?? this.sessionManager.resolveIdentity(channel, userId);
   const isAdmin = identity.role === 'owner' || identity.role === 'admin';
+  const authDenied = await authorizeMenuIntent.call(this, {
+    intent: buildMenuIntent('update', cmdBase, args, undefined, arg, fromControlChannel),
+    identity,
+    session,
+    channel,
+    channelId,
+    userId,
+    fromControlChannel,
+  });
+  if (authDenied) return authDenied;
 
   // ── 进程级 /gateway update（网关配置，value 为 JSON：{scope,type,patch}） ──
   if (cmdBase === '/gateway') {
@@ -1424,6 +1590,22 @@ export async function execMenuAction(this: any,
   if (!action) return { error: '缺少 action', code: 'MISSING_VALUE' };
   const gated = gateControlScope.call(this, { cmdBase, action, args, channel, fromControlChannel });
   if (gated) return gated;
+  const { session: authSession } = await this.loadMenuContext(channel, channelId);
+  const authIdentity = overrideIdentity ?? this.sessionManager.resolveIdentity(channel, userId);
+  if (cmdBase === '/agent' && !fromControlChannel && !args?.aid) {
+    const selfAid = this.getOwningAgent?.(channel)?.aid;
+    if (selfAid) args = { ...(args ?? {}), aid: selfAid };
+  }
+  const authDenied = await authorizeMenuIntent.call(this, {
+    intent: buildMenuIntent('action', cmdBase, args, action, undefined, fromControlChannel),
+    identity: authIdentity,
+    session: authSession,
+    channel,
+    channelId,
+    userId,
+    fromControlChannel,
+  });
+  if (authDenied) return authDenied;
 
   // ── /gateway action（进程级，gate 已确保 fromControlChannel） ──
   // test=连通性测试；delete=删除配置；models=模型+价格；set-price=改网关价格；sync-env=同步环境变量。
@@ -1786,18 +1968,89 @@ export async function execMenuAction(this: any,
   // ── /cli 透传 ──
   if (cmdBase === '/cli') {
     if (action !== 'exec') return { error: `不支持的 cli action: ${action}`, code: 'NOT_SUPPORTED' };
-    if (identity.role !== 'owner') return { error: '无权限：CLI 执行仅限 owner', code: 'NO_PERMISSION' };
 
     const argv = Array.isArray(args?.argv) ? args.argv.map((x: any) => String(x))
-               : typeof args?.command === 'string' ? tokenizeArgv(args.command)
+               : typeof args?.command === 'string' ? [args.command]
                : null;
     if (!argv || argv.length === 0) return { error: '缺少 argv 或 command', code: 'MISSING_VALUE' };
 
-    const allowed = CLI_EXEC_WHITELIST[argv[0]];
-    if (!allowed) return { error: `命令不在白名单: ${argv[0]}`, code: 'NOT_ALLOWED' };
-    if (allowed !== '*' && !allowed.has(argv[1] ?? '')) {
-      return { error: `子命令不在白名单: ${argv[0]} ${argv[1] ?? ''}`, code: 'NOT_ALLOWED' };
+    // 解析 CLI intent
+    const parseResult = Array.isArray(args?.argv)
+      ? parseCliIntent(argv, 'menu.cli')
+      : { kind: 'raw' as const, intent: rawCliIntent(argv, 'menu.cli'), reason: 'command string is always treated as raw CLI' };
+    if (parseResult.kind === 'invalid') {
+      return { error: parseResult.reason, code: parseResult.code };
     }
+
+    // 构造授权上下文
+    const agent = this.getOwningAgent?.(channel);
+    const selfAid = agent?.aid;
+    const channelType = this.resolveChannelType?.(channel);
+    const peerKey = channelType && userId ? formatPeerKey(channelType, userId) : undefined;
+    const isDaemonOwner = isProcessLevelOwner(userId, loadEvolclawConfig().owners);
+
+    const authCtx: CommandAuthorizationContext = {
+      intent: parseResult.intent,
+      actorId: userId,
+      channel,
+      channelId,
+      chatType: session?.chatType as 'private' | 'group' | undefined,
+      selfAid,
+      peerKey,
+      role: identity.role,
+      isDaemonOwner,
+      fromControlChannel: fromControlChannel ?? false,
+      source: 'menu.cli',
+    };
+
+    // 授权检查
+    const decision = authorizeCommand(authCtx);
+    if (!decision.allow) {
+      await auditCommandAuthorization({
+        ts: Date.now(),
+        source: 'menu.cli',
+        operation: parseResult.intent.operation,
+        scope: parseResult.intent.scope,
+        dangerous: parseResult.intent.dangerous ?? false,
+        actorId: userId,
+        selfAid,
+        peerKey,
+        channel,
+        channelId,
+        role: identity.role,
+        isDaemonOwner,
+        fromControlChannel: fromControlChannel ?? false,
+        decision: 'deny',
+        code: decision.code,
+        reason: decision.reason,
+        matchedRule: decision.matchedRule,
+      });
+      return { error: decision.reason, code: decision.code };
+    }
+
+    // 审计 dangerous 操作
+    if (decision.dangerous) {
+      await auditCommandAuthorization({
+        ts: Date.now(),
+        source: 'menu.cli',
+        operation: parseResult.intent.operation,
+        scope: parseResult.intent.scope,
+        dangerous: true,
+        actorId: userId,
+        selfAid,
+        peerKey,
+        channel,
+        channelId,
+        role: identity.role,
+        isDaemonOwner,
+        fromControlChannel: fromControlChannel ?? false,
+        decision: 'allow',
+        matchedRule: decision.matchedRule,
+        argvHash: hashArgv(argv),
+      });
+    }
+
+    // 执行
     return await this.execCliPassthrough(argv);
   }
 
@@ -1897,7 +2150,7 @@ export async function execMenuForEcweb(this: any, payload: any): Promise<import(
 
       case 'menu.query': {
         if (!cmd) return ecwebErr(id, name, 'MISSING_CMD', '缺少 name/cmd');
-        const r = await this.execMenuQuery(cmd, agentChannelKey, agentChannelKey, userId, payload.args, undefined, true);
+        const r = await this.execMenuQuery(cmd, agentChannelKey, agentChannelKey, userId, payload.args, undefined, true, ownerIdentity);
         return ecwebResp(id, name, r);
       }
 
@@ -1965,7 +2218,7 @@ export async function execMenuForControl(this: any, payload: any, peerId: string
 
       case 'menu.query': {
         if (!cmd) return ecwebErr(id, name, 'MISSING_CMD', '缺少 name/cmd');
-        const r = await this.execMenuQuery(cmd, CONTROL_CHANNEL, CONTROL_CHANNEL, peerId, payload.args, undefined, true);
+        const r = await this.execMenuQuery(cmd, CONTROL_CHANNEL, CONTROL_CHANNEL, peerId, payload.args, undefined, true, ownerIdentity);
         return ecwebResp(id, name, r);
       }
 

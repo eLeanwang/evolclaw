@@ -46,10 +46,17 @@ export function mergeRolesConfig(base: RolesConfig, overlay: RolesConfig | null 
       mergedPerms[field] = overlayPerm;
     }
 
+    // 合并 commandPermissions（v4 新增）
+    const mergedCmdPerms: Record<string, any> = { ...(baseDef.commandPermissions || {}) };
+    for (const [op, overlayPerm] of Object.entries(overlayDef.commandPermissions || {})) {
+      mergedCmdPerms[op] = overlayPerm;
+    }
+
     merged.roles[roleName] = {
       description: overlayDef.description ?? baseDef.description,
       allowAccess: overlayDef.allowAccess ?? baseDef.allowAccess,
       permissions: mergedPerms,
+      commandPermissions: Object.keys(mergedCmdPerms).length > 0 ? mergedCmdPerms : undefined,
     };
   }
 
@@ -83,15 +90,23 @@ export function diffRolesConfig(builtin: RolesConfig, full: RolesConfig): RolesC
       if (!builtinPerm || !deepEqual(fullPerm, builtinPerm)) permDiff[field] = fullPerm;
     }
 
+    // Diff commandPermissions（v4 新增）
+    const cmdPermDiff: Record<string, any> = {};
+    for (const [op, fullPerm] of Object.entries(fullDef.commandPermissions || {})) {
+      const builtinPerm = builtinDef.commandPermissions?.[op];
+      if (!builtinPerm || !deepEqual(fullPerm, builtinPerm)) cmdPermDiff[op] = fullPerm;
+    }
+
     const descDiff = fullDef.description !== builtinDef.description;
     const accessDiff = fullDef.allowAccess !== builtinDef.allowAccess;
-    if (Object.keys(permDiff).length === 0 && !descDiff && !accessDiff) continue;
+    if (Object.keys(permDiff).length === 0 && Object.keys(cmdPermDiff).length === 0 && !descDiff && !accessDiff) continue;
 
     const roleDiff: RoleDefinition = {
       description: descDiff ? fullDef.description : builtinDef.description,
       permissions: permDiff,
     };
     if (accessDiff) roleDiff.allowAccess = fullDef.allowAccess;
+    if (Object.keys(cmdPermDiff).length > 0) roleDiff.commandPermissions = cmdPermDiff;
     diff.roles[roleName] = roleDiff;
   }
 

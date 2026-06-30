@@ -5,7 +5,7 @@
     "agent-config":    { "currentVersion": 2 },
     "relation-config": { "currentVersion": 1 },
     "behavior":        { "currentVersion": 1 },
-    "roles":           { "currentVersion": 3 },
+    "roles":           { "currentVersion": 4 },
     "role-assignments": { "currentVersion": 2 }
   },
   "history": [
@@ -19,6 +19,7 @@
     { "schema": "roles",           "version": 2, "date": "2026-06-25", "description": "add defaultRole (global fallback) + allowAccess (per-role access control)" },
     { "schema": "role-assignments", "version": 1, "date": "2026-06-26", "description": "per-agent peer role assignment source of truth" },
     { "schema": "roles",           "version": 3, "date": "2026-06-26", "description": "split default roles for private and group conversations" },
-    { "schema": "role-assignments", "version": 2, "date": "2026-06-26", "description": "scope role assignments by private, group, and group-member" }
+    { "schema": "role-assignments", "version": 2, "date": "2026-06-26", "description": "scope role assignments by private, group, and group-member" },
+    { "schema": "roles",           "version": 4, "date": "2026-06-30", "description": "add commandPermissions for unified command authorization system" }
   ]
 }
