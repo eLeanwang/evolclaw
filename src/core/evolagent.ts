@@ -235,14 +235,25 @@ export class EvolAgent {
 
   setBaseagentEffort(value: string | undefined, baseagentName?: string): void {
     const ba = baseagentName || this.baseagent;
-    const fieldName = ba === 'codex' ? 'reasoning' : 'effort';
     if (!this.merged.baseagents) (this.merged as any).baseagents = {};
     const mBlock = (((this.merged as any).baseagents)[ba] ??= {});
-    if (value === undefined) delete mBlock[fieldName]; else mBlock[fieldName] = value;
+    if (value === undefined) {
+      delete mBlock.effort;
+      delete mBlock.reasoning;
+    } else {
+      mBlock.effort = value;
+      delete mBlock.reasoning;
+    }
     this.mutateBehavior(b => {
       b.baseagents = b.baseagents || {};
       const blk = ((b.baseagents as any)[ba] ??= {});
-      if (value === undefined) delete blk[fieldName]; else blk[fieldName] = value;
+      if (value === undefined) {
+        delete blk.effort;
+        delete blk.reasoning;
+      } else {
+        blk.effort = value;
+        delete blk.reasoning;
+      }
     });
   }
 

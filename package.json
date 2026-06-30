@@ -20,7 +20,9 @@
     "!CLAUDE.md",
     "!DEPLOYMENT.md",
     "!ONBOARDING.md",
-    "!TODO.md"
+    "!TODO.md",
+    "!SKILLS.md",
+    "!evolclaw-install-aun.md"
   ],
   "scripts": {
     "dev": "tsx watch src/index.ts",

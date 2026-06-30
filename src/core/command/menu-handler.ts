@@ -394,6 +394,18 @@ function modelDisplayLabel(agent: any, model: string): string {
   return full && full !== model ? `${model} (${full})` : model;
 }
 
+function menuStringArg(args: Record<string, any> | undefined, key: string): string | undefined {
+  const value = args?.[key];
+  if (typeof value !== 'string') return undefined;
+  const trimmed = value.trim();
+  return trimmed || undefined;
+}
+
+function menuSessionForBaseagent(session: Session | null | undefined, baseagent: string | undefined): Session | null | undefined {
+  if (!session || !baseagent || session.baseagent === baseagent) return session;
+  return { ...session, baseagent };
+}
+
 export function isProcessLevelOwner(peerId: string | undefined, owners: string[] | undefined): boolean {
   if (!peerId) return false;
   return (owners ?? []).includes(peerId);
@@ -705,19 +717,22 @@ export async function getSubMenuItems(this: any, cmd: string, channel: string, c
   }
 
   if (cmd === '/model') {
-    const agent = this.getAgent(channel, session?.baseagent);
+    const requestedBaseagent = menuStringArg(args, 'baseagent') ?? session?.baseagent;
+    const agent = this.getAgent(channel, requestedBaseagent);
+    const modelSession = menuSessionForBaseagent(session, requestedBaseagent);
     if (hasModelSwitcher(agent) && agent.listModels) {
       const models = await agent.listModels() ?? [];
       const state = resolveCommandModelResolution({
         agent,
-        session,
+        session: modelSession,
         selfAid: this.getOwningAgent?.(channel)?.aid,
         channelType: this.resolveChannelType?.(channel),
         channelId,
         userId,
         role: (overrideIdentity ?? this.sessionManager.resolveIdentity(channel, userId)).role,
       });
-      const currentModel = state.model || agent.getModel();
+      const requestedModel = menuStringArg(args, 'model') ?? menuStringArg(args, 'current');
+      const currentModel = requestedModel || state.model || agent.getModel();
       if (models.length > 0) return models.map((m: string) => ({ value: m, label: modelDisplayLabel(agent, m), selected: modelMatches(agent, m, currentModel) }));
     }
     return null;
@@ -745,19 +760,22 @@ export async function getSubMenuItems(this: any, cmd: string, channel: string, c
   }
 
   if (cmd === '/effort') {
-    const agent = this.getAgent(channel, session?.baseagent);
+    const requestedBaseagent = menuStringArg(args, 'baseagent') ?? session?.baseagent;
+    const agent = this.getAgent(channel, requestedBaseagent);
+    const effortSession = menuSessionForBaseagent(session, requestedBaseagent);
     const state = resolveCommandModelResolution({
       agent,
-      session,
+      session: effortSession,
       selfAid: this.getOwningAgent?.(channel)?.aid,
       channelType: this.resolveChannelType?.(channel),
       channelId,
       userId,
       role: (overrideIdentity ?? this.sessionManager.resolveIdentity(channel, userId)).role,
     });
-    const currentModel = hasModelSwitcher(agent) ? (state.model || agent.getModel()) : agent.name;
+    const requestedModel = menuStringArg(args, 'model') ?? menuStringArg(args, 'currentModel');
+    const currentModel = requestedModel || (hasModelSwitcher(agent) ? (state.model || agent.getModel()) : agent.name);
     const efforts = getAvailableEfforts(agent, currentModel);
-    const currentEffort = state.effort || 'auto';
+    const currentEffort = menuStringArg(args, 'effort') ?? menuStringArg(args, 'current') ?? state.effort ?? 'auto';
     const allItems = [...efforts, 'auto'] as string[];
     return allItems.map(e => ({ value: e, label: e === 'auto' ? 'auto (SDK默认)' : e, selected: e === currentEffort }));
   }
@@ -1539,6 +1557,8 @@ export async function execMenuAction(this: any,
         targetThreadId: args.targetThreadId,
         targetSessionStrategy: strategy,
         agentId: args.agentId,
+        model: args.model,
+        effort: args.effort,
         permissionMode: args.permissionMode,
       };
       const r = await this.registerTriggerFromParsed(

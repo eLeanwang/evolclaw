@@ -96,6 +96,8 @@ export class DaemonChannel implements ChannelAdapter {
         triggerName: ctx.trigger.name,
         fireTime: ctx.firedAt,
         boundSessionId: ctx.session.id,
+        modelOverride: ctx.trigger.execution.model,
+        effortOverride: ctx.trigger.execution.effort,
         permissionModeOverride: ctx.trigger.execution.permissionMode,
       },
     };

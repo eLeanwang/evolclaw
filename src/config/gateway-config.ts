@@ -44,7 +44,6 @@ export interface GatewayEntry {
   apiKeyIsEnvRef: boolean;  // true=值是 $ENV 引用；false=明文或缺失
   model?: string;
   effort?: string;          // claude/codex
-  reasoning?: string;       // codex
   mode?: string;            // gemini: cli|sdk
   cliPath?: string;         // gemini
   useVertex?: boolean;      // gemini
@@ -113,8 +112,7 @@ function extractEntries(raw: any, scope: string): GatewayEntry[] {
       apiKeyMask: mask,
       apiKeyIsEnvRef: isEnvRef,
       model: c.model,
-      effort: c.effort,
-      reasoning: c.reasoning,
+      effort: c.effort ?? c.reasoning,
       mode: c.mode,
       cliPath: c.cliPath,
       useVertex: c.useVertex,
@@ -220,7 +218,7 @@ function computeEffective(defaults: any, aids: string[]): EffectiveGateway[] {
 
     const keys = type === 'gemini'
       ? ['model', 'apiKey', 'mode', 'cliPath', 'useVertex', 'project', 'location']
-      : ['baseUrl', 'apiKey', 'model', 'effort', ...(type === 'codex' ? ['reasoning'] : [])];
+      : ['baseUrl', 'apiKey', 'model', 'effort'];
 
     const fields: Record<string, EffectiveField> = {};
     for (const k of keys) {
@@ -443,7 +441,8 @@ function buildPatch(type: GatewayType, patch: any): { fields: Record<string, unk
     if (patch.effort !== undefined) f.effort = String(patch.effort).trim() || undefined;
   }
   if (type === 'codex') {
-    if (patch.reasoning !== undefined) f.reasoning = String(patch.reasoning).trim() || undefined;
+    if (patch.reasoning !== undefined && patch.effort === undefined) f.effort = String(patch.reasoning).trim() || undefined;
+    delete f.reasoning;
   }
   if (type === 'gemini') {
     if (patch.mode !== undefined) f.mode = (patch.mode === 'sdk' ? 'sdk' : 'cli');

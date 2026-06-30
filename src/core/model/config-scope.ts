@@ -108,16 +108,10 @@ export function activeBaseagent(self?: string): string {
   return 'claude';
 }
 
-/** codex 的推理强度字段名是 reasoning，其余是 effort。 */
-function effortField(ba: string): 'effort' | 'reasoning' {
-  return ba === 'codex' ? 'reasoning' : 'effort';
-}
-
 // ── 读：单作用域 ──────────────────────────────────────────────────────
 
 /** 读取指定作用域当前存的 {model,effort,permissionMode}（未设为空对象）。不抛出。 */
 export function readScope(scope: ModelScope, sel: ScopeSelector, ba: string): ModelPrefs {
-  const ef = effortField(ba);
   try {
     switch (scope) {
       case 'global':
@@ -126,20 +120,20 @@ export function readScope(scope: ModelScope, sel: ScopeSelector, ba: string): Mo
       case 'agent': {
         const b = sel.self ? readAgentBehaviorWithConfigFallback(sel.self, { cache: true }) : null;
         const c = ((b?.baseagents || {}) as any)[ba] || {};
-        return { model: c.model, effort: c[ef] };
+        return { model: c.model, effort: c.effort ?? c.reasoning };
       }
       case 'role': {
         const b = sel.self ? readAgentBehaviorWithConfigFallback(sel.self, { cache: true }) : null;
         const ov = (b?.roles || {})[sel.role!] as RoleOverride | undefined;
         const c = ((ov?.baseagents || {}) as any)[ba] || {};
-        return { model: c.model, effort: c[ef], permissionMode: ov?.permissionMode };
+        return { model: c.model, effort: c.effort ?? c.reasoning, permissionMode: ov?.permissionMode };
       }
       case 'relation': {
         const b = (sel.self && sel.peerKey)
           ? readRelationBehaviorWithConfigFallback(sel.self, sel.peerKey, { cache: true })
           : null;
         const c = ((b?.baseagents || {}) as any)[ba] || {};
-        return { model: c.model, effort: c[ef], permissionMode: b?.permissionMode };
+        return { model: c.model, effort: c.effort ?? c.reasoning, permissionMode: b?.permissionMode };
       }
     }
   } catch {
@@ -156,14 +150,13 @@ export function writeScope(
   ba: string,
   patch: { model?: string | null; effort?: string | null },
 ): void {
-  const ef = effortField(ba);
   if (scope === 'global') {
     throw new ModelScopeError('NO_GLOBAL_SCOPE', '全局 model 作用域已退场：请用 --self 逐 agent 设置');
   }
   if (scope === 'agent') {
     requireSelf(sel);
     const cur = readAgentBehavior(sel.self!) || {};
-    applyBaPatch(cur, ba, ef, patch);
+    applyBaPatch(cur, ba, patch);
     writeAgentBehavior(sel.self!, cur);
     return;
   }
@@ -173,28 +166,33 @@ export function writeScope(
     cur.roles = cur.roles || {};
     const ov: RoleOverride = (cur.roles[sel.role!] = cur.roles[sel.role!] || {});
     ov.baseagents = ov.baseagents || {};
-    applyBaPatchTo(ov.baseagents as any, ba, ef, patch);
+    applyBaPatchTo(ov.baseagents as any, ba, patch);
     writeAgentBehavior(sel.self!, cur);
     return;
   }
   // relation
   requirePeer(sel);
   const cur = readRelationBehavior(sel.self!, sel.peerKey!) || {};
-  applyBaPatch(cur, ba, ef, patch);
+  applyBaPatch(cur, ba, patch);
   writeRelationBehavior(sel.self!, sel.peerKey!, cur);
 }
 
-function applyBaPatch(cfg: BehaviorConfig, ba: string, ef: string, patch: { model?: string | null; effort?: string | null }): void {
+function applyBaPatch(cfg: BehaviorConfig, ba: string, patch: { model?: string | null; effort?: string | null }): void {
   cfg.baseagents = cfg.baseagents || {};
-  applyBaPatchTo(cfg.baseagents as any, ba, ef, patch);
+  applyBaPatchTo(cfg.baseagents as any, ba, patch);
 }
-function applyBaPatchTo(block: Record<string, any>, ba: string, ef: string, patch: { model?: string | null; effort?: string | null }): void {
+function applyBaPatchTo(block: Record<string, any>, ba: string, patch: { model?: string | null; effort?: string | null }): void {
   block[ba] = block[ba] || {};
   const sub = block[ba];
   if (patch.model === null) delete sub.model;
   else if (patch.model !== undefined) sub.model = patch.model;
-  if (patch.effort === null) delete sub[ef];
-  else if (patch.effort !== undefined) sub[ef] = patch.effort;
+  if (patch.effort === null) {
+    delete sub.effort;
+    delete sub.reasoning;
+  } else if (patch.effort !== undefined) {
+    sub.effort = patch.effort;
+    delete sub.reasoning;
+  }
 }
 
 /** 写关系级 permissionMode（供 /perm 命令使用）。null 删除字段。 */
@@ -262,7 +260,6 @@ export interface ResolvedModel {
  */
 export function resolveEffectiveModel(sel: ScopeSelector, ba?: string): ResolvedModel {
   const baseagent = ba || activeBaseagent(sel.self);
-  const ef = effortField(baseagent);
 
   // 逐层 chain（仅展示；命中标记按从高到低首个非空）
   const order: ModelScope[] = [];
@@ -290,7 +287,7 @@ export function resolveEffectiveModel(sel: ScopeSelector, ba?: string): Resolved
   const mergedBa = ((mergedBehavior.baseagents || {}) as any)[baseagent] || {};
   if (mergedBehavior.baseagents && Object.prototype.hasOwnProperty.call(mergedBehavior.baseagents as any, baseagent)) {
     finalModel = mergedBa.model;
-    finalEffort = mergedBa[ef];
+    finalEffort = mergedBa.effort ?? mergedBa.reasoning;
   }
 
   return {

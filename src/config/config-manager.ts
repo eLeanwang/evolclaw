@@ -131,11 +131,25 @@ export function read<T = any>(target: ConfigTarget, sel?: Selector, opts: ReadOp
   // schema 版本迁移（read 时若 $schema_version < current）
   const migrated = migrateIfNeeded(target, raw, file);
   const normalized = target === ConfigTarget.Agent
-    ? normalizeAgentLifecycle(migrated as any) as T
+    ? normalizeAgentConfigForRead(migrated as any) as T
     : migrated;
   if (!opts.expand) return normalized;
   const resolver = buildEnvResolver(envScopeFor(sel));
   return expandVars(normalized, resolver);
+}
+
+function normalizeAgentConfigForRead<T extends Record<string, any>>(value: T): T {
+  const config = normalizeAgentLifecycle(value) as T;
+  const mutable = config as Record<string, any>;
+  // Legacy configs used top-level "agents" for baseagent settings.
+  // Keep read compatibility, but never write the obsolete field back.
+  if (mutable.agents && typeof mutable.agents === 'object' && !Array.isArray(mutable.agents)) {
+    mutable.baseagents = mutable.baseagents && typeof mutable.baseagents === 'object' && !Array.isArray(mutable.baseagents)
+      ? { ...mutable.agents, ...mutable.baseagents }
+      : mutable.agents;
+    delete mutable.agents;
+  }
+  return config;
 }
 
 function groupFor(target: ConfigTarget, sel?: Selector): string {
@@ -179,7 +193,12 @@ function validateOrThrow(schema: SchemaEntry, value: unknown, target: ConfigTarg
   const ok = schema.validate(value);
   if (!ok) {
     const errs = (schema.validate.errors || [])
-      .map(e => `${e.instancePath || '/'} ${e.message}`)
+      .map(e => {
+        const extra = typeof (e.params as any)?.additionalProperty === 'string'
+          ? ` (additionalProperty=${(e.params as any).additionalProperty})`
+          : '';
+        return `${e.instancePath || '/'} ${e.message}${extra}`;
+      })
       .join('; ');
     throw new ConfigError('SCHEMA_INVALID', `${target} 配置不合 schema(${schema.logicalName}.v${schema.version}): ${errs}`);
   }
@@ -194,7 +213,12 @@ export function validateConfig(target: ConfigTarget, value: unknown): string[] {
   const withVer = ensureSchemaVersion(value as any, schema.version);
   const ok = schema.validate(withVer);
   if (ok) return [];
-  return (schema.validate.errors || []).map(e => `${e.instancePath || '/'} ${e.message}`);
+  return (schema.validate.errors || []).map(e => {
+    const extra = typeof (e.params as any)?.additionalProperty === 'string'
+      ? ` (additionalProperty=${(e.params as any).additionalProperty})`
+      : '';
+    return `${e.instancePath || '/'} ${e.message}${extra}`;
+  });
 }
 
 function fileCacheAvailable(): boolean {

@@ -4,6 +4,7 @@ import type {
   FeedbackDisposition,
   FeedbackTarget,
   TriggerDefinition,
+  TriggerEffort,
   TriggerEventFilter,
   TriggerExecution,
   TriggerPermissionMode,
@@ -20,6 +21,7 @@ import type {
 const MAX_SCRIPT_TIMEOUT_MS = 900_000;
 const DEFAULT_NOOP_SENTINEL = '[[NOOP]]';
 const LIMIT_DURATION_RE = /^[1-9]\d*(m|h|d)$/;
+const TRIGGER_EFFORTS = new Set<TriggerEffort>(['low', 'medium', 'high', 'xhigh', 'max']);
 const PERMISSION_MODES = new Set<TriggerPermissionMode>([
   'auto',
   'bypass',
@@ -299,11 +301,22 @@ function normalizeExecution(value: unknown, opts: { id: string }): TriggerExecut
     prompt: mode === 'agent' ? requiredString(raw.prompt, 'execution.prompt') : optionalString(raw.prompt),
     script: mode === 'script' ? normalizeScript(raw.script) : undefined,
     session: normalizeExecutionSession(raw.session, opts),
+    model: optionalString(raw.model),
+    effort: normalizeEffort(raw.effort),
     permissionMode: normalizePermissionMode(raw.permissionMode),
     onError: normalizeOnError(raw.onError),
     noopSentinel: optionalString(raw.noopSentinel) ?? DEFAULT_NOOP_SENTINEL,
   };
   return execution;
+}
+
+function normalizeEffort(value: unknown): TriggerEffort | undefined {
+  const effort = optionalString(value);
+  if (effort === undefined) return undefined;
+  if (!TRIGGER_EFFORTS.has(effort as TriggerEffort)) {
+    throw new Error('execution.effort must be one of low, medium, high, xhigh, max');
+  }
+  return effort as TriggerEffort;
 }
 
 function normalizePermissionMode(value: unknown): TriggerPermissionMode | undefined {

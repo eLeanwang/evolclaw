@@ -46,6 +46,7 @@ interface RunningRun {
 interface TriggerRuntimeConfig {
   projectPath: string;
   baseagent: string;
+  getBaseagent?: () => string;
 }
 
 interface ExecutionRunResult {
@@ -491,17 +492,18 @@ export class TriggerRuntimeScheduler {
     }
 
     try {
+      const runtimeBaseagent = this.runtime.getBaseagent?.() || this.runtime.baseagent;
       const executionSession = await this.daemonChannel.getOrCreateConversationSession(
         definition,
         this.runtime.projectPath,
-        definition.execution.session.baseagent || this.runtime.baseagent,
+        runtimeBaseagent,
       );
       const daemonReply = await this.daemonChannel.converse(prompt, {
         trigger: definition,
         runId,
         firedAt,
         projectPath: this.runtime.projectPath,
-        baseagent: definition.execution.session.baseagent || this.runtime.baseagent,
+        baseagent: runtimeBaseagent,
         session: executionSession,
       });
       const sentinel = definition.execution.noopSentinel ?? '[[NOOP]]';

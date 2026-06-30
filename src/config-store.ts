@@ -266,6 +266,17 @@ export function loadAgent(aid: string): AgentConfig | null {
 }
 
 export function saveAgent(value: AgentConfig): void {
+  if (value.projects) {
+    const projects = value.projects;
+    const normalized: NonNullable<AgentConfig['projects']> = {};
+    if (typeof projects.rootPath === 'string') normalized.rootPath = projects.rootPath;
+    if (typeof projects.defaultPath === 'string') normalized.defaultPath = projects.defaultPath;
+    if (Object.keys(normalized).length > 0) value = { ...value, projects: normalized };
+    else {
+      const { projects: _projects, ...rest } = value;
+      value = rest as AgentConfig;
+    }
+  }
   if (!isValidAid(value.aid)) {
     throw new Error(`[config] saveAgent: invalid aid "${value.aid}" (must be a valid multi-level domain like mybot.agentid.pub)`);
   }
@@ -377,8 +388,8 @@ export function loadAllAgents(): AgentLoadResult {
 /**
  * @deprecated 设计目标（config-system-design-v2 §七）是用 ConfigManager 的 ajv schema
  * 校验替代本函数。但**当前 agent config.json 尚未完成完整 schema 定义**——现有文件仍
- * 包含 schema 未定义的子字段（如 projects.autoCreate/list 等）。agent-config schema
- * 是 `additionalProperties:false`，此刻切到 schema 校验会让所有现存 agent 加载失败。
+ * 包含少量历史/实验字段。agent-config schema 是 `additionalProperties:false`，
+ * 此刻切到 schema 校验可能让现存 agent 加载失败。
  *
  * 因此本函数**暂保留纯业务规则校验**（不接 schema）。待 schema 补齐所有字段后，
  * 再切换到 ConfigManager.validateConfig。

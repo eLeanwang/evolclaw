@@ -133,7 +133,6 @@ export interface Config {
       baseUrl?: string;
       model?: string;
       effort?: string;
-      reasoning?: string;
       enableRequestUserInput?: boolean;
       approvalsReviewer?: 'user' | 'auto_review' | 'guardian_subagent';
       evolclawAgentAid?: string;
@@ -161,8 +160,6 @@ export interface Config {
   };
   projects?: {
     defaultPath: string;
-    autoCreate?: boolean;
-    list?: Record<string, string>;
   };
   debug?: {
     logLevel?: 'DEBUG' | 'INFO' | 'WARN' | 'ERROR';
@@ -344,6 +341,8 @@ export interface Message {
     pendingThread?: boolean;
     rootMessageId?: string;
     chatModeOverride?: 'proactive';
+    modelOverride?: string;
+    effortOverride?: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
     permissionModeOverride?: PermissionMode;
   };
 }
@@ -514,7 +513,7 @@ export interface EvolAgentConfig {
   enabled?: boolean;
   agents: Record<string, any>;
   channels: Record<string, any>;
-  projects: { defaultPath: string; list?: Record<string, string>; autoCreate?: boolean };
+  projects: { defaultPath: string };
   chatmode?: { private?: 'interactive' | 'proactive'; group?: 'interactive' | 'proactive' };
 }
 
@@ -697,7 +696,6 @@ export interface BaseagentCodexConfig {
   baseUrl?: string;
   model?: string;
   effort?: string;
-  reasoning?: string;
   enableRequestUserInput?: boolean;
   approvalsReviewer?: 'user' | 'auto_review' | 'guardian_subagent';
 }
@@ -735,8 +733,9 @@ export interface RoleOverride {
 }
 
 export interface ProjectsBlock {
-  /** 工作目录根路径——创建 agent 时自动合成 `<rootPath>/<aid第一段>` 作为 defaultPath */
+  /** Defaults 作用域可用：创建 agent 时自动合成 `<rootPath>/<aid第一段>` 作为 defaultPath。 */
   rootPath?: string;
+  /** Agent 作用域中唯一公开项目路径。 */
   defaultPath?: string;
 }
 

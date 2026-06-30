@@ -1001,7 +1001,11 @@ async function main() {
       triggerScriptExecutor,
       dispatcher,
       daemonChannel,
-      { projectPath: owner.projectPath, baseagent: owner.baseagent },
+      {
+        projectPath: owner.projectPath,
+        baseagent: owner.baseagent,
+        getBaseagent: () => agentRegistry.get(owner.aid)?.baseagent || owner.baseagent,
+      },
       eventBus,
     );
     triggerSchedulers.set(owner.aid, scheduler);
