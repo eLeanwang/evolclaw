@@ -3637,21 +3637,21 @@ function cssVar(name) {
 
 function chartTheme() {
   const isDark = document.documentElement.getAttribute('data-theme') === 'dark';
-  const fg = cssVar('--fg') || (isDark ? '#e5edf7' : '#0f172a');
-  const dim = cssVar('--dim') || (isDark ? '#8fa3b8' : '#64748b');
-  const border = cssVar('--border') || (isDark ? 'rgba(148,163,184,.2)' : 'rgba(51,65,85,.16)');
-  const bg2 = cssVar('--bg2') || (isDark ? '#0f172a' : '#ffffff');
+  const fg = cssVar('--fg') || (isDark ? '#e6edf5' : '#111827');
+  const dim = cssVar('--dim') || (isDark ? '#a5b4c3' : '#64748b');
+  const border = cssVar('--border') || (isDark ? 'rgba(148,163,184,.14)' : 'rgba(51,65,85,.13)');
+  const bg2 = cssVar('--bg2') || (isDark ? '#0f141d' : '#ffffff');
   return {
     isDark,
     fg,
     dim,
     border,
     bg2,
-    accent: cssVar('--accent') || '#22d3ee',
+    accent: cssVar('--accent') || '#5eead4',
     green: cssVar('--green') || '#22c55e',
     orange: cssVar('--orange') || '#f59e0b',
-    blue: cssVar('--blue') || '#38bdf8',
-    red: cssVar('--red') || '#ef4444',
+    blue: cssVar('--blue') || '#60a5fa',
+    red: cssVar('--red') || '#f43f5e',
     magenta: cssVar('--magenta') || '#a78bfa',
   };
 }
@@ -3662,7 +3662,7 @@ function themedTooltip() {
     backgroundColor: c.bg2,
     borderColor: c.border,
     textStyle: { color: c.fg, fontSize: 12 },
-    extraCssText: 'box-shadow: 0 14px 36px rgba(0,0,0,.28); border-radius: 8px;',
+    extraCssText: 'box-shadow: 0 10px 22px rgba(0,0,0,.22); border-radius: 6px;',
   };
 }
 
@@ -4780,7 +4780,7 @@ function renderMonitor(data) {
   if (msgEl) {
     if (!window._monMsg) window._monMsg = echarts.init(msgEl, isDark ? 'dark' : null);
     window._monMsg.setOption({
-      title: { text: '近一小时活动', left: 'center', top: 4, textStyle: { fontSize: 12, color: theme.fg } },
+      title: { text: '近一小时活动', left: 12, top: 8, textStyle: { fontSize: 12, fontWeight: 700, color: theme.fg } },
       tooltip: Object.assign({ trigger: 'axis' }, themedTooltip()),
       grid: { top: 36, bottom: 24, left: 44, right: 12 },
       xAxis: {
@@ -4817,7 +4817,7 @@ function renderMonitor(data) {
       if (!window._monErr) window._monErr = echarts.init(errEl, isDark ? 'dark' : null);
       window._monErr.setOption({
         color: [theme.red, theme.orange, theme.magenta, theme.blue, theme.accent],
-        title: { text: '错误分布', left: 'center', top: 4, textStyle: { fontSize: 12, color: theme.fg } },
+        title: { text: '错误分布', left: 12, top: 8, textStyle: { fontSize: 12, fontWeight: 700, color: theme.fg } },
         tooltip: Object.assign({ trigger: 'item', formatter: '{b}: {c} ({d}%)' }, themedTooltip()),
         series: [{
           type: 'pie', radius: ['32%', '64%'], center: ['50%', '56%'],
@@ -4885,7 +4885,7 @@ function monDualLine(elId, varKey, times, isDark, title, series, fmtY, yRange) {
   var theme = chartTheme();
   if (!window[varKey]) window[varKey] = echarts.init(el, isDark ? 'dark' : null);
   window[varKey].setOption({
-    title: { text: title, left: 'center', top: 4, textStyle: { fontSize: 12, color: theme.fg } },
+    title: { text: title, left: 12, top: 8, textStyle: { fontSize: 12, fontWeight: 700, color: theme.fg } },
     legend: { show: false },
     tooltip: Object.assign({
       trigger: 'axis',
