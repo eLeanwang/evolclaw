@@ -38,7 +38,6 @@ import type {
 import { CONFIG_SCHEMA_VERSION } from './types.js';
 import { resolveAgentConfig, resolveEffective } from './config/config-manager.js';
 import { expandVars, buildEnvResolver } from './config/merge.js';
-import { mergeBehaviorIntoEffective } from './config/behavior.js';
 import { normalizeAgentLifecycle } from './config/lifecycle.js';
 import { logger } from './utils/logger.js';
 
@@ -444,7 +443,7 @@ export function validateAgentConfig(cfg: AgentConfig): string[] {
  * @deprecated Compatibility shim for older callers/tests.
  *
  * Runtime merging is owned by ConfigManager.resolveEffective(). This helper keeps
- * the old direct API alive while also overlaying HA fields from behavior.json.
+ * the old direct API alive for legacy tests/callers and must not read behavior.json.
  */
 export function mergeForAgent(agent: AgentConfig, defaults: DefaultsConfig | null): AgentConfig {
   const hMerged = defaults ? deepMergeObject(defaults, agent) as AgentConfig : { ...agent };
@@ -452,7 +451,7 @@ export function mergeForAgent(agent: AgentConfig, defaults: DefaultsConfig | nul
   delete (hMerged as any).admins;
   if (agent.owners) hMerged.owners = [...agent.owners];
   if (agent.admins) hMerged.admins = [...agent.admins];
-  return mergeBehaviorIntoEffective(hMerged, { self: agent.aid }) as AgentConfig;
+  return hMerged;
 }
 
 // ── 目录骨架 ───────────────────────────────────────────────────────────

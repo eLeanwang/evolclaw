@@ -259,7 +259,7 @@ export async function handleSlashCommand(this: any,
         '',
         '其他：',
         '  /status - 显示会话状态',
-        '  /check - 检查渠道健康',
+        '  /check - 检查 EvolAgent 实例健康',
         '  /help - 显示此帮助信息',
       ];
       appendProcessCommands(lines);
@@ -276,7 +276,7 @@ export async function handleSlashCommand(this: any,
         '  /name <新名称> - 重命名当前会话',
         '  /del <名称> - 删除指定会话（仅解绑，不删除文件）',
         '  /status - 显示会话状态',
-        '  /check - 检查渠道健康',
+        '  /check - 检查 EvolAgent 实例健康',
         '',
         '❓ 帮助：',
         '  /help - 显示此帮助信息',
@@ -319,7 +319,7 @@ export async function handleSlashCommand(this: any,
       '🛠️ 运维：',
       '  /status - 显示会话状态',
       '  /stop - 中断当前任务',
-      '  /check - 检查渠道状态',
+      '  /check - 检查 EvolAgent 实例健康',
       ...(isDaemonOwner ? [
         '  /restart - 重启服务',
         '  /reload [aid] - 热重载 Agent 配置',
@@ -374,7 +374,7 @@ export async function handleSlashCommand(this: any,
     // 运维
     cmds.push({ command: '/status', description: '显示会话状态', category: '运维', roles: ['guest', 'admin', 'owner'] });
     cmds.push({ command: '/stop', description: '中断当前任务', category: '运维', roles: ['admin', 'owner'] });
-    cmds.push({ command: '/check', description: '检查渠道状态', category: '运维', roles: ['guest', 'admin', 'owner'] });
+    cmds.push({ command: '/check', description: '检查 EvolAgent 实例健康', category: '运维', roles: ['guest', 'admin', 'owner'] });
     if (isAdmin) {
       cmds.push({ command: '/activity', args: '[all|none]', description: '查看/控制中间输出显示模式', category: '聊天设置', roles: ['admin', 'owner'] });
     }
@@ -649,18 +649,14 @@ export async function handleSlashCommand(this: any,
   if (normalizedContent === '/baseagent' || normalizedContent.startsWith('/baseagent ')) {
     const args = normalizedContent.slice(10).trim();
     const owningAgent = this.agentRegistry?.resolveByChannel(channel);
-    // 切换（带参）会修改 agent 默认 baseagent，仅 owner 可操作；无参查询对所有人放开
+    // 切换（带参）会修改 agent active_baseagent，仅 owner 可操作；无参查询对所有人放开
     if (args && !isOwner) {
       return { kind: 'command.error' as const, text: '❌ 无权限：切换 baseagent 仅限 owner 使用' };
     }
     const available = this.getAvailableBaseagents(channel);
 
     if (!args) {
-      // currentAgent: 当前 session 的 baseagent，或该 channel 所属 evolagent 的 baseagent
-      const currentAgent = activeSession?.baseagent
-        || this.agentRegistry?.resolveByChannel(channel)?.baseagent
-        || this.parseDefaultBaseagent();
-      const defaultAgent = owningAgent?.baseagent || this.parseDefaultBaseagent();
+      const activeBaseagent = owningAgent?.baseagent || this.parseDefaultBaseagent();
 
       // 尝试发送 CommandCard 卡片
       if (this.interactionRouter && available.length > 1) {
@@ -674,10 +670,10 @@ export async function handleSlashCommand(this: any,
             kind: 'command-card',
             title: '🔌 切换 Agent',
             buttons: available.map((a: string) => ({
-              label: a === defaultAgent ? `✓ ${a}` : a,
+              label: a === activeBaseagent ? `✓ ${a}` : a,
               command: `/baseagent ${a}`,
-              style: (a === defaultAgent ? 'primary' : 'default') as 'primary' | 'default',
-              disabled: a === defaultAgent,
+              style: (a === activeBaseagent ? 'primary' : 'default') as 'primary' | 'default',
+              disabled: a === activeBaseagent,
             })),
           },
         };
@@ -689,12 +685,12 @@ export async function handleSlashCommand(this: any,
       }
 
       // 降级：文本
-      const list = available.map((a: string) => `${a === defaultAgent ? ' ✓' : '  '} ${a}`).join('\n');
+      const list = available.map((a: string) => `${a === activeBaseagent ? ' ✓' : '  '} ${a}`).join('\n');
       const canSwitchAgent = isOwner;
       if (canSwitchAgent) {
-        return { kind: 'command.result' as const, text: `当前会话: ${currentAgent}\n新会话默认: ${defaultAgent}\n\n可用:\n${list}\n用法: /baseagent <name>` };
+        return { kind: 'command.result' as const, text: `当前 Baseagent: ${activeBaseagent}\n\n可用:\n${list}\n用法: /baseagent <name>` };
       }
-      return { kind: 'command.result' as const, text: `当前 Agent: ${currentAgent}` };
+      return { kind: 'command.result' as const, text: `当前 Baseagent: ${activeBaseagent}` };
     }
 
     if (!available.includes(args)) {
@@ -702,28 +698,24 @@ export async function handleSlashCommand(this: any,
     }
 
     if (!owningAgent) {
-      return { kind: 'command.error' as const, text: '❌ 当前 channel 无绑定 agent，无法设置默认 baseagent' };
+      return { kind: 'command.error' as const, text: '❌ 当前 channel 无绑定 agent，无法设置 active_baseagent' };
     }
 
     const previousDefaultBaseagent = owningAgent.baseagent || this.parseDefaultBaseagent();
-    const currentSessionAgent = activeSession?.baseagent || previousDefaultBaseagent;
     owningAgent.setActiveBaseagent(args);
     this.eventBus.publish({
       type: 'agent:baseagent-changed',
       aid: owningAgent.aid,
       baseagent: args,
       previousBaseagent: previousDefaultBaseagent,
-      scope: 'default',
+      scope: 'agent',
       timestamp: Date.now(),
     });
     const projectName = this.getProjectName(owningAgent.projectPath);
     const agentSwitchResponse = [
-      `✓ 已设置默认 baseagent: ${args}`,
+      `✓ 已设置 Baseagent: ${args}`,
       `  Agent: ${owningAgent.name}`,
       `  项目: ${projectName}`,
-      '',
-      `⚠️ 当前会话仍在使用 ${currentSessionAgent}，切换不会立即生效。`,
-      `  发送 /new 创建新会话，或开启新话题，即可用上 ${args}。`,
     ].join('\n');
 
     return { kind: 'command.result' as const, text: agentSwitchResponse };
@@ -1578,12 +1570,13 @@ export async function handleSlashCommand(this: any,
       );
     }
 
+    const newSessionBaseagent = this.agentRegistry?.resolveByChannel(channel)?.baseagent || this.parseDefaultBaseagent();
     const newSession = await this.sessionManager.createNewSession(
       channel,
       channelId,
       projectPath,
       sessionName,
-      this.agentRegistry?.resolveByChannel(channel)?.baseagent || session?.baseagent || this.parseDefaultBaseagent()
+      newSessionBaseagent
     );
 
     const previousAgent = getActiveAgentIfAvailable();
@@ -1614,17 +1607,18 @@ export async function handleSlashCommand(this: any,
     return { kind: 'command.result' as const, text: `✓ 已创建新会话${sessionName ? `: ${sessionName}` : ''}\n  项目: ${this.getProjectName(projectPath)}\n  后端: ${backendBits}\n  之前的对话历史已保留，可通过 /s 查看` };
   }
 
-  // /check 命令：检查渠道状态（guest 可用，详情仅 admin）
+  // /check 命令：检查 EvolAgent 实例健康（guest 可用，详情仅 admin）
   if (normalizedContent === '/check' || normalizedContent.startsWith('/check ')) {
 
     // 限定可见渠道：agent-owned 通道仅显示该 agent 名下的渠道；
-    // __ecweb__ 是 ECWeb 系统级入口，展示全量渠道
-    const checkOwningAgent = this.getOwningAgent(channel);
+    // __ecweb__ / __control__ 是系统级入口，展示全量渠道
+    const isGlobalCheckChannel = channel === '__ecweb__' || channel === '__control__';
+    const checkOwningAgent = isGlobalCheckChannel ? null : this.getOwningAgent(channel);
     let allowedChannels: Set<string>;
     if (checkOwningAgent) {
       allowedChannels = new Set(checkOwningAgent.channelInstanceNames());
-    } else if (channel === '__ecweb__') {
-      // ECWeb 全局视图：展示所有渠道
+    } else if (isGlobalCheckChannel) {
+      // ECWeb / 控制 AID 全局视图：展示所有渠道
       allowedChannels = new Set(this.adapters.keys());
     } else {
       // default 范围：不再有 default channel 概念，等价于"所有 channel"
@@ -1637,10 +1631,10 @@ export async function handleSlashCommand(this: any,
     }
 
     // Default: show system health check (non-admin 仅看摘要)
-    const checkAgentName = checkOwningAgent?.name ?? 'DefaultAgent';
+    const checkAgentName = checkOwningAgent?.name ?? (isGlobalCheckChannel ? 'EvolClaw' : 'DefaultAgent');
     const checkDefaultBaseagent = checkOwningAgent?.baseagent ?? this.parseDefaultBaseagent();
     const checkBaseagent = activeSession?.baseagent ?? checkDefaultBaseagent;
-    const lines: string[] = [`📡 渠道状态 (Agent: ${checkAgentName})：`];
+    const lines: string[] = [`📡 EvolAgent 实例健康 (Agent: ${checkAgentName})：`];
     lines.push(`  Baseagent: ${checkBaseagent}`);
     if (checkDefaultBaseagent !== checkBaseagent) {
       lines.push(`  默认 Baseagent: ${checkDefaultBaseagent}`);
@@ -1663,7 +1657,7 @@ export async function handleSlashCommand(this: any,
     }
 
     if (!isAdmin) {
-      // guest/user: 仅显示渠道健康摘要
+      // guest/user: 仅显示实例通道摘要
       const total = [...groups.values()].flat().length;
       const healthy = [...groups.values()].flat().filter(i => i.status.includes('✓')).length;
       lines.push(`  ${healthy}/${total} 渠道正常`);
@@ -1683,15 +1677,21 @@ export async function handleSlashCommand(this: any,
       }
     }
 
-    // 当前 agent 名（用于 agent 维度 stats / queue 查询）
-    const currentAgentName = checkOwningAgent?.name ?? '<unknown>';
-    // ECWeb 全局视图使用全局统计（不按 agent 过滤）
-    const statsAgentName = channel === '__ecweb__' ? undefined : currentAgentName;
+    // 当前 agent 标识（用于 agent 维度 stats / queue 查询）。运行统计按 AID 入桶。
+    const currentAgentName = checkOwningAgent?.aid ?? checkOwningAgent?.name ?? '<unknown>';
+    // 系统级入口使用全局统计（不按 agent 过滤）
+    const statsAgentName = isGlobalCheckChannel ? undefined : currentAgentName;
+    const queuePending = isGlobalCheckChannel
+      ? this.messageQueue.getGlobalQueueLength()
+      : this.messageQueue.getQueueLengthByAgent(currentAgentName);
+    const queueProcessing = isGlobalCheckChannel
+      ? this.messageQueue.getGlobalProcessingCount()
+      : this.messageQueue.getProcessingCountByAgent(currentAgentName);
 
-    // 队列状态（按当前 agent 维度）
+    // 队列状态（系统级入口为全局；agent 入口为当前 agent 维度）
     lines.push('', '📬 队列状态：');
-    lines.push(`  待处理消息: ${this.messageQueue.getQueueLengthByAgent(currentAgentName)}`);
-    lines.push(`  处理中队列: ${this.messageQueue.getProcessingCountByAgent(currentAgentName)}`);
+    lines.push(`  待处理消息: ${queuePending}`);
+    lines.push(`  处理中队列: ${queueProcessing}`);
 
     // 运行概况（全局，进程级）
     lines.push('', '🖥️ 运行概况：');
@@ -1756,7 +1756,7 @@ export async function handleSlashCommand(this: any,
       return h;
     };
 
-    // 以 EvolAgent 为中心聚合：后端 + 渠道健康 + 负载，并记录已归属渠道
+    // 以 EvolAgent 为中心聚合：后端 + 通道明细 + 负载，并记录已归属通道
     const ownedNames = new Set<string>();
     const evolagents = (this.agentRegistry?.list() ?? []).map((ag: any) => {
       const chans = (ag.channels ?? []).map((n: string) => { ownedNames.add(n); return channelHealth(n); });
@@ -1778,7 +1778,7 @@ export async function handleSlashCommand(this: any,
         channels: chans,
       };
     });
-    // 未归属到任何 EvolAgent 的渠道（系统级 / DefaultAgent）
+    // 未归属到任何 EvolAgent 实例的系统通道（系统级 / DefaultAgent）
     const unownedChannels: any[] = [];
     for (const [cname] of this.adapters) {
       if (!allowedChannels.has(cname) || ownedNames.has(cname)) continue;
@@ -1786,10 +1786,14 @@ export async function handleSlashCommand(this: any,
     }
 
     const structured = {
+      daemon: {
+        ...(typeof this.daemonStatusProvider === 'function' ? this.daemonStatusProvider() : {}),
+        status: 'running',
+      },
       channels: [...groups.entries()].map(([type, instances]) => ({ type, instances })),
       queue: {
-        pending: this.messageQueue.getQueueLengthByAgent(currentAgentName),
-        processing: this.messageQueue.getProcessingCountByAgent(currentAgentName),
+        pending: queuePending,
+        processing: queueProcessing,
       },
       baseagent: checkBaseagent,
       defaultBaseagent: checkDefaultBaseagent,

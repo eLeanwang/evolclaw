@@ -36,6 +36,13 @@
       "message": "❌ API Key 未找到，请检查密钥配置"
     },
     {
+      "id": "api-key-verifier-too-many-connections",
+      "match": "error 1040 (08004): too many connections",
+      "action": "retry",
+      "type": "api_error",
+      "message": "⚠️ API 服务繁忙，请稍后重试"
+    },
+    {
       "id": "credit-query-timeout",
       "match": "积分查询超时",
       "action": "retry",

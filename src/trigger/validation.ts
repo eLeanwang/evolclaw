@@ -20,7 +20,7 @@ import type {
 
 const MAX_SCRIPT_TIMEOUT_MS = 900_000;
 const DEFAULT_NOOP_SENTINEL = '[[NOOP]]';
-const LIMIT_DURATION_RE = /^[1-9]\d*(m|h|d)$/;
+const LIMIT_DURATION_RE = /^[1-9]\d*(s|m|h|d)$/;
 const TRIGGER_EFFORTS = new Set<TriggerEffort>(['low', 'medium', 'high', 'xhigh', 'max']);
 const PERMISSION_MODES = new Set<TriggerPermissionMode>([
   'auto',
@@ -59,7 +59,50 @@ export function previewText(value: string, max = 240): string {
   return cleaned.length > max ? `${cleaned.slice(0, max)}...` : cleaned;
 }
 
+export function splitScriptCommand(input: string): { path: string; args: string[] } {
+  const text = String(input ?? '').trim();
+  if (!text) return { path: '', args: [] };
+  const parts: string[] = [];
+  let current = '';
+  let quote: '"' | "'" | undefined;
+  let escaping = false;
+  for (const ch of text) {
+    if (escaping) {
+      current += ch;
+      escaping = false;
+      continue;
+    }
+    if (ch === '\\') {
+      escaping = true;
+      continue;
+    }
+    if (quote) {
+      if (ch === quote) quote = undefined;
+      else current += ch;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      continue;
+    }
+    if (/\s/.test(ch)) {
+      if (current) {
+        parts.push(current);
+        current = '';
+      }
+      continue;
+    }
+    current += ch;
+  }
+  if (escaping) current += '\\';
+  if (quote) throw new Error('script.path has an unterminated quoted argument');
+  if (current) parts.push(current);
+  return { path: parts[0] ?? '', args: parts.slice(1) };
+}
+
 export function resolveScriptPath(triggerDir: string, scriptPath: string): string {
+  const command = splitScriptCommand(scriptPath);
+  scriptPath = command.path;
   if (path.isAbsolute(scriptPath)) {
     throw new Error('script.path must be relative to trigger directory');
   }
@@ -89,11 +132,11 @@ export function safeRelativePath(input: string): string {
 
 export function parseDurationMs(value: string): number {
   if (!LIMIT_DURATION_RE.test(value)) {
-    throw new Error('limits.maxDuration must match ^[1-9]\\d*(m|h|d)$');
+    throw new Error('limits.maxDuration must match ^[1-9]\\d*(s|m|h|d)$');
   }
   const amount = Number(value.slice(0, -1));
   const unit = value.slice(-1);
-  const multiplier = unit === 'd' ? 86_400_000 : unit === 'h' ? 3_600_000 : 60_000;
+  const multiplier = unit === 'd' ? 86_400_000 : unit === 'h' ? 3_600_000 : unit === 'm' ? 60_000 : 1_000;
   return amount * multiplier;
 }
 
@@ -163,7 +206,7 @@ function normalizeV3(raw: Record<string, unknown>, opts: { now?: number }): Trig
     origin: normalizeOrigin(raw.origin),
     source: normalizeSource(raw.source),
     execution: normalizeExecution(raw.execution, { id }),
-    feedback: normalizeFeedback(raw.feedback, raw.origin),
+    feedback: normalizeFeedback(raw.feedback),
     reliability: normalizeReliability(raw.reliability),
     limits: normalizeLimits(raw.limits),
   };
@@ -330,23 +373,19 @@ function normalizePermissionMode(value: unknown): TriggerPermissionMode | undefi
 
 function normalizeExecutionSession(value: unknown, opts: { id: string }): TriggerExecutionSession {
   const raw = isObject(value) ? value as Record<string, unknown> : {};
-  const strategy = (optionalString(raw.strategy) ?? 'isolated') as TriggerExecutionSessionStrategy;
-  if (strategy !== 'isolated' && strategy !== 'thread' && strategy !== 'main') {
-    throw new Error('execution.session.strategy must be isolated, thread, or main');
+  const rawStrategy = optionalString(raw.strategy) ?? 'isolated';
+  const strategy = (rawStrategy === 'main' ? 'isolated' : rawStrategy) as TriggerExecutionSessionStrategy;
+  if (strategy !== 'isolated' && strategy !== 'thread') {
+    throw new Error('execution.session.strategy must be isolated or thread');
   }
   const session: TriggerExecutionSession = {
     strategy,
     baseagent: optionalString(raw.baseagent),
     channelKey: optionalString(raw.channelKey),
     channelId: optionalString(raw.channelId),
-    sessionId: optionalString(raw.sessionId),
     threadId: optionalString(raw.threadId),
     name: optionalString(raw.name),
   };
-  if (strategy === 'main') {
-    if (!session.channelKey) throw new Error('execution.session.channelKey is required when strategy=main');
-    if (!session.channelId) throw new Error('execution.session.channelId is required when strategy=main');
-  }
   if (strategy === 'thread' && !session.threadId) {
     session.threadId = `trigger:${opts.id}`;
   }
@@ -356,38 +395,51 @@ function normalizeExecutionSession(value: unknown, opts: { id: string }): Trigge
 function normalizeScript(value: unknown): TriggerScriptConfig {
   if (!isObject(value)) throw new Error('execution.script must be an object');
   const raw = value as Record<string, unknown>;
+  const command = splitScriptCommand(requiredString(raw.path, 'script.path'));
+  if (!command.path) throw new Error('script.path is required');
   const timeoutMs = optionalNumber(raw.timeoutMs) ?? 30_000;
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0 || timeoutMs > MAX_SCRIPT_TIMEOUT_MS) {
     throw new Error(`script.timeoutMs must be between 1 and ${MAX_SCRIPT_TIMEOUT_MS}`);
   }
+  const args = raw.args !== undefined
+    ? raw.args
+    : (command.args.length > 0 ? command.args : undefined);
   return {
-    path: requiredString(raw.path, 'script.path'),
+    path: command.path,
     runtime: requiredString(raw.runtime, 'script.runtime'),
-    args: raw.args,
+    args,
     timeoutMs,
   };
 }
 
-function normalizeFeedback(value: unknown, origin: unknown): TriggerDefinition['feedback'] {
+function normalizeFeedback(value: unknown): TriggerDefinition['feedback'] {
   if (!isObject(value)) throw new Error('feedback must be an object');
   const raw = value as Record<string, unknown>;
+  if (raw.default !== undefined) {
+    throw new Error('feedback.default has been removed; use feedback.onFailure');
+  }
   return {
-    onReply: normalizeDisposition(raw.onReply, 'feedback.onReply', { fallback: { kind: 'reply-origin' }, origin }),
-    onNoop: normalizeDisposition(raw.onNoop, 'feedback.onNoop', { fallback: { kind: 'silent' }, origin }),
-    default: normalizeDisposition(raw.default, 'feedback.default', { fallback: { kind: 'silent' }, origin }),
+    onReply: normalizeDisposition(raw.onReply, 'feedback.onReply'),
+    onNoop: normalizeDisposition(raw.onNoop, 'feedback.onNoop'),
+    onFailure: normalizeDisposition(raw.onFailure, 'feedback.onFailure'),
   };
 }
 
-function normalizeDisposition(value: unknown, label: string, opts?: { fallback: FeedbackDisposition; origin: unknown }): FeedbackDisposition {
+function normalizeDisposition(value: unknown, label: string): FeedbackDisposition {
   if (value === undefined) {
-    if (!opts?.fallback) throw new Error(`${label} is required`);
-    return opts.fallback;
+    throw new Error(`${label} is required`);
   }
   if (!isObject(value)) throw new Error(`${label} must be an object`);
   const raw = value as Record<string, unknown>;
   const kind = requiredString(raw.kind, `${label}.kind`);
   if (kind === 'silent') return { kind };
-  if (kind === 'reply-origin') return { kind, template: optionalTemplate(raw.template) };
+  if (kind === 'reply-origin') {
+    return {
+      kind,
+      delivery: normalizeDelivery(raw.delivery, `${label}.delivery`),
+      template: optionalTemplate(raw.template),
+    };
+  }
   if (kind === 'forward') {
     if (!Array.isArray(raw.targets) || raw.targets.length === 0) {
       throw new Error(`${label}.targets must be a non-empty array`);
@@ -415,14 +467,19 @@ function normalizeTarget(value: unknown, label: string, fallback?: FeedbackTarge
   const channelId = optionalString(raw.channelId) ?? fallback?.channelId;
   if (!channelKey) throw new Error(`${label}.channelKey is required`);
   if (!channelId) throw new Error(`${label}.channelId is required`);
-  const delivery = optionalString(raw.delivery) ?? fallback?.delivery ?? 'direct';
-  if (delivery !== 'direct' && delivery !== 'inbound') throw new Error(`${label}.delivery must be direct or inbound`);
+  const delivery = normalizeDelivery(raw.delivery ?? fallback?.delivery, `${label}.delivery`);
   return {
     channelKey,
     channelId,
     delivery,
     threadId: optionalString(raw.threadId) ?? fallback?.threadId,
   };
+}
+
+function normalizeDelivery(value: unknown, label: string): 'direct' | 'inbound' {
+  const delivery = optionalString(value);
+  if (delivery !== 'direct' && delivery !== 'inbound') throw new Error(`${label} must be direct or inbound`);
+  return delivery;
 }
 
 function normalizeReliability(value: unknown): TriggerReliability {
@@ -487,8 +544,8 @@ function validateTriggerSemantics(definition: TriggerDefinition): void {
   if (definition.execution.mode === 'script' && !definition.execution.script) {
     throw new Error('execution.script is required when execution.mode=script');
   }
-  if (!definition.feedback.onReply && !definition.feedback.onNoop && !definition.feedback.default) {
-    throw new Error('feedback must define onReply, onNoop, or default');
+  if (!definition.feedback.onReply || !definition.feedback.onNoop || !definition.feedback.onFailure) {
+    throw new Error('feedback must define onReply, onNoop, and onFailure');
   }
 }
 

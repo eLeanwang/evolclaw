@@ -93,8 +93,9 @@ export class TriggerFeedbackDispatcher {
     }
 
     if (input.disposition.kind === 'reply-origin') {
-      const target = this.originTarget(input.trigger);
+      const target = this.originTarget(input.trigger, input.disposition.delivery);
       if (!target) return this.failed(feedback, [], 'origin_missing', 'trigger.origin does not contain a reply target');
+      feedback.target = target;
       return await this.dispatchForwardTargets(input, feedback, renderedText, [target]);
     }
 
@@ -278,11 +279,11 @@ export class TriggerFeedbackDispatcher {
     }
   }
 
-  private originTarget(trigger: TriggerDefinition): FeedbackTarget | undefined {
+  private originTarget(trigger: TriggerDefinition, delivery: FeedbackTarget['delivery']): FeedbackTarget | undefined {
     const channelKey = trigger.origin?.channel || trigger.execution.session.channelKey;
     const channelId = trigger.origin?.peerId || trigger.execution.session.channelId;
     if (!channelKey || !channelId) return undefined;
-    return { channelKey, channelId, delivery: 'direct' };
+    return { channelKey, channelId, delivery };
   }
 
   private failed(

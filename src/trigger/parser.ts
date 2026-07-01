@@ -50,16 +50,12 @@ function parseFlags(args: string): Map<string, string | true> {
 }
 
 export function parseDuration(s: string): number | null {
-  const re = /^(?:(\d+)d)?(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?$/;
-  const m = re.exec(s.trim().toLowerCase());
-  if (!m || !s.trim()) return null;
-  const [, d, h, min, sec] = m;
-  const total =
-    (parseInt(d ?? '0') * 86400 +
-      parseInt(h ?? '0') * 3600 +
-      parseInt(min ?? '0') * 60 +
-      parseInt(sec ?? '0')) * 1000;
-  return total > 0 ? total : null;
+  const m = /^([1-9]\d*)([dhms])$/.exec(s.trim().toLowerCase());
+  if (!m) return null;
+  const amount = Number(m[1]);
+  const unit = m[2];
+  const multiplier = unit === 'd' ? 86_400_000 : unit === 'h' ? 3_600_000 : unit === 'm' ? 60_000 : 1_000;
+  return amount * multiplier;
 }
 
 export function parseIsoDate(s: string): number | null {
@@ -89,7 +85,7 @@ function parseLimitDurationFlag(flags: Map<string, string | true>, name: string,
   if (!flags.has(name)) return { ok: true };
   const raw = flags.get(name);
   if (!raw || raw === true) return { ok: false, error: `${label} 不能为空` };
-  if (!/^[1-9]\d*(m|h|d)$/.test(raw)) return { ok: false, error: `${label} 支持格式：30m、12h、3d` };
+  if (!/^[1-9]\d*(s|m|h|d)$/.test(raw)) return { ok: false, error: `${label} 支持格式：30s、15m、2h、1d` };
   return { ok: true, value: raw };
 }
 
@@ -142,7 +138,6 @@ export interface ParsedTriggerUpdate {
   targetChannelType?: string;  // Recomputed by caller when targetChannel changes
   targetThreadId?: string;
   targetSessionStrategy?: TriggerSessionStrategy;
-  boundSessionId?: string;  // Rebound by caller per session strategy
   agentId?: string;
   name?: string;
   prompt?: string;
@@ -213,7 +208,7 @@ export function parseTriggerUpdate(args: string): UpdateParseResult {
   if (hasDelay) {
     const raw = flags.get('delay') as string;
     const ms = parseDuration(raw);
-    if (ms === null) return { ok: false, error: `无法解析 --delay "${raw}"，支持格式：30m、2h、1d、2h30m` };
+    if (ms === null) return { ok: false, error: `无法解析 --delay "${raw}"，支持格式：30s、15m、2h、1d` };
     result.scheduleType = 'delay';
     result.scheduleValue = String(ms);
   } else if (hasAt) {
@@ -236,7 +231,7 @@ export function parseTriggerUpdate(args: string): UpdateParseResult {
     const raw = flags.get('every');
     if (!raw || raw === true) return { ok: false, error: '--every 不能为空' };
     const ms = parseDuration(raw);
-    if (ms === null) return { ok: false, error: `无法解析 --every "${raw}"，支持格式：30m、2h、1d、2h30m` };
+    if (ms === null) return { ok: false, error: `无法解析 --every "${raw}"，支持格式：30s、15m、2h、1d` };
     result.scheduleType = 'interval';
     result.scheduleValue = String(ms);
   }
@@ -257,7 +252,7 @@ export function parseTriggerUpdate(args: string): UpdateParseResult {
 
   if (flags.has('session')) {
     const sv = flags.get('session') as string;
-    if (sv !== 'latest' && sv !== 'current' && sv !== 'thread') return { ok: false, error: '--session 只接受 latest、current 或 thread' };
+    if (sv !== 'latest' && sv !== 'thread') return { ok: false, error: '--session 只接受 latest 或 thread' };
     result.targetSessionStrategy = sv;
   }
 
@@ -380,7 +375,7 @@ export function parseTriggerSet(args: string): ParseResult {
     const raw = flags.get('delay') as string;
     const ms = parseDuration(raw);
     if (ms === null) {
-      return { ok: false, error: `无法解析 --delay "${raw}"，支持格式：30m、2h、1d、2h30m` };
+      return { ok: false, error: `无法解析 --delay "${raw}"，支持格式：30s、15m、2h、1d` };
     }
     scheduleType = 'delay';
     scheduleValue = String(ms);
@@ -412,7 +407,7 @@ export function parseTriggerSet(args: string): ParseResult {
     }
     const ms = parseDuration(raw);
     if (ms === null) {
-      return { ok: false, error: `无法解析 --every "${raw}"，支持格式：30m、2h、1d、2h30m` };
+      return { ok: false, error: `无法解析 --every "${raw}"，支持格式：30s、15m、2h、1d` };
     }
     scheduleType = 'interval';
     scheduleValue = String(ms);
@@ -441,8 +436,8 @@ export function parseTriggerSet(args: string): ParseResult {
   let targetSessionStrategy: TriggerSessionStrategy = 'latest';
   if (hasSession) {
     const sv = flags.get('session') as string;
-    if (sv !== 'latest' && sv !== 'current' && sv !== 'thread') {
-      return { ok: false, error: '--session 只接受 latest、current 或 thread' };
+    if (sv !== 'latest' && sv !== 'thread') {
+      return { ok: false, error: '--session 只接受 latest 或 thread' };
     }
     targetSessionStrategy = sv;
   }

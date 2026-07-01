@@ -27,7 +27,6 @@ import {
   type SchemaEntry,
 } from './schema-registry.js';
 import { mergeLayers, expandVars, buildEnvResolver, type EnvScope } from './merge.js';
-import { mergeBehaviorIntoEffective } from './behavior.js';
 import { normalizeAgentLifecycle } from './lifecycle.js';
 import type {
   ProcessConfig,
@@ -320,7 +319,7 @@ export function resolveEffective(sel: Selector, opts: ReadOpts = {}): EffectiveA
     permissionMode: config.permissionMode,
     roles: config.roles,
   };
-  return mergeBehaviorIntoEffective(effective, sel, opts);
+  return effective;
 }
 
 // ── 字段 → target 路由（按 schema 归属判定）──────────────────────────────────

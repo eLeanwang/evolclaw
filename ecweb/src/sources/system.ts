@@ -64,6 +64,9 @@ async function buildSnapshot(): Promise<any> {
   }
   // checkResp 包含 evolagents 等健康检查数据
   const check = checkResp?.data ?? null;
+  if (check && system?.aid) {
+    check.daemon = { ...(check.daemon ?? {}), aid: check.daemon?.aid ?? system.aid };
+  }
   return { daemonRunning, system: system ? { ...system, baseagents } : system, upgrade: null, check };
 }
 

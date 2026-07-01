@@ -1,4 +1,5 @@
 import crypto from 'crypto';
+import fs from 'fs';
 import { CronExpressionParser } from 'cron-parser';
 import { logger } from '../utils/logger.js';
 import type { EventBus } from '../core/event-bus.js';
@@ -14,6 +15,7 @@ import {
   parseDurationMs,
   previewText,
   renderTemplate,
+  resolveScriptPath,
   sha256,
 } from './validation.js';
 import type {
@@ -30,6 +32,7 @@ import type {
   TriggerRunPayload,
   TriggerRuntimeResult,
   TriggerScheduleState,
+  TriggerScriptPreview,
   TriggerScriptResult,
   TriggerSource,
   TriggerSourceEvent,
@@ -37,6 +40,7 @@ import type {
 } from './types.js';
 
 const MAX_TIMER_MS = 2_147_483_647;
+const SCRIPT_PREVIEW_MAX_BYTES = 64 * 1024;
 
 interface RunningRun {
   run: TriggerActiveRun;
@@ -106,14 +110,54 @@ export class TriggerRuntimeScheduler {
     return this.manager.list(opts);
   }
 
-  show(triggerId: string): { definition: TriggerDefinition; active: TriggerActiveRun[]; schedule?: TriggerScheduleState; limitState?: TriggerLimitState; recentRuns: TriggerAuditRecord[] } {
+  show(triggerId: string): { definition: TriggerDefinition; active: TriggerActiveRun[]; schedule?: TriggerScheduleState; limitState?: TriggerLimitState; recentRuns: TriggerAuditRecord[]; scriptPreview?: TriggerScriptPreview } {
+    const definition = this.manager.require(triggerId);
     return {
-      definition: this.manager.require(triggerId),
+      definition,
       active: this.state.list(triggerId),
       schedule: this.state.readSchedule(triggerId),
       limitState: this.state.readLimitState(triggerId),
       recentRuns: this.audit.recent(triggerId, 10),
+      scriptPreview: this.scriptPreview(definition),
     };
+  }
+
+  private scriptPreview(definition: TriggerDefinition): TriggerScriptPreview | undefined {
+    if (definition.execution.mode !== 'script' || !definition.execution.script) return undefined;
+    const script = definition.execution.script;
+    const preview: TriggerScriptPreview = {
+      path: script.path,
+      runtime: script.runtime,
+    };
+    try {
+      const abs = resolveScriptPath(this.manager.triggerDir(definition.id), script.path);
+      const stat = fs.statSync(abs);
+      if (!stat.isFile()) {
+        return { ...preview, error: 'script path is not a file' };
+      }
+      const fd = fs.openSync(abs, 'r');
+      try {
+        const size = stat.size;
+        const limit = Math.min(size, SCRIPT_PREVIEW_MAX_BYTES + 1);
+        const buffer = Buffer.alloc(limit);
+        const bytesRead = fs.readSync(fd, buffer, 0, limit, 0);
+        const slice = buffer.subarray(0, Math.min(bytesRead, SCRIPT_PREVIEW_MAX_BYTES));
+        if (slice.includes(0)) {
+          return { ...preview, sizeBytes: size, mtime: stat.mtimeMs, error: 'script file appears to be binary' };
+        }
+        return {
+          ...preview,
+          content: slice.toString('utf8'),
+          sizeBytes: size,
+          truncated: bytesRead > SCRIPT_PREVIEW_MAX_BYTES,
+          mtime: stat.mtimeMs,
+        };
+      } finally {
+        fs.closeSync(fd);
+      }
+    } catch (err: any) {
+      return { ...preview, error: err?.message || String(err) };
+    }
   }
 
   stats(triggerId: string): TriggerRunStats {
@@ -450,7 +494,7 @@ export class TriggerRuntimeScheduler {
       if (script.error || script.exitCode !== 0) {
         const reply = errorReply(runId, script.durationMs, script.error?.code || 'script_error', script.error?.message || 'script failed');
         return {
-          branch: 'default',
+          branch: 'onFailure',
           script,
           processing: { mode: 'script' },
           reply,
@@ -521,7 +565,7 @@ export class TriggerRuntimeScheduler {
     } catch (err: any) {
       const reply = errorReply(runId, 0, 'agent_execution_error', err?.message || String(err));
       return {
-        branch: 'default',
+        branch: 'onFailure',
         script: null,
         processing,
         reply,
@@ -532,7 +576,7 @@ export class TriggerRuntimeScheduler {
   private selectDisposition(definition: TriggerDefinition, branch: TriggerFeedbackBranch): FeedbackDisposition {
     if (branch === 'onReply') return definition.feedback.onReply;
     if (branch === 'onNoop') return definition.feedback.onNoop;
-    return definition.feedback.default;
+    return definition.feedback.onFailure;
   }
 
   private async runScriptOnce(
@@ -1046,7 +1090,7 @@ function invalidScriptReply(script: TriggerScriptResult, runId: string, reason: 
 function branchFromReply(reply: TriggerReply): TriggerFeedbackBranch {
   if (reply.outcome === 'success') return 'onReply';
   if (reply.outcome === 'noop') return 'onNoop';
-  return 'default';
+  return 'onFailure';
 }
 
 function shouldRetryExecution(reply: TriggerReply): boolean {
@@ -1082,7 +1126,7 @@ function summarizeReply(reply: TriggerReply | null | undefined): TriggerAuditRec
 }
 
 function primaryTarget(definition: TriggerDefinition): FeedbackTarget | undefined {
-  for (const disposition of [definition.feedback.onReply, definition.feedback.default, definition.feedback.onNoop]) {
+  for (const disposition of [definition.feedback.onReply, definition.feedback.onFailure, definition.feedback.onNoop]) {
     if (disposition.kind === 'forward' && disposition.targets.length > 0) return disposition.targets[0];
   }
   if (definition.origin?.channel && definition.origin.peerId) {

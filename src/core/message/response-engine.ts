@@ -123,9 +123,8 @@ function wasRetryHealthRecorded(error: unknown): boolean {
 }
 
 function formatRetryableErrorFinalMessage(error: unknown, retries: number): string {
-  const raw = error instanceof Error ? error.message : String(error);
-  const firstLine = raw.split('\n')[0]?.trim() || 'API 暂时不可用';
-  return `❌ API 暂时不可用，已自动重试 ${retries} 次仍失败，任务已停止。\n原因：${firstLine}`;
+  const reason = getErrorMessage(error, undefined, false) || 'API 暂时不可用';
+  return `❌ API 暂时不可用，已自动重试 ${retries} 次仍失败，任务已停止。\n原因：${reason}`;
 }
 
 function getStreamErrorText(result: StreamRunResult): string {
@@ -138,6 +137,22 @@ function getStreamErrorText(result: StreamRunResult): string {
   ]
     .filter((part): part is string => typeof part === 'string' && part.trim().length > 0)
     .join('\n');
+}
+
+function getStreamErrorMessage(result: StreamRunResult, includeEmoji = false): string {
+  const raw = getStreamErrorText(result) || '任务执行失败';
+  return getErrorMessage(new Error(raw), result.terminalReason, includeEmoji);
+}
+
+function normalizeComparableText(text: string): string {
+  return text.replace(/\s+/g, ' ').trim();
+}
+
+function isPendingTextSameAsStreamError(pendingText: string, errorText: string): boolean {
+  const pending = normalizeComparableText(pendingText);
+  const error = normalizeComparableText(errorText);
+  if (!pending || !error || pending.length < 20) return false;
+  return pending === error || pending.includes(error) || error.includes(pending);
 }
 
 function streamHitContextLimit(result: StreamRunResult): boolean {
@@ -1756,6 +1771,7 @@ export class ResponseEngine implements IMessageProcessor {
       if (streamResult.isError) {
         // Agent 流正常结束但任务结果失败（权限被拒、max turns、工具链失败等）
         const errorSummary = streamResult.errors?.join('; ') || '任务执行失败';
+        const userErrorSummary = getStreamErrorMessage(streamResult, false);
         const rawSubtype = streamResult.subtype || 'agent_error';
         const errorType = prefixErrorType(ERROR_PREFIX.AGENT, rawSubtype);
         // 用户主动打断（新消息/​/stop/​撤回）会让 SDK 流在工具调用中途被掐断，
@@ -1763,7 +1779,7 @@ export class ResponseEngine implements IMessageProcessor {
         // 这不是真正的失败，不应把诊断串暴露给用户，也不计入错误统计。
         const isUserInterrupt = interruptReason === 'new_message' || interruptReason === 'stop' || interruptReason === 'recalled';
         if (!isUserInterrupt) {
-          await adapter.send(envelope, { kind: 'result.error', text: errorSummary, reason: rawSubtype }).catch(() => {});
+          await adapter.send(envelope, { kind: 'result.error', text: userErrorSummary, reason: rawSubtype }).catch(() => {});
           adapter.send(envelope, { kind: 'status.error', metadata: { errorType: rawSubtype } }).catch(() => {});
           this.touchAgentActivity(channelKey);
         }
@@ -2535,7 +2551,7 @@ export class ResponseEngine implements IMessageProcessor {
           const isRetryableRuntimeError = isRetryableError(new Error(event.error || ''));
           if (!isContextError && !isRetryableRuntimeError && !hasErrorResult && !shouldSuppress()) {
             hasErrorResult = true;
-            renderer.addNotice(`${event.error}`, 'warn', 'runtime-error', true);
+            renderer.addNotice(getErrorMessage(new Error(event.error || '任务执行失败'), undefined, false), 'warn', 'runtime-error', true);
           }
         }
 
@@ -2571,16 +2587,16 @@ export class ResponseEngine implements IMessageProcessor {
           const isRetryableCompleteError = event.isError && !isContextTooLong && completeErrorText
             ? isRetryableError(new Error(completeErrorText))
             : false;
+          if (event.isError && completeErrorText && isPendingTextSameAsStreamError(renderer.getRemainingText(), completeErrorText)) {
+            renderer.discardPendingText();
+          }
           if (event.isError && !hasErrorResult && !shouldSuppress() && !isUserInterrupt && !isContextTooLong && !isRetryableCompleteError) {
-            const errorSummary = event.errors?.join('; ') || '任务执行失败';
             // 使用 terminalReason 提供更友好的错误提示（不带 emoji，由 formatter 统一加）
             const userFriendlyMessage = event.terminalReason === 'prompt_too_long'
               ? getContextTooLongHint(agent)
               : event.terminalReason === 'context_compact_failed'
                 ? getContextCompactFailedHint(agent)
-                : event.terminalReason
-                  ? getErrorMessage(null, event.terminalReason, false)
-                  : errorSummary;
+                : getStreamErrorMessage(completeResult, false);
             renderer.addNotice(userFriendlyMessage, 'warn', 'task-error', true);
           }
 

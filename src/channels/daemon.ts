@@ -158,35 +158,10 @@ export class DaemonChannel implements ChannelAdapter {
     baseagent: string,
   ): Promise<Session> {
     const strategy = trigger.execution.session.strategy;
-    if (strategy === 'main' && trigger.execution.session.sessionId) {
-      const session = await this.sessionManager.getSessionById(trigger.execution.session.sessionId);
-      if (session) return session;
-    }
-    if (strategy === 'main') {
-      const channelKey = trigger.execution.session.channelKey;
-      const channelId = trigger.execution.session.channelId;
-      if (!channelKey || !channelId) throw new Error('main execution session requires channelKey and channelId');
-      const channelType = channelTypeFromKey(channelKey);
-      return await this.sessionManager.getOrCreateSession(
-        channelKey,
-        channelId,
-        projectPath,
-        undefined,
-        { channelKey, peerId: `trigger:${trigger.id}`, peerName: trigger.name },
-        trigger.execution.session.name || trigger.name,
-        undefined,
-        'private',
-        baseagent,
-        trigger.agentAid,
-        channelType,
-        'system',
-      );
-    }
-
     const channelId = trigger.execution.session.channelId || `trigger:${trigger.id}`;
     const threadId = strategy === 'isolated'
       ? `run:${Date.now()}`
-      : (strategy === 'thread' ? (trigger.execution.session.threadId || `trigger:${trigger.id}`) : undefined);
+      : (trigger.execution.session.threadId || `trigger:${trigger.id}`);
     return await this.sessionManager.getOrCreateSession(
       this.channelName,
       channelId,

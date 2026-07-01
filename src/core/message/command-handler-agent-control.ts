@@ -12,7 +12,12 @@ import type { AgentConfig, DefaultsConfig, ProjectsBlock } from '../../types.js'
 import { logger } from '../../utils/logger.js';
 import { resolvePaths, resolveRoot } from '../../paths.js';
 import path from 'path';
-import { loadAgent, saveAgent } from '../../config-store.js';
+import {
+  ConfigTarget,
+  ensureFile as cfgEnsure,
+  read as cfgRead,
+  write as cfgWrite,
+} from '../../config/config-manager.js';
 import { CreateStatusWriter, readCreateStatus, type CreatePhase } from './create-status.js';
 import { deriveAgentProjectPath } from '../../utils/project-path.js';
 import type { EventBus } from '../event-bus.js';
@@ -23,7 +28,6 @@ import { isValidAid } from '../../aun/aid/validation.js';
 export type ExecResult = { data: any } | { error: string; code: string };
 
 const SUPPORTED_AGENT_PATCH_FIELDS = new Set(['aid', 'name', 'avatar', 'active_baseagent', 'baseagents', 'projects', 'owners', 'chatmode', 'channels']);
-const ACTIVE_BASEAGENT_CANDIDATES = new Set(['claude', 'codex', 'gemini']);
 const HIDDEN_VALUE = '[hidden]';
 const SENSITIVE_CONFIG_KEYS = new Set([
   'apiKey',
@@ -372,7 +376,7 @@ export async function execAgentAction(
 }
 
 /** name=agent 的 menu.action=update：落盘 config patch / agent.md patch，不触发 reload。
- *  直接 loadAgent + saveAgent（不走 agentSet，避免其内部自动 evolagent.reload）——
+ *  直接通过 ConfigManager 读写 agent config（不走 agentSet，避免其内部自动 evolagent.reload）——
  *  重载由用户在 Agents 页操作列手动触发（带任务执行检查）。
  *  AUN 渠道绑定 agent 顶层 aid，不可通过 patch 编辑：拒绝改 aid、拒绝 channels 数组里出现 aun 条目。
  *  可写字段：name / active_baseagent / baseagents / projects / owners / chatmode / channels（非 aun）。 */
@@ -405,7 +409,7 @@ export async function execAgentUpdate(args: Record<string, any> | undefined): Pr
   if (Array.isArray(p.channels) && p.channels.some((c: any) => c?.type === 'aun')) {
     return { error: 'AUN 渠道不可通过 patch 编辑（由 agent aid 隐式管理）', code: 'INVALID_ARGS' };
   }
-  const config = loadAgent(a.aid);
+  const config = cfgRead<AgentConfig>(ConfigTarget.Agent, { self: a.aid });
   if (!config) return { error: `Agent "${a.aid}" not found`, code: 'NOT_FOUND' };
 
   if (p.avatar !== undefined) {
@@ -420,10 +424,10 @@ export async function execAgentUpdate(args: Record<string, any> | undefined): Pr
   const data: Record<string, any> = { aid: a.aid };
   const hasConfigPatch = p.active_baseagent !== undefined || p.baseagents !== undefined || p.projects !== undefined || p.owners !== undefined || p.chatmode !== undefined || p.channels !== undefined;
   if (p.active_baseagent !== undefined) {
-    if (typeof p.active_baseagent !== 'string' || !ACTIVE_BASEAGENT_CANDIDATES.has(p.active_baseagent)) {
-      return { error: `无效 active_baseagent: ${JSON.stringify(p.active_baseagent)}（可选: ${Array.from(ACTIVE_BASEAGENT_CANDIDATES).join(' / ')}）`, code: 'INVALID_ARGS' };
+    if (typeof p.active_baseagent !== 'string' || !p.active_baseagent.trim()) {
+      return { error: `无效 active_baseagent: ${JSON.stringify(p.active_baseagent)}（必须是非空字符串）`, code: 'INVALID_ARGS' };
     }
-    (config as any).active_baseagent = p.active_baseagent;
+    (config as any).active_baseagent = p.active_baseagent.trim();
     touched = true;
   }
   if (p.baseagents !== undefined) {
@@ -457,7 +461,8 @@ export async function execAgentUpdate(args: Record<string, any> | undefined): Pr
 
   if (hasConfigPatch) {
     try {
-      saveAgent(config);
+      cfgEnsure(ConfigTarget.Agent, { self: a.aid });
+      cfgWrite(ConfigTarget.Agent, config, { self: a.aid });
     } catch (e: any) {
       return { error: e?.message || String(e), code: classifyError(e?.message || String(e)) };
     }
@@ -489,7 +494,7 @@ export async function execAgentQuery(args: Record<string, any> | undefined): Pro
     if (code === 'NOT_FOUND' && progress) return { data: buildCreateProgressOnlyAgent(aid, progress) };
     return { error: (res as any).error, code };
   }
-  const config = loadAgent(aid);
+  const config = cfgRead<AgentConfig>(ConfigTarget.Agent, { self: aid });
   const safeConfig = buildSafeAgentConfig(config);
   const data = {
     ...res,

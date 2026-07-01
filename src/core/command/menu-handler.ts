@@ -11,6 +11,7 @@ import fs from 'fs';
 import crypto from 'crypto';
 import { execFileSync } from 'child_process';
 import { CronExpressionParser } from 'cron-parser';
+import { parseDuration } from '../../trigger/parser.js';
 import type { ParsedTriggerSet } from '../../trigger/parser.js';
 import { checkLatestVersion, getLocalVersion, isLinkedInstall, compareVersions, resolveGlobalPkg } from '../../utils/npm-ops.js';
 import { commandExists } from '../../utils/cross-platform.js';
@@ -462,13 +463,20 @@ function ecwebResp(id: string, name: string | undefined, result: { data: any } |
     : { type: 'menu.response', id, ...(name ? { name } : {}), data: result.data };
 }
 
+function parseScheduleDurationMs(value: string): number {
+  const numeric = Number(value);
+  if (Number.isFinite(numeric)) return numeric;
+  const parsed = parseDuration(value);
+  return parsed ?? Number.NaN;
+}
+
 export function validateScheduleParams(scheduleType: string, scheduleValue: string): string | null {
-  if (!['delay', 'at', 'cron'].includes(scheduleType)) {
-    return `无效 scheduleType: ${scheduleType}（可选: delay / at / cron）`;
+  if (!['delay', 'at', 'cron', 'interval'].includes(scheduleType)) {
+    return `无效 scheduleType: ${scheduleType}（可选: delay / at / cron / interval）`;
   }
-  if (scheduleType === 'delay') {
-    const ms = Number(scheduleValue);
-    if (!Number.isFinite(ms) || ms <= 0) return `delay 的 scheduleValue 需为正整数毫秒: ${scheduleValue}`;
+  if (scheduleType === 'delay' || scheduleType === 'interval') {
+    const ms = parseScheduleDurationMs(scheduleValue);
+    if (!Number.isFinite(ms) || ms <= 0) return `${scheduleType} 的 scheduleValue 需为正数时长（如 30s / 15m / 2h / 1d）: ${scheduleValue}`;
   } else if (scheduleType === 'at') {
     const ts = new Date(scheduleValue).getTime();
     if (!Number.isFinite(ts)) return `at 的 scheduleValue 需为合法时间: ${scheduleValue}`;
@@ -502,7 +510,7 @@ export function getMenuItems(this: any, role: string, chatType: string = 'privat
         group: '其他',
         commands: [
           { cmd: '/status', label: '显示会话状态' },
-          { cmd: '/check', label: '检查渠道健康' },
+          { cmd: '/check', label: '检查 EvolAgent 实例健康' },
           { cmd: '/help', label: '显示帮助信息' },
         ]
       }
@@ -529,7 +537,7 @@ export function getMenuItems(this: any, role: string, chatType: string = 'privat
     items.push({
       group: 'Agent 与模型',
       commands: [
-        { cmd: '/baseagent', label: '切换 Agent 后端', desc: '切换当前会话使用的 AI 后端', next: { type: 'select', dynamic: true } },
+        { cmd: '/baseagent', label: '切换 Agent 后端', desc: '切换 Agent 当前 Baseagent', next: { type: 'select', dynamic: true } },
         { cmd: '/model', label: '切换模型', desc: '切换当前 Agent 使用的模型版本', next: { type: 'select', dynamic: true } },
         { cmd: '/effort', label: '切换推理强度', desc: '调整模型推理深度，影响响应速度与质量', next: { type: 'select', items: [
           { value: 'low', label: 'Low' },
@@ -572,7 +580,7 @@ export function getMenuItems(this: any, role: string, chatType: string = 'privat
       commands: [
         { cmd: '/status', label: '显示会话状态', desc: '查看当前会话、项目、Agent 的详细状态' },
         { cmd: '/stop', label: '中断当前任务', desc: '立即中断正在执行的 Agent 任务' },
-        { cmd: '/check', label: '检查渠道状态', desc: '检查各消息渠道的连接健康状态' },
+        { cmd: '/check', label: '检查 EvolAgent 实例健康', desc: '检查各 EvolAgent 实例、后端与消息通道的健康状态' },
         { cmd: '/activity', label: '控制中间输出显示', desc: '设置工具调用过程的可见范围', next: { type: 'select', items: [
           { value: 'all', label: '全部显示', desc: '所有用户均可见中间输出' },
           { value: 'none', label: '不显示', desc: '关闭所有中间输出' },
@@ -590,7 +598,7 @@ export function getMenuItems(this: any, role: string, chatType: string = 'privat
       group: '其他',
       commands: [
         { cmd: '/status', label: '显示会话状态', desc: '查看当前会话的基本状态' },
-        { cmd: '/check', label: '检查渠道健康', desc: '检查消息渠道连接状态' },
+        { cmd: '/check', label: '检查 EvolAgent 实例健康', desc: '检查 EvolAgent 实例与消息通道健康状态' },
       ]
     });
   }
@@ -710,10 +718,16 @@ export async function getSubMenuItems(this: any, cmd: string, channel: string, c
   }
 
   if (cmd === '/baseagent') {
-    const currentAgent = session?.baseagent
+    const requestedAgent = typeof args?.aid === 'string'
+      ? (this.agentRegistry?.get?.(args.aid) ?? null)
+      : null;
+    const currentAgent = requestedAgent?.baseagent
       ?? this.agentRegistry?.resolveByChannel(channel)?.baseagent
       ?? this.parseDefaultBaseagent?.();
-    return this.getAvailableBaseagents(channel).map((name: string) => ({ value: name, label: name, selected: name === currentAgent }));
+    const available = requestedAgent?.name
+      ? (this.getAvailableBaseagentsForOwner?.(requestedAgent.name) ?? [])
+      : this.getAvailableBaseagents(channel);
+    return available.map((name: string) => ({ value: name, label: name, selected: name === currentAgent }));
   }
 
   if (cmd === '/model') {
@@ -1020,8 +1034,12 @@ export async function execMenuQuery(this: any,
   }
 
   if (cmdBase === '/baseagent') {
-    const value = session?.baseagent ?? evolagent?.config?.active_baseagent ?? null;
-    return { data: { baseagent: value } };
+    const requestedAgent = typeof args?.aid === 'string'
+      ? (this.agentRegistry?.get?.(args.aid) ?? null)
+      : null;
+    const targetAgent = requestedAgent ?? evolagent;
+    const value = targetAgent?.baseagent ?? targetAgent?.config?.active_baseagent ?? null;
+    return { data: { baseagent: value, scope: 'agent' } };
   }
 
   if (cmdBase === '/model') {
@@ -1112,6 +1130,7 @@ export async function execMenuQuery(this: any,
     }
     const owningAgent = this.getOwningAgent(channel);
     const data: Record<string, any> = {
+      aid: loadEvolclawConfig().aid ?? null,
       pid: process.pid,
       node: process.version,
       uptime: Math.floor(process.uptime()),
@@ -1262,7 +1281,7 @@ export async function execMenuUpdate(this: any,
 
   if (cmdBase === '/baseagent') {
     if (identity.role !== 'owner') return { error: '无权限', code: 'NO_PERMISSION' };
-    if (!evolagent) return { error: '当前 channel 无绑定 agent，无法设置默认 baseagent', code: 'EXEC_FAILED' };
+    if (!evolagent) return { error: '当前 channel 无绑定 agent，无法设置 active_baseagent', code: 'EXEC_FAILED' };
     const valid = this.getAvailableBaseagents(channel);
     if (valid.length && !valid.includes(arg)) {
       return { error: `无效 baseagent: ${arg}，可选: ${valid.join(' / ')}`, code: 'INVALID_VALUE' };
@@ -1274,10 +1293,10 @@ export async function execMenuUpdate(this: any,
       aid: evolagent.aid,
       baseagent: arg,
       previousBaseagent,
-      scope: 'default',
+      scope: 'agent',
       timestamp: Date.now(),
     });
-    return { data: { baseagent: arg, scope: 'default', currentSessionBaseagent: session?.baseagent ?? null } };
+    return { data: { baseagent: arg, scope: 'agent' } };
   }
 
   if (cmdBase === '/model') {
@@ -1544,7 +1563,7 @@ export async function execMenuAction(this: any,
       const schedErr = validateScheduleParams(args.scheduleType, String(args.scheduleValue));
       if (schedErr) return { error: schedErr, code: 'INVALID_ARGS' };
       const strategy = args.targetSessionStrategy ?? 'latest';
-      if (!['latest', 'current', 'thread'].includes(strategy)) {
+      if (!['latest', 'thread'].includes(strategy)) {
         return { error: `无效 targetSessionStrategy: ${strategy}`, code: 'INVALID_ARGS' };
       }
       const parsed: ParsedTriggerSet = {
@@ -1584,6 +1603,38 @@ export async function execMenuAction(this: any,
       const cancelled = triggerScheduler.cancel(trigger.id);
       this.eventBus.publish({ type: 'trigger:cancelled', triggerId: cancelled.id, name: cancelled.name, by: userId ?? '' });
       return { data: { id: cancelled.id, cancelled: true } };
+    }
+
+    if (action === 'enable' || action === 'disable') {
+      const nameOrId = args?.nameOrId;
+      if (!nameOrId) return { error: '缺少 nameOrId', code: 'INVALID_ARGS' };
+      if (!isAdmin && !userId) return { error: '无法确认身份，请确保渠道提供发送者 ID', code: 'FORBIDDEN' };
+      const trigger = this.findTriggerDefinition(triggerScheduler, nameOrId, userId ?? '', channel, isAdmin);
+      if (!trigger) return { error: '触发器不存在或无权限', code: 'NOT_FOUND' };
+      const updated = triggerScheduler.setEnabled(trigger.id, action === 'enable');
+      return { data: { id: updated.id, enabled: updated.enabled } };
+    }
+
+    if (action === 'delete') {
+      const nameOrId = args?.nameOrId;
+      if (!nameOrId) return { error: '缺少 nameOrId', code: 'INVALID_ARGS' };
+      if (!isAdmin && !userId) return { error: '无法确认身份，请确保渠道提供发送者 ID', code: 'FORBIDDEN' };
+      const trigger = this.findTriggerDefinition(triggerScheduler, nameOrId, userId ?? '', channel, isAdmin);
+      if (!trigger) return { error: '触发器不存在或无权限', code: 'NOT_FOUND' };
+      if (trigger.enabled) return { error: '请先禁用触发器再删除', code: 'INVALID_STATE' };
+      const deleted = triggerScheduler.delete(trigger.id);
+      return { data: { id: deleted.id, deleted: true } };
+    }
+
+    if (action === 'run') {
+      const nameOrId = args?.nameOrId;
+      if (!nameOrId) return { error: '缺少 nameOrId', code: 'INVALID_ARGS' };
+      if (!isAdmin && !userId) return { error: '无法确认身份，请确保渠道提供发送者 ID', code: 'FORBIDDEN' };
+      const trigger = this.findTriggerDefinition(triggerScheduler, nameOrId, userId ?? '', channel, isAdmin);
+      if (!trigger) return { error: '触发器不存在或无权限', code: 'NOT_FOUND' };
+      if (!trigger.enabled) return { error: '触发器已禁用，不能立即执行', code: 'INVALID_STATE' };
+      const result = await triggerScheduler.run(trigger.id, { dryRun: args?.dryRun === true });
+      return { data: { id: trigger.id, runId: result.runId, status: result.status, reason: result.reason } };
     }
 
     return { error: `不支持的 trigger action: ${action}`, code: 'INVALID_ARGS' };
@@ -1756,7 +1807,7 @@ export async function execMenuAction(this: any,
 
     if (action === 'check') {
       const r = await this.delegateAsAction(action, '/check', channel, channelId, userId, { overrideIdentity });
-      // delegateAsAction 已经把 structured 放在 data.structured 里了，直接返回
+      // delegateAsAction 会把 structured 展开到 data 顶层，并保留 data.structured 兼容旧客户端。
       return r as any;
     }
 

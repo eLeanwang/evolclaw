@@ -444,8 +444,11 @@ function handleConnection(ws: WebSocket, req: http.IncomingMessage, log: (s: str
     }
     if (msg.type === 'menu' && msg.payload) {
       const p = resolvePaths();
+      const timeoutMs = Number.isFinite(Number(msg.timeoutMs)) && Number(msg.timeoutMs) > 0
+        ? Math.min(Number(msg.timeoutMs), 120_000)
+        : 5000;
       const resp = await ipcQuery<{ ok: boolean; response?: any; error?: string }>(
-        p.socket, { type: 'menu.exec', payload: msg.payload }, 5000,
+        p.socket, { type: 'menu.exec', payload: msg.payload }, timeoutMs,
       );
       if (resp?.ok) {
         send({ type: 'menu.response', requestId: msg.requestId, data: resp.response });

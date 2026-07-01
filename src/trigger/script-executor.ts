@@ -37,6 +37,7 @@ export class TriggerScriptExecutor {
 
     const scriptAbs = resolveScriptPath(input.triggerDir, script.path);
     const timeoutMs = script.timeoutMs ?? 30_000;
+    const scriptArgs = Array.isArray(script.args) ? script.args.map(arg => String(arg)) : [];
     const payload = {
       trigger: {
         id: input.trigger.id,
@@ -54,7 +55,7 @@ export class TriggerScriptExecutor {
       args: script.args ?? {},
     };
 
-    return await this.spawnProcess(script.runtime, [scriptAbs], JSON.stringify(payload), timeoutMs, input.signal);
+    return await this.spawnProcess(script.runtime, [scriptAbs, ...scriptArgs], JSON.stringify(payload), timeoutMs, input.signal);
   }
 
   private spawnProcess(command: string, args: string[], stdin: string, timeoutMs: number, signal?: AbortSignal): Promise<TriggerScriptResult> {

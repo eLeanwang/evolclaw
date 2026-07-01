@@ -901,6 +901,8 @@ export interface DefaultsConfig {
   owners?: string[];     // list，与 agent/relation 并集
   admins?: string[];     // list，同上
   models?: ModelsBlock;
+  active_baseagent?: string;
+  baseagents?: BaseagentsBlock;
   projects?: ProjectsBlock;
   aun?: AunRuntimeBlock;
   debug?: DebugBlock;
@@ -1099,13 +1101,13 @@ export interface ChannelCapabilities {
 // ── Trigger types ──
 
 export type TriggerScheduleType = 'delay' | 'at' | 'cron' | 'interval';
-export type TriggerSessionStrategy = 'latest' | 'current' | 'thread';
+export type TriggerSessionStrategy = 'latest' | 'thread';
 
 export interface Trigger {
   id: string;
   name: string;
   scheduleType: TriggerScheduleType;
-  scheduleValue: string;       // delay: ms as string; at: ISO string; cron: expression
+  scheduleValue: string;       // delay/interval: duration (10s/15m/2h) or legacy ms string; at: ISO string; cron: expression
   nextFireAt: number;          // Unix ms
   targetChannel: string;
   targetChannelId: string;
@@ -1126,7 +1128,6 @@ export interface Trigger {
   lastResult?: 'completed' | 'failed' | 'interrupted';
   createdAt: number;
   updatedAt: number;
-  boundSessionId?: string;       // current：注册时绑定的 sessionId
   threadKind?: 'aun' | 'feishu'; // thread：实现路径
   rootMessageId?: string;        // thread(feishu)：注册时命令消息的 messageId
   pendingThread?: boolean;       // thread(feishu)：首次触发待建话题
