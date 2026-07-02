@@ -39,6 +39,14 @@ test-*.ts
 test-*.mjs
 test-*.cjs
 tests/
+!tests/
+tests/**
+!tests/setup.ts
+!tests/config-routing.test.ts
+!tests/session-chatmode.test.ts
+!tests/core/
+!tests/core/command/
+!tests/core/command/*.test.ts
 
 # 编辑器
 .vscode/
@@ -116,6 +124,14 @@ src/experimental/
 
 # 测试文件
 /tests/
+!/tests/
+/tests/**
+!/tests/setup.ts
+!/tests/config-routing.test.ts
+!/tests/session-chatmode.test.ts
+!/tests/core/
+!/tests/core/command/
+!/tests/core/command/*.test.ts
 
 
 # 用户个人 onboarding 报告（含使用统计，不入库）

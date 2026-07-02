@@ -43,10 +43,12 @@ class ConfigManager {
 
 ```typescript
 enum ConfigTarget {
-  Process   = 'process',         // evolclaw.json
-  Defaults  = 'defaults',        // agents/defaults.json
-  Agent     = 'agent',           // agents/{aid}/config.json
-  Relation  = 'relation',        // relations/{peerKey}/config.json
+  Process          = 'process',           // evolclaw.json
+  Defaults         = 'defaults',          // agents/defaults.json
+  Agent            = 'agent',             // agents/{aid}/config.json
+  Relation         = 'relation',          // relations/{peerKey}/config.json
+  Behavior         = 'behavior',          // agents/{aid}/behavior.json
+  RelationBehavior = 'relation-behavior', // relations/{peerKey}/behavior.json
 }
 ```
 
@@ -171,7 +173,8 @@ resolveAgentConfig(selector: Selector): AgentConfig
 
 ### 功能
 
-覆盖链合并：`defaults → agent/config → relation/config`
+H 链合并：`defaults → agent/config → relation/config`。
+运行时 effective 还会叠加 HA 行为链：`agent/behavior → roles.<role> → relation/behavior`。
 
 ### 实现
 
@@ -690,16 +693,16 @@ class ConfigManager {
 
 // 进程 A
 try {
-  configManager.write(ConfigTarget.Agent, { chatmode: { private: 'proactive' } }, {
+  configManager.write(ConfigTarget.Behavior, { chatmode: { private: 'proactive' } }, {
     self: 'bot1.aid.pub',
     merge: true
   });
 } catch (error) {
   if (error instanceof ConfigConflictError) {
     // 重试：重新读取 + 合并 + 写入
-    const current = configManager.read(ConfigTarget.Agent, { self: 'bot1.aid.pub' });
+    const current = configManager.read(ConfigTarget.Behavior, { self: 'bot1.aid.pub' });
     const merged = deepMerge(current, { chatmode: { private: 'proactive' } });
-    configManager.write(ConfigTarget.Agent, merged, { self: 'bot1.aid.pub' });
+    configManager.write(ConfigTarget.Behavior, merged, { self: 'bot1.aid.pub' });
   }
 }
 ```

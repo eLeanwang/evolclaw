@@ -32,8 +32,8 @@ kits/schemas/
 ├── evolclaw.schema.1.json            ← evolclaw.json（v1）
 ├── defaults.schema.1.json            ← agents/defaults.json（v1）
 ├── agent-config.schema.1.json        ← agents/{aid}/config.json（v1）
-├── agent-config.schema.2.json        ← agents/{aid}/config.json（v2，并存）
 ├── relation-config.schema.1.json     ← relations/{peerKey}/config.json
+├── behavior.schema.1.json            ← behavior.json（HA 行为字段）
 ├── migrations/                       ← 版本间迁移函数
 │   ├── agent-config.1-to-2.ts
 │   └── ...
@@ -50,6 +50,7 @@ kits/schemas/
 | `defaults` | `agents/defaults.json` |
 | `agent-config` | `agents/{aid}/config.json` |
 | `relation-config` | `relations/{peerKey}/config.json` |
+| `behavior` | `agents/{aid}/behavior.json` / `relations/{peerKey}/behavior.json` |
 
 ### 为什么放在 kits/schemas/
 
@@ -106,11 +107,12 @@ export function migrate(old: object): object;   // 旧版本完整 JSON → 新�
   "schemas": {
     "evolclaw":       { "currentVersion": 1 },
     "defaults":       { "currentVersion": 1 },
-    "agent-config":   { "currentVersion": 2 },
-    "relation-config":{ "currentVersion": 1 }
+    "agent-config":   { "currentVersion": 1 },
+    "relation-config":{ "currentVersion": 1 },
+    "behavior":       { "currentVersion": 1 }
   },
   "history": [
-    { "schema": "agent-config", "version": 2, "date": "2026-06-19", "description": "去除 behavior.json，所有参数统一在 config.json" }
+    { "schema": "behavior", "version": 1, "date": "2026-06-23", "description": "agent-writable behavior fields (HA)" }
   ]
 }
 ```
@@ -157,7 +159,7 @@ export function migrate(old: object): object;   // 旧版本完整 JSON → 新�
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "agent-config.schema.1.json",
   "title": "AgentConfig (agents/{aid}/config.json)",
-  "description": "Agent 级配置 - 包含所有参数（基础设施 + 行为）",
+  "description": "Agent 级 H 配置 - 身份、授权、渠道和基础设施",
   "type": "object",
   "required": ["aid", "channels"],
   "properties": {
@@ -166,18 +168,39 @@ export function migrate(old: object): object;   // 旧版本完整 JSON → 新�
     "enabled": { "type": "boolean" },
     "owners": { "type": "array", "items": { "type": "string" } },
     "channels": { "type": "array", "items": { "type": "object" } },
+    "baseagents": { "type": "object" },
+    "projects": { "type": "object" },
+    "debug": { "type": "object" }
+  }
+}
+```
+
+### behavior.schema.1.json（精简示例）
+
+```json
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "behavior.schema.1.json",
+  "title": "BehaviorConfig (behavior.json)",
+  "description": "Agent-writable runtime behavior fields (HA)",
+  "type": "object",
+  "properties": {
+    "$schema_version": { "type": "number", "default": 1 },
     "active_baseagent": { "type": "string" },
     "baseagents": { "type": "object" },
     "chatmode": {
       "type": "object",
       "properties": {
         "private": { "type": "string", "enum": ["interactive", "proactive"] },
-        "group": { "type": "string", "enum": ["interactive", "proactive"] }
+        "group": { "type": "string", "enum": ["interactive", "proactive"] },
+        "nothuman": { "type": "string", "enum": ["interactive", "proactive"] }
       }
     },
-    "flush_delay": { "type": "number" },
-    "debounce": { "type": "number" },
-    "permissionMode": { "type": "string" }
+    "dispatch": { "type": "string", "enum": ["mention", "broadcast"] },
+    "permissionMode": {
+      "type": "string",
+      "enum": ["auto", "bypass", "readonly", "request", "edit", "plan", "noask"]
+    }
   }
 }
 ```
@@ -186,7 +209,12 @@ export function migrate(old: object): object;   // 旧版本完整 JSON → 新�
 
 ## 六、Schema 元数据（x- 扩展）
 
-虽然去除了 H/HA 文件物理分离，但可以保留元数据标注用于文档和未来扩展：
+当前保留 H/HA 文件物理分离。schema 根字段 `x-permission` 标注该 schema 的 owner：
+
+- `H`：人类/进程管理配置。
+- `HA`：agent 可写行为配置。
+
+字段级扩展可继续用于文档和未来权限细化：
 
 ```json
 {
@@ -212,7 +240,7 @@ export function migrate(old: object): object;   // 旧版本完整 JSON → 新�
 - `x-permission: "configurable"` - 标记 agent 可修改参数
 - `x-category` - 参数分类（用于文档生成）
 
-**当前**：所有参数暂时都允许 agent 修改，权限体系待设计。
+**当前**：CLI 已按 schema owner 拒绝 agent 托管环境写 H 字段；HA 字段允许通过受控入口修改。
 
 ---
 
