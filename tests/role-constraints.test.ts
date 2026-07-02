@@ -311,6 +311,12 @@ describe('Role Constraints', () => {
       expect(isModelAllowedForRole('guest', 'claude-sonnet-4-6')).toBe(false);
       expect(isModelAllowedForRole('guest', 'claude-haiku-4-5-20251001')).toBe(true);
     });
+
+    it('should treat unknown roles as anonymous', () => {
+      expect(isModelAllowedForRole('unknown-role', 'claude-opus-4-8')).toBe(false);
+      expect(isModelAllowedForRole('unknown-role', 'claude-sonnet-4-6')).toBe(false);
+      expect(isModelAllowedForRole('unknown-role', 'claude-haiku-4-5-20251001')).toBe(true);
+    });
   });
 
   describe('isModelAllowedByPatterns', () => {
@@ -323,14 +329,15 @@ describe('Role Constraints', () => {
   });
 
   describe('unknown role fallback', () => {
-    it('should fallback to member for unknown role', () => {
+    it('should fallback to anonymous for unknown role', () => {
       const result = mergeWithRoleConstraints('unknown-role', {
         'baseagents.claude.model': 'claude-opus-4-8'
       });
 
-      // member 不能使用 opus
+      // anonymous cannot override the default haiku model.
       expect(result.valid).toBe(false);
-      expect(result.violations[0].reason).toBe('model_not_allowed');
+      expect(result.violations[0].reason).toBe('override_not_allowed');
+      expect(result.effectiveConfig.baseagents?.claude?.model).toBe('claude-haiku-4-5-20251001');
     });
   });
 

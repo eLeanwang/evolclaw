@@ -11,6 +11,7 @@ import fs from 'fs';
 import os from 'os';
 import { logger } from '../utils/logger.js';
 import { checkBlacklist, checkReadonly, checkHClassWrite, parseEvolclawSendCommand, summarizeToolInput, requestDangerousCommandPermission } from '../core/permission.js';
+import { authorizeEcCommand } from '../core/command/ec-command-permission.js';
 import { encodePath } from '../utils/cross-platform.js';
 import { resolveEffective } from '../config/config-manager.js';
 import { resolveClaudeCapabilityRunOptionsForProject } from '../core/capability/capability-manager.js';
@@ -1272,6 +1273,36 @@ export class AgentRunner {
       const hResult = checkHClassWrite(input.tool_name, input.tool_input || {}, hClassContext);
       if (hResult.behavior === 'deny') {
         return { decision: 'block' as const, reason: hResult.message };
+      }
+
+      // ec 命令权限控制（ec msg send / ec group send / ec ctl send|file）
+      // 优先于只读模式检查，因为 ec 命令有独立的角色权限策略（commandPermissions）
+      if (input.tool_name === 'Bash') {
+        const command = typeof input.tool_input?.command === 'string' ? input.tool_input.command : '';
+        const permCtx = this.permissionContexts.get(sessionId);
+        const session = sessionManager?.getActiveSession?.(sessionId);
+        const ecAuthCtx = {
+          actorId: permCtx?.userId,
+          channel: permCtx?.channel,
+          channelId: session?.identity?.channel,
+          chatType: session?.identity?.chatType,
+          selfAid: session?.identity?.self,
+          peerKey: session?.identity?.peerKey,
+          role: session?.identity?.role || 'anonymous',
+          isDaemonOwner: false, // claude-runner 在会话内执行，不是 daemon owner 操作
+          fromControlChannel: permCtx?.channel?.startsWith('control#') || false,
+        };
+        const ecDecision = authorizeEcCommand(command, ecAuthCtx);
+        if (ecDecision) {
+          // 这是一条被识别的 ec 命令，必须依据鉴权结果放行或拒绝
+          if (!ecDecision.allow) {
+            const reason = `🔒 EC 命令权限拒绝: ${ecDecision.reason}`;
+            return { decision: 'block' as const, reason };
+          }
+          // ec 命令鉴权通过，放行（跳过后续只读检查和危险命令检查，避免误伤）
+          return {};
+        }
+        // 非 ec 命令或无法识别的 ec 子命令，继续走后续逻辑
       }
 
       if (callPermissionMode === 'readonly') {

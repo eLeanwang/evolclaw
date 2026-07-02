@@ -16,6 +16,7 @@ import { GeminiSessionFileAdapter } from './core/session/adapters/gemini-session
 import { resolveAnthropicConfig } from './agents/baseagent.js';
 import { loadDefaults, loadAllAgents, ensureAgentDirSkeleton, migrateIdentitiesIfNeeded, migrateProcessConfigIfNeeded, loadEvolclawConfig } from './config-store.js';
 import { initConfigManager } from './config/config-manager.js';
+import { shouldFailFastForMissingOwners } from './config/owner-policy.js';
 import { resolvePeerRoleDetail, roleToSessionIdentity } from './config/peer-role-resolver.js';
 import { getFirstRoleAssignment, listRoleAssignments } from './config/role-assignments.js';
 import { snapshot as configSnapshot, retentionCleanup, readCurrent, readWVersion, writeWVersion, diffWorkingVsVersion, paramDiff, incrementSuccessCount, collectConfigFiles } from './config/snapshot.js';
@@ -617,6 +618,9 @@ async function main() {
   const evolclawCfg = loadEvolclawConfig();
   let processLevelOwners = evolclawCfg.owners ?? [];
   const bindBootstrapMode = process.env.EVOLCLAW_BIND_BOOTSTRAP === '1';
+  if (processLevelOwners.length === 0 && shouldFailFastForMissingOwners()) {
+    throw new Error('evolclaw.json.owners is required when EVOLCLAW_REQUIRE_OWNERS=1');
+  }
 
   // 进程级 menu 操作（/system /agent）鉴权：owners 来自 evolclaw.json 顶层。
   // owners 为空时这些操作一律 FORBIDDEN，启动时提示如何配置。

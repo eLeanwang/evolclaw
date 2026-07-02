@@ -8,6 +8,7 @@ export async function auditCommandAuthorization(
   const shouldAudit =
     event.decision === 'deny' ||
     (event.decision === 'allow' && event.dangerous) ||
+    event.operation.startsWith('role.') ||
     event.operation === 'cli.exec.raw';
 
   if (!shouldAudit) return;

@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { buildConversationSeeds, normalizeAgentPeerType, parseAgentMdInfo } from '../ecweb/src/sources/role-assignments.js';
+import {
+  buildConversationSeeds,
+  canAssignRole,
+  canRevokeRole,
+  normalizeAgentPeerType,
+  parseAgentMdInfo,
+} from '../ecweb/src/sources/role-assignments.js';
 
 function msg(overrides: any) {
   return {
@@ -175,5 +181,27 @@ describe('ecweb role assignment source', () => {
     expect(normalizeAgentPeerType('codeagent')).toBe('ai');
     expect(normalizeAgentPeerType('Codex')).toBe('ai');
     expect(normalizeAgentPeerType('unknown')).toBeUndefined();
+  });
+
+  it('enforces role assignment escalation policy', () => {
+    expect(canAssignRole('owner', 'owner')).toBe(true);
+    expect(canAssignRole('owner', 'admin')).toBe(true);
+    expect(canAssignRole('admin', 'member')).toBe(true);
+    expect(canAssignRole('admin', 'guest')).toBe(true);
+    expect(canAssignRole('admin', 'anonymous')).toBe(true);
+    expect(canAssignRole('admin', 'admin')).toBe(false);
+    expect(canAssignRole('admin', 'owner')).toBe(false);
+    expect(canAssignRole('member', 'guest')).toBe(false);
+  });
+
+  it('enforces role revoke escalation policy', () => {
+    expect(canRevokeRole('owner', 'owner')).toBe(true);
+    expect(canRevokeRole('owner', 'admin')).toBe(true);
+    expect(canRevokeRole('admin', 'member')).toBe(true);
+    expect(canRevokeRole('admin', 'guest')).toBe(true);
+    expect(canRevokeRole('admin', 'anonymous')).toBe(true);
+    expect(canRevokeRole('admin', 'admin')).toBe(false);
+    expect(canRevokeRole('admin', 'owner')).toBe(false);
+    expect(canRevokeRole('member', 'guest')).toBe(false);
   });
 });

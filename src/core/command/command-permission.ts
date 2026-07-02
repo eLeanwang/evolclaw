@@ -77,6 +77,18 @@ export function authorizeCommand(
     );
   }
 
+  if (permission.constraints?.requireExplicitDangerousGrant && !isExplicitDangerousGrant(matchedRule, permission)) {
+    return denyDecision(
+      ctx,
+      'DANGEROUS_NOT_GRANTED',
+      `Operation ${operation} requires an explicit dangerous grant`,
+      operation,
+      intent.scope,
+      opMeta.dangerous,
+      matchedRule
+    );
+  }
+
   if (opMeta.dangerous && !isExplicitDangerousGrant(matchedRule, permission)) {
     return denyDecision(
       ctx,
@@ -228,12 +240,81 @@ function checkConstraints(
     }
   }
 
+  if (constraints.allowedConfigKeys) {
+    const keyCheck = checkAllowedConfigKeys(ctx, constraints.allowedConfigKeys);
+    if (!keyCheck.ok) return keyCheck;
+  }
+
+  if (constraints.allowedPrefixes) {
+    const prefixCheck = checkAllowedPrefixes(ctx, constraints.allowedPrefixes);
+    if (!prefixCheck.ok) return prefixCheck;
+  }
+
   if (constraints.requireFieldOverride) {
     const fieldCheck = checkFieldOverride(ctx, constraints.requireFieldOverride);
     if (!fieldCheck.ok) return fieldCheck;
   }
 
   return { ok: true };
+}
+
+function checkAllowedConfigKeys(
+  ctx: CommandAuthorizationContext,
+  allowedConfigKeys: string[]
+): ConstraintCheckResult {
+  if (allowedConfigKeys.length === 0) return { ok: true };
+  for (const key of configKeysFromArgs(ctx.intent.args)) {
+    if (!allowedConfigKeys.includes(key)) {
+      return { ok: false, reason: `Config key ${key} is not allowed` };
+    }
+  }
+  return { ok: true };
+}
+
+function checkAllowedPrefixes(
+  ctx: CommandAuthorizationContext,
+  allowedPrefixes: string[]
+): ConstraintCheckResult {
+  if (allowedPrefixes.length === 0) return { ok: true };
+  for (const value of prefixedValuesFromArgs(ctx.intent.args)) {
+    if (!allowedPrefixes.some(prefix => value.startsWith(prefix))) {
+      return { ok: false, reason: `Value ${value} does not match an allowed prefix` };
+    }
+  }
+  return { ok: true };
+}
+
+function configKeysFromArgs(args: Record<string, unknown>): string[] {
+  const keys = new Set<string>();
+  for (const name of ['key', 'field', 'fieldPath', 'path', 'name', 'configKey']) {
+    collectStringValues(args[name], keys);
+  }
+  for (const name of ['keys', 'fields', 'fieldPaths', 'paths', 'configKeys']) {
+    collectStringValues(args[name], keys);
+  }
+  return [...keys];
+}
+
+function prefixedValuesFromArgs(args: Record<string, unknown>): string[] {
+  const values = new Set<string>();
+  for (const name of ['path', 'cwd', 'file', 'filePath', 'target', 'targetPath', 'prefix']) {
+    collectStringValues(args[name], values);
+  }
+  for (const name of ['paths', 'files', 'filePaths', 'targets', 'targetPaths']) {
+    collectStringValues(args[name], values);
+  }
+  return [...values];
+}
+
+function collectStringValues(value: unknown, out: Set<string>): void {
+  if (typeof value === 'string' && value.length > 0) {
+    out.add(value);
+    return;
+  }
+  if (!Array.isArray(value)) return;
+  for (const item of value) {
+    if (typeof item === 'string' && item.length > 0) out.add(item);
+  }
 }
 
 function checkOwnPeer(ctx: CommandAuthorizationContext): ConstraintCheckResult {

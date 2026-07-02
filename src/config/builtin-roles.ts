@@ -23,6 +23,8 @@ export function getBuiltinRolesConfig(): RolesConfig {
           enable_rich_content: { default: true, allowOverride: true },
         },
         commandPermissions: {
+          'role.assign': { allow: true, scopes: ['agent'] },
+          'role.revoke': { allow: true, scopes: ['agent'] },
           '*': { allow: true },
           'dangerous:*': { allow: true, dangerous: true, constraints: { requireDaemonOwner: true } },
         },
@@ -46,6 +48,8 @@ export function getBuiltinRolesConfig(): RolesConfig {
           enable_rich_content: { default: true, allowOverride: true },
         },
         commandPermissions: {
+          'role.assign': { allow: true, scopes: ['agent'] },
+          'role.revoke': { allow: true, scopes: ['agent'] },
           '*': { allow: true },
           'dangerous:*': { allow: true, dangerous: true, constraints: { requireDaemonOwner: true } },
         },
@@ -69,9 +73,16 @@ export function getBuiltinRolesConfig(): RolesConfig {
           enable_rich_content: { default: false, allowOverride: true },
         },
         commandPermissions: {
+          'role.assign': { allow: false },
+          'role.revoke': { allow: false },
           'category:read': { allow: true },
           'category:write-own': { allow: true },
           'model.*': { allow: true, scopes: ['relation', 'agent'], constraints: { ownPeerOnly: true, ownAgentOnly: true } },
+          'ec.msg.send': { allow: true, constraints: { ownPeerOnly: true } },
+          'ec.msg.file': { allow: true, constraints: { ownPeerOnly: true } },
+          'ec.group.send': { allow: true, constraints: { groupOnly: true } },
+          'ec.group.file': { allow: true, constraints: { groupOnly: true } },
+          'ec.ctl.*': { allow: false },
           'cli.exec.raw': { allow: false, dangerous: true },
         },
       },
@@ -94,6 +105,8 @@ export function getBuiltinRolesConfig(): RolesConfig {
           enable_rich_content: { default: false, allowOverride: false },
         },
         commandPermissions: {
+          'role.assign': { allow: false },
+          'role.revoke': { allow: false },
           'model.list': { allow: true, scopes: ['relation'], constraints: { ownPeerOnly: true, ownAgentOnly: true, privateOnly: true } },
           'model.current': { allow: true, scopes: ['relation'], constraints: { ownPeerOnly: true, ownAgentOnly: true, privateOnly: true } },
           'model.use': {
@@ -102,6 +115,10 @@ export function getBuiltinRolesConfig(): RolesConfig {
             constraints: { ownPeerOnly: true, ownAgentOnly: true, privateOnly: true, requireFieldOverride: 'baseagents.claude.model' },
           },
           'session.list': { allow: true, scopes: ['relation'], constraints: { ownPeerOnly: true, privateOnly: true } },
+          'ec.msg.send': { allow: true, scopes: ['relation'], constraints: { ownPeerOnly: true, privateOnly: true } },
+          'ec.msg.file': { allow: false },
+          'ec.group.*': { allow: false },
+          'ec.ctl.*': { allow: false },
           'cli.exec.raw': { allow: false, dangerous: true },
           'dangerous:*': { allow: false, dangerous: true },
         },
@@ -125,6 +142,8 @@ export function getBuiltinRolesConfig(): RolesConfig {
           enable_rich_content: { default: false, allowOverride: false },
         },
         commandPermissions: {
+          'role.assign': { allow: false },
+          'role.revoke': { allow: false },
           '*': { allow: false },
         },
       },

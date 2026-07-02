@@ -151,7 +151,25 @@ const OPERATIONS: OperationMeta[] = [
     sources: ['slash', 'menu'],
   },
 
-  // ── Agent Operations ──
+  // Role Assignment Operations
+  {
+    id: 'role.assign',
+    category: 'write-agent',
+    dangerous: false,
+    defaultScopes: ['agent'],
+    description: 'Assign a scoped peer, group, or group-member role',
+    sources: ['ecweb', 'control'],
+  },
+  {
+    id: 'role.revoke',
+    category: 'write-agent',
+    dangerous: false,
+    defaultScopes: ['agent'],
+    description: 'Revoke a scoped peer, group, or group-member role assignment',
+    sources: ['ecweb', 'control'],
+  },
+
+  // Agent Operations
   {
     id: 'agent.list',
     category: 'read',
@@ -385,6 +403,58 @@ const OPERATIONS: OperationMeta[] = [
     defaultScopes: ['process'],
     description: '修改配置',
     sources: ['menu', 'control'],
+  },
+
+  // ── EC Command Operations ──
+  // agent 在会话内通过 Bash 工具调用 `ec msg|group|ctl send|file` 时触发。
+  // 参照设计文档 docs/权限配置化与通用接口鉴权设计.md
+  {
+    id: 'ec.msg.send',
+    category: 'write-own',
+    dangerous: false,
+    defaultScopes: ['relation', 'agent'],
+    description: '通过 ec msg send 发送私聊消息',
+    sources: ['agent-tool'],
+  },
+  {
+    id: 'ec.msg.file',
+    category: 'write-own',
+    dangerous: false,
+    defaultScopes: ['relation', 'agent'],
+    description: '通过 ec msg file 发送私聊文件',
+    sources: ['agent-tool'],
+  },
+  {
+    id: 'ec.group.send',
+    category: 'write-own',
+    dangerous: false,
+    defaultScopes: ['relation', 'agent'],
+    description: '通过 ec group send 发送群组消息',
+    sources: ['agent-tool'],
+  },
+  {
+    id: 'ec.group.file',
+    category: 'write-own',
+    dangerous: false,
+    defaultScopes: ['relation', 'agent'],
+    description: '通过 ec group file 发送群组文件',
+    sources: ['agent-tool'],
+  },
+  {
+    id: 'ec.ctl.send',
+    category: 'write-agent',
+    dangerous: false,
+    defaultScopes: ['control', 'agent'],
+    description: '通过 ec ctl send 发送控制通道消息',
+    sources: ['agent-tool'],
+  },
+  {
+    id: 'ec.ctl.file',
+    category: 'write-agent',
+    dangerous: false,
+    defaultScopes: ['control', 'agent'],
+    description: '通过 ec ctl file 发送控制通道文件',
+    sources: ['agent-tool'],
   },
 
   // ── Raw CLI & Shell Execution ──

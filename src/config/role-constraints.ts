@@ -26,9 +26,9 @@ export function mergeWithRoleConstraints(
   const roleDef = getRoleDefinition(role);
 
   if (!roleDef) {
-    // 未定义的角色，降级到 member 级别
-    console.warn(`[role-constraints] Unknown role: ${role}, fallback to member`);
-    const result = mergeWithRoleConstraints('member', relationConfig);
+    // 未定义的角色，降级到 anonymous 级别
+    console.warn(`[role-constraints] Unknown role: ${role}, fallback to anonymous`);
+    const result = mergeWithRoleConstraints('anonymous', relationConfig);
     // 更新违规记录中的 role 为原始角色
     result.violations.forEach(v => v.role = role);
     return result;
@@ -158,8 +158,9 @@ export function mergeWithRoleConstraints(
  * @returns 是否允许
  */
 export function isModelAllowedForRole(role: string, model: string, baseagent = 'claude'): boolean {
-  const perm = getFieldPermission(role, `baseagents.${baseagent}.model`)
-    ?? (baseagent === 'claude' ? getFieldPermission('member', 'baseagents.claude.model') : null);
+  const effectiveRole = getRoleDefinition(role) ? role : 'anonymous';
+  const perm = getFieldPermission(effectiveRole, `baseagents.${baseagent}.model`)
+    ?? (baseagent === 'claude' ? getFieldPermission('anonymous', 'baseagents.claude.model') : null);
   if (!perm || !perm.allowedModels) {
     return baseagent !== 'claude';
   }

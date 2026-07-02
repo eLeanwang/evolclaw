@@ -121,10 +121,50 @@ describe('Operation Registry', () => {
       expect(hasOperation('agent.delete')).toBe(true);
     });
 
+    it('should have role assignment operations', () => {
+      expect(hasOperation('role.assign')).toBe(true);
+      expect(hasOperation('role.revoke')).toBe(true);
+      expect(getOperationMeta('role.assign')).toMatchObject({
+        category: 'write-agent',
+        dangerous: false,
+        defaultScopes: ['agent'],
+      });
+      expect(getOperationMeta('role.revoke')).toMatchObject({
+        category: 'write-agent',
+        dangerous: false,
+        defaultScopes: ['agent'],
+      });
+    });
+
     it('should have system operations', () => {
       expect(hasOperation('system.status')).toBe(true);
       expect(hasOperation('system.restart')).toBe(true);
       expect(hasOperation('system.upgrade')).toBe(true);
+    });
+
+    it('should have ec command operations', () => {
+      expect(hasOperation('ec.msg.send')).toBe(true);
+      expect(hasOperation('ec.msg.file')).toBe(true);
+      expect(hasOperation('ec.group.send')).toBe(true);
+      expect(hasOperation('ec.group.file')).toBe(true);
+      expect(hasOperation('ec.ctl.send')).toBe(true);
+      expect(hasOperation('ec.ctl.file')).toBe(true);
+
+      const msgSend = getOperationMeta('ec.msg.send');
+      expect(msgSend).toMatchObject({
+        category: 'write-own',
+        dangerous: false,
+        defaultScopes: ['relation', 'agent'],
+        sources: ['agent-tool'],
+      });
+
+      const ctlSend = getOperationMeta('ec.ctl.send');
+      expect(ctlSend).toMatchObject({
+        category: 'write-agent',
+        dangerous: false,
+        defaultScopes: ['control', 'agent'],
+        sources: ['agent-tool'],
+      });
     });
   });
 

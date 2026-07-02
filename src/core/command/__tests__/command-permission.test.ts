@@ -1,8 +1,14 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { authorizeCommand } from '../command-permission.js';
+import { ConfigTarget, write } from '../../../config/config-manager.js';
+import { clearRolesCache } from '../../../config/roles.js';
 import type { CommandAuthorizationContext } from '../../../types.js';
 
 describe('Command Permission', () => {
+  beforeEach(() => {
+    clearRolesCache();
+  });
+
   describe('Guest role permissions', () => {
     const baseContext: CommandAuthorizationContext = {
       intent: {
@@ -418,6 +424,156 @@ describe('Command Permission', () => {
       };
       const decision = authorizeCommand(ctx);
       expect(decision.allow).toBe(false);
+    });
+
+    it('should authorize role assignment operations through command permissions', () => {
+      const ownerDecision = authorizeCommand({
+        intent: {
+          operation: 'role.assign',
+          scope: 'agent',
+          source: 'ecweb',
+          args: { targetRole: 'admin' },
+        },
+        actorId: 'owner.aid.pub',
+        selfAid: 'agent1',
+        role: 'owner',
+        source: 'ecweb',
+      });
+      expect(ownerDecision.allow).toBe(true);
+
+      const memberDecision = authorizeCommand({
+        intent: {
+          operation: 'role.assign',
+          scope: 'agent',
+          source: 'ecweb',
+          args: { targetRole: 'guest' },
+        },
+        actorId: 'member.aid.pub',
+        selfAid: 'agent1',
+        role: 'member',
+        source: 'ecweb',
+      });
+      expect(memberDecision.allow).toBe(false);
+      if (!memberDecision.allow) {
+        expect(memberDecision.code).toBe('NOT_ALLOWED');
+      }
+    });
+
+    it('should enforce configured config key and prefix constraints', () => {
+      write(ConfigTarget.Roles, {
+        $schema_version: 4,
+        defaultRoles: { private: 'anonymous', group: 'guest' },
+        roles: {
+          constrained: {
+            description: 'constraint test role',
+            allowAccess: true,
+            permissions: {},
+            commandPermissions: {
+              'config.write': {
+                allow: true,
+                dangerous: true,
+                scopes: ['process'],
+                constraints: { allowedConfigKeys: ['debug.logLevel'] },
+              },
+              'file.fetch': {
+                allow: true,
+                scopes: ['filesystem'],
+                constraints: { allowedPrefixes: ['/safe/'] },
+              },
+            },
+          },
+        },
+      });
+      clearRolesCache();
+
+      expect(authorizeCommand({
+        intent: {
+          operation: 'config.write',
+          scope: 'process',
+          source: 'menu',
+          args: { key: 'debug.logLevel' },
+        },
+        role: 'constrained',
+        source: 'menu',
+      }).allow).toBe(true);
+
+      const badKeyDecision = authorizeCommand({
+        intent: {
+          operation: 'config.write',
+          scope: 'process',
+          source: 'menu',
+          args: { key: 'owners' },
+        },
+        role: 'constrained',
+        source: 'menu',
+      });
+      expect(badKeyDecision.allow).toBe(false);
+      if (!badKeyDecision.allow) {
+        expect(badKeyDecision.code).toBe('ARGUMENT_MISMATCH');
+      }
+
+      expect(authorizeCommand({
+        intent: {
+          operation: 'file.fetch',
+          scope: 'filesystem',
+          source: 'menu',
+          args: { filePath: '/safe/report.txt' },
+        },
+        role: 'constrained',
+        source: 'menu',
+      }).allow).toBe(true);
+
+      const badPrefixDecision = authorizeCommand({
+        intent: {
+          operation: 'file.fetch',
+          scope: 'filesystem',
+          source: 'menu',
+          args: { filePath: '/etc/passwd' },
+        },
+        role: 'constrained',
+        source: 'menu',
+      });
+      expect(badPrefixDecision.allow).toBe(false);
+      if (!badPrefixDecision.allow) {
+        expect(badPrefixDecision.code).toBe('ARGUMENT_MISMATCH');
+      }
+    });
+
+    it('should enforce requireExplicitDangerousGrant when declared on a permission', () => {
+      write(ConfigTarget.Roles, {
+        $schema_version: 4,
+        defaultRoles: { private: 'anonymous', group: 'guest' },
+        roles: {
+          sensitive: {
+            description: 'explicit grant test role',
+            allowAccess: true,
+            permissions: {},
+            commandPermissions: {
+              'role.assign': {
+                allow: true,
+                scopes: ['agent'],
+                constraints: { requireExplicitDangerousGrant: true },
+              },
+            },
+          },
+        },
+      });
+      clearRolesCache();
+
+      const decision = authorizeCommand({
+        intent: {
+          operation: 'role.assign',
+          scope: 'agent',
+          source: 'ecweb',
+          args: { targetRole: 'guest' },
+        },
+        role: 'sensitive',
+        source: 'ecweb',
+      });
+      expect(decision.allow).toBe(false);
+      if (!decision.allow) {
+        expect(decision.code).toBe('DANGEROUS_NOT_GRANTED');
+      }
     });
   });
 });

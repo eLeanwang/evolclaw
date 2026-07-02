@@ -27,6 +27,11 @@ export interface RoleAssignment {
   updatedAt?: number;
 }
 
+type ScopedAssignmentTarget =
+  | ({ scope: 'private'; peerId: string } & Record<string, unknown>)
+  | ({ scope: 'group'; groupId: string } & Record<string, unknown>)
+  | ({ scope: 'group-member'; groupId: string; peerId: string } & Record<string, unknown>);
+
 interface LocalAgentMdInfo {
   name?: string;
   declaredType?: string;
@@ -76,6 +81,37 @@ async function getParentModules() {
   return { assignments, roles, resolver };
 }
 
+async function getCommandModules() {
+  const permissionPath = resolveParentDistModule('core', 'command', 'command-permission.js');
+  const auditPath = resolveParentDistModule('core', 'command', 'command-audit.js');
+  const permission = await import(toFileUrl(permissionPath));
+  const audit = await import(toFileUrl(auditPath));
+  return { permission, audit };
+}
+
+export const ROLE_ASSIGNMENT_POLICY = {
+  owner: {
+    assign: '*',
+    revoke: '*',
+  },
+  admin: {
+    assign: ['member', 'guest', 'anonymous'],
+    revoke: ['member', 'guest', 'anonymous'],
+  },
+} as const;
+
+export function canAssignRole(actorRole: string, targetRole: string): boolean {
+  if (actorRole === 'owner') return true;
+  if (actorRole !== 'admin') return false;
+  return ROLE_ASSIGNMENT_POLICY.admin.assign.includes(targetRole as any);
+}
+
+export function canRevokeRole(actorRole: string, targetRole?: string): boolean {
+  if (actorRole === 'owner') return true;
+  if (actorRole !== 'admin' || !targetRole) return false;
+  return ROLE_ASSIGNMENT_POLICY.admin.revoke.includes(targetRole as any);
+}
+
 async function getAgentsFromIpc(): Promise<any[]> {
   try {
     const p = resolvePaths();
@@ -91,14 +127,129 @@ async function getAgentsFromIpc(): Promise<any[]> {
   }
 }
 
-async function canManageAgent(aid: string, auth: RoleWriteAuth): Promise<boolean> {
-  if (auth.localDirect) return true;
-  if (!auth.actorAid) return false;
-  const { assignments } = await getParentModules();
-  ensureScopedRoleAssignments(assignments, aid);
-  return assignments
-    .listRoleAssignments(aid, { scope: 'private', role: 'owner' })
-    .some((item: RoleAssignment) => item.peerId === auth.actorAid);
+interface RoleAssignmentAuthorizationResult {
+  allow: boolean;
+  status?: number;
+  error?: string;
+  code?: string;
+  reason?: string;
+  actorRole?: string;
+}
+
+async function authorizeRoleAssignmentWrite(
+  modules: { roles: any; resolver: any },
+  aid: string,
+  auth: RoleWriteAuth,
+  operation: 'role.assign' | 'role.revoke',
+  targetRole: string | undefined,
+  args: Record<string, unknown>,
+): Promise<RoleAssignmentAuthorizationResult> {
+  const { permission, audit } = await getCommandModules();
+  const actorRole = auth.localDirect
+    ? 'owner'
+    : auth.actorAid
+      ? modules.resolver.resolvePeerRoleDetail({
+        selfAid: aid,
+        channelType: 'aun',
+        chatType: 'private',
+        actorId: auth.actorAid,
+        conversationId: auth.actorAid,
+      }).effectiveRole
+      : 'anonymous';
+
+  const decision = permission.authorizeCommand({
+    intent: {
+      operation,
+      scope: 'agent',
+      source: 'ecweb',
+      args: {
+        ...args,
+        targetRole,
+      },
+    },
+    actorId: auth.localDirect ? 'local-direct' : auth.actorAid || undefined,
+    selfAid: aid,
+    role: actorRole,
+    source: 'ecweb',
+  });
+
+  if (!decision.allow) {
+    await audit.auditCommandAuthorization({
+      ts: Date.now(),
+      source: 'ecweb',
+      operation,
+      scope: 'agent',
+      dangerous: false,
+      actorId: auth.localDirect ? 'local-direct' : auth.actorAid || undefined,
+      selfAid: aid,
+      role: actorRole,
+      decision: 'deny',
+      code: decision.code,
+      reason: decision.reason,
+      matchedRule: decision.matchedRule,
+      argsSummary: { ...args, targetRole },
+    });
+    return {
+      allow: false,
+      status: 403,
+      error: 'forbidden: role operation not allowed',
+      code: decision.code,
+      reason: decision.reason,
+      actorRole,
+    };
+  }
+
+  const policyAllowed = operation === 'role.assign'
+    ? !!targetRole && canAssignRole(actorRole, targetRole)
+    : canRevokeRole(actorRole, targetRole);
+  if (!policyAllowed) {
+    const reason = operation === 'role.assign'
+      ? `Role ${actorRole} cannot assign target role ${targetRole || '(missing)'}`
+      : `Role ${actorRole} cannot revoke target role ${targetRole || '(missing)'}`;
+    await audit.auditCommandAuthorization({
+      ts: Date.now(),
+      source: 'ecweb',
+      operation,
+      scope: 'agent',
+      dangerous: false,
+      actorId: auth.localDirect ? 'local-direct' : auth.actorAid || undefined,
+      selfAid: aid,
+      role: actorRole,
+      decision: 'deny',
+      code: 'NOT_ALLOWED',
+      reason,
+      matchedRule: decision.matchedRule,
+      argsSummary: { ...args, targetRole },
+    });
+    return {
+      allow: false,
+      status: 403,
+      error: 'forbidden: target role not assignable',
+      code: 'NOT_ALLOWED',
+      reason,
+      actorRole,
+    };
+  }
+
+  await audit.auditCommandAuthorization({
+    ts: Date.now(),
+    source: 'ecweb',
+    operation,
+    scope: 'agent',
+    dangerous: false,
+    actorId: auth.localDirect ? 'local-direct' : auth.actorAid || undefined,
+    selfAid: aid,
+    role: actorRole,
+    decision: 'allow',
+    matchedRule: decision.matchedRule,
+    argsSummary: { ...args, targetRole },
+  });
+
+  return { allow: true, actorRole };
+}
+
+function roleExists(roles: any, role: string): boolean {
+  return !!roles.readRolesConfig().roles?.[role];
 }
 
 function parseBody(req: any): Promise<any> {
@@ -115,6 +266,15 @@ function parseBody(req: any): Promise<any> {
 function sendJson(res: any, status: number, data: any): void {
   res.writeHead(status, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify(data));
+}
+
+function sendAuthorizationDenied(res: any, decision: RoleAssignmentAuthorizationResult): void {
+  sendJson(res, decision.status ?? 403, {
+    error: decision.error || 'forbidden',
+    ...(decision.code ? { code: decision.code } : {}),
+    ...(decision.reason ? { reason: decision.reason } : {}),
+    ...(decision.actorRole ? { actorRole: decision.actorRole } : {}),
+  });
 }
 
 function assignmentFromPath(urlPath: string): { aid: string; targetId: string } | null {
@@ -547,6 +707,36 @@ function setScopedAssignment(assignments: any, aid: string, body: any, fallbackT
   return assignments.setGroupMemberRoleAssignment(aid, groupId, peerId, role, { note: body.note });
 }
 
+function scopedAssignmentArgs(body: any, fallbackTargetId?: string): ScopedAssignmentTarget {
+  const scope = requireScope(body);
+  if (scope === 'private') {
+    const peerId = body.peerId || fallbackTargetId;
+    if (!peerId) throw new Error('peerId is required');
+    return { scope, peerId };
+  }
+  if (scope === 'group') {
+    const groupId = body.groupId || fallbackTargetId;
+    if (!groupId) throw new Error('groupId is required');
+    return { scope, groupId };
+  }
+  const groupId = body.groupId;
+  const peerId = body.peerId || fallbackTargetId;
+  if (!groupId || !peerId) throw new Error('groupId and peerId are required');
+  return { scope, groupId, peerId };
+}
+
+function getScopedAssignment(assignments: any, aid: string, body: any, fallbackTargetId?: string): RoleAssignment | undefined {
+  ensureScopedRoleAssignments(assignments, aid);
+  const target = scopedAssignmentArgs(body, fallbackTargetId);
+  if (target.scope === 'private') {
+    return assignments.getPrivateRoleAssignment(aid, target.peerId);
+  }
+  if (target.scope === 'group') {
+    return assignments.getGroupRoleAssignment(aid, target.groupId);
+  }
+  return assignments.getGroupMemberRoleAssignment(aid, target.groupId, target.peerId);
+}
+
 function deleteScopedAssignment(assignments: any, aid: string, body: any, fallbackTargetId?: string): boolean {
   ensureScopedRoleAssignments(assignments, aid);
   const scope = requireScope(body);
@@ -568,7 +758,8 @@ function deleteScopedAssignment(assignments: any, aid: string, body: any, fallba
 
 export async function handleRoleAssignmentsApi(req: any, res: any, auth: RoleWriteAuth = {}): Promise<void> {
   try {
-    const { assignments } = await getParentModules();
+    const modules = await getParentModules();
+    const { assignments, roles } = modules;
     const urlPath = (req.url || '').split('?')[0];
 
     if (req.method === 'GET' && urlPath.startsWith('/api/roles/agent/')) {
@@ -580,9 +771,26 @@ export async function handleRoleAssignmentsApi(req: any, res: any, auth: RoleWri
     if ((req.method === 'POST' || req.method === 'PUT') && urlPath.startsWith('/api/roles/agent/')) {
       const aid = decodeURIComponent(urlPath.split('/').filter(Boolean).pop() || '');
       if (!aid) return sendJson(res, 400, { error: 'missing aid' });
-      if (!(await canManageAgent(aid, auth))) return sendJson(res, 403, { error: 'forbidden: owner required' });
 
       const body = await parseBody(req);
+      if (typeof body.role !== 'string' || !body.role) {
+        return sendJson(res, 400, { error: 'role is required' });
+      }
+      if (!roleExists(roles, body.role)) {
+        return sendJson(res, 400, { error: `Unknown role: ${body.role}` });
+      }
+
+      const args = scopedAssignmentArgs(body);
+      const authorization = await authorizeRoleAssignmentWrite(
+        modules,
+        aid,
+        auth,
+        'role.assign',
+        body.role,
+        args,
+      );
+      if (!authorization.allow) return sendAuthorizationDenied(res, authorization);
+
       const item = setScopedAssignment(assignments, aid, body);
       return sendJson(res, 200, { ok: true, assignment: item });
     }
@@ -595,19 +803,49 @@ export async function handleRoleAssignmentsApi(req: any, res: any, auth: RoleWri
 
 export async function handlePeerRoleApi(req: any, res: any, auth: RoleWriteAuth = {}): Promise<void> {
   try {
-    const { assignments } = await getParentModules();
+    const modules = await getParentModules();
+    const { assignments, roles } = modules;
     const urlPath = (req.url || '').split('?')[0];
     const target = assignmentFromPath(urlPath);
     if (!target) return sendJson(res, 400, { error: 'missing aid or target id' });
-    if (!(await canManageAgent(target.aid, auth))) return sendJson(res, 403, { error: 'forbidden: owner required' });
 
     if (req.method === 'DELETE') {
       const body = await parseBody(req);
+      const args = scopedAssignmentArgs(body, target.targetId);
+      const existing = getScopedAssignment(assignments, target.aid, body, target.targetId);
+      const authorization = await authorizeRoleAssignmentWrite(
+        modules,
+        target.aid,
+        auth,
+        'role.revoke',
+        existing?.role,
+        args,
+      );
+      if (!authorization.allow) return sendAuthorizationDenied(res, authorization);
+
       const deleted = deleteScopedAssignment(assignments, target.aid, body, target.targetId);
       return sendJson(res, 200, { ok: true, deleted });
     }
     if (req.method === 'PUT') {
       const body = await parseBody(req);
+      if (typeof body.role !== 'string' || !body.role) {
+        return sendJson(res, 400, { error: 'role is required' });
+      }
+      if (!roleExists(roles, body.role)) {
+        return sendJson(res, 400, { error: `Unknown role: ${body.role}` });
+      }
+
+      const args = scopedAssignmentArgs(body, target.targetId);
+      const authorization = await authorizeRoleAssignmentWrite(
+        modules,
+        target.aid,
+        auth,
+        'role.assign',
+        body.role,
+        args,
+      );
+      if (!authorization.allow) return sendAuthorizationDenied(res, authorization);
+
       const item = setScopedAssignment(assignments, target.aid, body, target.targetId);
       return sendJson(res, 200, { ok: true, assignment: item });
     }

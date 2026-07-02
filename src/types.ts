@@ -1170,7 +1170,7 @@ export interface MenuResponse {
 
 // ── Command Authorization Types ──
 
-export type CommandSource = 'slash' | 'menu' | 'menu.cli' | 'ctl' | 'ipc' | 'ecweb' | 'control';
+export type CommandSource = 'slash' | 'menu' | 'menu.cli' | 'ctl' | 'ipc' | 'ecweb' | 'control' | 'agent-tool';
 
 export type CommandScope =
   | 'relation'
