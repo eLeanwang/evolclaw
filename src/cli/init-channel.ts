@@ -18,6 +18,7 @@ import { ipcQuery } from '../ipc.js';
 import { cmdStart } from './daemon-commands.js';
 import * as platform from '../utils/cross-platform.js';
 import { cleanupInstances } from '../utils/instance-registry.js';
+import { setPrivateRoleAssignment } from '../config/role-assignments.js';
 
 function ask(rl: readline.Interface, question: string): Promise<string> {
   return new Promise(resolve => rl.question(question, resolve));
@@ -517,10 +518,12 @@ export async function cmdInitFeishu(): Promise<void> {
     enabled: true,
     appId: result.appId,
     appSecret: result.appSecret,
-    ...(result.openId ? { owners: [result.openId] } : {}),
   } as ChannelInstance;
 
   await commitChannel(aid!, channel, choice.action);
+  if (result.openId) {
+    setPrivateRoleAssignment(aid!, result.openId, 'owner', { note: 'bound by feishu init flow' });
+  }
 
   console.log(`  App ID: ${result.appId}`);
   if (result.openId) console.log(`  Owner: ${result.openId}`);
@@ -773,8 +776,7 @@ async function promptAgentOwnerForAunManually(rl: readline.Interface, aid: strin
     console.log(`  ⚠ 无法加载 agent 配置: ${aid}`);
     return;
   }
-  const owners = [fallback, ...(agent.owners || []).filter(o => o !== fallback)];
-  saveAgent({ ...agent, owners });
+  setPrivateRoleAssignment(aid, fallback, 'owner', { note: 'set manually by init-channel' });
   try {
     const result = await ipcQuery<any>(resolvePaths().socket, { type: 'evolagent.reload', name: aid }, 30_000);
     if (result?.ok) console.log('  ✓ agent owner 已热重载');

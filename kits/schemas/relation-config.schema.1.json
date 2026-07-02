@@ -134,6 +134,7 @@
     },
     "permissionMode": {
       "type": "string",
+      "enum": ["auto", "bypass", "readonly", "request", "edit", "plan", "noask"],
       "description": "执行权限模式（对信任用户 bypass，对陌生用户 readonly）",
       "x-merge": "scalar"
     },
@@ -146,7 +147,11 @@
         "additionalProperties": false,
         "properties": {
           "baseagents": { "type": "object", "description": "角色级 baseagents 覆盖" },
-          "permissionMode": { "type": "string", "description": "角色级 permissionMode 覆盖" }
+          "permissionMode": {
+            "type": "string",
+            "enum": ["auto", "bypass", "readonly", "request", "edit", "plan", "noask"],
+            "description": "角色级 permissionMode 覆盖"
+          }
         }
       }
     }

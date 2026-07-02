@@ -1,4 +1,4 @@
-import { ChannelAdapter, Session, ChannelPolicy, InteractionRequest, ReplyContext, type OutboundPayload, type EvolAgentRegistryHandle, type EvolAgentHandle } from '../../types.js';
+import { ChannelAdapter, Session, ChannelPolicy, InteractionRequest, ReplyContext, type OutboundPayload, type EvolAgentRegistryHandle, type EvolAgentHandle, type SessionIdentity } from '../../types.js';
 import { SessionManager } from '../session/session-manager.js';
 import { BaseagentRunnerUnavailableError, type AgentRunnerFull } from '../../agents/runner-types.js';
 import { MessageCache } from '../message/message-cache.js';
@@ -12,6 +12,7 @@ import { renderCommandCardAsText } from '../interaction-router.js';
 import { buildEnvelope, sendInteractionPayload } from '../message/message-utils.js';
 import { resolvePaths, getPackageRoot } from '../../paths.js';
 import { logger } from '../../utils/logger.js';
+import { resolvePeerRoleDetail, roleToSessionIdentity } from '../../config/peer-role-resolver.js';
 import crypto from 'crypto';
 import path from 'path';
 import fs from 'fs';
@@ -226,6 +227,7 @@ export class CommandHandler {
     if (scheduleType === 'at') return { type: 'at', at: scheduleValue };
     if (scheduleType === 'cron') return { type: 'cron', expression: scheduleValue };
     if (scheduleType === 'interval') return { type: 'interval', everyMs: this.triggerDurationMs(scheduleValue) };
+    if (scheduleType === 'event') return { type: 'event', eventPattern: scheduleValue };
     throw new Error(`unsupported scheduleType: ${scheduleType}`);
   }
 
@@ -302,6 +304,7 @@ export class CommandHandler {
       status: definition.enabled ? 'active' : 'disabled',
       limits: definition.limits,
       limitState: schedulerDetails?.limitState,
+      subscription: schedulerDetails?.subscription,
     };
   }
 
@@ -767,29 +770,6 @@ export class CommandHandler {
     return { matched: true, result: '✓ 已回答' };
   }
 
-  /** 获取活跃会话，无会话时自动创建（话题除外） */
-  private async ensureSession(channel: string, channelId: string, threadId?: string, chatType?: string, selfAID?: string): Promise<{ session: Session } | { error: string }> {
-    if (threadId) {
-      // 话题会话：仅查询，不创建
-      const session = await this.sessionManager.getThreadSession(channel, channelId, threadId);
-      if (!session) {
-        return { error: '❌ 话题中尚未创建会话\n发送消息后自动创建' };
-      }
-      return { session };
-    }
-    const ct: 'private' | 'group' | undefined = chatType === 'group' ? 'group' : chatType === 'private' ? 'private' : undefined;
-    const channelType = this.resolveChannelType(channel);
-    const sid = selfAID ?? this.resolveSelfAID(channel);
-    const session = await this.sessionManager.getActiveSession(channel, channelId)
-      ?? await this.sessionManager.getOrCreateSession(channel, channelId, this.getEffectiveDefaultPath(channel), undefined, undefined, undefined, undefined, ct, undefined, sid, channelType);
-    // 如果 session 已存在但 chatType 跟传入的不一致，更新
-    if (ct && session.chatType !== ct) {
-      await this.sessionManager.updateSession(session.id, { chatType: ct });
-      session.chatType = ct;
-    }
-    return { session };
-  }
-
   setProcessor(processor: IMessageProcessor): void {
     this.processor = processor;
   }
@@ -836,6 +816,35 @@ export class CommandHandler {
    */
   private resolveSelfAID(channel: string): string | undefined {
     return tryParseChannelKey(channel)?.selfAID;
+  }
+
+  private resolveCtlIdentity(session: Session, userId?: string): SessionIdentity {
+    const parsed = tryParseChannelKey(session.channel);
+    const owningAgent = this.getOwningAgent(session.channel);
+    const selfAid = session.selfAID || owningAgent?.aid || parsed?.selfAID;
+    const channelType = session.channelType || parsed?.type || this.resolveChannelType(session.channel);
+    const chatType = session.chatType === 'group' ? 'group' : 'private';
+    const actorId = userId || session.metadata?.peerId;
+    const conversationId = chatType === 'group'
+      ? (session.metadata?.groupId || session.channelId)
+      : actorId;
+
+    if (!selfAid || !actorId || !conversationId) {
+      const fallback = session.identity ?? this.sessionManager.resolveIdentity(session.channel, userId);
+      logger.info(`[ctl] identity fallback: sessionId=${session.id} role=${fallback.role} selfAid=${selfAid ?? 'none'} actor=${actorId ?? 'none'} conversation=${conversationId ?? 'none'}`);
+      return fallback;
+    }
+
+    const detail = resolvePeerRoleDetail({
+      selfAid,
+      channelType,
+      chatType,
+      actorId,
+      conversationId,
+      peerType: (session.metadata as any)?.peerType,
+    });
+    logger.info(`[ctl] identity resolved: sessionId=${session.id} role=${detail.effectiveRole} source=${detail.source} selfAid=${selfAid} actor=${actorId} conversation=${conversationId}`);
+    return roleToSessionIdentity(detail.effectiveRole);
   }
 
   registerPolicy(channelName: string, policy: ChannelPolicy): void {
@@ -939,9 +948,9 @@ export class CommandHandler {
 
   /** menu.query — 查询当前值。 */
   async execMenuQuery(
-    cmd: string, channel: string, channelId: string, userId?: string, args?: Record<string, any>, explicitChatType?: MenuChatType, fromControlChannel = false
+    cmd: string, channel: string, channelId: string, userId?: string, args?: Record<string, any>, explicitChatType?: MenuChatType, fromControlChannel = false, overrideIdentity?: import('../../types.js').SessionIdentity
   ): Promise<{ data: any } | { error: string; code?: string }> {
-    return await menuExecMenuQuery.call(this, cmd, channel, channelId, userId, args, explicitChatType, fromControlChannel);
+    return await menuExecMenuQuery.call(this, cmd, channel, channelId, userId, args, explicitChatType, fromControlChannel, overrideIdentity);
   }
 
   /** menu.update — 写入新值。 */
@@ -1133,9 +1142,10 @@ export class CommandHandler {
     source?: 'user' | 'card-trigger',
     messageId?: string,
     selfAID?: string,
+    overrideIdentity?: import('../../types.js').SessionIdentity,
   ): Promise<OutboundPayload | string | null | undefined> {
     try {
-      const result = await this._handleInternal(content, channel, channelId, sendMessage, userId, threadId, chatType, source, messageId, selfAID);
+      const result = await this._handleInternal(content, channel, channelId, sendMessage, userId, threadId, chatType, source, messageId, selfAID, overrideIdentity);
       return result;
     } catch (error) {
       if (error instanceof BaseagentRunnerUnavailableError) {
@@ -1440,10 +1450,27 @@ export class CommandHandler {
     }
     if (patch.scheduleType !== undefined || patch.scheduleValue !== undefined) {
       const current = this.scheduleViewFromSource(definition.source);
-      updated.source = this.triggerSourceFromSchedule(
-        patch.scheduleType ?? current.scheduleType,
-        String(patch.scheduleValue ?? current.scheduleValue),
-      );
+      const nextScheduleType = patch.scheduleType ?? current.scheduleType;
+      const nextScheduleValue = String(patch.scheduleValue ?? current.scheduleValue);
+      if (nextScheduleType === 'event') {
+        if (!/^\*$|^[A-Za-z0-9_-]+:[A-Za-z0-9_-]+$|^[A-Za-z0-9_-]+:\*$/.test(nextScheduleValue)) {
+          return { ok: false, error: `无效 eventPattern: ${nextScheduleValue}` };
+        }
+      }
+      updated.source = this.triggerSourceFromSchedule(nextScheduleType, nextScheduleValue);
+    }
+
+    if (patch.eventFilter !== undefined) {
+      if (updated.source.type !== 'event') return { ok: false, error: 'eventFilter 仅适用于 event trigger' };
+      if (
+        patch.eventFilter === null
+        || patch.eventFilter === ''
+        || (typeof patch.eventFilter === 'object' && Object.keys(patch.eventFilter).length === 0)
+      ) {
+        delete updated.source.filter;
+      } else {
+        updated.source.filter = patch.eventFilter;
+      }
     }
 
     if (
@@ -1565,6 +1592,29 @@ export class CommandHandler {
     if (patch.feedback !== undefined) {
       const applied = this.applyFeedbackPatch(updated, patch.feedback);
       if (!applied.ok) return { ok: false, error: applied.error };
+    }
+
+    if (patch.mode !== undefined) {
+      const mode = String(patch.mode);
+      const delivery = mode === 'direct' || mode === 'direct-message'
+        ? 'direct'
+        : mode === 'agent' || mode === 'agent-runner'
+          ? 'inbound'
+          : undefined;
+      if (!delivery) return { ok: false, error: `无效 mode: ${patch.mode}` };
+      const withDelivery = (disposition: FeedbackDisposition): FeedbackDisposition => {
+        if (disposition.kind === 'reply-origin') return { ...disposition, delivery };
+        if (disposition.kind === 'forward') {
+          return {
+            ...disposition,
+            targets: disposition.targets.map(target => ({ ...target, delivery })),
+          };
+        }
+        return disposition;
+      };
+      updated.feedback.onReply = withDelivery(updated.feedback.onReply);
+      updated.feedback.onNoop = withDelivery(updated.feedback.onNoop);
+      updated.feedback.onFailure = withDelivery(updated.feedback.onFailure);
     }
 
     if (patch.onFailure !== undefined) {
@@ -1847,7 +1897,7 @@ export class CommandHandler {
 
   private static readonly CTL_COMMANDS = [
     '/help', '/status', '/check', '/pwd',
-    '/model', '/effort', '/perm', '/agent', '/baseagent',
+    '/model', '/setmodel', '/effort', '/perm', '/agent', '/baseagent',
     '/compact', '/file', '/send', '/restart', '/aid', '/rpc', '/storage',
     '/rename', '/name', '/trigger',
     '/chatmode', '/dispatch', '/activity',
@@ -1855,7 +1905,7 @@ export class CommandHandler {
   ];
 
   /** ctl 中仅允许查询形态的指令；写形态（带参）一律拒绝 */
-  private static readonly CTL_READONLY = new Set(['/baseagent']);
+  private static readonly CTL_READONLY = new Set(['/baseagent', '/setmodel']);
 
   /**
    * 从 session 恢复 ReplyContext，用于 ctl send 主动发送文本时的路由
@@ -1916,6 +1966,7 @@ export class CommandHandler {
 
     // 3. 从 session.metadata.peerId 获取 userId（用于权限判断）
     const userId = session.metadata?.peerId;
+    const ctlIdentity = this.resolveCtlIdentity(session, userId);
 
     // 3.1 /agent: EvolAgent 管理（转发到 CLI）
     if (cmd === '/agent' || cmd.startsWith('/agent ')) {
@@ -2014,11 +2065,8 @@ export class CommandHandler {
         cmd === '/rpc' || cmd.startsWith('/rpc ') ||
         cmd === '/storage' || cmd.startsWith('/storage ')) {
       // 权限检查：仅 owner
-      if (userId) {
-        const identity = this.sessionManager.resolveIdentity(session.channel, userId);
-        if (identity.role !== 'owner') {
-          return { ok: false, error: '无权限：此命令仅限 owner 使用' };
-        }
+      if (ctlIdentity.role !== 'owner') {
+        return { ok: false, error: '无权限：此命令仅限 owner 使用' };
       }
 
       // 无参数时返回用法说明
@@ -2063,12 +2111,18 @@ export class CommandHandler {
 
     // 6. 调用现有 handle()，不传 sendMessage 回调（结果直接返回）
     try {
-      const result = await this.handle(
+      const result = await this._handleInternal(
         cmd,
         session.channel,
         session.channelId,
         undefined,  // 不发送消息
         userId,
+        session.threadId || undefined,
+        session.chatType,
+        undefined,
+        undefined,
+        session.selfAID,
+        ctlIdentity,
       );
       const text = typeof result === 'string' ? result : (result && 'text' in result ? result.text : '(无输出)');
       return { ok: true, result: text || '(无输出)' };

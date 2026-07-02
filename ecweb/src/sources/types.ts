@@ -8,7 +8,7 @@
  * aid/cache 走 IPC 轮询（无推送），msg/session 走 fs.watch 文件监听。
  */
 
-export type ViewKind = 'agents' | 'msg' | 'session' | 'cache' | 'system' | 'triggers' | 'monitor' | 'gateway';
+export type ViewKind = 'agents' | 'msg' | 'session' | 'cache' | 'system' | 'triggers' | 'monitor' | 'gateway' | 'roles' | 'roleDefinitions';
 
 export interface WatchSource {
   readonly kind: ViewKind;

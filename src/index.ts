@@ -16,9 +16,11 @@ import { GeminiSessionFileAdapter } from './core/session/adapters/gemini-session
 import { resolveAnthropicConfig } from './agents/baseagent.js';
 import { loadDefaults, loadAllAgents, ensureAgentDirSkeleton, migrateIdentitiesIfNeeded, migrateProcessConfigIfNeeded, loadEvolclawConfig } from './config-store.js';
 import { initConfigManager } from './config/config-manager.js';
+import { resolvePeerRoleDetail, roleToSessionIdentity } from './config/peer-role-resolver.js';
+import { getFirstRoleAssignment, listRoleAssignments } from './config/role-assignments.js';
 import { snapshot as configSnapshot, retentionCleanup, readCurrent, readWVersion, writeWVersion, diffWorkingVsVersion, paramDiff, incrementSuccessCount, collectConfigFiles } from './config/snapshot.js';
 import { appendBootLog, selfDiagnose } from './config/boot-log.js';
-import type { Config, EffectiveAgentConfig, AgentConfig, DefaultsConfig } from './types.js';
+import type { Config, EffectiveAgentConfig, AgentConfig, DefaultsConfig, SessionIdentity } from './types.js';
 import { CONFIG_SCHEMA_VERSION } from './types.js';
 import type { Session } from './types.js';
 import { SessionManager } from './core/session/session-manager.js';
@@ -42,6 +44,7 @@ import { BootstrapService } from './core/bootstrap-service.js';
 import { MessageCache } from './core/message/message-cache.js';
 import { CommandHandler, isProcessLevelOwner } from './core/command/command-handler.js';
 import { EventBus, GatewayEvent } from './core/event-bus.js';
+import { getEventCatalog } from './core/event-catalog.js';
 import { StatsCollector } from './utils/stats.js';
 import { AidStatsCollector } from './utils/stats.js';
 import { PermissionGateway } from './core/permission.js';
@@ -697,9 +700,9 @@ async function main() {
     logger.warn(`[startup] ${agentRuntimeError} Control Plane will remain available.`);
   }
 
-  // 进程级设置（从 defaults 取，不属于任何 agent）
+  // 进程级设置：idleMonitor 属于 evolclaw.json；debug 继续沿用 defaults 的现有行为。
   const globalSettings: import('./types.js').GlobalSettings = {
-    idleMonitor: (defaults as any).idleMonitor,
+    idleMonitor: evolclawCfg.idleMonitor,
     debug: (defaults as any).debug,
   };
 
@@ -761,12 +764,27 @@ async function main() {
   }).catch(() => {});
 
   // 初始化 SessionManager（文件系统后端）
+  const resolveSessionIdentity = (channel: string, userId?: string): SessionIdentity => {
+    const parsed = tryParseChannelKey(channel);
+    const owningAgent = agentRegistry.resolveByChannel(channel);
+    const selfAid = owningAgent?.aid ?? parsed?.selfAID;
+    if (!selfAid || !userId) return { role: 'anonymous', mode: 'interactive' };
+    const detail = resolvePeerRoleDetail({
+      selfAid,
+      channelType: parsed?.type || channel,
+      chatType: 'private',
+      actorId: userId,
+      conversationId: userId,
+    });
+    return roleToSessionIdentity(detail.effectiveRole);
+  };
+
   const sessionManager = new SessionManager(paths.sessionsDir, eventBus,
-    (channel, userId) => agentRegistry.isOwner(channel, userId),
-    (channel, userId) => agentRegistry.isAdmin(channel, userId)
+    resolveSessionIdentity,
+    (channel) => agentRegistry.resolveByChannel(channel)?.config.chatmode,
   );
 
-  // chatMode 已写死在 resolveDefaultSessionMode 中（session-manager.ts），不再读 agent config
+  // chatMode 作为新 session 初始值读取 owning agent effective config；已有 session 保持自身状态。
   logger.info('✓ Database initialized');
 
   // 注册会话文件适配器（Claude / Codex 各自的会话文件操作）
@@ -1201,7 +1219,7 @@ async function main() {
         const owningAgent = agentRegistry.resolveByChannel(channelKey);
         return {
           observable: owningAgent?.getObservable() ?? false,
-          owners: owningAgent?.config.owners ?? [],
+          owners: owningAgent ? listRoleAssignments(owningAgent.aid, { scope: 'private', role: 'owner' }).map(a => a.peerId).filter((peerId): peerId is string => !!peerId) : [],
         };
       });
     }
@@ -1297,7 +1315,7 @@ async function main() {
     const agent = agentRegistry.resolveByChannel(inst.adapter.channelKey) ?? agentRegistry.resolveByChannel(name);
     if (!agent) return;
     if (!agent.config.debug?.upmsg) return;
-    const ownerAid = agent.config.owners?.[0];
+    const ownerAid = getFirstRoleAssignment(agent.aid, { scope: 'private', role: 'owner' })?.peerId;
     if (!ownerAid) return;
     const noticeKey = `${agent.aid}#${name}`;
     if (onlineNoticeSent.has(noticeKey)) return;
@@ -1626,10 +1644,12 @@ async function main() {
       const otherType = other.channelType || other.adapter.channelName;
       if (otherType === sourceChannelType) continue;  // 跳过同类型通道
       if (notified.has(otherType)) continue;  // 同类型已通知过
-      const ownerId = agentRegistry.getOwner(other.adapter.channelKey);
+      const owningAgent = agentRegistry.resolveByChannel(other.adapter.channelKey);
+      const ownerId = owningAgent
+        ? getFirstRoleAssignment(owningAgent.aid, { scope: 'private', role: 'owner' })?.peerId
+        : undefined;
       if (!ownerId) continue;
       notified.add(otherType);
-      const owningAgent = agentRegistry.resolveByChannel(other.adapter.channelKey);
       const envelope = buildEnvelope({
         taskId: `system-channel-down-${crypto.randomBytes(5).toString('hex')}`,
         channel: other.adapter.channelKey,
@@ -1747,7 +1767,6 @@ async function main() {
 
   // M3: direct call (not cast) — wire EvolAgentRegistry into IPC for evolagent.* handlers
   ipcServer.setAgentRegistry(agentRegistry);
-  ipcServer.setEventBus(eventBus);
   ipcServer.setMenuExecutor((payload) => cmdHandler.execMenuForEcweb(payload));
   cmdHandler.setDaemonStatusProvider(() => {
     const aidState = controlChannel?.getAidState?.();
@@ -2041,6 +2060,9 @@ async function main() {
         if (!cmd.triggerId) throw new Error('missing triggerId');
         return { ok: true, ...schedulerFor(agentAid).show(cmd.triggerId) };
       }
+      case 'trigger.eventCatalog': {
+        return { ok: true, ...getEventCatalog({ includeInternal: cmd.includeInternal === true }) };
+      }
       case 'trigger.create': {
         const definition = normalizeTriggerDefinition(await definitionWithActorOrigin(cmd.definition, cmd.actorSessionId));
         requireAgent(definition.agentAid);
@@ -2080,7 +2102,16 @@ async function main() {
         const agentAid = requireAgent(cmd.agentAid);
         if (!cmd.triggerId) throw new Error('missing triggerId');
         const result = await schedulerFor(agentAid).run(cmd.triggerId, { dryRun: cmd.dryRun === true });
-        return { ok: result.ok, result };
+        return {
+          ok: result.ok,
+          result,
+          runId: result.runId,
+          triggerId: result.triggerId,
+          status: result.status,
+          reason: result.reason,
+          error: result.error,
+          audit: result.audit,
+        };
       }
       default:
         return { ok: false, error: `unknown trigger command: ${cmd.type}` };

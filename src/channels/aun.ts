@@ -8,6 +8,7 @@ import { logger, localTimestamp } from '../utils/logger.js';
 import { LogWriter } from '../utils/log-writer.js';
 import type { ChannelPlugin, ChannelInstance, ChannelBuildContext, BridgeHookContext } from '../core/channel-loader.js';
 import { resolveShowActivities, showActivitiesPolicy } from '../core/channel-loader.js';
+import { DEFAULT_FLUSH_DELAY_SECONDS } from '../core/defaults.js';
 import type { MessageBridge } from '../core/message/message-bridge.js';
 import type { ReplyContext, AunChannelInstance as AunInst, AidConnectionState, AidStatus, AidKickDetail, InteractionResponse, ActionInteraction, CommandCard, InboundMessage } from '../types.js';
 import { resolvePaths, getPackageRoot, agentMdPath as agentMdPathFn, agentDir as agentDirPath, resolveRoot } from '../paths.js';
@@ -26,6 +27,7 @@ import { getProcessStartTime } from '../utils/process-introspect.js';
 import * as outbox from '../aun/outbox.js';
 import { guessMime, formatSize } from '../utils/media-cache.js';
 import { PeerIdentityCache } from '../core/relation/peer-identity.js';
+import { getFirstRoleAssignment } from '../config/role-assignments.js';
 
 /**
  * 构造 connect extra_info：自描述本进程身份。
@@ -75,7 +77,6 @@ export interface AUNConfig {
   flushDelay?: number;
   aunTrace?: boolean;     // 启用数据追踪日志
   aunSdkLog?: boolean;    // 启用 AUN SDK 内部日志（写入 ~/.aun/logs/ts-sdk-YYYYMMDD.log）
-  owner?: string;         // Owner AID，用于发送欢迎消息
   agentName?: string;     // self-agent 的 AID（用于 status 表格识别归属）
   channelName?: string;   // channel 实例名（用于日志/状态聚合）
   pureIdentity?: boolean;  // 纯身份模式：跳过 evolagent onboarding（welcome / agent.md 上传 / 自身 agent.md 拉取 / group 监听）
@@ -943,7 +944,7 @@ export class AUNChannel {
         return;
       }
 
-      const owner = agentConfig.owners?.[0] ?? this.config.owner;
+      const owner = getFirstRoleAssignment(aidName, { scope: 'private', role: 'owner' })?.peerId;
       if (!owner) {
         logger.info(`${this.logPrefix()} No owner configured, skipping welcome message (will retry after auto-bind)`);
         return;
@@ -3643,7 +3644,6 @@ export class AUNChannelPlugin implements ChannelPlugin {
       gatewayUrl: inst.gatewayUrl,
       accessToken: inst.accessToken,
       flushDelay: inst.flushDelay,
-      owner: (inst as any).owner ?? inst.owners?.[0],
       agentName: ctx.agentName,
       channelName: inst.name,
       aunTrace: ctx.debug?.aunTrace,
@@ -3864,7 +3864,7 @@ export class AUNChannelPlugin implements ChannelPlugin {
     return {
       channelType: 'aun', adapter, channel,
       policy,
-      options: { flushDelay: inst.flushDelay ?? 3, fileMarkerPattern: /\[SEND_FILE:(?:(\w+):)?([^\]]+)\]/g },
+      options: { flushDelay: inst.flushDelay ?? DEFAULT_FLUSH_DELAY_SECONDS, fileMarkerPattern: /\[SEND_FILE:(?:(\w+):)?([^\]]+)\]/g },
       connect: () => channel.connect(),
       disconnect: () => channel.disconnect(),
       onProjectPathRequest: () => Promise.resolve(ctx.defaultProjectPath),

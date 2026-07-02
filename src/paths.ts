@@ -96,6 +96,9 @@ export function agentConfig(aid: string): string {
 export function agentBehaviorConfig(aid: string): string {
   return path.join(agentDir(aid), 'behavior.json');
 }
+export function agentRoleAssignmentsConfig(aid: string): string {
+  return path.join(agentDir(aid), 'role-assignments.json');
+}
 export function agentPersonalDir(aid: string): string {
   return path.join(agentDir(aid), 'personal');
 }
@@ -250,6 +253,12 @@ export function kitsTemplatesDir(): string {
 }
 export function kitsSchemasDir(): string {
   return path.join(getPackageRoot(), 'kits', 'schemas');
+}
+
+// ── Role System ──
+
+export function rolesConfig(): string {
+  return path.join(resolveRoot(), 'roles.json');
 }
 
 // ── 调试输出 ──

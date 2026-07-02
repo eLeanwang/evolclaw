@@ -481,7 +481,6 @@ function printAgentShowHuman(result: any): void {
   if (result.config.model) console.log(`    Model:        ${result.config.model}`);
   if (result.config.effort) console.log(`    Effort:       ${result.config.effort}`);
   if (result.config.chatmode) console.log(`    Chatmode:     private=${result.config.chatmode.private}  group=${result.config.chatmode.group}`);
-  if (result.config.owners.length) console.log(`    Owners:       ${result.config.owners.join(', ')}`);
   console.log(`    Channels:     ${result.config.channels.length > 0 ? result.config.channels.join(', ') : '—'}`);
   console.log('');
   if (result.connection) {

@@ -30,6 +30,8 @@ import { buildEnvelope, sendInteractionPayload } from './message-utils.js';
 export { buildEnvelope, sendInteractionPayload } from './message-utils.js';
 import { resolveEffectiveModel, resolvePermissionMode } from '../model/config-scope.js';
 import { resolveEffective } from '../../config/config-manager.js';
+import { getFirstRoleAssignment } from '../../config/role-assignments.js';
+import { checkRoleAccess } from '../../config/peer-role-resolver.js';
 import { insertUsageEvent, insertContextBreakdown, insertModelCalls } from '../../stats/writer.js';
 import { normalizeUsage } from '../../stats/normalizer.js';
 import { resolvePrices } from '../../stats/price-resolver.js';
@@ -638,6 +640,39 @@ export class ResponseEngine implements IMessageProcessor {
     // 先解析会话，再优先用 session.metadata.channelKey 精确定位实例级 adapter
     // message.channel 现在存实例名（channelName），可直接用于精确路由
     const { session, absoluteProjectPath } = await this.resolveSession(message);
+
+    // ── 角色访问控制检查：读取该用户角色的 allowAccess 配置，false 则拦截并回复权限不足 ──
+    const userRole = session.identity?.role || 'anonymous';
+    if (!checkRoleAccess(userRole)) {
+      logger.warn(`[ResponseEngine] Access denied: role=${userRole} peerKey=${message.channelId} session=${session.id}`);
+      const channelKey = session.metadata?.channelKey || message.channel;
+      const channelInfo = this.resolveChannelInfo(channelKey);
+      if (channelInfo) {
+        try {
+          await channelInfo.adapter.send(
+            {
+              taskId: `access-denied-${Date.now()}`,
+              sessionId: session.id,
+              channel: channelKey,
+              channelId: message.channelId,
+              agentName: 'evolclaw',
+              chatmode: 'interactive',
+              replyContext: message.replyContext,
+              timestamp: Date.now(),
+            },
+            {
+              kind: 'system.error',
+              text: '暂无权限访问本 agent，请联系 agent 管理员授权访问',
+              subtype: 'access_denied',
+              recoverable: false,
+            }
+          );
+        } catch (err) {
+          logger.error(`[ResponseEngine] Failed to send access-denied message:`, err);
+        }
+      }
+      return;
+    }
 
     // thread(feishu) pending strategy: inject replyContext so first reply creates the thread
     if (message.triggerMeta?.pendingThread && message.triggerMeta?.rootMessageId) {
@@ -1694,7 +1729,11 @@ export class ResponseEngine implements IMessageProcessor {
               if (isCrossChannel) {
                 const targetAdapterName = targetInfo.adapter.channelName;
                 const targetChannelType = targetInfo.options?.channelType || targetAdapterName;
-                const ownerPeerId = this.agentRegistry?.getOwner?.(targetAdapterName);
+                const targetChannelKey = targetInfo.adapter.channelKey || targetAdapterName;
+                const targetAgent = this.agentRegistry?.resolveByChannel(targetChannelKey);
+                const ownerPeerId = targetAgent
+                  ? getFirstRoleAssignment(targetAgent.aid, { scope: 'private', role: 'owner' })?.peerId
+                  : undefined;
                 targetChannelId = ownerPeerId ? (this.sessionManager.getOwnerChatId(targetChannelType, ownerPeerId) ?? '') : '';
                 if (!targetChannelId) {
                   await adapter.send(envelope, { kind: 'system.error', text: `❌ 未找到 ${targetLabel} 的私聊会话，请先在该通道发送一条消息`, subtype: 'channel_down' });
@@ -1798,6 +1837,11 @@ export class ResponseEngine implements IMessageProcessor {
             terminalReason: streamResult.terminalReason
           });
         } else {
+          if (message.triggerMeta) {
+            const triggerRunId = message.triggerMeta.runId ?? message.messageId ?? messageId;
+            this.eventBus.publish({ type: 'trigger:failed', triggerId: message.triggerMeta.triggerId, name: message.triggerMeta.triggerName ?? '', runId: triggerRunId, originTriggerId: message.triggerMeta.triggerId, messageId: messageId, error: errorSummary, targetChannel: message.channel, targetChannelId: message.channelId, fireTime: message.triggerMeta.fireTime ?? 0, phase: 'execute' });
+          }
+
           this.eventBus.publish({
             type: 'task:error',
             sessionId: session.id,
@@ -1972,6 +2016,14 @@ export class ResponseEngine implements IMessageProcessor {
             renderer.addLifecycle('completed', completedMetadata);
             renderer.flushActivitiesOnly().catch(() => {});
             adapter.send(envelope, { kind: 'status.completed', metadata: completedMetadata as any }).catch(() => {});
+          }
+        }
+        if (message.triggerMeta) {
+          const triggerRunId = message.triggerMeta.runId ?? message.messageId ?? messageId;
+          if (interruptReason) {
+            this.eventBus.publish({ type: 'trigger:skipped', triggerId: message.triggerMeta.triggerId, name: message.triggerMeta.triggerName ?? '', runId: triggerRunId, originTriggerId: message.triggerMeta.triggerId, reason: 'interrupted', targetChannel: message.channel, targetChannelId: message.channelId, fireTime: message.triggerMeta.fireTime });
+          } else {
+            this.eventBus.publish({ type: 'trigger:completed', triggerId: message.triggerMeta.triggerId, name: message.triggerMeta.triggerName ?? '', runId: triggerRunId, originTriggerId: message.triggerMeta.triggerId, messageId: messageId, durationMs, targetChannel: message.channel, targetChannelId: message.channelId, fireTime: message.triggerMeta.fireTime ?? 0 });
           }
         }
         await this.sessionManager.recordSuccess(session.id);

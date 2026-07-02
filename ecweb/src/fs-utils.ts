@@ -33,6 +33,7 @@ export interface SessionFile {
   agentSessionId: string | null;
   channelType: string;
   channelId: string;
+  chatType?: 'private' | 'group';
   selfAID?: string;
   name: string | null;
   updatedAt: number;
@@ -115,7 +116,7 @@ export interface MessageLogEntry {
   numTurns?: number | null;
   usage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number } | null;
   encrypt?: boolean; chatmode?: string; source?: string;
-  channelType?: string; selfAID?: string; peerName?: string | null; groupName?: string | null;
+  channelType?: string; selfAID?: string; peerName?: string | null; peerType?: string; groupName?: string | null;
 }
 
 export interface PeerInfo {

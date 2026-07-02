@@ -1,11 +1,12 @@
 import path from 'path';
 import { logger } from '../utils/logger.js';
 import { saveAgent } from '../config-store.js';
-import { formatChannelKey, tryParseChannelKey } from './channel-loader.js';
+import { formatChannelKey } from './channel-loader.js';
 import { agentPersonalDir } from '../paths.js';
 import { fileCache } from './daemon-file-cache.js';
 import { ConfigTarget, read as cfgRead, write as cfgWrite, ensureFile as cfgEnsure, resolveEffective } from '../config/config-manager.js';
 import { withLifecycleForWrite } from '../config/lifecycle.js';
+import { listRoleAssignments, setPrivateRoleAssignment } from '../config/role-assignments.js';
 import type {
   AgentConfig,
   AgentLifecycle,
@@ -141,64 +142,6 @@ export class EvolAgent {
     return this.merged.channels.find(c => this.effectiveChannelName(c.type, c.name) === channelKey) ?? null;
   }
 
-  // ── Owner / Admin（per-channel-instance；AUN 走顶层 owners/admins）──────
-
-  /**
-   * AUN channel 是隐式的，不在 channels[] 里——其 owner/admin 存于 EvolAgent 顶层
-   * `owners`/`admins`（config 加载时由 aunBlock.owner/admins 收集而来）。
-   */
-  private isAunChannelKey(channelKey: string): boolean {
-    const parsed = tryParseChannelKey(channelKey);
-    return parsed?.type === 'aun' && parsed.selfAID === this.aid;
-  }
-
-  getOwner(channelKey: string): string | undefined {
-    if (this.isAunChannelKey(channelKey)) {
-      return this.merged.owners?.[0];
-    }
-    const inst = this.findChannelInstance(channelKey);
-    return inst?.owners?.[0];
-  }
-
-  isOwner(channelKey: string, userId: string): boolean {
-    if (this.isAunChannelKey(channelKey)) {
-      return this.merged.owners?.includes(userId) ?? false;
-    }
-    const inst = this.findChannelInstance(channelKey);
-    return inst?.owners?.includes(userId) ?? false;
-  }
-
-  isAdmin(channelKey: string, userId: string): boolean {
-    if (this.isOwner(channelKey, userId)) return true;
-    if (this.isAunChannelKey(channelKey)) {
-      return this.merged.admins?.includes(userId) ?? false;
-    }
-    const inst = this.findChannelInstance(channelKey);
-    return inst?.admins?.includes(userId) ?? false;
-  }
-
-  setOwner(channelKey: string, userId: string): void {
-    // AUN：写到 rawAgent 顶层 owners（merged 也指向同一份引用）
-    if (this.isAunChannelKey(channelKey)) {
-      if (!this.rawAgent.owners) this.rawAgent.owners = [];
-      if (!this.rawAgent.owners.includes(userId)) this.rawAgent.owners.push(userId);
-      // merged.owners 是从 rawAgent.owners 派生的拷贝；同步内存视图避免重新 merge
-      if (!this.merged.owners) this.merged.owners = [];
-      if (!this.merged.owners.includes(userId)) this.merged.owners.push(userId);
-      this.persist();
-      return;
-    }
-    const inst = this.findRawChannelInstance(channelKey);
-    if (!inst) {
-      logger.warn(`[EvolAgent ${this.aid}] setOwner: channel "${channelKey}" not found`);
-      return;
-    }
-    // 顶层 owners 是单值列表（首通信者即 owner）；channel 实例 owners 也允许多值
-    if (!inst.owners) inst.owners = [];
-    if (!inst.owners.includes(userId)) inst.owners.push(userId);
-    this.persist();
-  }
-
   // ── ShowActivities ────────────────────────────────────────────────────
 
   getShowActivities(_channelKey: string): ShowActivitiesMode {
@@ -207,15 +150,52 @@ export class EvolAgent {
 
   setShowActivities(_channelKey: string, mode: ShowActivitiesMode): void {
     this.merged.show_activities = mode;
-    this.mutateAgentConfig(b => { b.show_activities = mode; });
+    this.mutateBehavior(b => { b.show_activities = mode; });
+  }
+
+  // ── Role-based Access Control ─────────────────────────────────────────
+
+  /**
+   * Check if a user has owner role for this agent (private scope).
+   * Uses the role-assignments system.
+   */
+  isOwner(_channelKey: string, userId: string): boolean {
+    const assignments = listRoleAssignments(this.aid, { scope: 'private', role: 'owner', peerId: userId });
+    return assignments.length > 0;
+  }
+
+  /**
+   * Check if a user has admin role for this agent (private scope).
+   * Uses the role-assignments system.
+   */
+  isAdmin(_channelKey: string, userId: string): boolean {
+    const assignments = listRoleAssignments(this.aid, { scope: 'private', role: 'admin', peerId: userId });
+    return assignments.length > 0;
+  }
+
+  /**
+   * Get the first owner of this agent (private scope).
+   * Returns the peerId of the first owner assignment.
+   */
+  getOwner(_channelKey: string): string | undefined {
+    const owners = listRoleAssignments(this.aid, { scope: 'private', role: 'owner' });
+    return owners[0]?.peerId;
+  }
+
+  /**
+   * Set a user as owner for this agent (private scope).
+   * Creates a role assignment in the role-assignments system.
+   */
+  setOwner(_channelKey: string, userId: string): void {
+    setPrivateRoleAssignment(this.aid, userId, 'owner');
   }
 
   // ── Baseagent 字段写入 ────────────────────────────
 
-  /** 切换当前活跃 baseagent（写 config.active_baseagent）。 */
+  /** 切换当前活跃 baseagent（写 behavior.active_baseagent）。 */
   setActiveBaseagent(value: string | undefined): void {
     this.merged.active_baseagent = value;
-    this.mutateAgentConfig(b => {
+    this.mutateBehavior(b => {
       if (value === undefined) delete b.active_baseagent;
       else b.active_baseagent = value;
     });
@@ -226,7 +206,7 @@ export class EvolAgent {
     if (!this.merged.baseagents) (this.merged as any).baseagents = {};
     const mBlock = (((this.merged as any).baseagents)[ba] ??= {});
     if (value === undefined) delete mBlock.model; else mBlock.model = value;
-    this.mutateAgentConfig(b => {
+    this.mutateBehavior(b => {
       b.baseagents = b.baseagents || {};
       const blk = ((b.baseagents as any)[ba] ??= {});
       if (value === undefined) delete blk.model; else blk.model = value;
@@ -244,7 +224,7 @@ export class EvolAgent {
       mBlock.effort = value;
       delete mBlock.reasoning;
     }
-    this.mutateAgentConfig(b => {
+    this.mutateBehavior(b => {
       b.baseagents = b.baseagents || {};
       const blk = ((b.baseagents as any)[ba] ??= {});
       if (value === undefined) {
@@ -261,7 +241,7 @@ export class EvolAgent {
   setChatmodePrivate(value: 'interactive' | 'proactive' | undefined): void {
     if (!this.merged.chatmode) this.merged.chatmode = {};
     this.merged.chatmode.private = value;
-    this.mutateAgentConfig(b => {
+    this.mutateBehavior(b => {
       b.chatmode = b.chatmode || {};
       if (value === undefined) delete b.chatmode.private; else b.chatmode.private = value;
     });
@@ -270,7 +250,7 @@ export class EvolAgent {
   /** 设置群聊 dispatch 默认值（mention | broadcast）。 */
   setDispatch(value: 'mention' | 'broadcast' | undefined): void {
     this.merged.dispatch = value;
-    this.mutateAgentConfig(b => {
+    this.mutateBehavior(b => {
       if (value === undefined) delete b.dispatch; else b.dispatch = value;
     });
   }
@@ -390,12 +370,12 @@ export class EvolAgent {
     saveAgent(this.rawAgent);
   }
 
-  /** 读改写 agent 级 config.json（走 ConfigManager 唯一写入口）。 */
-  private mutateAgentConfig(fn: (b: AgentConfig) => void): void {
+  /** 读改写 agent 级 behavior.json（走 ConfigManager 唯一写入口）。 */
+  private mutateBehavior(fn: (b: AgentConfig) => void): void {
     const sel = { self: this.aid };
-    const cur = (cfgRead<AgentConfig>(ConfigTarget.Agent, sel) as AgentConfig) || {};
+    const cur = (cfgRead<AgentConfig>(ConfigTarget.Behavior, sel) as AgentConfig) || {};
     fn(cur);
-    cfgEnsure(ConfigTarget.Agent, sel);
-    cfgWrite(ConfigTarget.Agent, cur, sel);
+    cfgEnsure(ConfigTarget.Behavior, sel);
+    cfgWrite(ConfigTarget.Behavior, cur, sel);
   }
 }

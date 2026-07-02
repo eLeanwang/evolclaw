@@ -3,7 +3,7 @@ import path from 'path';
 import readline from 'readline';
 import { resolvePaths, agentMdPath as getAgentMdPathFromPaths, aunPath as defaultAunPath } from '../paths.js';
 import { loadDefaults, loadAllAgents, loadAgent, saveAgent, ensureAgentDirSkeleton } from '../config-store.js';
-import { ConfigTarget, write as cfgWrite, ensureFile as cfgEnsure, read as cfgRead, routeField, initConfigManager } from '../config/config-manager.js';
+import { ConfigTarget, write as cfgWrite, ensureFile as cfgEnsure, read as cfgRead, routeFieldPath, resolveEffective, initConfigManager } from '../config/config-manager.js';
 import { ipcQuery } from '../ipc.js';
 import { CONFIG_SCHEMA_VERSION } from '../types.js';
 import type { AgentConfig, ChannelInstance } from '../types.js';
@@ -12,6 +12,7 @@ import { isValidChannelName } from '../core/channel-loader.js';
 import { commandExists } from '../utils/cross-platform.js';
 import { getCodexAppServerAvailability, isCodexAppServerAvailable } from '../agents/codex-runner.js';
 import { agentProjectRootFromDefaults, deriveAgentProjectPath } from '../utils/project-path.js';
+import { setPrivateRoleAssignment } from '../config/role-assignments.js';
 
 // ==================== Types ====================
 
@@ -50,7 +51,6 @@ export interface AgentShowResult {
     model: string | null;
     effort: string | null;
     chatmode: { private: string; group: string } | null;
-    owners: string[];
     channels: string[];
   };
   connection: AgentConnectionInfo | null;
@@ -170,9 +170,10 @@ function saveInitialBehavior(aid: string, baseagent: Baseagent): void {
     chatmode: { ...DEFAULT_CHATMODE },
     dispatch: DEFAULT_DISPATCH,
   };
-  // 读取现有 config，合并写入
-  const existingConfig = cfgRead(ConfigTarget.Agent, { self: aid }) || {};
-  cfgWrite(ConfigTarget.Agent, { ...existingConfig, ...behavior }, { self: aid });
+  const sel = { self: aid };
+  const existingBehavior = cfgRead(ConfigTarget.Behavior, sel) || {};
+  cfgEnsure(ConfigTarget.Behavior, sel);
+  cfgWrite(ConfigTarget.Behavior, { ...existingBehavior, ...behavior }, sel);
 }
 
 function readAgentMdIdentity(aid: string): { name: string | null; description: string | null } {
@@ -343,7 +344,6 @@ export async function agentShow(aid: string): Promise<AgentResult<AgentShowResul
       lastActivity: agent.lastActivity || null,
       error: agent.error,
       chatmode: agent.config?.chatmode || null,
-      owners: agent.config?.owners || [],
     };
   }
   const identity = readAgentMdIdentity(aid);
@@ -359,7 +359,6 @@ export async function agentShow(aid: string): Promise<AgentResult<AgentShowResul
       model: agentInfo.model || null,
       effort: agentInfo.effort || null,
       chatmode: agentInfo.chatmode || null,
-      owners: agentInfo.owners || [],
       channels: agentInfo.channels || [],
     },
     connection: connectionInfo,
@@ -542,12 +541,12 @@ export async function agentCreateInteractive(opts: AgentCreateInteractiveOpts = 
       aid,
       enabled: true,
       lifecycle: 'created',
-      owners: owner ? [owner] : [],
       channels: [],
       projects: { defaultPath: projectPath },
     };
 
     saveAgent(agentConfig);
+    if (owner) setPrivateRoleAssignment(aid, owner, 'owner', { note: 'created by cli agent wizard' });
     saveInitialBehavior(aid, baseagent);
     ensureAgentDirSkeleton(aid);
 
@@ -666,8 +665,7 @@ async function promptAgentOwnerManually(aid: string): Promise<string | undefined
         console.log(`  ⚠ 无法加载 agent 配置: ${aid}`);
         return undefined;
       }
-      const owners = [owner, ...(agent.owners || []).filter(o => o !== owner)];
-      saveAgent({ ...agent, owners });
+      setPrivateRoleAssignment(aid, owner, 'owner', { note: 'set manually by cli' });
       try {
         const result = await ipcQuery<any>(resolvePaths().socket, { type: 'evolagent.reload', name: aid }, 30_000);
         if (result?.ok) console.log('  ✓ agent owner 已热重载');
@@ -781,13 +779,13 @@ export async function agentCreateNonInteractive(opts: AgentCreateNonInteractiveO
     aid: opts.aid,
     enabled: true,
     lifecycle: preservedLifecycle,
-    owners: opts.owner ? [opts.owner] : [],
     channels: [],
     projects: { defaultPath: opts.project },
   };
 
   opts.onPhase?.('config_saved', 'begin');
   saveAgent(agentConfig);
+  if (opts.owner) setPrivateRoleAssignment(opts.aid, opts.owner, 'owner', { note: 'created by cli agent' });
   saveInitialBehavior(opts.aid, baseagent);
   ensureAgentDirSkeleton(opts.aid);
   opts.onPhase?.('config_saved', 'done');
@@ -1022,7 +1020,7 @@ async function agentSetEnabled(aid: string, enabled: boolean): Promise<AgentResu
 // ==================== agentGet / agentSet ====================
 //
 // addendum D2：`ec agent get/set <aid> <key>` 是 `ec config get/set --self <aid>` 的
-// 位置参数别名。内部走 ConfigManager，统一在 config.json 中。
+// 位置参数别名。内部走 ConfigManager，按字段 owner 写入 H 或 HA。
 
 export async function agentGet(aid: string, key: string): Promise<AgentResult<AgentGetResult>> {
   const p = resolvePaths();
@@ -1031,10 +1029,8 @@ export async function agentGet(aid: string, key: string): Promise<AgentResult<Ag
   }
   try {
     initConfigManager();
-    const top = key.split('.')[0];
-    const route = routeField(top, 'agent');
-    const cfg = cfgRead<Record<string, any>>(route.target, { self: aid }) || {};
-    const value = getNestedValue(cfg, key);
+    routeFieldPath(key, 'agent');
+    const value = getNestedValue(resolveEffective({ self: aid }) as any, key);
     return { ok: true, aid, key, value };
   } catch (e: any) {
     return { ok: false, error: e?.message || String(e) };
@@ -1058,8 +1054,7 @@ export async function agentSet(aid: string, key: string, rawValue: string): Prom
 
   try {
     initConfigManager();
-    const top = key.split('.')[0];
-    const route = routeField(top, 'agent');  // 路由到正确的 target
+    const route = routeFieldPath(key, 'agent');  // 路由到 canonical target
     const cur = cfgRead<Record<string, any>>(route.target, { self: aid }) || {};
     setNestedValue(cur, key, value);
     cfgEnsure(route.target, { self: aid });

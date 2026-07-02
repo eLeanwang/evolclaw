@@ -1,4 +1,4 @@
-import { type InteractionRequest, type OutboundPayload, type ReplyContext, type Session } from '../../types.js';
+import { type CommandAuthorizationContext, type CommandIntent, type InteractionRequest, type OutboundPayload, type ReplyContext, type Session } from '../../types.js';
 import type { PermissionDecision } from '../permission.js';
 import { hasModelSwitcher, hasPermissionController } from '../../agents/runner-types.js';
 import { getCodexEfforts } from '../../agents/codex-runner.js';
@@ -13,9 +13,12 @@ import { checkLatestVersion, getLocalVersion, isLinkedInstall, compareVersions }
 import { loadEvolclawConfig } from '../../config-store.js';
 import { isProcessLevelOwner } from './menu-handler.js';
 import { execAgentAction } from '../message/command-handler-agent-control.js';
+import { authorizeCommand } from './command-permission.js';
+import { auditCommandAuthorization } from './command-audit.js';
 import { resolvePermissionMode, writeRelationPermissionMode } from '../model/config-scope.js';
 import { formatPeerKey } from '../relation/peer-identity.js';
 import { modelMatches, resolveCommandModelResolution } from './model-resolve.js';
+import { filterModelsForRole, validateModelSelectionForRole } from '../model/model-permission.js';
 import { displaySessionTitle } from '../session/session-title.js';
 import {
   guardIdleCommand,
@@ -52,6 +55,137 @@ function formatIdleTime(ms: number): string {
   if (hours > 0) return `${hours}小时前`;
   if (minutes > 0) return `${minutes}分钟前`;
   return '刚刚';
+}
+
+async function authorizeSlashIntent(params: {
+  intent: CommandIntent;
+  identity: import('../../types.js').SessionIdentity;
+  session?: Session | null;
+  explicitChatType?: 'private' | 'group';
+  channel: string;
+  channelId: string;
+  userId?: string;
+  selfAid?: string;
+  isDaemonOwner: boolean;
+}): Promise<{ kind: 'command.error'; text: string } | null> {
+  const { intent, identity, session, channel, channelId, userId, selfAid, isDaemonOwner } = params;
+  const chatType = (session?.chatType as 'private' | 'group' | undefined) ?? params.explicitChatType;
+  const peerKeyId = chatType === 'group'
+    ? (session?.metadata?.groupId || channelId)
+    : userId;
+  const channelType = channel.split('#')[0];
+  const peerKey = channelType && peerKeyId ? formatPeerKey(channelType, peerKeyId) : undefined;
+  const authCtx: CommandAuthorizationContext = {
+    intent,
+    actorId: userId,
+    channel,
+    channelId,
+    chatType,
+    selfAid,
+    peerKey,
+    role: identity.role,
+    isDaemonOwner,
+    fromControlChannel: false,
+    source: 'slash',
+  };
+
+  const decision = authorizeCommand(authCtx);
+  if (!decision.allow) {
+    await auditCommandAuthorization({
+      ts: Date.now(),
+      source: 'slash',
+      operation: intent.operation,
+      scope: intent.scope,
+      dangerous: intent.dangerous ?? false,
+      actorId: userId,
+      selfAid,
+      peerKey,
+      channel,
+      channelId,
+      role: identity.role,
+      isDaemonOwner,
+      fromControlChannel: false,
+      decision: 'deny',
+      code: decision.code,
+      reason: decision.reason,
+      matchedRule: decision.matchedRule,
+      argsSummary: intent.args,
+    });
+    return { kind: 'command.error', text: decision.reason };
+  }
+
+  if (decision.dangerous) {
+    await auditCommandAuthorization({
+      ts: Date.now(),
+      source: 'slash',
+      operation: intent.operation,
+      scope: intent.scope,
+      dangerous: true,
+      actorId: userId,
+      selfAid,
+      peerKey,
+      channel,
+      channelId,
+      role: identity.role,
+      isDaemonOwner,
+      fromControlChannel: false,
+      decision: 'allow',
+      matchedRule: decision.matchedRule,
+      argsSummary: intent.args,
+    });
+  }
+
+  return null;
+}
+
+function buildSlashRelationIntentArgs(params: {
+  args?: Record<string, unknown>;
+  selfAid?: string;
+  peerKey?: string;
+}): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...(params.args ?? {}) };
+  if (params.selfAid && out.self === undefined) out.self = params.selfAid;
+  if (params.peerKey && out.peer === undefined && out.peerKey === undefined) out.peer = params.peerKey;
+  return out;
+}
+
+async function canReadSlashModelList(params: {
+  identity: import('../../types.js').SessionIdentity;
+  session?: Session | null;
+  explicitChatType?: 'private' | 'group';
+  channel: string;
+  channelId: string;
+  userId?: string;
+  selfAid?: string;
+  isDaemonOwner: boolean;
+}): Promise<boolean> {
+  const { identity, session, channel, channelId, userId, selfAid, isDaemonOwner } = params;
+  const chatType = (session?.chatType as 'private' | 'group' | undefined) ?? params.explicitChatType;
+  const peerKeyId = chatType === 'group'
+    ? (session?.metadata?.groupId || channelId)
+    : userId;
+  const channelType = channel.split('#')[0];
+  const peerKey = channelType && peerKeyId ? formatPeerKey(channelType, peerKeyId) : undefined;
+  const intent: CommandIntent = {
+    operation: 'model.list',
+    scope: 'relation',
+    source: 'slash',
+    args: buildSlashRelationIntentArgs({ selfAid, peerKey }),
+  };
+  const decision = authorizeCommand({
+    intent,
+    actorId: userId,
+    channel,
+    channelId,
+    chatType,
+    selfAid,
+    peerKey,
+    role: identity.role,
+    isDaemonOwner,
+    fromControlChannel: false,
+    source: 'slash',
+  });
+  return decision.allow;
 }
 
 function getAgentBusyInfo(handler: any, aid: string | undefined, excludeSessionKey?: string): { count: number; processing: Array<{ queueKey: string; agentName: string }>; agentName: string } | null {
@@ -741,7 +875,10 @@ export async function handleSlashCommand(this: any,
     const currentEffort = setmodelState.effort || 'auto';
 
     const now = Math.floor(Date.now() / 1000);
-    const modelIds = hasModelSwitcher(setmodelAgent) ? await setmodelAgent.listModels() : [];
+    const rawModelIds = hasModelSwitcher(setmodelAgent) ? await setmodelAgent.listModels() : [];
+    const modelIds = hasModelSwitcher(setmodelAgent)
+      ? filterModelsForRole(identity.role, fallbackBaseagent, rawModelIds, (setmodelAgent as any).resolveModelId?.bind(setmodelAgent))
+      : rawModelIds;
     const modelListData = {
       object: 'list',
       data: modelIds.map(id => ({ id, object: 'model', created: now, owned_by: setmodelAgent.name === 'codex' ? 'openai' : 'anthropic' })),
@@ -759,11 +896,6 @@ export async function handleSlashCommand(this: any,
   if (normalizedContent.startsWith('/model')) {
     const args = normalizedContent.slice(6).trim();
 
-    // 带参（切换/调整）需 admin+；无参查询仍允许低权限查看当前模型。
-    // Must happen before runner lookup so unavailable-session recovery errors
-    // do not mask authorization failures.
-    if (args && !isAdmin) return { kind: 'command.error' as const, text: '❌ 无权限：切换模型仅限管理员使用' };
-
     if (!args) {
       const modelSession = await getExistingSessionForCommand();
       const fallbackBaseagent = modelSession?.baseagent || this.agentRegistry?.resolveByChannel(channel)?.baseagent || this.parseDefaultBaseagent();
@@ -777,13 +909,26 @@ export async function handleSlashCommand(this: any,
         userId,
         role: identity.role,
       });
-      const models = hasModelSwitcher(modelAgent) ? await modelAgent.listModels() : [];
+      const rawModels = hasModelSwitcher(modelAgent) ? await modelAgent.listModels() : [];
+      const models = hasModelSwitcher(modelAgent)
+        ? filterModelsForRole(identity.role, fallbackBaseagent, rawModels, (modelAgent as any).resolveModelId?.bind(modelAgent))
+        : rawModels;
       const currentModel = hasModelSwitcher(modelAgent) ? (modelState.model || modelAgent.getModel()) : modelAgent.name;
       const efforts = getAvailableEfforts(modelAgent, currentModel);
       const currentEffort = modelState.effort || 'auto';
+      const canReadModelList = await canReadSlashModelList({
+        identity,
+        session: modelSession,
+        explicitChatType: chatType === 'private' || chatType === 'group' ? chatType : undefined,
+        channel,
+        channelId,
+        userId,
+        selfAid: selfAID ?? this.resolveSelfAID(channel),
+        isDaemonOwner,
+      });
 
       // 尝试发送 CommandCard 卡片
-      if (this.interactionRouter && models.length > 0) {
+      if (canReadModelList && this.interactionRouter && models.length > 0) {
         const interaction: InteractionRequest = {
           type: 'interaction',
           id: `model-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`,
@@ -816,8 +961,9 @@ export async function handleSlashCommand(this: any,
       const effortHint = efforts.length > 0
         ? `\n推理强度: ${currentEffort === 'auto' ? 'auto (SDK默认)' : currentEffort}  (使用 /effort 调整)`
         : '';
-      if (isAdmin) {
-        return { kind: 'command.result' as const, text: `当前模型: ${modelDisplayLabel(modelAgent, currentModel)}${effortHint}\n\n可用模型：\n${modelList}\n\n用法: /model <模型>` };
+      if (canReadModelList) {
+        const usage = isAdmin ? '\n\n用法: /model <模型>' : '';
+        return { kind: 'command.result' as const, text: `当前模型: ${modelDisplayLabel(modelAgent, currentModel)}${effortHint}\n\n可用模型：\n${modelList}${usage}` };
       }
       return { kind: 'command.result' as const, text: `当前模型: ${modelDisplayLabel(modelAgent, currentModel)}${effortHint}` };
     }
@@ -837,6 +983,9 @@ export async function handleSlashCommand(this: any,
     });
 
     const models = hasModelSwitcher(modelAgent) ? await modelAgent.listModels() : [];
+    const allowedModels = hasModelSwitcher(modelAgent)
+      ? filterModelsForRole(identity.role, fallbackBaseagent, models, (modelAgent as any).resolveModelId?.bind(modelAgent))
+      : models;
 
     const parts = args.split(/\s+/);
     let newModel: string | undefined;
@@ -859,7 +1008,7 @@ export async function handleSlashCommand(this: any,
         } else if (models.includes(arg)) {
           newModel = arg;
         } else {
-          const modelList = models.map((m: string) => `  ${modelMatches(modelAgent, m, currentModel) ? '✓' : ' '} ${modelDisplayLabel(modelAgent, m)}`).join('\n');
+          const modelList = allowedModels.map((m: string) => `  ${modelMatches(modelAgent, m, currentModel) ? '✓' : ' '} ${modelDisplayLabel(modelAgent, m)}`).join('\n');
           const effortHint = efforts.length > 0 ? `\n\n推理强度请使用 /effort 命令` : '';
           return { kind: 'command.error' as const, text: `❌ 无效参数: ${arg}\n\n可用模型：\n${modelList}${effortHint}` };
         }
@@ -886,6 +1035,49 @@ export async function handleSlashCommand(this: any,
     }
 
     // 运行时 model/effort 切换已通过 EvolAgent.setBaseagentModel/setBaseagentEffort 持久化
+
+    if (newModel) {
+      const modelChatType = (modelSession?.chatType as 'private' | 'group' | undefined)
+        ?? (chatType === 'private' || chatType === 'group' ? chatType : undefined);
+      const peerKeyId = modelChatType === 'group'
+        ? (modelSession?.metadata?.groupId || channelId)
+        : userId;
+      const channelType = this.resolveChannelType(channel);
+      const peerKey = channelType && peerKeyId ? formatPeerKey(channelType, peerKeyId) : undefined;
+      const useAuthDenied = await authorizeSlashIntent({
+        intent: {
+          operation: 'model.use',
+          scope: 'relation',
+          source: 'slash',
+          args: buildSlashRelationIntentArgs({
+            args: { model: newModel },
+            selfAid: selfAID ?? this.resolveSelfAID(channel),
+            peerKey,
+          }),
+        },
+        identity,
+        session: modelSession,
+        explicitChatType: modelChatType,
+        channel,
+        channelId,
+        userId,
+        selfAid: selfAID ?? this.resolveSelfAID(channel),
+        isDaemonOwner,
+      });
+      if (useAuthDenied) return useAuthDenied;
+
+      const decision = validateModelSelectionForRole({
+        role: identity.role,
+        baseagent: fallbackBaseagent,
+        requestedModel: newModel,
+        models,
+        resolveModelId: (modelAgent as any).resolveModelId?.bind(modelAgent),
+      });
+      if (!decision.ok) {
+        return { kind: 'command.error' as const, text: decision.message || `invalid model: ${newModel}` };
+      }
+      newModel = decision.model || newModel;
+    }
 
     const isCodexAgent = modelAgent.name === 'codex';
     const changes: string[] = [];
@@ -1068,6 +1260,23 @@ export async function handleSlashCommand(this: any,
   if (normalizedContent === '/reload' || normalizedContent.startsWith('/reload ')) {
     const aidArg = normalizedContent.slice('/reload'.length).trim() || undefined;
     const selfAid = this.agentRegistry?.resolveByChannel(channel)?.aid;
+    const authDenied = await authorizeSlashIntent({
+      intent: {
+        operation: 'agent.reload',
+        scope: aidArg ? 'control' : 'agent',
+        source: 'slash',
+        args: { ...(aidArg ? { aid: aidArg } : {}), ...(selfAid ? { self: selfAid } : {}) },
+        dangerous: true,
+      },
+      identity,
+      session: activeSession,
+      channel,
+      channelId,
+      userId,
+      selfAid,
+      isDaemonOwner,
+    });
+    if (authDenied) return authDenied;
 
     // 权限判断：daemon owner 或 agent channel 的 owner/admin
     if (!isDaemonOwner && !isAdmin) {
@@ -1807,6 +2016,24 @@ export async function handleSlashCommand(this: any,
 
   // /restart 命令：重启服务（进程级，仅 daemon owner）
   if (normalizedContent === '/restart') {
+    const restartSelfAid = this.agentRegistry?.resolveByChannel(channel)?.aid;
+    const authDenied = await authorizeSlashIntent({
+      intent: {
+        operation: 'system.restart',
+        scope: 'process',
+        source: 'slash',
+        args: {},
+        dangerous: true,
+      },
+      identity,
+      session: activeSession,
+      channel,
+      channelId,
+      userId,
+      selfAid: restartSelfAid,
+      isDaemonOwner,
+    });
+    if (authDenied) return authDenied;
     // 进程级操作：必须是 daemon owner（evolclaw.json.owners），与 menu 协议 /system restart 一致。
     // agent-channel 的 owner 角色不足以重启整个 daemon。
     if (!isDaemonOwner) {

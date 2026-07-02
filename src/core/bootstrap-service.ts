@@ -5,6 +5,7 @@ import { kitsTemplatesDir, agentMdPath } from '../paths.js';
 import { logger } from '../utils/logger.js';
 import { loadAgent, saveAgent } from '../config-store.js';
 import { normalizeAgentLifecycle, withLifecycleForWrite } from '../config/lifecycle.js';
+import { getFirstRoleAssignment } from '../config/role-assignments.js';
 import { renderTemplate } from '../eck/manifest-engine.js';
 import { activeBaseagent } from './model/config-scope.js';
 import { buildEnvelope } from './message/message-utils.js';
@@ -125,13 +126,8 @@ export class BootstrapService {
     saveAgent(withLifecycleForWrite(cfg, lifecycle) as AgentConfig);
   }
 
-  private resolveConfiguredRecipient(config: AgentConfig, channelKey: string, channelType?: string): string | undefined {
-    if (channelType === 'aun') return config.owners?.[0];
-    const parsed = this.parseChannelKey(channelKey);
-    const inst = parsed
-      ? config.channels.find(c => c.type === parsed.type && c.name === parsed.name)
-      : config.channels.find(c => c.name === channelKey);
-    return inst?.owners?.[0];
+  private resolveConfiguredRecipient(config: AgentConfig, channelKey: string, _channelType?: string): string | undefined {
+    return getFirstRoleAssignment(config.aid, { scope: 'private', role: 'owner' })?.peerId;
   }
 
   private defaultChannelIdForConnection(channelType: string | undefined, recipientId: string): string | undefined {

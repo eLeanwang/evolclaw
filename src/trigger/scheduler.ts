@@ -37,6 +37,7 @@ import type {
   TriggerSource,
   TriggerSourceEvent,
   TriggerSourceRunInfo,
+  TriggerSubscriptionInfo,
 } from './types.js';
 
 const MAX_TIMER_MS = 2_147_483_647;
@@ -110,7 +111,7 @@ export class TriggerRuntimeScheduler {
     return this.manager.list(opts);
   }
 
-  show(triggerId: string): { definition: TriggerDefinition; active: TriggerActiveRun[]; schedule?: TriggerScheduleState; limitState?: TriggerLimitState; recentRuns: TriggerAuditRecord[]; scriptPreview?: TriggerScriptPreview } {
+  show(triggerId: string): { definition: TriggerDefinition; active: TriggerActiveRun[]; schedule?: TriggerScheduleState; limitState?: TriggerLimitState; recentRuns: TriggerAuditRecord[]; scriptPreview?: TriggerScriptPreview; subscription: TriggerSubscriptionInfo } {
     const definition = this.manager.require(triggerId);
     return {
       definition,
@@ -119,6 +120,7 @@ export class TriggerRuntimeScheduler {
       limitState: this.state.readLimitState(triggerId),
       recentRuns: this.audit.recent(triggerId, 10),
       scriptPreview: this.scriptPreview(definition),
+      subscription: this.subscriptionInfo(definition),
     };
   }
 
@@ -917,6 +919,14 @@ export class TriggerRuntimeScheduler {
 
   private unregisterEvent(triggerId: string): void {
     this.eventSource?.unregister(triggerId);
+  }
+
+  private subscriptionInfo(definition: TriggerDefinition): TriggerSubscriptionInfo {
+    if (definition.source.type !== 'event') return { status: 'not-event' };
+    if (!definition.enabled) return { status: 'inactive', warning: 'trigger is disabled' };
+    if (!this.eventSource) return { status: 'event-bus-unavailable', warning: 'event bus is not attached to this scheduler' };
+    if (this.eventSource.has(definition.id)) return { status: 'active' };
+    return { status: 'inactive', warning: 'event subscription is not registered' };
   }
 
   private async fireEventTrigger(triggerId: string, event: TriggerSourceEvent): Promise<void> {

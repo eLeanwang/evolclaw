@@ -44,6 +44,8 @@
         <button class="tab" data-view="gateway" data-i18n="tab.gateway">API Endpoints</button>
         <button class="tab" data-view="usage" data-i18n="tab.usage">Usage</button>
         <button class="tab" data-view="monitor" data-i18n="tab.monitor">Monitor</button>
+        <button class="tab" data-view="roleDefinitions" data-i18n="tab.roleDefinitions">Roles</button>
+        <button class="tab" data-view="roles" data-i18n="tab.roles">Role Assignment</button>
 
       </nav>
       <span style="flex:1"></span>
@@ -240,6 +242,113 @@
           </div>
           <div class="mon-table-wrap" id="mon-agent-table-wrap"></div>
           <div class="mon-err-wrap" id="mon-err-list"></div>
+        </div>
+      </section>
+
+      <!-- 角色定义管理页面 -->
+      <section id="view-roleDefinitions" class="view">
+        <div class="role-defs-layout">
+          <div class="role-defs-header">
+            <h2 data-i18n="roleDefs.title">角色定义管理</h2>
+            <button class="btn-new-role" id="btn-new-role">+ 新增角色</button>
+          </div>
+
+          <!-- 全局默认角色选择器 -->
+          <div class="role-default-selector" id="role-default-selector">
+            <label class="role-default-label">
+              <span>默认角色 (Default Role):</span>
+              <select id="default-private-role-select" class="form-select">
+                <!-- 动态填充 -->
+              </select>
+            </label>
+            <small style="color: var(--dim);">未显式分配角色的用户将使用此角色</small>
+          </div>
+
+          <div class="role-cards-grid" id="role-cards-grid">
+            <!-- 动态渲染角色卡片 -->
+          </div>
+        </div>
+
+        <!-- 角色编辑弹窗 -->
+        <div id="role-edit-modal" class="modal" style="display:none">
+          <div class="modal-content">
+            <div class="modal-header">
+              <h3 id="role-edit-title">编辑角色</h3>
+              <button class="modal-close" id="role-edit-close">×</button>
+            </div>
+            <div class="modal-body" id="role-edit-body">
+              <!-- 动态渲染表单 -->
+            </div>
+            <div class="modal-footer">
+              <button class="btn-secondary" id="role-edit-cancel" data-i18n="roleDefs.cancel">取消</button>
+              <button class="btn-primary" id="role-edit-save" data-i18n="roleDefs.save">保存</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 角色分配管理页面 -->
+      <section id="view-roles" class="view">
+        <div class="role-assign-layout">
+          <!-- Agent 选择器 + 搜索 + 筛选 -->
+          <div class="assign-header">
+            <label>
+              <span data-i18n="roles.selectAgent">Select Agent:</span>
+              <select id="roles-agent-select">
+                <option value="" data-i18n="roles.selectAgentPlaceholder">-- Select an Agent --</option>
+              </select>
+            </label>
+            <select id="filter-chattype">
+              <option value="" data-i18n="roles.filter.allChatType">全部会话</option>
+              <option value="private" data-i18n="roles.filter.private">💬 私聊</option>
+              <option value="group" data-i18n="roles.filter.group">👥 群聊</option>
+            </select>
+            <select id="filter-verify">
+              <option value="" data-i18n="roles.filter.allVerify">全部状态</option>
+              <option value="verified" data-i18n="roles.filter.verified">✅ 已验证</option>
+              <option value="invalid" data-i18n="roles.filter.invalid">⚠️ 验证失败</option>
+              <option value="agentmd-unverified" data-i18n="roles.filter.unverified">⚠️ 未验证</option>
+              <option value="unknown" data-i18n="roles.filter.unknown">❓ 未知</option>
+            </select>
+            <div class="search-box">
+              <input type="search" id="peer-search" placeholder="Search peer key..." data-i18n="roles.searchPlaceholder">
+            </div>
+          </div>
+
+          <!-- 对端关系列表 -->
+          <div class="assign-peer-roles">
+            <table id="relations-table" class="relations-table">
+              <thead>
+                <tr>
+                  <th data-i18n="roles.table.chatType">会话</th>
+                  <th data-i18n="roles.table.peerName">昵称</th>
+                  <th data-i18n="roles.table.peerAid">对端AID</th>
+                  <th data-i18n="roles.table.peerType">类型</th>
+                  <th data-i18n="roles.table.role">角色</th>
+                  <th data-i18n="roles.table.source">来源</th>
+                  <th data-i18n="roles.table.actions">操作</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- 对端角色编辑弹窗 -->
+        <div id="peer-role-modal" class="modal" style="display:none">
+          <div class="modal-content">
+            <div class="modal-header">
+              <h3 id="peer-role-title">Edit Peer Role</h3>
+              <button class="modal-close" id="peer-role-close">×</button>
+            </div>
+            <div class="modal-body" id="peer-role-body">
+              <!-- 动态渲染 -->
+            </div>
+            <div class="modal-footer">
+              <button class="btn-secondary" id="peer-role-cancel" data-i18n="roleDefs.cancel">Cancel</button>
+              <button class="btn-primary" id="peer-role-save" data-i18n="roleDefs.save">Save</button>
+            </div>
+          </div>
         </div>
       </section>
 

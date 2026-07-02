@@ -96,28 +96,40 @@ function listAgentAids(): string[] {
   }
 }
 
-function extractEntries(raw: any, scope: string): GatewayEntry[] {
+function extractEntries(raw: any, scope: string, includeEmpty = false): GatewayEntry[] {
   const out: GatewayEntry[] = [];
   const ba = raw?.baseagents;
-  if (!ba || typeof ba !== 'object') return out;
+  if (!ba || typeof ba !== 'object') {
+    if (!includeEmpty) return out;
+    for (const type of GATEWAY_TYPES) {
+      out.push({
+        scope,
+        type,
+        name: DISPLAY_NAMES[type] ?? type,
+        apiKeyIsEnvRef: false,
+      });
+    }
+    return out;
+  }
   for (const type of GATEWAY_TYPES) {
     const c = ba[type];
-    if (!c || typeof c !== 'object') continue;
-    const { mask, isEnvRef } = maskApiKey(c.apiKey);
+    if ((!c || typeof c !== 'object') && !includeEmpty) continue;
+    const cfg = c && typeof c === 'object' ? c : {};
+    const { mask, isEnvRef } = maskApiKey(cfg.apiKey);
     out.push({
       scope,
       type,
       name: DISPLAY_NAMES[type] ?? type,
-      baseUrl: c.baseUrl,
+      baseUrl: cfg.baseUrl,
       apiKeyMask: mask,
       apiKeyIsEnvRef: isEnvRef,
-      model: c.model,
-      effort: c.effort ?? c.reasoning,
-      mode: c.mode,
-      cliPath: c.cliPath,
-      useVertex: c.useVertex,
-      project: c.project,
-      location: c.location,
+      model: cfg.model,
+      effort: cfg.effort ?? cfg.reasoning,
+      mode: cfg.mode,
+      cliPath: cfg.cliPath,
+      useVertex: cfg.useVertex,
+      project: cfg.project,
+      location: cfg.location,
     });
   }
   return out;
@@ -129,7 +141,7 @@ export function gatewayList(): ExecResult {
     const gateways: GatewayEntry[] = [];
     const defaults = readDefaultsRaw();
 
-    if (defaults) gateways.push(...extractEntries(defaults, 'defaults'));
+    if (defaults) gateways.push(...extractEntries(defaults, 'defaults', true));
 
     const aids = listAgentAids();
 

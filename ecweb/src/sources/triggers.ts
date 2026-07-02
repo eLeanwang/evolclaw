@@ -41,6 +41,7 @@ async function listTriggersForAgent(agentAid: string, agentLabel: string): Promi
     const effectiveAgentAid = trigger.agentAid || trigger.schedulerAid || agentAid;
     let definition: any = null;
     let scriptPreview: any = null;
+    let subscription: any = null;
     try {
       const shown = await ipcQuery<any>(
         p.socket,
@@ -50,6 +51,7 @@ async function listTriggersForAgent(agentAid: string, agentLabel: string): Promi
       if (shown?.ok) {
         definition = shown.definition ?? null;
         scriptPreview = shown.scriptPreview ?? null;
+        subscription = shown.subscription ?? null;
       }
     } catch { /* detail is best-effort; menu data remains usable */ }
     return {
@@ -58,6 +60,7 @@ async function listTriggersForAgent(agentAid: string, agentLabel: string): Promi
       agentLabel: trigger.agentLabel || agentLabel,
       definition,
       scriptPreview,
+      subscription,
     };
   }));
 }

@@ -21,6 +21,8 @@ const translations = {
     'tab.gateway': 'API 端点',
     'tab.usage': '用量',
     'tab.monitor': '监控',
+    'tab.roles': '角色分配',
+    'tab.roleDefinitions': '角色定义',
 
     // Status
     'status.connecting': '连接中…',
@@ -202,6 +204,8 @@ const translations = {
     'messages.empty.selectToView': '选择 Agent 查看消息',
     'messages.empty.noMessages': '暂无消息',
     'messages.tag.group': '群聊',
+    'messages.tag.groupShort': '群',
+    'messages.all.aggregate': '聚合全部消息',
     'messages.tag.encrypted': '🔒密文',
     'messages.tag.plain': '明文',
     'messages.tag.proactive': '自主',
@@ -216,6 +220,7 @@ const translations = {
     'messages.msgType.file': '文件',
     'messages.msgType.command': '命令',
     'messages.groupCount': '群 {count}',
+    'messages.privateCount': '单 {count}',
 
     // Sessions view
     'sessions.filter.normal': '🔍 仅有效',
@@ -420,6 +425,10 @@ const translations = {
     'triggers.error.emptySchedule': '调度表达式不能为空',
     'triggers.error.scheduleDurationFormat': '{type}支持格式：30s、15m、2h、1d',
     'triggers.error.invalidAt': '指定时间格式不正确',
+    'triggers.error.invalidEventPattern': '事件模式格式不正确，支持 *、message:received、message:*',
+    'triggers.error.filterPathRequired': '过滤字段不能为空',
+    'triggers.error.filterValueRequired': '过滤条件值不能为空',
+    'triggers.error.filterJsonInvalid': '过滤条件 JSON 不合法',
     'triggers.error.nameRequired': '名称不能为空',
     'triggers.error.promptRequired': 'Prompt 不能为空',
     'triggers.error.channelRequired': '目标渠道不能为空',
@@ -439,6 +448,15 @@ const translations = {
     'triggers.field.scheduleType': '调度类型',
     'triggers.field.timezone': '时区',
     'triggers.field.scheduleExpression': '调度表达式',
+    'triggers.field.eventPattern': '事件模式',
+    'triggers.field.eventFilter': '过滤条件',
+    'triggers.field.filterField': '字段',
+    'triggers.field.filterOperator': '操作符',
+    'triggers.field.filterValue': '值',
+    'triggers.eventCatalog.loading': '正在加载事件目录…',
+    'triggers.eventCatalog.unavailable': '事件目录不可用',
+    'triggers.eventCatalog.noEvents': '没有匹配的事件',
+    'triggers.eventCatalog.noFields': '没有匹配的字段',
     'triggers.field.outputTemplate': '输出模板',
     'triggers.field.prompt': 'Prompt',
     'triggers.field.executionType': '执行类型',
@@ -466,6 +484,7 @@ const translations = {
     'triggers.placeholder.scheduleDuration': '30s / 15m / 2h / 1d',
     'triggers.placeholder.maxDuration': '30s / 15m / 2h / 1d',
     'triggers.placeholder.scriptPath': 'scripts/job.js --foo bar',
+    'triggers.placeholder.filterValue': '文本 / 数字 / true / false',
     'triggers.concurrency.forbid': '跳过本次执行',
     'triggers.concurrency.replace': '中断上次并执行本次',
     'triggers.concurrency.allow': '允许并行执行',
@@ -486,6 +505,7 @@ const translations = {
     'triggers.empty.noTriggers': '暂无触发器',
     'triggers.empty.noAgentTriggers': '该 Agent 暂无触发器',
     'triggers.th.status': '状态',
+    'triggers.th.subscription': '订阅',
     'triggers.th.name': '名称',
     'triggers.th.type': '类型',
     'triggers.th.expression': '表达式',
@@ -500,6 +520,20 @@ const translations = {
     'triggers.th.createdChannel': '创建渠道',
     'triggers.th.createdAt': '创建时间',
     'triggers.th.operations': '操作',
+    'triggers.subscription.active': '已订阅',
+    'triggers.subscription.inactive': '未订阅',
+    'triggers.subscription.event-bus-unavailable': '无事件总线',
+    'triggers.filter.add': '添加条件',
+    'triggers.filter.clear': '清空条件',
+    'triggers.filter.none': '未设置过滤条件',
+    'triggers.filter.op.eq': '等于',
+    'triggers.filter.op.in': '包含于',
+    'triggers.filter.op.regex': '正则匹配',
+    'triggers.filter.op.gt': '大于',
+    'triggers.filter.op.gte': '大于等于',
+    'triggers.filter.op.lt': '小于',
+    'triggers.filter.op.lte': '小于等于',
+    'triggers.filter.op.exists': '存在',
 
     // Usage view
     'usage.subtab.overview': '总览',
@@ -588,6 +622,63 @@ const translations = {
     'usage.explorer.th.cacheCreation': 'Cache↑',
     'usage.explorer.th.cacheHit': 'CacheHit',
     'usage.explorer.th.calls': 'Calls',
+
+    // Role Definitions view
+    'roleDefs.title': '角色定义管理',
+    'roleDefs.owner': '所有者',
+    'roleDefs.admin': '管理员',
+    'roleDefs.member': '成员',
+    'roleDefs.guest': '访客',
+    'roleDefs.anonymous': '匿名',
+    'roleDefs.viewDetails': '查看详情',
+    'roleDefs.edit': '编辑',
+    'roleDefs.reset': '重置',
+    'roleDefs.save': '保存',
+    'roleDefs.cancel': '取消',
+    'roleDefs.permissionMode': '权限模式',
+    'roleDefs.model': '模型',
+    'roleDefs.dispatch': '分发模式',
+    'roleDefs.allowOverride': '允许覆盖',
+    'roleDefs.allowedModels': '允许的模型',
+    'roleDefs.description': '描述',
+    'roleDefs.resetConfirm': '确定要将 {role} 重置为默认配置吗？',
+    'roleDefs.saveSuccess': '保存成功',
+    'roleDefs.saveFailed': '保存失败',
+
+    // Role permission values
+    'roleDefs.effort.low': '低 (low)',
+    'roleDefs.effort.medium': '中 (medium)',
+    'roleDefs.effort.high': '高 (high)',
+    'roleDefs.showActivities.true': '显示 (true)',
+    'roleDefs.showActivities.false': '不显示 (false)',
+    'roleDefs.permMode.bypass': '绕过 (bypass)',
+    'roleDefs.permMode.request': '请求 (request)',
+    'roleDefs.permMode.auto': '自动 (auto)',
+    'roleDefs.permMode.readonly': '只读 (readonly)',
+    'roleDefs.dispatch.broadcast': '广播 (broadcast)',
+    'roleDefs.dispatch.mention': '提及 (mention)',
+
+    // Roles view
+    'roles.selectAgent': '选择智能体:',
+    'roles.selectAgentPlaceholder': '-- 请选择智能体 --',
+    'roles.searchPlaceholder': '搜索对端...',
+    'roles.table.chatType': '会话',
+    'roles.table.peerName': '昵称',
+    'roles.table.peerAid': '对端AID',
+    'roles.table.peerType': '类型',
+    'roles.table.role': '有效角色',
+    'roles.table.source': '来源',
+    'roles.table.actions': '操作',
+    'roles.chatType.private': '私聊',
+    'roles.chatType.group': '群聊',
+    'roles.filter.allChatType': '全部会话',
+    'roles.filter.private': '💬 私聊',
+    'roles.filter.group': '👥 群聊',
+    'roles.filter.allVerify': '全部状态',
+    'roles.filter.verified': '✅ 已验证',
+    'roles.filter.invalid': '⚠️ 验证失败',
+    'roles.filter.unverified': '⚠️ 未验证',
+    'roles.filter.unknown': '❓ 未知',
   },
   'en-US': {
     // Tabs
@@ -600,6 +691,8 @@ const translations = {
     'tab.gateway': 'API Endpoints',
     'tab.usage': 'Usage',
     'tab.monitor': 'Monitor',
+    'tab.roles': 'Role Assignment',
+    'tab.roleDefinitions': 'Roles',
 
     // Status
     'status.connecting': 'Connecting…',
@@ -781,6 +874,8 @@ const translations = {
     'messages.empty.selectToView': 'Select Agent to view messages',
     'messages.empty.noMessages': 'No messages',
     'messages.tag.group': 'Group',
+    'messages.tag.groupShort': 'G',
+    'messages.all.aggregate': 'Aggregate messages',
     'messages.tag.encrypted': '🔒Encrypted',
     'messages.tag.plain': 'Plain',
     'messages.tag.proactive': 'Proactive',
@@ -795,6 +890,7 @@ const translations = {
     'messages.msgType.file': 'File',
     'messages.msgType.command': 'Command',
     'messages.groupCount': '{count} groups',
+    'messages.privateCount': '{count} private',
 
     // Sessions view
     'sessions.filter.normal': '🔍 Valid Only',
@@ -999,6 +1095,10 @@ const translations = {
     'triggers.error.emptySchedule': 'Schedule expression is required',
     'triggers.error.scheduleDurationFormat': '{type} supports: 30s, 15m, 2h, 1d',
     'triggers.error.invalidAt': 'Specific time format is invalid',
+    'triggers.error.invalidEventPattern': 'Invalid event pattern. Supported: *, message:received, message:*',
+    'triggers.error.filterPathRequired': 'Filter field is required',
+    'triggers.error.filterValueRequired': 'Filter value is required',
+    'triggers.error.filterJsonInvalid': 'Filter JSON is invalid',
     'triggers.error.nameRequired': 'Name is required',
     'triggers.error.promptRequired': 'Prompt is required',
     'triggers.error.channelRequired': 'Target channel is required',
@@ -1018,6 +1118,15 @@ const translations = {
     'triggers.field.scheduleType': 'Schedule Type',
     'triggers.field.timezone': 'Timezone',
     'triggers.field.scheduleExpression': 'Schedule Expression',
+    'triggers.field.eventPattern': 'Event Pattern',
+    'triggers.field.eventFilter': 'Filter',
+    'triggers.field.filterField': 'Field',
+    'triggers.field.filterOperator': 'Operator',
+    'triggers.field.filterValue': 'Value',
+    'triggers.eventCatalog.loading': 'Loading event catalog…',
+    'triggers.eventCatalog.unavailable': 'Event catalog unavailable',
+    'triggers.eventCatalog.noEvents': 'No matching events',
+    'triggers.eventCatalog.noFields': 'No matching fields',
     'triggers.field.outputTemplate': 'Output Template',
     'triggers.field.prompt': 'Prompt',
     'triggers.field.executionType': 'Execution Type',
@@ -1045,6 +1154,7 @@ const translations = {
     'triggers.placeholder.scheduleDuration': '30s / 15m / 2h / 1d',
     'triggers.placeholder.maxDuration': '30s / 15m / 2h / 1d',
     'triggers.placeholder.scriptPath': 'scripts/job.js --foo bar',
+    'triggers.placeholder.filterValue': 'text / number / true / false',
     'triggers.concurrency.forbid': 'Skip this run',
     'triggers.concurrency.replace': 'Cancel previous and run',
     'triggers.concurrency.allow': 'Allow parallel runs',
@@ -1065,6 +1175,7 @@ const translations = {
     'triggers.empty.noTriggers': 'No triggers',
     'triggers.empty.noAgentTriggers': 'No triggers for this agent',
     'triggers.th.status': 'Status',
+    'triggers.th.subscription': 'Subscription',
     'triggers.th.name': 'Name',
     'triggers.th.type': 'Type',
     'triggers.th.expression': 'Expression',
@@ -1079,6 +1190,20 @@ const translations = {
     'triggers.th.createdChannel': 'Created Channel',
     'triggers.th.createdAt': 'Created At',
     'triggers.th.operations': 'Operations',
+    'triggers.subscription.active': 'Subscribed',
+    'triggers.subscription.inactive': 'Not subscribed',
+    'triggers.subscription.event-bus-unavailable': 'No event bus',
+    'triggers.filter.add': 'Add Condition',
+    'triggers.filter.clear': 'Clear Conditions',
+    'triggers.filter.none': 'No filter conditions',
+    'triggers.filter.op.eq': 'Equals',
+    'triggers.filter.op.in': 'In',
+    'triggers.filter.op.regex': 'Regex',
+    'triggers.filter.op.gt': 'Greater than',
+    'triggers.filter.op.gte': 'Greater or equal',
+    'triggers.filter.op.lt': 'Less than',
+    'triggers.filter.op.lte': 'Less or equal',
+    'triggers.filter.op.exists': 'Exists',
 
     // Usage view
     'usage.subtab.overview': 'Overview',
@@ -1167,6 +1292,63 @@ const translations = {
     'usage.explorer.th.cacheCreation': 'Cache↑',
     'usage.explorer.th.cacheHit': 'CacheHit',
     'usage.explorer.th.calls': 'Calls',
+
+    // Role Definitions view
+    'roleDefs.title': 'Role Definitions',
+    'roleDefs.owner': 'Owner',
+    'roleDefs.admin': 'Admin',
+    'roleDefs.member': 'Member',
+    'roleDefs.guest': 'Guest',
+    'roleDefs.anonymous': 'Anonymous',
+    'roleDefs.viewDetails': 'View Details',
+    'roleDefs.edit': 'Edit',
+    'roleDefs.reset': 'Reset',
+    'roleDefs.save': 'Save',
+    'roleDefs.cancel': 'Cancel',
+    'roleDefs.permissionMode': 'Permission Mode',
+    'roleDefs.model': 'Model',
+    'roleDefs.dispatch': 'Dispatch',
+    'roleDefs.allowOverride': 'Allow Override',
+    'roleDefs.allowedModels': 'Allowed Models',
+    'roleDefs.description': 'Description',
+    'roleDefs.resetConfirm': 'Reset {role} to default configuration?',
+    'roleDefs.saveSuccess': 'Saved successfully',
+    'roleDefs.saveFailed': 'Save failed',
+
+    // Role permission values
+    'roleDefs.effort.low': 'Low (low)',
+    'roleDefs.effort.medium': 'Medium (medium)',
+    'roleDefs.effort.high': 'High (high)',
+    'roleDefs.showActivities.true': 'Show (true)',
+    'roleDefs.showActivities.false': 'Hide (false)',
+    'roleDefs.permMode.bypass': 'Bypass (bypass)',
+    'roleDefs.permMode.request': 'Request (request)',
+    'roleDefs.permMode.auto': 'Auto (auto)',
+    'roleDefs.permMode.readonly': 'Readonly (readonly)',
+    'roleDefs.dispatch.broadcast': 'Broadcast (broadcast)',
+    'roleDefs.dispatch.mention': 'Mention (mention)',
+
+    // Roles view
+    'roles.selectAgent': 'Select Agent:',
+    'roles.selectAgentPlaceholder': '-- Select an Agent --',
+    'roles.searchPlaceholder': 'Search peer...',
+    'roles.table.chatType': 'Chat',
+    'roles.table.peerName': 'Name',
+    'roles.table.peerAid': 'Peer AID',
+    'roles.table.peerType': 'Type',
+    'roles.table.role': 'Role',
+    'roles.table.source': 'Source',
+    'roles.table.actions': 'Actions',
+    'roles.chatType.private': 'Private',
+    'roles.chatType.group': 'Group',
+    'roles.filter.allChatType': 'All Chats',
+    'roles.filter.private': '💬 Private',
+    'roles.filter.group': '👥 Group',
+    'roles.filter.allVerify': 'All Status',
+    'roles.filter.verified': '✅ Verified',
+    'roles.filter.invalid': '⚠️ Verification Failed',
+    'roles.filter.unverified': '⚠️ Unverified',
+    'roles.filter.unknown': '❓ Unknown',
   }
 };
 
@@ -1288,7 +1470,7 @@ let ws = null;
 let reconnectDelay = 1000;
 let currentView = localStorage.getItem(VIEW_KEY) || 'agents';
 let pendingSub = null;        // 重连后要恢复的订阅
-const state = { agents: null, msg: null, session: null, cache: null, system: null, triggers: null, monitor: null, gateway: null };
+const state = { agents: null, msg: null, session: null, cache: null, system: null, triggers: null, monitor: null, gateway: null, roles: null, roleDefinitions: null };
 
 function setConnStatus(text, cls) {
   const el = $('#conn-status');
@@ -1339,6 +1521,11 @@ function connect() {
     if (msg.type === 'menu.response') {
       const pend = _menuPending[msg.requestId];
       if (pend) { delete _menuPending[msg.requestId]; pend.resolve(msg.data); }
+      return;
+    }
+    if (msg.type === 'ipc.response') {
+      const pend = _ipcPending[msg.requestId];
+      if (pend) { delete _ipcPending[msg.requestId]; pend.resolve(msg.data); }
       return;
     }
     if (msg.type === 'snapshot' || msg.type === 'delta') {
@@ -1406,6 +1593,21 @@ function menuSend(payload) {
   });
 }
 
+const _ipcPending = {};
+let _ipcSeq = 0;
+function ipcSend(payload, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    if (!ws || ws.readyState !== WebSocket.OPEN) { reject(new Error(t('common.notConnected'))); return; }
+    const requestId = 'ecw-ipc-' + (++_ipcSeq);
+    const wait = Number.isFinite(Number(timeoutMs)) && Number(timeoutMs) > 0 ? Number(timeoutMs) : 10000;
+    _ipcPending[requestId] = { resolve, reject };
+    setTimeout(() => {
+      if (_ipcPending[requestId]) { delete _ipcPending[requestId]; reject(new Error('timeout')); }
+    }, wait + 1000);
+    ws.send(JSON.stringify({ type: 'ipc', requestId, payload, timeoutMs: wait }));
+  });
+}
+
 // 心跳
 setInterval(() => {
   if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'ping' }));
@@ -1438,6 +1640,8 @@ function switchView(view) {
   else if (view === 'monitor') subscribe('monitor', { range: monRange });
   else if (view === 'gateway') subscribe('gateway', {});
   else if (view === 'usage') refreshUsageView();
+  else if (view === 'roleDefinitions') subscribe('roleDefinitions', {});
+  else if (view === 'roles') subscribe('roles', {});
   else subscribe('agents', {});
   if (state[view]) renderView(view);
 }
@@ -1457,6 +1661,8 @@ function renderView(view) {
   else if (view === 'triggers') renderTriggers(state.triggers);
   else if (view === 'monitor') renderMonitor(state.monitor);
   else if (view === 'gateway') renderGateway(state.gateway);
+  else if (view === 'roles') renderRoles(state.roles);
+  else if (view === 'roleDefinitions') renderRoleDefinitions(state.roleDefinitions);
 }
 
 // ── 工具 ──
@@ -1945,7 +2151,7 @@ function renderCache(data) {
     }
     html += '<tr>' +
       `<td>${esc(gl.label)}${gl.sub ? ` <span style="color:var(--dim)">${esc(gl.sub)}</span>` : ''}</td>` +
-      `<td><span class="tag tag-${gl.kind}">${esc(gl.kind)}</span></td>` +
+      `<td><span class="cache-tag cache-tag-${gl.kind}">${esc(gl.kind)}</span></td>` +
       `<td>${fmtNum(c.gets)}</td><td>${fmtNum(c.hits)}</td><td>${fmtNum(c.misses)}</td>` +
       `<td><span class="dot ${rateCls(r)}"></span>${fmtPct(r)}</td>` +
       `<td>${fmtNum(c.reReads)}</td><td>${fmtNum(c.evictions)}</td>` +
@@ -2003,10 +2209,12 @@ function renderMsg(data) {
   for (const a of aids) {
     const sel = a.aid === msgSel.aid ? ' sel' : '';
     const name = a.selfAID && a.selfAID !== 'unknown' ? shortAid(a.selfAID) : 'unknown';
+    const privateCount = Math.max(0, (a.peerCount || 0) - (a.groupCount || 0));
+    const privateBit = tf('messages.privateCount', { count: privateCount });
     const groupBit = a.groupCount ? ` · ${tf('messages.groupCount', { count: a.groupCount })}` : '';
     aidsHtml += `<div class="list-item${sel}" data-aid="${esc(a.aid)}">` +
       `<div class="name">${esc(name)}</div>` +
-      `<div class="sub">↓${a.totalIn} ↑${a.totalOut} · ${a.peerCount} chats${groupBit} · ${fmtAgo(a.lastAt)}</div></div>`;
+      `<div class="sub">↓${a.totalIn} ↑${a.totalOut} · ${privateBit}${groupBit} · ${fmtAgo(a.lastAt)}</div></div>`;
   }
   $('#msg-aids').innerHTML = aidsHtml;
   $('#msg-aids').querySelectorAll('.list-item').forEach(item => {
@@ -2018,16 +2226,18 @@ function renderMsg(data) {
   if (msgSel.aid) {
     const allSel = msgSel.peer === null ? ' sel' : '';
     peersHtml += `<div class="list-item${allSel}" data-peer=""><div class="name">${t('messages.colTitle.all')}</div>` +
-      `<div class="sub">${peers.length} chats</div></div>`;
+      `<div class="sub">${peers.length} chats · ${t('messages.all.aggregate')}</div></div>`;
     for (const p of peers) {
       const sel = p.peerId === msgSel.peer ? ' sel' : '';
+      const isGroup = p.chatType === 'group';
       const displayName = p.chatType === 'group'
         ? (p.groupName || p.peerName || p.groupId || p.peerId)
         : (p.peerName || p.peerId);
       const channelLabel = p.channelName && p.channelName !== 'main' ? `${p.channelType}/${p.channelName}` : (p.channelType || '');
-      const typeLabel = p.chatType === 'group' ? `${channelLabel} · ${t('messages.tag.group')}` : channelLabel;
+      const groupMark = isGroup ? `<span class="msg-group-mark">${esc(t('messages.tag.groupShort'))}</span>` : '';
+      const channelTag = channelLabel ? `<span class="msg-tag">${esc(channelLabel)}</span>` : '';
       peersHtml += `<div class="list-item${sel}" data-peer="${esc(p.peerId)}">` +
-        `<div class="name">${esc(shortId(displayName))} <span class="tag">${esc(typeLabel)}</span></div>` +
+        `<div class="name">${groupMark}<span class="msg-peer-title">${esc(shortId(displayName))}</span>${channelTag}</div>` +
         `<div class="sub">↓${p.inbound} ↑${p.outbound} · ${fmtAgo(p.lastAt)}</div></div>`;
     }
   } else {
@@ -2056,7 +2266,7 @@ function renderMsg(data) {
     if (mt) tags.push(`${mt.icon}${mt.label()}`);
     if (m.encrypt != null) tags.push(m.encrypt ? t('messages.tag.encrypted') : t('messages.tag.plain'));
     if (m.chatmode) tags.push(m.chatmode === 'proactive' ? t('messages.tag.proactive') : (m.chatmode === 'inject' ? t('messages.tag.inject') : t('messages.tag.responsive')));
-    const tagHtml = tags.map(tag => `<span class="tag">${esc(tag)}</span>`).join('');
+    const tagHtml = tags.map(tag => `<span class="msg-tag">${esc(tag)}</span>`).join('');
     msgHtml += `<div class="bubble ${cls}">` +
       `<div class="meta">${fmtTime(m.ts)} ${arrow} ${esc(from)}→${esc(to)}${tagHtml}</div>` +
       `<div class="body">${esc(m.content)}</div></div>`;
@@ -3811,6 +4021,7 @@ const TRIGGER_SCHEDULE_TYPES = [
   ['at', () => t('triggers.schedule.at')],
   ['cron', () => t('triggers.schedule.cron')],
   ['interval', () => t('triggers.schedule.interval')],
+  ['event', () => t('triggers.schedule.event')],
 ];
 const TRIGGER_EXECUTION_MODES = [
   ['agent', () => t('triggers.execution.agent')],
@@ -3844,6 +4055,20 @@ const TRIGGER_FEEDBACK_DELIVERY_OPTIONS = [
   ['inbound', () => t('triggers.feedback.delivery.inbound')],
   ['direct', () => t('triggers.feedback.delivery.direct')],
 ];
+const TRIGGER_FILTER_OPERATORS = [
+  ['eq', () => t('triggers.filter.op.eq')],
+  ['in', () => t('triggers.filter.op.in')],
+  ['regex', () => t('triggers.filter.op.regex')],
+  ['gt', () => t('triggers.filter.op.gt')],
+  ['gte', () => t('triggers.filter.op.gte')],
+  ['lt', () => t('triggers.filter.op.lt')],
+  ['lte', () => t('triggers.filter.op.lte')],
+  ['exists', () => t('triggers.filter.op.exists')],
+];
+let _triggerEventCatalog = { namespaces: [], events: [] };
+let _triggerEventCatalogPromise = null;
+let _triggerEventCatalogLoading = false;
+let _triggerEventCatalogError = '';
 
 function trigStatusBadge(status) {
   const map = {
@@ -3855,6 +4080,23 @@ function trigStatusBadge(status) {
   };
   const [label, cls] = map[status] || [status, 'trig-badge-fired'];
   return `<span class="trig-badge ${cls}">${esc(label)}</span>`;
+}
+
+function trigSubscriptionBadge(subscription, sourceType) {
+  if (sourceType !== 'event') return '<span class="trig-sub muted">—</span>';
+  const status = subscription?.status || 'inactive';
+  const map = {
+    active: [t('triggers.subscription.active'), 'ok'],
+    inactive: [t('triggers.subscription.inactive'), 'warn'],
+    'event-bus-unavailable': [t('triggers.subscription.event-bus-unavailable'), 'err'],
+  };
+  const [label, cls] = map[status] || [status, 'warn'];
+  const title = subscription?.warning ? ` title="${esc(subscription.warning)}"` : '';
+  return `<span class="trig-sub ${cls}"${title}>${esc(label)}</span>`;
+}
+
+function triggerSourceType(trigger) {
+  return trigger?.definition?.source?.type || trigger?.scheduleType || '';
 }
 
 function triggerRefresh() {
@@ -3914,6 +4156,209 @@ function triggerOptionHtml(items, current, emptyLabel) {
     html += `<option value="${esc(selected)}" selected>${esc(selected)} (${t('common.currentSuffix')})</option>`;
   }
   return html;
+}
+
+async function triggerEnsureEventCatalog(ctx) {
+  if (!_triggerEventCatalogPromise) {
+    _triggerEventCatalogLoading = true;
+    _triggerEventCatalogError = '';
+    if (ctx && _triggerEdit === ctx) triggerRefreshEventDatalists(ctx);
+    _triggerEventCatalogPromise = ipcSend({ type: 'trigger.eventCatalog' }, 10000)
+      .then(resp => {
+        if (!resp?.ok) throw new Error(resp?.error || 'event catalog unavailable');
+        _triggerEventCatalog = {
+          namespaces: Array.isArray(resp.namespaces) ? resp.namespaces : [],
+          events: Array.isArray(resp.events) ? resp.events : [],
+        };
+        _triggerEventCatalogLoading = false;
+        _triggerEventCatalogError = '';
+        return _triggerEventCatalog;
+      })
+      .catch(err => {
+        _triggerEventCatalogLoading = false;
+        _triggerEventCatalogError = err?.message || String(err);
+        _triggerEventCatalogPromise = null;
+        throw err;
+      });
+  }
+  const catalog = await _triggerEventCatalogPromise;
+  if (ctx && _triggerEdit === ctx) triggerRefreshEventDatalists(ctx);
+  return catalog;
+}
+
+function triggerEventPatternOptionsHtml(current) {
+  const selected = String(current || '');
+  const values = new Map();
+  values.set('*', '*');
+  for (const ns of _triggerEventCatalog.namespaces || []) values.set(`${ns}:*`, `${ns}:*`);
+  for (const ev of _triggerEventCatalog.events || []) values.set(ev.type, `${ev.type} - ${ev.description || ''}`.trim());
+  if (selected && !values.has(selected)) values.set(selected, selected);
+  return [...values.entries()]
+    .map(([value, label]) => `<option value="${esc(value)}" label="${esc(label)}"></option>`)
+    .join('');
+}
+
+function triggerEventFieldsForPattern(pattern) {
+  const text = String(pattern || '').trim();
+  const events = _triggerEventCatalog.events || [];
+  let matched = events;
+  if (text && text !== '*') {
+    if (text.endsWith(':*')) {
+      const prefix = text.slice(0, -1);
+      matched = events.filter(ev => ev.type.startsWith(prefix));
+    } else {
+      matched = events.filter(ev => ev.type === text);
+    }
+  }
+  const fields = new Map();
+  for (const ev of matched) {
+    for (const field of ev.fields || []) {
+      if (!field?.path || fields.has(field.path)) continue;
+      fields.set(field.path, field);
+    }
+  }
+  return [...fields.values()].sort((a, b) => String(a.path).localeCompare(String(b.path)));
+}
+
+function triggerEventFieldOptionsHtml(pattern) {
+  return triggerEventFieldsForPattern(pattern)
+    .map(field => `<option value="${esc(field.path)}" label="${esc(`${field.path} (${field.type}${field.optional ? '?' : ''})`)}"></option>`)
+    .join('');
+}
+
+function triggerRefreshEventDatalists(ctx) {
+  const root = ctx.backdrop;
+  const pattern = root.querySelector('#trig-edit-schedule-value')?.value || ctx.original.scheduleValue || '';
+  const patternList = root.querySelector('#trig-event-pattern-list');
+  if (patternList) patternList.innerHTML = triggerEventPatternOptionsHtml(pattern);
+  const fieldList = root.querySelector('#trig-event-field-list');
+  if (fieldList) fieldList.innerHTML = triggerEventFieldOptionsHtml(pattern);
+}
+
+function triggerFilterOperatorOptions(current) {
+  return triggerOptionHtml(TRIGGER_FILTER_OPERATORS, current || 'eq', null);
+}
+
+function triggerFilterRowsFromMatch(match) {
+  const rows = [];
+  if (!match || typeof match !== 'object') return rows;
+  for (const [path, expected] of Object.entries(match)) {
+    if (typeof expected === 'string' || typeof expected === 'number' || typeof expected === 'boolean') {
+      rows.push({ path, op: 'eq', value: String(expected) });
+      continue;
+    }
+    if (!expected || typeof expected !== 'object') {
+      rows.push({ path, op: 'eq', value: String(expected ?? '') });
+      continue;
+    }
+    if ('$in' in expected) rows.push({ path, op: 'in', value: Array.isArray(expected.$in) ? expected.$in.map(v => String(v)).join(', ') : '' });
+    if ('$regex' in expected) rows.push({ path, op: 'regex', value: String(expected.$regex ?? '') });
+    if ('$gt' in expected) rows.push({ path, op: 'gt', value: String(expected.$gt ?? '') });
+    if ('$gte' in expected) rows.push({ path, op: 'gte', value: String(expected.$gte ?? '') });
+    if ('$lt' in expected) rows.push({ path, op: 'lt', value: String(expected.$lt ?? '') });
+    if ('$lte' in expected) rows.push({ path, op: 'lte', value: String(expected.$lte ?? '') });
+    if ('$exists' in expected) rows.push({ path, op: 'exists', value: String(expected.$exists ?? true) });
+  }
+  return rows;
+}
+
+function triggerFilterRowHtml(row = {}) {
+  const path = String(row.path || '');
+  const op = String(row.op || 'eq');
+  const value = String(row.value ?? (op === 'exists' ? 'true' : ''));
+  return `<div class="trig-filter-row">` +
+    `<label class="ag-edit-field"><span>${t('triggers.field.filterField')}</span><input class="trig-filter-path" list="trig-event-field-list" type="text" autocomplete="off" spellcheck="false" value="${esc(path)}"></label>` +
+    `<label class="ag-edit-field"><span>${t('triggers.field.filterOperator')}</span><select class="trig-filter-op">${triggerFilterOperatorOptions(op)}</select></label>` +
+    `<label class="ag-edit-field"><span>${t('triggers.field.filterValue')}</span><input class="trig-filter-value" type="text" autocomplete="off" spellcheck="false" value="${esc(value)}" placeholder="${t('triggers.placeholder.filterValue')}"></label>` +
+    `<button class="ctrl-btn danger trig-filter-remove" type="button" title="${t('triggers.op.delete')}">×</button>` +
+  `</div>`;
+}
+
+function triggerRenderFilterRows(ctx, rows) {
+  const list = ctx.backdrop.querySelector('#trig-filter-list');
+  if (!list) return;
+  if (!rows.length) {
+    list.innerHTML = `<div class="trig-filter-empty">${t('triggers.filter.none')}</div>`;
+  } else {
+    list.innerHTML = rows.map(row => triggerFilterRowHtml(row)).join('');
+  }
+  triggerUpdateFilterJsonPreview(ctx);
+}
+
+function triggerFilterRows(ctx) {
+  return [...ctx.backdrop.querySelectorAll('.trig-filter-row')].map(row => ({
+    path: row.querySelector('.trig-filter-path')?.value || '',
+    op: row.querySelector('.trig-filter-op')?.value || 'eq',
+    value: row.querySelector('.trig-filter-value')?.value || '',
+  }));
+}
+
+function triggerParseFilterScalar(text) {
+  const value = String(text ?? '').trim();
+  if (value === 'true') return true;
+  if (value === 'false') return false;
+  if (/^-?\d+(?:\.\d+)?$/.test(value)) return Number(value);
+  return value;
+}
+
+function triggerFilterMatchFromRows(rows) {
+  const match = {};
+  const setOperator = (path, op, expected) => {
+    const current = match[path];
+    if (!current || typeof current !== 'object' || Array.isArray(current)) match[path] = {};
+    match[path][op] = expected;
+  };
+  for (const row of rows) {
+    const path = String(row.path || '').trim();
+    const op = String(row.op || 'eq');
+    const value = String(row.value ?? '').trim();
+    if (!path && !value) continue;
+    if (!path) return { error: t('triggers.error.filterPathRequired') };
+    for (const part of path.split('.')) {
+      if (!part || part === '__proto__' || part === 'prototype' || part === 'constructor') {
+        return { error: t('triggers.error.filterPathRequired') };
+      }
+    }
+    if (op !== 'exists' && !value) return { error: t('triggers.error.filterValueRequired') };
+    if (op === 'eq') match[path] = triggerParseFilterScalar(value);
+    else if (op === 'in') setOperator(path, '$in', value.split(',').map(v => triggerParseFilterScalar(v)).filter(v => String(v).trim() !== ''));
+    else if (op === 'regex') setOperator(path, '$regex', value);
+    else if (op === 'gt' || op === 'gte' || op === 'lt' || op === 'lte') {
+      const n = Number(value);
+      if (!Number.isFinite(n)) return { error: t('triggers.error.filterValueRequired') };
+      setOperator(path, `$${op}`, n);
+    } else if (op === 'exists') {
+      setOperator(path, '$exists', value === '' ? true : value !== 'false');
+    }
+  }
+  return { match };
+}
+
+function triggerReadEventFilter(ctx) {
+  const result = triggerFilterMatchFromRows(triggerFilterRows(ctx));
+  if (result.error) return result;
+  return Object.keys(result.match).length ? { value: { match: result.match } } : { value: null };
+}
+
+function triggerStableJson(value) {
+  if (value === undefined) return '';
+  const normalize = v => {
+    if (Array.isArray(v)) return v.map(normalize);
+    if (v && typeof v === 'object') {
+      const out = {};
+      for (const key of Object.keys(v).sort()) out[key] = normalize(v[key]);
+      return out;
+    }
+    return v;
+  };
+  return JSON.stringify(normalize(value ?? null));
+}
+
+function triggerUpdateFilterJsonPreview(ctx) {
+  const preview = ctx.backdrop.querySelector('#trig-filter-json-preview');
+  if (!preview) return;
+  const result = triggerReadEventFilter(ctx);
+  preview.value = result.error ? result.error : JSON.stringify(result.value || {}, null, 2);
 }
 
 function triggerFeedbackKind(definition, branch, fallback) {
@@ -4033,6 +4478,11 @@ function triggerScheduleDurationComparable(value) {
   const parsed = triggerParseDuration(text, TRIGGER_SCHEDULE_DURATION_FORMAT);
   if (parsed !== null) return String(parsed);
   return /^[1-9]\d*$/.test(text) ? String(Number(text)) : text;
+}
+
+function triggerEventPatternValueValid(value) {
+  const text = String(value || '').trim();
+  return text === '*' || /^[A-Za-z0-9_-]+:[A-Za-z0-9_-]+$/.test(text) || /^[A-Za-z0-9_-]+:\*$/.test(text);
 }
 
 function triggerScheduleValueLabel(type, value) {
@@ -4159,6 +4609,7 @@ function triggerOriginalEditState(t) {
     scriptPreview: t?.scriptPreview ?? null,
     scheduleType: source.scheduleType,
     scheduleValue: source.scheduleValue,
+    eventFilter: definition?.source?.type === 'event' ? (definition.source.filter ?? null) : null,
     timezone: String(source.timezone ?? ''),
     prompt: triggerPrompt(definition, t),
     baseagent: String(definition?.execution?.session?.baseagent ?? t?.baseagent ?? triggerActiveBaseagentForAgent(agentAid)),
@@ -4306,19 +4757,23 @@ function syncTriggerEditFields(ctx) {
   const type = root.querySelector('#trig-edit-schedule-type')?.value || ctx.original.scheduleType;
   const typeSelect = root.querySelector('#trig-edit-schedule-type');
   const valueInput = root.querySelector('#trig-edit-schedule-value');
+  const valueLabel = root.querySelector('#trig-edit-schedule-value-label');
+  const eventFields = root.querySelectorAll('.trig-event-field');
   const strategy = root.querySelector('#trig-edit-session-strategy')?.value || ctx.original.targetSessionStrategy;
   const threadField = root.querySelector('#trig-edit-thread-field');
   const threadInput = root.querySelector('#trig-edit-thread');
   const mode = triggerEditMode(root, ctx.original.mode);
   const promptLabel = root.querySelector('#trig-edit-prompt-label');
 
-  if (typeSelect) typeSelect.disabled = ctx.original.scheduleType === 'event';
+  if (typeSelect) typeSelect.disabled = Boolean(ctx.saving);
+  if (valueLabel) valueLabel.textContent = type === 'event' ? t('triggers.field.eventPattern') : t('triggers.field.scheduleExpression');
   if (valueInput) {
     const previousType = valueInput.dataset.scheduleType || '';
-    valueInput.disabled = type === 'event';
+    valueInput.disabled = Boolean(ctx.saving);
     valueInput.removeAttribute('min');
     valueInput.removeAttribute('step');
     valueInput.removeAttribute('inputmode');
+    valueInput.removeAttribute('list');
     if (triggerIsDurationSchedule(type)) {
       const currentValue = triggerIsDurationSchedule(previousType)
         ? valueInput.value
@@ -4338,6 +4793,7 @@ function syncTriggerEditFields(ctx) {
         : (triggerIsDurationSchedule(previousType) ? '' : valueInput.value);
       valueInput.type = 'text';
       valueInput.value = currentValue;
+      if (type === 'event') valueInput.setAttribute('list', 'trig-event-pattern-list');
     }
     valueInput.dataset.scheduleType = type;
     const placeholders = {
@@ -4349,6 +4805,8 @@ function syncTriggerEditFields(ctx) {
     };
     valueInput.placeholder = placeholders[type] || '';
   }
+  eventFields.forEach(el => { el.hidden = type !== 'event'; });
+  if (type === 'event') triggerRefreshEventDatalists(ctx);
   if (threadField) threadField.hidden = strategy !== 'thread';
   if (threadInput) threadInput.disabled = strategy !== 'thread';
   root.querySelectorAll('.trig-agent-field').forEach(el => { el.hidden = mode !== 'agent'; });
@@ -4402,8 +4860,7 @@ function readTriggerEditValues(root) {
 }
 
 function validateTriggerSchedule(type, value) {
-  if (type === 'event') return null;
-  if (!['delay', 'at', 'cron', 'interval'].includes(type)) return tf('triggers.error.invalidScheduleType', { type });
+  if (!['delay', 'at', 'cron', 'interval', 'event'].includes(type)) return tf('triggers.error.invalidScheduleType', { type });
   if (!value) return t('triggers.error.emptySchedule');
   if (type === 'delay' || type === 'interval') {
     if (!triggerDurationValueValid(value, TRIGGER_SCHEDULE_DURATION_FORMAT)) {
@@ -4411,6 +4868,7 @@ function validateTriggerSchedule(type, value) {
     }
   }
   if (type === 'at' && !Number.isFinite(new Date(value).getTime())) return t('triggers.error.invalidAt');
+  if (type === 'event' && !triggerEventPatternValueValid(value)) return t('triggers.error.invalidEventPattern');
   return null;
 }
 
@@ -4422,14 +4880,19 @@ function collectTriggerEditPatch(ctx) {
   if (!values.name) return { error: t('triggers.error.nameRequired') };
   if (values.name !== original.name) patch.name = values.name;
 
-  if (original.scheduleType !== 'event') {
-    const scheduleError = validateTriggerSchedule(values.scheduleType, values.scheduleValue);
-    if (scheduleError) return { error: scheduleError };
-    const originalScheduleComparable = triggerComparableScheduleValue(original.scheduleType, original.scheduleValue);
-    const nextScheduleComparable = triggerComparableScheduleValue(values.scheduleType, values.scheduleValue);
-    if (values.scheduleType !== original.scheduleType || nextScheduleComparable !== originalScheduleComparable) {
-      patch.scheduleType = values.scheduleType;
-      patch.scheduleValue = values.scheduleValue;
+  const scheduleError = validateTriggerSchedule(values.scheduleType, values.scheduleValue);
+  if (scheduleError) return { error: scheduleError };
+  const originalScheduleComparable = triggerComparableScheduleValue(original.scheduleType, original.scheduleValue);
+  const nextScheduleComparable = triggerComparableScheduleValue(values.scheduleType, values.scheduleValue);
+  if (values.scheduleType !== original.scheduleType || nextScheduleComparable !== originalScheduleComparable) {
+    patch.scheduleType = values.scheduleType;
+    patch.scheduleValue = values.scheduleValue;
+  }
+  if (values.scheduleType === 'event') {
+    const eventFilter = triggerReadEventFilter(ctx);
+    if (eventFilter.error) return { error: eventFilter.error };
+    if (triggerStableJson(eventFilter.value) !== triggerStableJson(original.eventFilter || null)) {
+      patch.eventFilter = eventFilter.value;
     }
   }
 
@@ -4536,9 +4999,8 @@ function openTriggerEditDrawer(id, agent) {
   if (!item) { toast(t('triggers.error.notFound'), true); return; }
   closeTriggerEditDrawer();
   const original = triggerOriginalEditState(item);
-  const scheduleTypeOptions = original.scheduleType === 'event'
-    ? triggerOptionHtml([['event', () => t('triggers.schedule.event')]], 'event', null)
-    : triggerOptionHtml(TRIGGER_SCHEDULE_TYPES, original.scheduleType, null);
+  const scheduleTypeOptions = triggerOptionHtml(TRIGGER_SCHEDULE_TYPES, original.scheduleType, null);
+  const filterRows = triggerFilterRowsFromMatch(original.eventFilter?.match);
   const jsonText = esc(JSON.stringify(original.rawPreview, null, 2));
   const subtitleName = original.name || id;
   const feedbackRows = [
@@ -4562,8 +5024,23 @@ function openTriggerEditDrawer(id, agent) {
           `<h3>${t('triggers.section.basic')}</h3>` +
           `<div class="ag-edit-grid trig-edit-grid">` +
             `<label class="ag-edit-field"><span>${t('triggers.field.name')}</span><input id="trig-edit-name" type="text" autocomplete="off" value="${esc(original.name)}"></label>` +
-            `<label class="ag-edit-field"><span>${t('triggers.field.scheduleType')}</span><select id="trig-edit-schedule-type"${original.scheduleType === 'event' ? ' disabled' : ''}>${scheduleTypeOptions}</select></label>` +
-            `<label class="ag-edit-field"><span>${t('triggers.field.scheduleExpression')}</span><input id="trig-edit-schedule-value" type="text" autocomplete="off" spellcheck="false" value="${esc(original.scheduleValue)}"></label>` +
+            `<label class="ag-edit-field"><span>${t('triggers.field.scheduleType')}</span><select id="trig-edit-schedule-type">${scheduleTypeOptions}</select></label>` +
+            `<label class="ag-edit-field"><span id="trig-edit-schedule-value-label">${original.scheduleType === 'event' ? t('triggers.field.eventPattern') : t('triggers.field.scheduleExpression')}</span><input id="trig-edit-schedule-value" type="text" autocomplete="off" spellcheck="false" value="${esc(original.scheduleValue)}"><datalist id="trig-event-pattern-list"></datalist></label>` +
+          `</div>` +
+          `<div class="trig-event-field trig-filter-box">` +
+            `<div class="trig-filter-head">` +
+              `<span>${t('triggers.field.eventFilter')}</span>` +
+              `<div class="trig-filter-actions">` +
+                `<button class="ctrl-btn" id="trig-filter-add" type="button">${t('triggers.filter.add')}</button>` +
+                `<button class="ctrl-btn" id="trig-filter-clear" type="button">${t('triggers.filter.clear')}</button>` +
+              `</div>` +
+            `</div>` +
+            `<datalist id="trig-event-field-list"></datalist>` +
+            `<div id="trig-filter-list" class="trig-filter-list"></div>` +
+            `<details class="trig-filter-json">` +
+              `<summary>${t('common.rawJsonPreview')}</summary>` +
+              `<textarea id="trig-filter-json-preview" readonly spellcheck="false"></textarea>` +
+            `</details>` +
           `</div>` +
         `</section>` +
         `<section class="ag-edit-section">` +
@@ -4629,6 +5106,10 @@ function openTriggerEditDrawer(id, agent) {
   backdrop.querySelector('#trig-edit-cancel').addEventListener('click', closeTriggerEditDrawer);
   backdrop.querySelector('#trig-edit-save').addEventListener('click', () => saveTriggerEditDrawer(ctx));
   backdrop.querySelector('#trig-edit-schedule-type').addEventListener('change', () => syncTriggerEditFields(ctx));
+  backdrop.querySelector('#trig-edit-schedule-value').addEventListener('input', () => {
+    triggerRefreshEventDatalists(ctx);
+    triggerUpdateFilterJsonPreview(ctx);
+  });
   backdrop.querySelector('#trig-edit-mode').addEventListener('change', () => syncTriggerEditFields(ctx));
   backdrop.querySelector('#trig-edit-model').addEventListener('change', () => {
     const token = (ctx.optionLoadToken || 0) + 1;
@@ -4646,8 +5127,24 @@ function openTriggerEditDrawer(id, agent) {
   ['reply', 'noop', 'failure'].forEach(key => {
     backdrop.querySelector(`#trig-edit-feedback-${key}-enabled`)?.addEventListener('change', () => syncTriggerEditFields(ctx));
   });
+  backdrop.querySelector('#trig-filter-add').addEventListener('click', () => {
+    triggerRenderFilterRows(ctx, [...triggerFilterRows(ctx), { op: 'eq' }]);
+  });
+  backdrop.querySelector('#trig-filter-clear').addEventListener('click', () => triggerRenderFilterRows(ctx, []));
+  backdrop.querySelector('#trig-filter-list').addEventListener('input', () => triggerUpdateFilterJsonPreview(ctx));
+  backdrop.querySelector('#trig-filter-list').addEventListener('change', () => triggerUpdateFilterJsonPreview(ctx));
+  backdrop.querySelector('#trig-filter-list').addEventListener('click', e => {
+    if (!e.target.closest('.trig-filter-remove')) return;
+    e.target.closest('.trig-filter-row')?.remove();
+    if (!backdrop.querySelector('.trig-filter-row')) triggerRenderFilterRows(ctx, []);
+    else triggerUpdateFilterJsonPreview(ctx);
+  });
   document.addEventListener('keydown', ctx.onKeydown);
+  triggerRenderFilterRows(ctx, filterRows);
   syncTriggerEditFields(ctx);
+  triggerEnsureEventCatalog(ctx).catch(e => {
+    if (_triggerEdit === ctx) toast(e.message || String(e), true);
+  });
   syncTriggerOptionFields(ctx, original);
   setTimeout(() => backdrop.querySelector('#trig-edit-name')?.focus(), 0);
 }
@@ -4704,7 +5201,7 @@ function renderTriggers(data) {
   }
 
   let html = '<table><thead><tr>' +
-    `<th>Agent</th><th>${t('triggers.th.status')}</th><th>${t('triggers.th.name')}</th><th>ID</th><th>${t('triggers.th.type')}</th><th>${t('triggers.th.expression')}</th>` +
+    `<th>Agent</th><th>${t('triggers.th.status')}</th><th>${t('triggers.th.subscription')}</th><th>${t('triggers.th.name')}</th><th>ID</th><th>${t('triggers.th.type')}</th><th>${t('triggers.th.expression')}</th>` +
     `<th>${t('triggers.th.lastFire')}</th><th>${t('triggers.th.nextFire')}</th><th>${t('triggers.th.fireCount')}</th><th>${t('triggers.th.failCount')}</th><th>${t('triggers.th.lastResult')}</th><th>${t('triggers.field.sessionStrategy')}</th>` +
     `<th>${t('triggers.th.targetChannel')}</th><th>${t('triggers.field.channelId')}</th><th>${t('triggers.th.channelType')}</th>` +
     `<th>${t('triggers.th.createdBy')}</th><th>${t('triggers.th.createdChannel')}</th><th>${t('triggers.th.createdAt')}</th><th>${t('triggers.th.operations')}</th>` +
@@ -4716,12 +5213,14 @@ function renderTriggers(data) {
     const lastResult = trigger.lastResult || (trigger.lastScheduledAt ? t('triggers.lastUnrecorded') : '');
     const agentAid = trigger.agentAid || trigger.schedulerAid || selAid || '';
     const agentLabel = trigger.agentLabel || (agentAid ? shortAid(agentAid) : '');
+    const sourceType = triggerSourceType(trigger);
     html += `<tr class="${active ? '' : 'trig-disabled'}">` +
       `<td title="${esc(agentAid)}">${esc(agentLabel)}</td>` +
       `<td>${trigStatusBadge(status)}</td>` +
+      `<td>${trigSubscriptionBadge(trigger.subscription, sourceType)}</td>` +
       `<td>${esc(trigger.name ?? trigger.label ?? '')}</td>` +
       `<td>${esc(trigger.id ?? trigger.value ?? '')}</td>` +
-      `<td>${esc(triggerScheduleLabel(trigger.scheduleType ?? ''))}</td>` +
+      `<td>${esc(triggerScheduleLabel(sourceType || trigger.scheduleType || ''))}</td>` +
       `<td>${esc(triggerScheduleValueLabel(trigger.scheduleType, trigger.scheduleValue))}</td>` +
       `<td>${lastFireTime ? fmtTime(lastFireTime) : '—'}</td>` +
       `<td>${trigger.nextFireAt ? fmtTime(trigger.nextFireAt) : '—'}</td>` +
@@ -4766,6 +5265,8 @@ function renderTriggers(data) {
 
 function startApp() {
   initTabs();
+  initRolesTab();
+  initRoleDefinitionsTab();
   // 恢复保存的 tab 视图
   switchView(currentView);
   connect();
@@ -6128,6 +6629,2232 @@ function monDualLine(elId, varKey, times, isDark, title, series, fmtY, yRange) {
     }),
     animation: false,
   });
+}
+
+function renderRoles(data) {
+  if (!data) return;
+
+  const agentSelect = $('#roles-agent-select');
+  if (!agentSelect) return;
+
+  agentSelect.innerHTML = '';
+  const placeholderOption = document.createElement('option');
+  placeholderOption.value = '';
+  placeholderOption.setAttribute('data-i18n', 'roles.selectAgentPlaceholder');
+  placeholderOption.textContent = t('roles.selectAgentPlaceholder');
+  agentSelect.appendChild(placeholderOption);
+
+  const agentList = data.agents || [];
+  agentList.forEach(agent => {
+    const opt = document.createElement('option');
+    opt.value = agent.aid;
+    const name = agent.displayName || agent.name || shortAid(agent.aid);
+    const sa = shortAid(agent.aid);
+    opt.textContent = (name && name !== sa && name !== agent.aid) ? `${name} (${sa})` : sa;
+    agentSelect.appendChild(opt);
+  });
+
+  if (agentList.length > 0) {
+    if (!rolesCurrentAgent || !agentList.find(a => a.aid === rolesCurrentAgent)) {
+      rolesCurrentAgent = agentList[0].aid;
+    }
+    agentSelect.value = rolesCurrentAgent;
+    renderAgentPeerRelations(data, rolesCurrentAgent);
+  } else {
+    rolesCurrentAgent = null;
+    renderRelationsTable(data, null);
+  }
+}
+
+function renderAgentPeerRelations(data, aid) {
+  renderRelationsTable(data, aid);
+}
+
+function roleSourceLabel(source) {
+  const labels = {
+    assignment: 'Explicit',
+    'private-inherited': 'Private role',
+    'group-default': 'Group role',
+    default: 'Default',
+  };
+  return labels[source] || source || '-';
+}
+
+function peerTypeText(peerType) {
+  if (peerType === 'ai') return 'AI';
+  if (peerType === 'human') return 'Human';
+  if (peerType === 'system') return 'System';
+  return '-';
+}
+
+function roleClass(role) {
+  return String(role || 'anonymous').replace(/[^a-z0-9_-]/gi, '-');
+}
+
+function memberMatchesSearch(member) {
+  if (!rolesSearchTerm) return true;
+  const s = rolesSearchTerm.toLowerCase();
+  return [member.peerName, member.peerAid, member.peerKey, member.peerId].some(v =>
+    String(v || '').toLowerCase().includes(s)
+  );
+}
+
+function renderRelationsTable(data, filterAid = null) {
+  const tbody = document.querySelector('#relations-table tbody');
+  if (!tbody) return;
+
+  tbody.innerHTML = '';
+  let conversations = data.conversations || [];
+
+  if (filterAid) {
+    conversations = conversations.filter(conv => conv.self === filterAid);
+  }
+
+  if (rolesSearchTerm) {
+    const s = rolesSearchTerm.toLowerCase();
+    conversations = conversations.filter(conv => {
+      const ownMatch = [
+        conv.name,
+        conv.conversationId,
+        conv.groupId,
+        conv.groupName,
+        conv.peerName,
+        conv.peerAid,
+        conv.peerKey,
+      ].some(v => String(v || '').toLowerCase().includes(s));
+      const memberMatch = (conv.members || []).some(member => memberMatchesSearch(member));
+      return ownMatch || memberMatch;
+    });
+  }
+
+  if (rolesChatTypeFilter) {
+    conversations = conversations.filter(conv => conv.chatType === rolesChatTypeFilter);
+  }
+
+  conversations.sort((a, b) => {
+    const lastDiff = (b.lastAt || 0) - (a.lastAt || 0);
+    if (lastDiff !== 0) return lastDiff;
+    return String(a.name || '').localeCompare(String(b.name || ''));
+  });
+
+  if (conversations.length === 0) {
+    const row = tbody.insertRow();
+    const cell = row.insertCell();
+    cell.colSpan = 7;
+    cell.textContent = (rolesSearchTerm || rolesVerifyFilter || rolesChatTypeFilter)
+      ? (t('common.noResults') || 'No matching results')
+      : (filterAid ? (t('roles.noPeerRelations') || 'No conversations for this agent') : t('common.empty'));
+    cell.style.textAlign = 'center';
+    cell.style.color = 'var(--dim)';
+    cell.style.padding = '40px';
+    return;
+  }
+
+  conversations.forEach(conv => {
+    if (conv.chatType === 'group') renderGroupConversationRow(tbody, conv);
+    else renderPrivateConversationRow(tbody, conv);
+  });
+}
+
+function renderPrivateConversationRow(tbody, conv) {
+  const peerId = conv.peerId || conv.peerAid || conv.peerKey || conv.conversationId;
+  const name = conv.peerName || conv.name || shortAid(peerId);
+  const assignedRole = conv.source === 'assignment' ? (conv.assignment?.role || conv.role || '') : '';
+  const row = tbody.insertRow();
+  row.innerHTML = `
+    <td><span class="chat-tag chat-tag-private">${esc(t('roles.chatType.private') || 'Private')}</span></td>
+    <td><strong>${esc(name)}</strong></td>
+    <td><code>${esc(peerId)}</code></td>
+    <td>${esc(peerTypeText(conv.peerType))}</td>
+    <td><span class="role-badge role-${esc(roleClass(conv.role))}">${esc(conv.role || 'anonymous')}</span></td>
+    <td><span class="role-source">${esc(roleSourceLabel(conv.source))}</span></td>
+    <td>
+      <button class="edit-peer-role-btn"
+              data-aid="${esc(conv.self)}"
+              data-scope="private"
+              data-peer-id="${esc(peerId)}"
+              data-role="${esc(conv.role || '')}"
+              data-assigned-role="${esc(assignedRole)}"
+              data-label="${esc(name)}">
+        ${t('action.edit') || 'Edit'}
+      </button>
+    </td>
+  `;
+}
+
+function renderGroupConversationRow(tbody, conv) {
+  const groupId = conv.groupId || conv.conversationId;
+  const groupKey = `${conv.self}::${groupId}`;
+  const members = (conv.members || []).filter(member => memberMatchesSearch(member));
+  const expanded = rolesExpandedGroups.has(groupKey) || (!!rolesSearchTerm && members.length > 0);
+  const assignedRole = conv.source === 'assignment' ? (conv.assignment?.role || conv.role || '') : '';
+  const row = tbody.insertRow();
+  row.className = 'group-conversation-row';
+  row.innerHTML = `
+    <td>
+      <button class="group-expand-btn" data-group-key="${esc(groupKey)}" title="${expanded ? 'Collapse' : 'Expand'}">${expanded ? '-' : '+'}</button>
+      <span class="chat-tag chat-tag-group">${esc(t('roles.chatType.group') || 'Group')}</span>
+    </td>
+    <td><strong>${esc(conv.groupName || conv.name || groupId)}</strong></td>
+    <td><code>${esc(groupId)}</code></td>
+    <td>-</td>
+    <td><span class="role-badge role-${esc(roleClass(conv.role))}">${esc(conv.role || 'guest')}</span></td>
+    <td><span class="role-source">${esc(roleSourceLabel(conv.source))}</span></td>
+    <td>
+      <button class="edit-peer-role-btn"
+              data-aid="${esc(conv.self)}"
+              data-scope="group"
+              data-group-id="${esc(groupId)}"
+              data-role="${esc(conv.role || '')}"
+              data-assigned-role="${esc(assignedRole)}"
+              data-label="${esc(conv.groupName || conv.name || groupId)}">
+        ${t('action.edit') || 'Edit'}
+      </button>
+    </td>
+  `;
+
+  if (!expanded) return;
+  if (members.length === 0) {
+    const empty = tbody.insertRow();
+    empty.className = 'group-member-row group-member-empty';
+    empty.innerHTML = `<td></td><td colspan="6">No group member message records</td>`;
+    return;
+  }
+  members.forEach(member => renderGroupMemberRow(tbody, conv, member));
+}
+
+function renderGroupMemberRow(tbody, conv, member) {
+  const groupId = conv.groupId || conv.conversationId;
+  const peerId = member.peerId || member.peerAid || member.peerKey;
+  const name = member.peerName || shortAid(peerId);
+  const assignedRole = member.source === 'assignment' ? (member.assignment?.role || member.role || '') : '';
+  const row = tbody.insertRow();
+  row.className = 'group-member-row';
+  row.innerHTML = `
+    <td></td>
+    <td><span class="group-member-indent">${esc(name)}</span></td>
+    <td><code>${esc(peerId)}</code></td>
+    <td>${esc(peerTypeText(member.peerType))}</td>
+    <td><span class="role-badge role-${esc(roleClass(member.role))}">${esc(member.role || 'guest')}</span></td>
+    <td><span class="role-source">${esc(roleSourceLabel(member.source))}</span></td>
+    <td>
+      <button class="edit-peer-role-btn"
+              data-aid="${esc(conv.self)}"
+              data-scope="group-member"
+              data-group-id="${esc(groupId)}"
+              data-peer-id="${esc(peerId)}"
+              data-role="${esc(member.role || '')}"
+              data-assigned-role="${esc(assignedRole)}"
+              data-label="${esc(name)}">
+        ${t('action.edit') || 'Edit'}
+      </button>
+    </td>
+  `;
+}
+
+async function updatePeerRoleOverride(agentAid, scope, targetId, role, groupId, peerId) {
+  try {
+    const token = localStorage.getItem(TOKEN_KEY);
+    const body = { scope };
+    if (groupId) body.groupId = groupId;
+    if (peerId) body.peerId = peerId;
+    if (role) body.role = role;
+
+    const res = await fetch(apiUrl(`api/assignments/peer/${encodeURIComponent(agentAid)}/${encodeURIComponent(targetId)}`), {
+      method: role ? 'PUT' : 'DELETE',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`
+      },
+      body: JSON.stringify(body)
+    });
+
+    if (!res.ok) {
+      const err = await res.json();
+      alert(t('roleDefs.saveFailed') + ': ' + (err.error || 'unknown'));
+      return false;
+    }
+    return true;
+  } catch (err) {
+    console.error('[updatePeerRoleOverride] Exception:', err);
+    alert(t('pair.error.network') + ': ' + err.message);
+    return false;
+  }
+}
+
+let _rolesTabBound = false;
+function initRolesTab() {
+  if (_rolesTabBound) return;
+  _rolesTabBound = true;
+
+  const agentSelect = $('#roles-agent-select');
+  if (agentSelect) {
+    agentSelect.addEventListener('change', (e) => {
+      rolesCurrentAgent = e.target.value;
+      if (state.roles) renderRelationsTable(state.roles, rolesCurrentAgent || null);
+    });
+  }
+
+  const searchInput = $('#peer-search');
+  if (searchInput) {
+    searchInput.addEventListener('input', (e) => {
+      rolesSearchTerm = e.target.value.trim();
+      if (state.roles) renderRelationsTable(state.roles, rolesCurrentAgent || null);
+    });
+  }
+
+  const verifyFilter = $('#filter-verify');
+  if (verifyFilter) {
+    verifyFilter.addEventListener('change', (e) => {
+      rolesVerifyFilter = e.target.value;
+      if (state.roles) renderRelationsTable(state.roles, rolesCurrentAgent || null);
+    });
+  }
+
+  const chatTypeFilter = $('#filter-chattype');
+  if (chatTypeFilter) {
+    chatTypeFilter.addEventListener('change', (e) => {
+      rolesChatTypeFilter = e.target.value;
+      if (state.roles) renderRelationsTable(state.roles, rolesCurrentAgent || null);
+    });
+  }
+
+  const relationsTable = $('#relations-table');
+  if (relationsTable) {
+    relationsTable.addEventListener('click', (e) => {
+      const expandBtn = e.target.closest('.group-expand-btn');
+      if (expandBtn) {
+        const key = expandBtn.dataset.groupKey;
+        if (rolesExpandedGroups.has(key)) rolesExpandedGroups.delete(key);
+        else rolesExpandedGroups.add(key);
+        if (state.roles) renderRelationsTable(state.roles, rolesCurrentAgent || null);
+        return;
+      }
+
+      const btn = e.target.closest('.edit-peer-role-btn');
+      if (!btn) return;
+      openPeerRoleModal({
+        agentAid: btn.dataset.aid,
+        scope: btn.dataset.scope || 'private',
+        peerId: btn.dataset.peerId || '',
+        groupId: btn.dataset.groupId || '',
+        effectiveRole: btn.dataset.role || '',
+        assignedRole: btn.dataset.assignedRole || '',
+        label: btn.dataset.label || btn.dataset.peerId || btn.dataset.groupId,
+      });
+    });
+  }
+
+  const modal = $('#peer-role-modal');
+  const closeBtn = $('#peer-role-close');
+  const cancelBtn = $('#peer-role-cancel');
+  if (closeBtn) closeBtn.addEventListener('click', closePeerRoleModal);
+  if (cancelBtn) cancelBtn.addEventListener('click', closePeerRoleModal);
+  if (modal) {
+    modal.addEventListener('click', (e) => {
+      if (e.target === modal) closePeerRoleModal();
+    });
+  }
+
+  const saveBtn = $('#peer-role-save');
+  if (saveBtn) saveBtn.addEventListener('click', savePeerRole);
+}
+
+function openPeerRoleModal(options) {
+  const modal = $('#peer-role-modal');
+  const title = $('#peer-role-title');
+  const body = $('#peer-role-body');
+  if (!modal || !body) return;
+
+  const { agentAid, scope, peerId, groupId, effectiveRole, assignedRole, label } = options;
+  if (title) title.textContent = `${t('roles.editPeerRole') || 'Edit Peer Role'}: ${label || peerId || groupId}`;
+
+  const builtinRoles = ['owner', 'admin', 'member', 'guest', 'anonymous'];
+  const definedRoles = state.roleDefinitions?.roles ? Object.keys(state.roleDefinitions.roles) : [];
+  const roles = Array.from(new Set([...builtinRoles, ...definedRoles]));
+  body.innerHTML = `
+    <div style="margin-bottom: 16px;">
+      <label style="display: block; margin-bottom: 8px; font-weight: 500;">
+        ${t('roles.selectRole') || 'Select Role'}:
+      </label>
+      <select id="peer-role-select" style="width: 100%; padding: 8px; border: 1px solid var(--border); border-radius: 4px; background: var(--bg); color: var(--ink);">
+        <option value="" ${assignedRole ? '' : 'selected'}>${currentLang === 'zh-CN' ? '使用继承/默认角色' : 'Use inherited/default role'}</option>
+        ${roles.map(r => `<option value="${esc(r)}" ${r === assignedRole ? 'selected' : ''}>${esc(t(ROLE_NAMES[r] || r) || r)}${!assignedRole && r === effectiveRole ? ' *' : ''}</option>`).join('')}
+      </select>
+    </div>
+    <p style="font-size: 12px; color: var(--dim); margin-top: 12px;">
+      ${t('roles.editHint') || 'Role changes will update role-assignments.'}
+    </p>
+  `;
+
+  modal.dataset.agentAid = agentAid || '';
+  modal.dataset.scope = scope || 'private';
+  modal.dataset.peerId = peerId || '';
+  modal.dataset.groupId = groupId || '';
+  modal.dataset.assignedRole = assignedRole || '';
+  modal.style.display = 'flex';
+}
+
+function closePeerRoleModal() {
+  const modal = $('#peer-role-modal');
+  if (!modal) return;
+  modal.style.display = 'none';
+  modal.dataset.agentAid = '';
+  modal.dataset.scope = '';
+  modal.dataset.peerId = '';
+  modal.dataset.groupId = '';
+  modal.dataset.assignedRole = '';
+}
+
+function savePeerRole() {
+  const modal = $('#peer-role-modal');
+  const select = $('#peer-role-select');
+  if (!modal || !select) return;
+
+  const agentAid = modal.dataset.agentAid;
+  const scope = modal.dataset.scope || 'private';
+  const peerId = modal.dataset.peerId || '';
+  const groupId = modal.dataset.groupId || '';
+  const assignedRole = modal.dataset.assignedRole || '';
+  const newRole = select.value || '';
+
+  if (!agentAid || (scope === 'private' && !peerId) || (scope === 'group' && !groupId) || (scope === 'group-member' && (!groupId || !peerId))) {
+    alert(t('pair.error.failed') + ': missing role assignment target');
+    return;
+  }
+
+  if (newRole === assignedRole) {
+    closePeerRoleModal();
+    return;
+  }
+
+  const targetId = scope === 'group' ? groupId : peerId;
+  updatePeerRoleOverride(agentAid, scope, targetId, newRole, groupId, peerId).then(ok => {
+    if (!ok) return;
+    closePeerRoleModal();
+    subscribe('roles', {});
+  }).catch(err => {
+    alert(t('common.error') + ': ' + err.message);
+  });
+}
+
+// ========== Role Definitions Tab ==========
+const ROLE_ICONS = {
+  owner: '👑',
+  admin: '🛡️',
+  member: '👥',
+  guest: '👤',
+  anonymous: '🚫'
+};
+
+const ROLE_NAMES = {
+  owner: 'roleDefs.owner',
+  admin: 'roleDefs.admin',
+  member: 'roleDefs.member',
+  guest: 'roleDefs.guest',
+  anonymous: 'roleDefs.anonymous'
+};
+
+function renderRoleDefinitions(data) {
+  console.log('[roleDefinitions] renderRoleDefinitions called with data:', data);
+
+  const grid = $('#role-cards-grid');
+  if (!grid) {
+    console.error('[roleDefinitions] Grid element not found (#role-cards-grid)');
+    return;
+  }
+
+  if (!data) {
+    console.warn('[roleDefinitions] No data received');
+    grid.innerHTML = '<div class="role-error">❌ 未收到角色定义数据</div>';
+    return;
+  }
+
+  if (!data.roles) {
+    console.warn('[roleDefinitions] Data received but no roles field:', data);
+    grid.innerHTML = '<div class="role-error">❌ 角色定义数据格式错误（缺少 roles 字段）</div>';
+    return;
+  }
+
+  if (Object.keys(data.roles).length === 0) {
+    console.warn('[roleDefinitions] Roles object is empty');
+    grid.innerHTML = '<div class="role-error">⚠️ 暂无角色定义</div>';
+    return;
+  }
+
+  // 渲染全局默认角色选择器
+  renderDefaultRoleSelector(data);
+
+  console.log('[roleDefinitions] Rendering', Object.keys(data.roles).length, 'roles');
+  grid.innerHTML = '';
+
+  Object.entries(data.roles).forEach(([roleName, roleDef]) => {
+    try {
+      const card = createRoleCard(roleName, roleDef);
+      grid.appendChild(card);
+    } catch (err) {
+      console.error(`[roleDefinitions] Failed to create card for role ${roleName}:`, err);
+    }
+  });
+}
+
+function renderDefaultRoleSelector(data) {
+  const container = $('#role-default-selector');
+  if (!container) return;
+
+  const defaults = {
+    private: data.defaultRoles?.private || 'anonymous',
+    group: data.defaultRoles?.group || 'guest',
+  };
+
+  const roleOptions = Object.keys(data.roles || {}).map(roleName =>
+    `<option value="${esc(roleName)}">${esc(ROLE_NAMES[roleName] ? t(ROLE_NAMES[roleName]) : roleName)}</option>`
+  ).join('');
+
+  container.innerHTML = `
+    <label class="role-default-label">
+      <span>${currentLang === 'zh-CN' ? '私聊默认角色:' : 'Private default role:'}</span>
+      <select id="default-private-role-select" class="form-select">${roleOptions}</select>
+    </label>
+    <label class="role-default-label">
+      <span>${currentLang === 'zh-CN' ? '群聊默认角色:' : 'Group default role:'}</span>
+      <select id="default-group-role-select" class="form-select">${roleOptions}</select>
+    </label>
+    <small style="color: var(--dim);">${currentLang === 'zh-CN' ? '私聊和群聊使用独立的默认角色。' : 'Private and group conversations use separate fallback roles.'}</small>
+  `;
+
+  const privateSelect = $('#default-private-role-select');
+  const groupSelect = $('#default-group-role-select');
+  if (!privateSelect || !groupSelect) return;
+  privateSelect.value = defaults.private;
+  groupSelect.value = defaults.group;
+
+  const save = async () => {
+    const next = { private: privateSelect.value, group: groupSelect.value };
+    try {
+      const token = localStorage.getItem(TOKEN_KEY);
+      const writeRes = await fetch(apiUrl('api/role-definitions'), {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify({ defaultRoles: next })
+      });
+
+      if (!writeRes.ok) {
+        let detail = '';
+        try { detail = (await writeRes.json()).error || ''; } catch {}
+        alert('保存默认角色失败' + (detail ? ': ' + detail : ''));
+        privateSelect.value = defaults.private;
+        groupSelect.value = defaults.group;
+      }
+    } catch (err) {
+      console.error('[roleDefinitions] Failed to save defaultRoles:', err);
+      alert('网络错误');
+      privateSelect.value = defaults.private;
+      groupSelect.value = defaults.group;
+    }
+  };
+
+  privateSelect.onchange = save;
+  groupSelect.onchange = save;
+}
+
+const COMMAND_PERMISSION_SCOPE_VALUES = ['relation', 'role', 'agent', 'process', 'filesystem', 'control', 'raw-cli'];
+const COMMAND_PERMISSION_CATEGORY_ORDER = ['read', 'diagnose', 'write-own', 'write-agent', 'process', 'dangerous'];
+const COMMAND_PERMISSION_BOOLEAN_CONSTRAINTS = [
+  'ownPeerOnly',
+  'ownAgentOnly',
+  'privateOnly',
+  'groupOnly',
+  'requireDaemonOwner',
+  'requireControlChannel',
+  'requireExplicitDangerousGrant'
+];
+let roleOperationsCache = null;
+
+function getCommandPermissionsObject(commandPermissions) {
+  return commandPermissions && typeof commandPermissions === 'object' && !Array.isArray(commandPermissions)
+    ? commandPermissions
+    : {};
+}
+
+function getCommandPermissionStats(commandPermissions) {
+  const entries = Object.values(getCommandPermissionsObject(commandPermissions));
+  return entries.reduce((stats, permission) => {
+    const perm = permission && typeof permission === 'object' ? permission : {};
+    stats.total += 1;
+    if (perm.allow === true) stats.allow += 1;
+    else if (perm.allow === false) stats.deny += 1;
+    if (perm.dangerous === true) stats.dangerous += 1;
+    return stats;
+  }, { total: 0, allow: 0, deny: 0, dangerous: 0 });
+}
+
+function formatCommandPermissions(commandPermissions) {
+  return JSON.stringify(getCommandPermissionsObject(commandPermissions), null, 2);
+}
+
+async function fetchRoleOperationsCatalog() {
+  if (roleOperationsCache) return roleOperationsCache;
+  const token = localStorage.getItem(TOKEN_KEY);
+  const res = await fetch(apiUrl('api/role-definitions/operations'), {
+    headers: { 'Authorization': `Bearer ${token}` }
+  });
+  if (!res.ok) throw new Error('Failed to load CLI operation catalog');
+  const json = await res.json();
+  roleOperationsCache = Array.isArray(json.operations) ? json.operations : [];
+  return roleOperationsCache;
+}
+
+async function loadRoleOperationsForEditor() {
+  try {
+    return await fetchRoleOperationsCatalog();
+  } catch (err) {
+    console.warn('[roleDefinitions] Failed to load CLI operation catalog:', err);
+    return [];
+  }
+}
+
+function commandCategoryLabel(category) {
+  const labels = {
+    read: currentLang === 'zh-CN' ? '读取' : 'Read',
+    diagnose: currentLang === 'zh-CN' ? '诊断' : 'Diagnose',
+    'write-own': currentLang === 'zh-CN' ? '写入本人范围' : 'Write Own',
+    'write-agent': currentLang === 'zh-CN' ? '写入 Agent' : 'Write Agent',
+    process: currentLang === 'zh-CN' ? '进程/系统' : 'Process',
+    dangerous: currentLang === 'zh-CN' ? '危险操作' : 'Dangerous',
+  };
+  return labels[category] || category;
+}
+
+function commandConstraintLabel(key) {
+  const labels = {
+    ownPeerOnly: currentLang === 'zh-CN' ? '仅本人 Peer' : 'Own peer only',
+    ownAgentOnly: currentLang === 'zh-CN' ? '仅当前 Agent' : 'Own agent only',
+    privateOnly: currentLang === 'zh-CN' ? '仅私聊' : 'Private only',
+    groupOnly: currentLang === 'zh-CN' ? '仅群聊' : 'Group only',
+    requireDaemonOwner: currentLang === 'zh-CN' ? '需要 daemon owner' : 'Require daemon owner',
+    requireControlChannel: currentLang === 'zh-CN' ? '需要控制通道' : 'Require control channel',
+    requireExplicitDangerousGrant: currentLang === 'zh-CN' ? '需要危险授权' : 'Require dangerous grant',
+  };
+  return labels[key] || key;
+}
+
+function getCommandRuleRank(rule, permission, operation) {
+  const namespace = operation.id.split('.')[0];
+  const denyOffset = permission?.allow ? 0 : 1;
+  if (rule === operation.id) return 1000 + denyOffset;
+  if (rule === `${namespace}.*`) return 800 + denyOffset;
+  if (rule.startsWith('category:') && rule.slice('category:'.length) === operation.category) return 600 + denyOffset;
+  if (rule === 'dangerous:*' && operation.dangerous) return 400 + denyOffset;
+  if (rule === '*' && !operation.dangerous) return 200 + denyOffset;
+  return 0;
+}
+
+function getEffectiveCommandPermission(operation, commandPermissions) {
+  const permissions = getCommandPermissionsObject(commandPermissions);
+  let best = null;
+  Object.entries(permissions).forEach(([rule, permission]) => {
+    if (!permission || typeof permission !== 'object') return;
+    const rank = getCommandRuleRank(rule, permission, operation);
+    if (rank > 0 && (!best || rank > best.rank)) {
+      best = { rule, permission, rank };
+    }
+  });
+  return best;
+}
+
+function getCommandPermissionScopes(operation, permission) {
+  const scopes = Array.isArray(permission?.scopes) && permission.scopes.length
+    ? permission.scopes
+    : (Array.isArray(operation.defaultScopes) ? operation.defaultScopes : []);
+  return new Set(scopes);
+}
+
+function renderCommandScopeControls(operation, permission) {
+  const selected = getCommandPermissionScopes(operation, permission);
+  return COMMAND_PERMISSION_SCOPE_VALUES.map(scope => `
+    <label class="cli-scope-option">
+      <input type="checkbox"
+             data-command-scope="${esc(scope)}"
+             ${selected.has(scope) ? 'checked' : ''}>
+      <span>${esc(scope)}</span>
+    </label>
+  `).join('');
+}
+
+function renderCommandConstraintControls(permission) {
+  const constraints = permission?.constraints && typeof permission.constraints === 'object'
+    ? permission.constraints
+    : {};
+  return `
+    <div class="cli-constraint-grid">
+      ${COMMAND_PERMISSION_BOOLEAN_CONSTRAINTS.map(key => `
+        <label class="cli-constraint-option">
+          <input type="checkbox"
+                 data-command-constraint="${esc(key)}"
+                 ${constraints[key] ? 'checked' : ''}>
+          <span>${esc(commandConstraintLabel(key))}</span>
+        </label>
+      `).join('')}
+    </div>
+    <label class="cli-field-row">
+      <span>requireFieldOverride</span>
+      <input type="text"
+             class="form-input"
+             data-command-field="requireFieldOverride"
+             value="${esc(constraints.requireFieldOverride || '')}"
+             placeholder="baseagents.claude.model">
+    </label>
+  `;
+}
+
+function groupCommandOperations(operations) {
+  const groups = new Map();
+  COMMAND_PERMISSION_CATEGORY_ORDER.forEach(category => groups.set(category, []));
+  (operations || []).forEach(operation => {
+    const category = operation.category || 'other';
+    if (!groups.has(category)) groups.set(category, []);
+    groups.get(category).push(operation);
+  });
+  return [...groups.entries()].filter(([, items]) => items.length > 0);
+}
+
+function renderCommandPermissionRow(operation, commandPermissions, readonly = false) {
+  const match = getEffectiveCommandPermission(operation, commandPermissions);
+  const permission = match?.permission || {};
+  const allowed = permission.allow === true;
+  const denied = match ? permission.allow === false : true;
+  const status = allowed ? 'allow' : 'deny';
+  const statusText = allowed
+    ? (currentLang === 'zh-CN' ? '允许' : 'Allowed')
+    : (denied && match ? (currentLang === 'zh-CN' ? '拒绝' : 'Denied') : (currentLang === 'zh-CN' ? '未授权' : 'No rule'));
+  const scopes = getCommandPermissionScopes(operation, permission);
+  const sourceText = Array.isArray(operation.sources) ? operation.sources.join(', ') : '—';
+  const matchedRule = match?.rule || '—';
+  const description = operation.description || '';
+
+  if (readonly) {
+    return `
+      <div class="cli-permission-row readonly ${status}">
+        <div class="cli-op-main">
+          <div class="cli-op-title">
+            <code>${esc(operation.id)}</code>
+            <span class="cli-status ${status}">${esc(statusText)}</span>
+            ${operation.dangerous ? '<span class="cli-danger">dangerous</span>' : ''}
+          </div>
+          <div class="cli-op-desc">${esc(description)}</div>
+          <div class="cli-op-meta">category=${esc(operation.category)} · scopes=${esc([...scopes].join(', ') || '—')} · sources=${esc(sourceText)} · rule=${esc(matchedRule)}</div>
+        </div>
+      </div>
+    `;
+  }
+
+  return `
+    <div class="cli-permission-row ${status}"
+         data-command-operation="${esc(operation.id)}"
+         data-command-dangerous="${operation.dangerous ? 'true' : 'false'}">
+      <div class="cli-op-main">
+        <div class="cli-op-title">
+          <code>${esc(operation.id)}</code>
+          <span class="cli-status ${status}">${esc(statusText)}</span>
+          ${operation.dangerous ? '<span class="cli-danger">dangerous</span>' : ''}
+        </div>
+        <div class="cli-op-desc">${esc(description)}</div>
+        <div class="cli-op-meta">category=${esc(operation.category)} · sources=${esc(sourceText)} · matched rule=${esc(matchedRule)}</div>
+      </div>
+      <div class="cli-op-controls">
+        <label class="cli-field-row compact">
+          <span>${currentLang === 'zh-CN' ? '授权' : 'Grant'}</span>
+          <select class="form-select" data-command-field="decision">
+            <option value="keep">${currentLang === 'zh-CN' ? '保持当前' : 'Keep current'}</option>
+            <option value="allow">${currentLang === 'zh-CN' ? '允许' : 'Allow'}</option>
+            <option value="deny">${currentLang === 'zh-CN' ? '拒绝' : 'Deny'}</option>
+            <option value="remove">${currentLang === 'zh-CN' ? '移除精确规则' : 'Remove exact rule'}</option>
+          </select>
+        </label>
+        <label class="cli-danger-grant">
+          <input type="checkbox"
+                 data-command-field="dangerousGrant"
+                 ${operation.dangerous && (permission.dangerous || allowed) ? 'checked' : ''}
+                 ${operation.dangerous ? '' : 'disabled'}>
+          <span>${currentLang === 'zh-CN' ? '危险授权' : 'Dangerous grant'}</span>
+        </label>
+      </div>
+      <details class="cli-advanced">
+        <summary>${currentLang === 'zh-CN' ? 'Scopes 与约束' : 'Scopes and constraints'}</summary>
+        <div class="cli-advanced-grid">
+          <div>
+            <div class="cli-subtitle">Scopes</div>
+            <div class="cli-scope-grid">${renderCommandScopeControls(operation, permission)}</div>
+          </div>
+          <div>
+            <div class="cli-subtitle">${currentLang === 'zh-CN' ? '约束' : 'Constraints'}</div>
+            ${renderCommandConstraintControls(permission)}
+          </div>
+          <label class="cli-field-row cli-reason">
+            <span>Reason</span>
+            <input type="text"
+                   class="form-input"
+                   data-command-field="reason"
+                   value="${esc(permission.reason || '')}">
+          </label>
+        </div>
+      </details>
+    </div>
+  `;
+}
+
+function renderCommandPermissionsList(roleDef, operations, readonly = false) {
+  if (!operations || operations.length === 0) {
+    return `<div class="model-empty">${currentLang === 'zh-CN' ? '未加载到 CLI 清单' : 'No CLI operations loaded.'}</div>`;
+  }
+
+  const commandPermissions = getCommandPermissionsObject(roleDef?.commandPermissions);
+  return groupCommandOperations(operations).map(([category, items]) => `
+    <section class="cli-category-section">
+      <h5>${esc(commandCategoryLabel(category))} <span>${items.length}</span></h5>
+      <div class="cli-permission-list">
+        ${items.map(operation => renderCommandPermissionRow(operation, commandPermissions, readonly)).join('')}
+      </div>
+    </section>
+  `).join('');
+}
+
+function renderCommandPermissionsEditor(roleDef, operations) {
+  const stats = getCommandPermissionStats(roleDef?.commandPermissions);
+  return `
+    <div class="form-section command-permissions-section">
+      <h4>Command / CLI Permissions</h4>
+      <div class="cli-summary">
+        <span>${stats.total} rules</span>
+        <span>${stats.allow} allow</span>
+        <span>${stats.deny} deny</span>
+        <span>${stats.dangerous} dangerous</span>
+      </div>
+      <div class="cli-help">
+        ${currentLang === 'zh-CN'
+          ? '清单来自后端 operation registry。每行显示当前有效权限和命中的规则；修改后会写入精确 operation 规则。若要撤销内置继承规则，请对同名 operation 设置“拒绝”。'
+          : 'The list comes from the backend operation registry. Each row shows the current effective permission and matched rule. Changes are saved as exact operation rules.'}
+      </div>
+      ${renderCommandPermissionsList(roleDef, operations, false)}
+    </div>
+  `;
+}
+
+function validateCommandPermissionsClient(commandPermissions) {
+  if (!commandPermissions || typeof commandPermissions !== 'object' || Array.isArray(commandPermissions)) {
+    return 'Command permissions must be a JSON object.';
+  }
+
+  for (const [rule, permission] of Object.entries(commandPermissions)) {
+    if (!permission || typeof permission !== 'object' || Array.isArray(permission)) {
+      return `Command permission "${rule}" must be an object.`;
+    }
+    if (typeof permission.allow !== 'boolean') {
+      return `Command permission "${rule}" must include boolean allow.`;
+    }
+    if (permission.dangerous !== undefined && typeof permission.dangerous !== 'boolean') {
+      return `Command permission "${rule}" dangerous must be a boolean.`;
+    }
+    if (permission.scopes !== undefined) {
+      if (!Array.isArray(permission.scopes)) {
+        return `Command permission "${rule}" scopes must be an array.`;
+      }
+      const badScope = permission.scopes.find(scope => !COMMAND_PERMISSION_SCOPE_VALUES.includes(scope));
+      if (badScope) return `Command permission "${rule}" has unsupported scope: ${badScope}.`;
+    }
+    if (permission.constraints !== undefined && (
+      !permission.constraints ||
+      typeof permission.constraints !== 'object' ||
+      Array.isArray(permission.constraints)
+    )) {
+      return `Command permission "${rule}" constraints must be an object.`;
+    }
+  }
+
+  return '';
+}
+
+function collectCommandPermissions(container, fallback = {}) {
+  const rows = Array.from(container.querySelectorAll('[data-command-operation]'));
+  if (rows.length === 0) {
+    const input = container.querySelector('#edit-commandPermissions');
+    if (!input) return { ok: true, value: getCommandPermissionsObject(fallback) };
+    try {
+      const parsed = JSON.parse(input.value.trim() || '{}');
+      const validationError = validateCommandPermissionsClient(parsed);
+      if (validationError) return { ok: false, error: validationError };
+      return { ok: true, value: parsed };
+    } catch (err) {
+      return { ok: false, error: `Command permissions JSON is invalid: ${err.message}` };
+    }
+  }
+
+  const operationsById = new Map((roleOperationsCache || []).map(operation => [operation.id, operation]));
+  const commandPermissions = { ...getCommandPermissionsObject(fallback) };
+
+  for (const row of rows) {
+    const operationId = row.dataset.commandOperation;
+    const operation = operationsById.get(operationId);
+    if (!operation) continue;
+
+    const decision = row.querySelector('[data-command-field="decision"]')?.value || 'keep';
+    const dirty = row.dataset.commandDirty === 'true';
+    if (decision === 'keep' && !dirty) continue;
+
+    if (decision === 'remove') {
+      delete commandPermissions[operationId];
+      continue;
+    }
+
+    const match = getEffectiveCommandPermission(operation, commandPermissions);
+    const basePermission = commandPermissions[operationId] || match?.permission || {};
+    const nextAllow = decision === 'allow'
+      ? true
+      : decision === 'deny'
+        ? false
+        : basePermission.allow === true;
+
+    const scopes = Array.from(row.querySelectorAll('[data-command-scope]:checked'))
+      .map(input => input.dataset.commandScope)
+      .filter(Boolean);
+    if (nextAllow && scopes.length === 0) {
+      return { ok: false, error: `Command permission "${operationId}" must allow at least one scope.` };
+    }
+
+    const constraints = { ...(basePermission.constraints || {}) };
+    COMMAND_PERMISSION_BOOLEAN_CONSTRAINTS.forEach(key => {
+      delete constraints[key];
+    });
+    row.querySelectorAll('[data-command-constraint]').forEach(input => {
+      const key = input.dataset.commandConstraint;
+      if (key && input.checked) constraints[key] = true;
+    });
+
+    const requireFieldOverride = row.querySelector('[data-command-field="requireFieldOverride"]')?.value.trim();
+    if (requireFieldOverride) constraints.requireFieldOverride = requireFieldOverride;
+    else delete constraints.requireFieldOverride;
+
+    const dangerousGrant = !!row.querySelector('[data-command-field="dangerousGrant"]')?.checked;
+    const reason = row.querySelector('[data-command-field="reason"]')?.value.trim();
+
+    const nextPermission = {
+      ...basePermission,
+      allow: nextAllow,
+    };
+    if (nextAllow) nextPermission.scopes = scopes;
+    else delete nextPermission.scopes;
+    if (operation.dangerous || dangerousGrant) nextPermission.dangerous = operation.dangerous ? true : dangerousGrant;
+    else delete nextPermission.dangerous;
+    if (Object.keys(constraints).length) nextPermission.constraints = constraints;
+    else delete nextPermission.constraints;
+    if (reason) nextPermission.reason = reason;
+    else delete nextPermission.reason;
+
+    commandPermissions[operationId] = nextPermission;
+  }
+
+  const validationError = validateCommandPermissionsClient(commandPermissions);
+  if (validationError) return { ok: false, error: validationError };
+  return { ok: true, value: commandPermissions };
+}
+
+function createRoleCard(roleName, roleDef) {
+  const card = document.createElement('div');
+  card.className = `role-card role-${roleName}`;
+
+  const icon = ROLE_ICONS[roleName] || '📋';
+  const nameKey = ROLE_NAMES[roleName] || roleName;
+  const permMode = roleDef.permissions?.permissionMode?.default || '—';
+  const model = roleDef.permissions?.['baseagents.claude.model']?.default || '—';
+  const commandStats = getCommandPermissionStats(roleDef.commandPermissions);
+
+  // 判断是否为内置角色
+  const builtinRoles = ['owner', 'admin', 'member', 'guest', 'anonymous'];
+  const isBuiltin = builtinRoles.includes(roleName);
+
+  card.innerHTML = `
+    <div class="role-card-header">
+      <span class="role-icon">${icon}</span>
+      <h3 class="role-name" data-i18n="${nameKey}">${t(nameKey)}</h3>
+      ${!isBuiltin ? '<span class="role-custom-badge">自定义</span>' : ''}
+    </div>
+    <p class="role-description">${esc(roleDef.description || '')}</p>
+    <div class="role-preview">
+      <div class="role-preview-item">
+        <span class="label">${t('roleDefs.permissionMode')}:</span>
+        <span class="value">${esc(permMode)}</span>
+      </div>
+      <div class="role-preview-item">
+        <span class="label">${t('roleDefs.model')}:</span>
+        <span class="value">${esc(model)}</span>
+      </div>
+      <div class="role-preview-item">
+        <span class="label">CLI rules:</span>
+        <span class="value">${commandStats.total} (${commandStats.allow} allow / ${commandStats.deny} deny)</span>
+      </div>
+      <div class="role-preview-item">
+        <span class="label">Dangerous:</span>
+        <span class="value">${commandStats.dangerous}</span>
+      </div>
+    </div>
+    <div class="role-card-actions">
+      <button class="btn-view-role" data-role="${roleName}">${t('roleDefs.viewDetails')}</button>
+      <button class="btn-edit-role" data-role="${roleName}">${t('roleDefs.edit')}</button>
+      ${isBuiltin ? `<button class="btn-reset-role" data-role="${roleName}">${t('roleDefs.reset')}</button>` :
+                    `<button class="btn-delete-role" data-role="${roleName}">删除</button>`}
+    </div>
+  `;
+
+  return card;
+}
+
+let _roleDefinitionsTabBound = false;
+function initRoleDefinitionsTab() {
+  if (_roleDefinitionsTabBound) return;
+  _roleDefinitionsTabBound = true;
+
+  // 新增角色按钮
+  $('#btn-new-role')?.addEventListener('click', () => {
+    showNewRoleModal();
+  });
+
+  // View Details 按钮
+  document.addEventListener('click', (e) => {
+    const btn = e.target.closest?.('.btn-view-role');
+    if (btn) {
+      const roleName = btn.dataset.role;
+      if (state.roleDefinitions?.roles[roleName]) {
+        showRoleDetailsModal(roleName, state.roleDefinitions.roles[roleName]);
+      }
+    }
+  });
+
+  // Edit 按钮
+  document.addEventListener('click', (e) => {
+    const btn = e.target.closest?.('.btn-edit-role');
+    if (btn) {
+      const roleName = btn.dataset.role;
+      if (state.roleDefinitions?.roles[roleName]) {
+        showRoleEditModal(roleName, state.roleDefinitions.roles[roleName]);
+      }
+    }
+  });
+
+  // Reset 按钮
+  document.addEventListener('click', async (e) => {
+    const btn = e.target.closest?.('.btn-reset-role');
+    if (btn) {
+      const roleName = btn.dataset.role;
+      const confirmMsg = t('roleDefs.resetConfirm').replace('{role}', roleName);
+
+      if (!confirm(confirmMsg)) return;
+
+      try {
+        const token = localStorage.getItem(TOKEN_KEY);
+        const res = await fetch(apiUrl(`api/role-definitions/${roleName}/reset`), {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${token}` }
+        });
+
+        if (!res.ok) {
+          alert(t('roleDefs.saveFailed'));
+        } else {
+          alert(t('roleDefs.saveSuccess'));
+        }
+      } catch (err) {
+        alert(t('pair.error.network'));
+      }
+    }
+  });
+
+  // 删除角色按钮
+  document.addEventListener('click', async (e) => {
+    const btn = e.target.closest?.('.btn-delete-role');
+    if (btn) {
+      const roleName = btn.dataset.role;
+
+      if (!confirm(`确定要删除角色 "${roleName}" 吗？\n\n注意：内置角色（owner/admin/member/guest/anonymous）不能删除。`)) return;
+
+      try {
+        const token = localStorage.getItem(TOKEN_KEY);
+        const res = await fetch(apiUrl(`api/role-definitions/${roleName}`), {
+          method: 'DELETE',
+          headers: { 'Authorization': `Bearer ${token}` }
+        });
+
+        if (!res.ok) {
+          const err = await res.json();
+          alert(t('roleDefs.saveFailed') + ': ' + (err.error || 'unknown'));
+        } else {
+          alert('角色已删除');
+        }
+      } catch (err) {
+        alert(t('pair.error.network'));
+      }
+    }
+  });
+
+  // 关闭弹窗
+  $('#role-edit-close')?.addEventListener('click', () => {
+    $('#role-edit-modal').style.display = 'none';
+  });
+
+  $('#role-edit-cancel')?.addEventListener('click', () => {
+    $('#role-edit-modal').style.display = 'none';
+  });
+
+  // 保存按钮
+  $('#role-edit-save')?.addEventListener('click', async () => {
+    await saveRoleDefinition();
+  });
+}
+
+const CLAUDE_MODEL_PERMISSION_KEY = 'baseagents.claude.model';
+const CLAUDE_ALLOWED_MODELS_LEGACY_KEY = 'baseagents.claude.allowedModels';
+const DEFAULT_MODEL_PATTERN_OPTIONS = ['*', 'claude-opus-*', 'claude-sonnet-*', 'claude-haiku-*'];
+
+function getClaudeModelPermission(roleDef) {
+  const perm = roleDef?.permissions?.[CLAUDE_MODEL_PERMISSION_KEY];
+  return perm && typeof perm === 'object' ? perm : null;
+}
+
+function normalizeAllowedModels(value) {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set();
+  const out = [];
+  value.forEach(item => {
+    if (typeof item !== 'string') return;
+    const trimmed = item.trim();
+    if (!trimmed || seen.has(trimmed)) return;
+    seen.add(trimmed);
+    out.push(trimmed);
+  });
+  return out;
+}
+
+function inferModelSelectionMode(allowedModels) {
+  const list = normalizeAllowedModels(allowedModels);
+  if (!list.length) return 'explicit';
+  const patternCount = list.filter(m => m === '*' || m.endsWith('*')).length;
+  if (patternCount === list.length) return 'pattern';
+  if (patternCount === 0) return 'explicit';
+  return 'mixed';
+}
+
+function modelAllowedByPatterns(model, allowedModels) {
+  const list = normalizeAllowedModels(allowedModels);
+  if (list.includes('*')) return true;
+  return list.some(pattern => {
+    if (pattern.endsWith('*')) return model.startsWith(pattern.slice(0, -1));
+    return model === pattern;
+  });
+}
+
+function renderRoleModelPermissionSection(roleDef) {
+  const perm = getClaudeModelPermission(roleDef);
+  if (!perm) return '';
+
+  const allowedModels = normalizeAllowedModels(perm.allowedModels);
+  const selectionMode = inferModelSelectionMode(allowedModels);
+  const patternOptions = DEFAULT_MODEL_PATTERN_OPTIONS;
+
+  return `
+    <div class="form-group perm-group model-permissions-panel" data-model-permissions>
+      <div class="perm-header">
+        <label class="perm-label">${esc(t('roleDefs.model'))}</label>
+        <label class="perm-override">
+          <input type="checkbox"
+                 data-model-field="allowOverride"
+                 ${perm.allowOverride ? 'checked' : ''}>
+          <span>${t('roleDefs.allowOverride')}</span>
+        </label>
+      </div>
+
+      <label class="model-field-label">Default model</label>
+      <input type="text"
+             data-model-field="default"
+             value="${esc(perm.default || '')}"
+             list="role-model-options"
+             class="form-input">
+      <datalist id="role-model-options"></datalist>
+
+      <label class="model-field-label">${t('roleDefs.allowedModels')}</label>
+      <div class="model-allowed-editor">
+        <div class="model-allowed-list" data-model-allowed-list></div>
+        <div class="model-allowed-add">
+          <input type="text"
+                 class="form-input model-allowed-input"
+                 data-model-allowed-input
+                 list="role-model-options"
+                 placeholder="${currentLang === 'zh-CN' ? '输入模型 ID 或通配模式' : 'Model ID or wildcard pattern'}">
+          <button type="button" class="btn-secondary" data-model-allowed-add>${currentLang === 'zh-CN' ? '添加' : 'Add'}</button>
+        </div>
+      </div>
+
+      <div class="model-mode-tabs">
+        ${['pattern', 'explicit', 'mixed'].map(mode => `
+          <label class="model-mode-option">
+            <input type="radio"
+                   name="role-model-selection-mode"
+                   value="${mode}"
+                   ${selectionMode === mode ? 'checked' : ''}>
+            <span>${mode}</span>
+          </label>
+        `).join('')}
+        <span class="model-mode-note">derived from allowedModels</span>
+      </div>
+
+      <div class="model-mode-panel" data-model-panel="pattern">
+        <div class="model-option-grid">
+          ${patternOptions.map(pattern => `
+            <label class="model-option">
+              <input type="checkbox"
+                     class="model-pattern-checkbox"
+                     value="${esc(pattern)}"
+                     ${allowedModels.includes(pattern) ? 'checked' : ''}>
+              <span>${esc(pattern)}</span>
+            </label>
+          `).join('')}
+        </div>
+      </div>
+
+      <div class="model-mode-panel" data-model-panel="explicit">
+        <div class="model-explicit-list" data-loading="true">Loading models...</div>
+      </div>
+
+      <div class="model-preview" data-model-preview>Loading preview...</div>
+    </div>
+  `;
+}
+
+async function fetchRoleModelPermissionData(roleName) {
+  const token = localStorage.getItem(TOKEN_KEY);
+  const res = await fetch(apiUrl(`api/role-definitions/${encodeURIComponent(roleName)}/configurable-models`), {
+    headers: { 'Authorization': `Bearer ${token}` }
+  });
+  if (!res.ok) throw new Error('Failed to load role model permissions');
+  const json = await res.json();
+  return json.data;
+}
+
+async function fetchModelCatalogData() {
+  const token = localStorage.getItem(TOKEN_KEY);
+  const res = await fetch(apiUrl('api/models/catalog?baseagent=claude'), {
+    headers: { 'Authorization': `Bearer ${token}` }
+  });
+  if (!res.ok) throw new Error('Failed to load model catalog');
+  const json = await res.json();
+  return json.data;
+}
+
+function renderModelCatalogControls(section, models, allowedModels) {
+  const realModels = (models || []).filter(model => !model.isAlias);
+  const datalist = section.querySelector('#role-model-options');
+  if (datalist) {
+    datalist.innerHTML = realModels
+      .map(model => `<option value="${esc(model.id)}"></option>`)
+      .join('');
+  }
+
+  const explicitList = section.querySelector('.model-explicit-list');
+  if (!explicitList) return;
+
+  if (!realModels.length) {
+    explicitList.innerHTML = '<div class="model-empty">No catalog models available.</div>';
+    return;
+  }
+
+  explicitList.innerHTML = realModels.map(model => `
+    <label class="model-option model-option-row">
+      <input type="checkbox"
+             class="model-explicit-checkbox"
+             value="${esc(model.id)}"
+             ${allowedModels.includes(model.id) ? 'checked' : ''}>
+      <span>${esc(model.id)}</span>
+      <small>${esc(model.family || model.owned_by || '')}</small>
+    </label>
+  `).join('');
+}
+
+function getRoleAllowedModelsFromList(section) {
+  return normalizeAllowedModels(Array.from(section.querySelectorAll('[data-model-allowed-item]'))
+    .map(item => item.dataset.modelAllowedItem));
+}
+
+function syncModelSelectionMode(section, allowedModels = getRoleAllowedModelsFromList(section)) {
+  const mode = inferModelSelectionMode(allowedModels);
+  const radio = section.querySelector(`input[name="role-model-selection-mode"][value="${mode}"]`);
+  if (radio) radio.checked = true;
+}
+
+function syncModelCatalogChecks(section, allowedModels = getRoleAllowedModelsFromList(section)) {
+  const selected = new Set(allowedModels);
+  section.querySelectorAll('.model-pattern-checkbox, .model-explicit-checkbox').forEach(input => {
+    input.checked = selected.has(input.value);
+  });
+  syncModelSelectionMode(section, allowedModels);
+}
+
+function renderRoleAllowedModels(section, allowedModels) {
+  const list = section.querySelector('[data-model-allowed-list]');
+  if (!list) return;
+
+  const normalized = normalizeAllowedModels(allowedModels);
+  if (!normalized.length) {
+    list.innerHTML = `<div class="model-empty">${currentLang === 'zh-CN' ? '未配置可用模型' : 'No allowed models configured.'}</div>`;
+    syncModelCatalogChecks(section, normalized);
+    return;
+  }
+
+  list.innerHTML = normalized.map(model => `
+    <span class="model-allowed-chip" data-model-allowed-item="${esc(model)}">
+      <span>${esc(model)}</span>
+      <button type="button"
+              class="model-allowed-remove"
+              data-model-allowed-remove="${esc(model)}"
+              aria-label="${currentLang === 'zh-CN' ? '移除模型' : 'Remove model'}">x</button>
+    </span>
+  `).join('');
+  syncModelCatalogChecks(section, normalized);
+}
+
+function addRoleAllowedModel(section, value) {
+  const model = typeof value === 'string' ? value.trim() : '';
+  if (!model) return false;
+  const next = normalizeAllowedModels([...getRoleAllowedModelsFromList(section), model]);
+  renderRoleAllowedModels(section, next);
+  return true;
+}
+
+function collectRoleModelPermission(container) {
+  const section = container.matches?.('[data-model-permissions]')
+    ? container
+    : container.querySelector('[data-model-permissions]');
+  if (!section) return null;
+
+  const defaultInput = section.querySelector('[data-model-field="default"]');
+  const overrideInput = section.querySelector('[data-model-field="allowOverride"]');
+
+  return {
+    default: defaultInput?.value.trim() || '',
+    allowOverride: !!overrideInput?.checked,
+    allowedModels: getRoleAllowedModelsFromList(section)
+  };
+}
+
+function validateRoleModelPermissionClient(permission) {
+  if (!permission.default) return 'Default model is required.';
+  if (!permission.allowedModels.length) return 'At least one allowed model or pattern is required.';
+  if (!modelAllowedByPatterns(permission.default, permission.allowedModels)) {
+    return 'Default model must be allowed by allowedModels.';
+  }
+  return '';
+}
+
+function renderModelPreview(section, models, errorMessage) {
+  const preview = section.querySelector('[data-model-preview]');
+  if (!preview) return;
+
+  if (errorMessage) {
+    preview.innerHTML = `<span class="model-preview-error">${esc(errorMessage)}</span>`;
+    return;
+  }
+
+  const shown = (models || []).slice(0, 12);
+  const rest = Math.max(0, (models || []).length - shown.length);
+  preview.innerHTML = `
+    <div class="model-preview-count">${(models || []).length} matched model(s)</div>
+    <div class="model-preview-list">
+      ${shown.map(model => `<span class="model-chip">${esc(model.id || model)}</span>`).join('')}
+      ${rest ? `<span class="model-chip">+${rest}</span>` : ''}
+    </div>
+  `;
+}
+
+async function updateRoleModelPreview(section, roleName) {
+  const permission = collectRoleModelPermission(section);
+  if (!permission) return;
+
+  const validationError = validateRoleModelPermissionClient(permission);
+  if (validationError) {
+    renderModelPreview(section, [], validationError);
+    return;
+  }
+
+  const catalogModels = section._modelCatalog || [];
+  const localMatches = catalogModels
+    .filter(model => !model.isAlias && modelAllowedByPatterns(model.id, permission.allowedModels));
+  renderModelPreview(section, localMatches);
+
+  if (!roleName || roleName === '__new__') return;
+
+  clearTimeout(section._previewTimer);
+  section._previewTimer = setTimeout(async () => {
+    try {
+      const token = localStorage.getItem(TOKEN_KEY);
+      const res = await fetch(apiUrl(`api/role-definitions/${encodeURIComponent(roleName)}/preview-models`), {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify({
+          defaultModel: permission.default,
+          allowOverride: permission.allowOverride,
+          allowedModels: permission.allowedModels
+        })
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        renderModelPreview(section, localMatches, err.error || 'Preview failed');
+        return;
+      }
+      const json = await res.json();
+      renderModelPreview(section, json.data?.matchingModels || localMatches);
+    } catch (err) {
+      renderModelPreview(section, localMatches);
+    }
+  }, 250);
+}
+
+function updateModelModeVisibility(section) {
+  const mode = section.querySelector('input[name="role-model-selection-mode"]:checked')?.value || 'explicit';
+  section.querySelectorAll('[data-model-panel]').forEach(panel => {
+    const panelMode = panel.dataset.modelPanel;
+    panel.style.display = (mode === 'mixed' || mode === panelMode) ? '' : 'none';
+  });
+}
+
+async function initRoleModelPermissionEditor(container, roleName, roleDef) {
+  const section = container.querySelector('[data-model-permissions]');
+  if (!section) return;
+
+  const initialAllowed = normalizeAllowedModels(getClaudeModelPermission(roleDef)?.allowedModels);
+  let catalogModels = [];
+  section._initialAllowedModels = initialAllowed;
+
+  try {
+    const data = roleName && roleName !== '__new__'
+      ? await fetchRoleModelPermissionData(roleName)
+      : await fetchModelCatalogData();
+    catalogModels = data?.catalog?.models || data?.models || [];
+  } catch (err) {
+    console.warn('[roleDefinitions] Failed to load model catalog:', err);
+  }
+
+  section._modelCatalog = catalogModels;
+  renderModelCatalogControls(section, catalogModels, initialAllowed);
+  renderRoleAllowedModels(section, initialAllowed);
+  updateModelModeVisibility(section);
+
+  section.querySelector('[data-model-allowed-add]')?.addEventListener('click', () => {
+    const input = section.querySelector('[data-model-allowed-input]');
+    if (addRoleAllowedModel(section, input?.value || '')) {
+      if (input) input.value = '';
+      updateRoleModelPreview(section, roleName);
+    }
+  });
+
+  section.querySelector('[data-model-allowed-input]')?.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter') return;
+    e.preventDefault();
+    if (addRoleAllowedModel(section, e.currentTarget.value || '')) {
+      e.currentTarget.value = '';
+      updateRoleModelPreview(section, roleName);
+    }
+  });
+
+  section.addEventListener('click', (e) => {
+    const remove = e.target.closest?.('[data-model-allowed-remove]');
+    if (!remove) return;
+    const next = getRoleAllowedModelsFromList(section)
+      .filter(model => model !== remove.dataset.modelAllowedRemove);
+    renderRoleAllowedModels(section, next);
+    updateRoleModelPreview(section, roleName);
+  });
+
+  section.addEventListener('change', (e) => {
+    const target = e.target;
+    if (target?.classList?.contains('model-pattern-checkbox') || target?.classList?.contains('model-explicit-checkbox')) {
+      const allowed = new Set(getRoleAllowedModelsFromList(section));
+      if (target.checked) allowed.add(target.value);
+      else allowed.delete(target.value);
+      renderRoleAllowedModels(section, [...allowed]);
+    }
+    updateModelModeVisibility(section);
+    updateRoleModelPreview(section, roleName);
+  });
+  section.addEventListener('input', (e) => {
+    if (e.target?.matches?.('[data-model-allowed-input]')) return;
+    updateRoleModelPreview(section, roleName);
+  });
+
+  updateRoleModelPreview(section, roleName);
+}
+
+async function showNewRoleModal() {
+  const modal = $('#role-edit-modal');
+  const title = $('#role-edit-title');
+  const body = $('#role-edit-body');
+  const saveBtn = $('#role-edit-save');
+
+  if (!modal || !title || !body) return;
+
+  title.textContent = '新增自定义角色';
+  saveBtn.style.display = 'inline-block';
+  saveBtn.dataset.role = '__new__';
+
+  // 基于 member 角色的默认配置
+  const defaultDef = state.roleDefinitions?.roles?.member || {
+    description: '',
+    permissions: {
+      permissionMode: { default: 'request', allowOverride: false },
+      'baseagents.claude.model': { default: 'claude-sonnet-4', allowOverride: false, allowedModels: ['claude-sonnet-*', 'claude-haiku-*'] },
+      dispatch: { default: 'mention', allowOverride: false }
+    },
+    commandPermissions: {
+      'category:read': { allow: true },
+      'category:write-own': { allow: true },
+      'model.*': { allow: true, scopes: ['relation', 'agent'], constraints: { ownPeerOnly: true, ownAgentOnly: true } },
+      'cli.exec.raw': { allow: false, dangerous: true }
+    }
+  };
+  const operations = await loadRoleOperationsForEditor();
+
+  body.innerHTML = `
+    <div class="role-edit-form">
+      <div class="form-section">
+        <h4>角色名称</h4>
+        <input type="text"
+               id="new-role-name"
+               class="form-input"
+               placeholder="输入角色名称（如：developer, viewer 等）"
+               pattern="[a-z0-9_-]+"
+               required>
+        <small style="color: var(--dim);">只能包含小写字母、数字、下划线和连字符</small>
+      </div>
+
+      <div class="form-section">
+        <h4>${t('roleDefs.description')}</h4>
+        <textarea id="edit-description" rows="3" class="form-textarea">${esc(defaultDef.description)}</textarea>
+      </div>
+
+      <div class="form-section">
+        <h4>${currentLang === 'zh-CN' ? '是否允许访问' : 'Allow Access'}</h4>
+        <select id="edit-allowAccess" data-value-type="boolean" class="form-select">
+          <option value="true" ${(defaultDef.allowAccess ?? true) ? 'selected' : ''}>${currentLang === 'zh-CN' ? '允许 (true)' : 'Allow (true)'}</option>
+          <option value="false" ${(defaultDef.allowAccess ?? true) ? '' : 'selected'}>${currentLang === 'zh-CN' ? '拒绝 (false)' : 'Deny (false)'}</option>
+        </select>
+        <small style="color: var(--dim);">${currentLang === 'zh-CN' ? '拒绝时，该角色用户访问将收到"暂无权限"提示' : 'When denied, users with this role will receive "no permission" message'}</small>
+      </div>
+
+      <div class="role-editor-tabs" role="tablist">
+        <button type="button" class="role-editor-tab active" data-role-tab="fields">Field Permissions</button>
+        <button type="button" class="role-editor-tab" data-role-tab="cli">CLI Permissions</button>
+      </div>
+
+      <div class="role-editor-tab-panel active" data-role-tab-panel="fields">
+        <div class="form-section">
+          <h4>权限配置</h4>
+  `;
+
+  const permissions = defaultDef.permissions;
+  const permissionMeta = {
+    permissionMode: {
+      label: t('roleDefs.permissionMode'),
+      type: 'select',
+      options: [
+        { value: 'bypass', label: 'roleDefs.permMode.bypass' },
+        { value: 'request', label: 'roleDefs.permMode.request' },
+        { value: 'auto', label: 'roleDefs.permMode.auto' },
+        { value: 'readonly', label: 'roleDefs.permMode.readonly' }
+      ]
+    },
+    'baseagents.claude.model': {
+      label: t('roleDefs.model'),
+      type: 'text'
+    },
+    'baseagents.claude.effort': {
+      label: currentLang === 'zh-CN' ? '推理强度 (effort)' : 'Reasoning Effort (effort)',
+      type: 'select',
+      options: [
+        { value: 'low', label: 'roleDefs.effort.low' },
+        { value: 'medium', label: 'roleDefs.effort.medium' },
+        { value: 'high', label: 'roleDefs.effort.high' }
+      ]
+    },
+    dispatch: {
+      label: t('roleDefs.dispatch'),
+      type: 'select',
+      options: [
+        { value: 'broadcast', label: 'roleDefs.dispatch.broadcast' },
+        { value: 'mention', label: 'roleDefs.dispatch.mention' }
+      ]
+    },
+    'baseagents.claude.allowedModels': {
+      label: t('roleDefs.allowedModels'),
+      type: 'tags',
+      placeholder: '按回车添加模型'
+    },
+    'baseagents.claude.show_activities': {
+      label: currentLang === 'zh-CN' ? '显示活动 (show_activities)' : 'Show Activities (show_activities)',
+      type: 'select',
+      options: [
+        { value: 'true', label: 'roleDefs.showActivities.true' },
+        { value: 'false', label: 'roleDefs.showActivities.false' }
+      ]
+    },
+    chatmode: {
+      label: currentLang === 'zh-CN' ? '聊天模式 (chatmode)' : 'Chat Mode (chatmode)',
+      type: 'chatmode',
+      // 聊天模式按场景配置，可选值固定（放在默认配置里，非用户自由填写）
+      scenes: [
+        { key: 'private', label: currentLang === 'zh-CN' ? '私聊' : 'Private' },
+        { key: 'group', label: currentLang === 'zh-CN' ? '群聊' : 'Group' },
+        { key: 'nothuman', label: currentLang === 'zh-CN' ? '非人类(机器对端)' : 'Non-human' }
+      ],
+      options: [
+        { value: 'interactive', label: currentLang === 'zh-CN' ? '交互式 (interactive)' : 'Interactive (interactive)' },
+        { value: 'proactive', label: currentLang === 'zh-CN' ? '主动式 (proactive)' : 'Proactive (proactive)' }
+      ]
+    },
+    show_activities: {
+      label: currentLang === 'zh-CN' ? '显示活动 (show_activities)' : 'Show Activities (show_activities)',
+      type: 'select',
+      options: [
+        { value: 'all', label: currentLang === 'zh-CN' ? '全部 (all)' : 'All (all)' },
+        { value: 'none', label: currentLang === 'zh-CN' ? '不显示 (none)' : 'None (none)' }
+      ]
+    },
+    flush_delay: {
+      label: currentLang === 'zh-CN' ? '刷新延迟 (flush_delay)' : 'Flush Delay (flush_delay)',
+      type: 'number'
+    },
+    debounce: {
+      label: currentLang === 'zh-CN' ? '防抖延迟 (debounce)' : 'Debounce (debounce)',
+      type: 'number'
+    },
+    enable_rich_content: {
+      label: currentLang === 'zh-CN' ? '富文本内容 (enable_rich_content)' : 'Rich Content (enable_rich_content)',
+      type: 'boolean'
+    }
+  };
+
+  body.innerHTML += renderRoleModelPermissionSection(defaultDef);
+
+  Object.keys(permissions).forEach(permKey => {
+    if (permKey === CLAUDE_MODEL_PERMISSION_KEY || permKey === CLAUDE_ALLOWED_MODELS_LEGACY_KEY) return;
+    const perm = permissions[permKey];
+    const meta = permissionMeta[permKey] || { label: permKey, type: 'text' };
+
+    body.innerHTML += `
+      <div class="form-group perm-group">
+        <div class="perm-header">
+          <label class="perm-label">${esc(meta.label)}</label>
+          <label class="perm-override">
+            <input type="checkbox"
+                   data-perm="${esc(permKey)}"
+                   data-field="allowOverride"
+                   ${perm.allowOverride ? 'checked' : ''}>
+            <span>${t('roleDefs.allowOverride')}</span>
+          </label>
+        </div>
+    `;
+
+    if (meta.type === 'select') {
+      body.innerHTML += `<select data-perm="${esc(permKey)}" data-field="default" class="form-select">`;
+      meta.options.forEach(opt => {
+        const optValue = typeof opt === 'string' ? opt : opt.value;
+        const optLabel = typeof opt === 'string' ? opt : t(opt.label);
+        const selected = perm.default === optValue ? 'selected' : '';
+        body.innerHTML += `<option value="${esc(optValue)}" ${selected}>${esc(optLabel)}</option>`;
+      });
+      body.innerHTML += `</select>`;
+    } else if (meta.type === 'chatmode') {
+      // 聊天模式：按场景（私聊/群聊/非人类）各一个下拉，选项来自默认配置
+      const cm = (perm.default && typeof perm.default === 'object') ? perm.default : {};
+      body.innerHTML += `<div class="chatmode-grid" data-perm="${esc(permKey)}" data-field="default">`;
+      meta.scenes.forEach(scene => {
+        body.innerHTML += `<div class="chatmode-scene"><label class="chatmode-scene-label">${esc(scene.label)}</label><select data-scene="${esc(scene.key)}" class="form-select">`;
+        meta.options.forEach(opt => {
+          const selected = cm[scene.key] === opt.value ? 'selected' : '';
+          body.innerHTML += `<option value="${esc(opt.value)}" ${selected}>${esc(opt.label)}</option>`;
+        });
+        body.innerHTML += `</select></div>`;
+      });
+      body.innerHTML += `</div>`;
+    } else if (meta.type === 'boolean') {
+      // 布尔开关：true / false 下拉
+      body.innerHTML += `<select data-perm="${esc(permKey)}" data-field="default" data-value-type="boolean" class="form-select">`;
+      [{ v: 'true', l: currentLang === 'zh-CN' ? '是 (true)' : 'True (true)' },
+       { v: 'false', l: currentLang === 'zh-CN' ? '否 (false)' : 'False (false)' }].forEach(o => {
+        const selected = String(perm.default) === o.v ? 'selected' : '';
+        body.innerHTML += `<option value="${o.v}" ${selected}>${o.l}</option>`;
+      });
+      body.innerHTML += `</select>`;
+    } else if (meta.type === 'number') {
+      // 数值输入
+      const value = perm.default ?? '';
+      body.innerHTML += `<input type="number" data-perm="${esc(permKey)}" data-field="default" data-value-type="number" value="${esc(String(value))}" class="form-input">`;
+    } else if (meta.type === 'tags') {
+      const values = Array.isArray(perm.default) ? perm.default : [];
+      body.innerHTML += `
+        <div class="tags-input-container" data-perm="${esc(permKey)}">
+          <div class="tags-list">
+            ${values.map(v => `
+              <span class="tag">
+                ${esc(v)}
+                <button type="button" class="tag-remove" data-value="${esc(v)}">×</button>
+              </span>
+            `).join('')}
+          </div>
+          <input type="text"
+                 class="tags-input"
+                 placeholder="${esc(meta.placeholder || '')}"
+                 data-perm="${esc(permKey)}"
+                 data-field="default">
+        </div>
+      `;
+    } else {
+      const value = perm.default || '';
+      body.innerHTML += `
+        <input type="text"
+               data-perm="${esc(permKey)}"
+               data-field="default"
+               value="${esc(value)}"
+               class="form-input">
+      `;
+    }
+
+    body.innerHTML += `</div>`;
+  });
+
+  body.innerHTML += `</div></div>
+      <div class="role-editor-tab-panel" data-role-tab-panel="cli">
+        ${renderCommandPermissionsEditor(defaultDef, operations)}
+      </div>
+    </div>`;
+
+  bindTagsInputEvents(body);
+  initRoleEditorTabs(body);
+  initCommandPermissionEditor(body);
+  initRoleModelPermissionEditor(body, '__new__', defaultDef);
+
+  modal.style.display = 'flex';
+
+  // 聚焦到角色名称输入框
+  setTimeout(() => $('#new-role-name')?.focus(), 100);
+}
+
+async function showRoleEditModal(roleName, roleDef) {
+  const modal = $('#role-edit-modal');
+  const title = $('#role-edit-title');
+  const body = $('#role-edit-body');
+  const saveBtn = $('#role-edit-save');
+
+  if (!modal || !title || !body || !saveBtn) return;
+
+  title.textContent = `${t(ROLE_NAMES[roleName] || roleName)} - ${t('roleDefs.edit')}`;
+  saveBtn.style.display = 'inline-block';
+  saveBtn.dataset.role = roleName;
+  const operations = await loadRoleOperationsForEditor();
+
+  let formHtml = `<div class="role-edit-form">`;
+
+  formHtml += `
+    <div class="form-section">
+      <h4>${t('roleDefs.description')}</h4>
+      <textarea id="edit-description" rows="3" class="form-textarea">${esc(roleDef.description || '')}</textarea>
+    </div>
+  `;
+
+  const allowAccess = roleDef.allowAccess ?? true;
+  formHtml += `
+    <div class="form-section">
+      <h4>${currentLang === 'zh-CN' ? '是否允许访问' : 'Allow Access'}</h4>
+      <select id="edit-allowAccess" data-value-type="boolean" class="form-select">
+        <option value="true" ${allowAccess ? 'selected' : ''}>${currentLang === 'zh-CN' ? '允许 (true)' : 'Allow (true)'}</option>
+        <option value="false" ${allowAccess ? '' : 'selected'}>${currentLang === 'zh-CN' ? '拒绝 (false)' : 'Deny (false)'}</option>
+      </select>
+      <small style="color: var(--dim);">${currentLang === 'zh-CN' ? '拒绝时，该角色用户访问将收到"暂无权限"提示' : 'When denied, users with this role will receive "no permission" message'}</small>
+    </div>
+  `;
+
+  formHtml += `
+    <div class="role-editor-tabs" role="tablist">
+      <button type="button" class="role-editor-tab active" data-role-tab="fields">Field Permissions</button>
+      <button type="button" class="role-editor-tab" data-role-tab="cli">CLI Permissions</button>
+    </div>
+
+    <div class="role-editor-tab-panel active" data-role-tab-panel="fields">
+      <div class="form-section">
+        <h4>权限配置</h4>
+  `;
+
+  const permissions = roleDef.permissions || {};
+  const permissionMeta = {
+    permissionMode: {
+      label: t('roleDefs.permissionMode'),
+      type: 'select',
+      options: [
+        { value: 'bypass', label: 'roleDefs.permMode.bypass' },
+        { value: 'request', label: 'roleDefs.permMode.request' },
+        { value: 'auto', label: 'roleDefs.permMode.auto' },
+        { value: 'readonly', label: 'roleDefs.permMode.readonly' }
+      ]
+    },
+    'baseagents.claude.model': {
+      label: t('roleDefs.model'),
+      type: 'text'
+    },
+    'baseagents.claude.effort': {
+      label: currentLang === 'zh-CN' ? '推理强度 (effort)' : 'Reasoning Effort (effort)',
+      type: 'select',
+      options: [
+        { value: 'low', label: 'roleDefs.effort.low' },
+        { value: 'medium', label: 'roleDefs.effort.medium' },
+        { value: 'high', label: 'roleDefs.effort.high' }
+      ]
+    },
+    dispatch: {
+      label: t('roleDefs.dispatch'),
+      type: 'select',
+      options: [
+        { value: 'broadcast', label: 'roleDefs.dispatch.broadcast' },
+        { value: 'mention', label: 'roleDefs.dispatch.mention' }
+      ]
+    },
+    'baseagents.claude.allowedModels': {
+      label: t('roleDefs.allowedModels'),
+      type: 'tags',
+      placeholder: '按回车添加模型'
+    },
+    'baseagents.claude.show_activities': {
+      label: currentLang === 'zh-CN' ? '显示活动 (show_activities)' : 'Show Activities (show_activities)',
+      type: 'select',
+      options: [
+        { value: 'true', label: 'roleDefs.showActivities.true' },
+        { value: 'false', label: 'roleDefs.showActivities.false' }
+      ]
+    },
+    chatmode: {
+      label: currentLang === 'zh-CN' ? '聊天模式 (chatmode)' : 'Chat Mode (chatmode)',
+      type: 'chatmode',
+      scenes: [
+        { key: 'private', label: currentLang === 'zh-CN' ? '私聊' : 'Private' },
+        { key: 'group', label: currentLang === 'zh-CN' ? '群聊' : 'Group' },
+        { key: 'nothuman', label: currentLang === 'zh-CN' ? '非人类(机器对端)' : 'Non-human' }
+      ],
+      options: [
+        { value: 'interactive', label: currentLang === 'zh-CN' ? '交互式 (interactive)' : 'Interactive (interactive)' },
+        { value: 'proactive', label: currentLang === 'zh-CN' ? '主动式 (proactive)' : 'Proactive (proactive)' }
+      ]
+    },
+    show_activities: {
+      label: currentLang === 'zh-CN' ? '显示活动 (show_activities)' : 'Show Activities (show_activities)',
+      type: 'select',
+      options: [
+        { value: 'all', label: currentLang === 'zh-CN' ? '全部 (all)' : 'All (all)' },
+        { value: 'none', label: currentLang === 'zh-CN' ? '不显示 (none)' : 'None (none)' }
+      ]
+    },
+    flush_delay: {
+      label: currentLang === 'zh-CN' ? '刷新延迟 (flush_delay)' : 'Flush Delay (flush_delay)',
+      type: 'number'
+    },
+    debounce: {
+      label: currentLang === 'zh-CN' ? '防抖延迟 (debounce)' : 'Debounce (debounce)',
+      type: 'number'
+    },
+    enable_rich_content: {
+      label: currentLang === 'zh-CN' ? '富文本内容 (enable_rich_content)' : 'Rich Content (enable_rich_content)',
+      type: 'boolean'
+    }
+  };
+
+  formHtml += renderRoleModelPermissionSection(roleDef);
+
+  Object.keys(permissions).forEach(permKey => {
+    if (permKey === CLAUDE_MODEL_PERMISSION_KEY || permKey === CLAUDE_ALLOWED_MODELS_LEGACY_KEY) return;
+    const perm = permissions[permKey];
+    const meta = permissionMeta[permKey] || { label: permKey, type: 'text' };
+
+    formHtml += `
+      <div class="form-group perm-group">
+        <div class="perm-header">
+          <label class="perm-label">${esc(meta.label)}</label>
+          <label class="perm-override">
+            <input type="checkbox"
+                   data-perm="${esc(permKey)}"
+                   data-field="allowOverride"
+                   ${perm.allowOverride ? 'checked' : ''}>
+            <span>${t('roleDefs.allowOverride')}</span>
+          </label>
+        </div>
+    `;
+
+    if (meta.type === 'select') {
+      formHtml += `<select data-perm="${esc(permKey)}" data-field="default" class="form-select">`;
+      meta.options.forEach(opt => {
+        const optValue = typeof opt === 'string' ? opt : opt.value;
+        const optLabel = typeof opt === 'string' ? opt : t(opt.label);
+        const selected = perm.default === optValue ? 'selected' : '';
+        formHtml += `<option value="${esc(optValue)}" ${selected}>${esc(optLabel)}</option>`;
+      });
+      formHtml += `</select>`;
+    } else if (meta.type === 'chatmode') {
+      const cm = (perm.default && typeof perm.default === 'object') ? perm.default : {};
+      formHtml += `<div class="chatmode-grid" data-perm="${esc(permKey)}" data-field="default">`;
+      meta.scenes.forEach(scene => {
+        formHtml += `<div class="chatmode-scene"><label class="chatmode-scene-label">${esc(scene.label)}</label><select data-scene="${esc(scene.key)}" class="form-select">`;
+        meta.options.forEach(opt => {
+          const selected = cm[scene.key] === opt.value ? 'selected' : '';
+          formHtml += `<option value="${esc(opt.value)}" ${selected}>${esc(opt.label)}</option>`;
+        });
+        formHtml += `</select></div>`;
+      });
+      formHtml += `</div>`;
+    } else if (meta.type === 'boolean') {
+      formHtml += `<select data-perm="${esc(permKey)}" data-field="default" data-value-type="boolean" class="form-select">`;
+      [{ v: 'true', l: currentLang === 'zh-CN' ? '是 (true)' : 'True (true)' },
+       { v: 'false', l: currentLang === 'zh-CN' ? '否 (false)' : 'False (false)' }].forEach(o => {
+        const selected = String(perm.default) === o.v ? 'selected' : '';
+        formHtml += `<option value="${o.v}" ${selected}>${o.l}</option>`;
+      });
+      formHtml += `</select>`;
+    } else if (meta.type === 'number') {
+      const value = perm.default ?? '';
+      formHtml += `<input type="number" data-perm="${esc(permKey)}" data-field="default" data-value-type="number" value="${esc(String(value))}" class="form-input">`;
+    } else if (meta.type === 'tags') {
+      const values = Array.isArray(perm.default) ? perm.default : [];
+      formHtml += `
+        <div class="tags-input-container" data-perm="${esc(permKey)}">
+          <div class="tags-list">
+            ${values.map(v => `
+              <span class="tag">
+                ${esc(v)}
+                <button type="button" class="tag-remove" data-value="${esc(v)}">×</button>
+              </span>
+            `).join('')}
+          </div>
+          <input type="text"
+                 class="tags-input"
+                 placeholder="${esc(meta.placeholder || '')}"
+                 data-perm="${esc(permKey)}"
+                 data-field="default">
+        </div>
+      `;
+    } else {
+      const value = perm.default || '';
+      formHtml += `
+        <input type="text"
+               data-perm="${esc(permKey)}"
+               data-field="default"
+               value="${esc(value)}"
+               class="form-input">
+      `;
+    }
+
+    formHtml += `</div>`;
+  });
+
+  formHtml += `</div></div>
+    <div class="role-editor-tab-panel" data-role-tab-panel="cli">
+      ${renderCommandPermissionsEditor(roleDef, operations)}
+    </div>
+  </div>`;
+
+  body.innerHTML = formHtml;
+
+  bindTagsInputEvents(body);
+  initRoleEditorTabs(body);
+  initCommandPermissionEditor(body);
+  initRoleModelPermissionEditor(body, roleName, roleDef);
+
+  modal.style.display = 'flex';
+}
+
+async function showRoleDetailsModal(roleName, roleDef) {
+  const modal = $('#role-edit-modal');
+  const title = $('#role-edit-title');
+  const body = $('#role-edit-body');
+  const saveBtn = $('#role-edit-save');
+
+  if (!modal || !title || !body) return;
+
+  title.textContent = `${t(ROLE_NAMES[roleName] || roleName)} - ${t('roleDefs.viewDetails')}`;
+  saveBtn.style.display = 'none'; // 只读模式隐藏保存按钮
+  const operations = await loadRoleOperationsForEditor();
+
+  body.innerHTML = `
+    <div class="role-edit-form">
+      <h4>${t('roleDefs.description')}</h4>
+      <p>${esc(roleDef.description)}</p>
+
+      <h4>Field Permissions</h4>
+      <pre>${JSON.stringify(roleDef.permissions || {}, null, 2)}</pre>
+
+      <h4>Command / CLI Permissions</h4>
+      ${renderCommandPermissionsList(roleDef, operations, true)}
+    </div>
+  `;
+
+  modal.style.display = 'flex';
+}
+
+function bindTagsInputEvents(container) {
+  // 标签输入：按回车添加
+  container.querySelectorAll('.tags-input').forEach(input => {
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        const value = input.value.trim();
+        if (!value) return;
+
+        const tagsContainer = input.closest('.tags-input-container');
+        const tagsList = tagsContainer.querySelector('.tags-list');
+
+        // 检查是否已存在
+        const existing = Array.from(tagsList.querySelectorAll('.tag')).map(t => t.textContent.trim().replace('×', ''));
+        if (existing.includes(value)) {
+          input.value = '';
+          return;
+        }
+
+        // 添加标签
+        const tag = document.createElement('span');
+        tag.className = 'tag';
+        tag.innerHTML = `
+          ${esc(value)}
+          <button type="button" class="tag-remove" data-value="${esc(value)}">×</button>
+        `;
+        tagsList.appendChild(tag);
+        input.value = '';
+      }
+    });
+  });
+
+  // 标签删除
+  container.addEventListener('click', (e) => {
+    if (e.target.classList.contains('tag-remove')) {
+      e.target.closest('.tag').remove();
+    }
+  });
+}
+
+function initRoleEditorTabs(container) {
+  container.querySelectorAll('[data-role-tab]').forEach(tab => {
+    tab.addEventListener('click', () => {
+      const target = tab.dataset.roleTab;
+      container.querySelectorAll('[data-role-tab]').forEach(item => {
+        item.classList.toggle('active', item.dataset.roleTab === target);
+      });
+      container.querySelectorAll('[data-role-tab-panel]').forEach(panel => {
+        panel.classList.toggle('active', panel.dataset.roleTabPanel === target);
+      });
+    });
+  });
+}
+
+function initCommandPermissionEditor(container) {
+  container.querySelectorAll('[data-command-operation]').forEach(row => {
+    row.addEventListener('change', (e) => {
+      if (e.target?.matches?.('[data-command-field="decision"]')) {
+        row.dataset.commandDecision = e.target.value;
+      } else {
+        row.dataset.commandDirty = 'true';
+      }
+    });
+    row.addEventListener('input', () => {
+      row.dataset.commandDirty = 'true';
+    });
+  });
+}
+
+async function saveRoleDefinition() {
+  const saveBtn = $('#role-edit-save');
+  const roleName = saveBtn?.dataset.role;
+
+  if (!roleName) return;
+
+  const body = $('#role-edit-body');
+  const isNew = roleName === '__new__';
+
+  let actualRoleName = roleName;
+
+  // 如果是新增角色，获取角色名称
+  if (isNew) {
+    const nameInput = $('#new-role-name');
+    actualRoleName = nameInput?.value.trim();
+
+    if (!actualRoleName) {
+      alert('请输入角色名称');
+      nameInput?.focus();
+      return;
+    }
+
+    // 验证角色名称格式
+    if (!/^[a-z0-9_-]+$/.test(actualRoleName)) {
+      alert('角色名称只能包含小写字母、数字、下划线和连字符');
+      nameInput?.focus();
+      return;
+    }
+
+    // 检查是否与内置角色重名
+    const builtinRoles = ['owner', 'admin', 'member', 'guest', 'anonymous'];
+    if (builtinRoles.includes(actualRoleName)) {
+      alert('角色名称不能与内置角色重名');
+      nameInput?.focus();
+      return;
+    }
+
+    // 检查是否已存在
+    if (state.roleDefinitions?.roles[actualRoleName]) {
+      alert(`角色 "${actualRoleName}" 已存在`);
+      nameInput?.focus();
+      return;
+    }
+  }
+
+  const currentDef = isNew
+    ? (state.roleDefinitions?.roles?.member || {
+      description: '',
+      permissions: {
+        permissionMode: { default: 'request', allowOverride: false },
+        [CLAUDE_MODEL_PERMISSION_KEY]: { default: 'claude-sonnet-4', allowOverride: false, allowedModels: ['claude-sonnet-*', 'claude-haiku-*'] },
+        dispatch: { default: 'mention', allowOverride: false }
+      },
+      commandPermissions: {
+        'category:read': { allow: true },
+        'category:write-own': { allow: true },
+        'model.*': { allow: true, scopes: ['relation', 'agent'], constraints: { ownPeerOnly: true, ownAgentOnly: true } },
+        'cli.exec.raw': { allow: false, dangerous: true }
+      }
+    })
+    : (state.roleDefinitions?.roles[actualRoleName] || {});
+
+  // 收集描述
+  const description = $('#edit-description')?.value;
+
+  // 收集是否允许访问
+  const allowAccessSelect = $('#edit-allowAccess');
+  const allowAccess = allowAccessSelect ? (allowAccessSelect.value === 'true') : true;
+
+  // 收集所有权限配置
+  const permissions = {};
+
+  // 获取所有权限项的键
+  const permKeys = new Set();
+  body.querySelectorAll('[data-perm]').forEach(el => {
+    permKeys.add(el.dataset.perm);
+  });
+
+  permKeys.forEach(permKey => {
+    const defaultInput = body.querySelector(`[data-perm="${permKey}"][data-field="default"]`);
+    const overrideInput = body.querySelector(`[data-perm="${permKey}"][data-field="allowOverride"]`);
+
+    let defaultValue = currentDef.permissions?.[permKey]?.default;
+
+    // 根据输入类型获取值
+    if (defaultInput) {
+      if (defaultInput.classList.contains('chatmode-grid')) {
+        // 聊天模式：按场景收集为对象 { private, group, nothuman }
+        const obj = {};
+        defaultInput.querySelectorAll('select[data-scene]').forEach(sel => {
+          obj[sel.dataset.scene] = sel.value;
+        });
+        defaultValue = obj;
+      } else if (defaultInput.classList.contains('tags-input')) {
+        // 标签输入：收集所有标签
+        const tagsContainer = defaultInput.closest('.tags-input-container');
+        const tags = Array.from(tagsContainer.querySelectorAll('.tag')).map(tag => {
+          return tag.textContent.trim().replace('×', '');
+        });
+        defaultValue = tags;
+      } else {
+        defaultValue = defaultInput.value;
+        // 按声明的值类型转换：布尔/数值不能存成字符串
+        const valueType = defaultInput.dataset.valueType;
+        if (valueType === 'boolean') {
+          defaultValue = defaultValue === 'true';
+        } else if (valueType === 'number') {
+          const n = Number(defaultValue);
+          defaultValue = Number.isFinite(n) ? n : 0;
+        }
+      }
+    }
+
+    permissions[permKey] = {
+      ...(currentDef.permissions?.[permKey] || {}),
+      default: defaultValue,
+      allowOverride: overrideInput ? overrideInput.checked : false
+    };
+    delete permissions[permKey].selectionMode;
+  });
+
+  const modelPermission = collectRoleModelPermission(body);
+  if (modelPermission) {
+    const modelValidationError = validateRoleModelPermissionClient(modelPermission);
+    if (modelValidationError) {
+      alert(modelValidationError);
+      return;
+    }
+    permissions[CLAUDE_MODEL_PERMISSION_KEY] = {
+      ...(currentDef.permissions?.[CLAUDE_MODEL_PERMISSION_KEY] || {}),
+      default: modelPermission.default,
+      allowOverride: modelPermission.allowOverride,
+      allowedModels: modelPermission.allowedModels
+    };
+    delete permissions[CLAUDE_MODEL_PERMISSION_KEY].selectionMode;
+  }
+
+  const commandPermissionsResult = collectCommandPermissions(body, currentDef.commandPermissions);
+  if (!commandPermissionsResult.ok) {
+    alert(commandPermissionsResult.error);
+    return;
+  }
+
+  const updates = {
+    description,
+    allowAccess,
+    permissions,
+    commandPermissions: commandPermissionsResult.value
+  };
+
+  try {
+    const token = localStorage.getItem(TOKEN_KEY);
+    const method = isNew ? 'POST' : 'PUT';
+    const url = isNew ? apiUrl('api/role-definitions') : apiUrl(`api/role-definitions/${encodeURIComponent(actualRoleName)}`);
+
+    const res = await fetch(url, {
+      method,
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`
+      },
+      body: JSON.stringify(isNew ? { name: actualRoleName, ...updates } : updates)
+    });
+
+    if (!res.ok) {
+      let message = t('roleDefs.saveFailed');
+      try {
+        const data = await res.json();
+        message = data?.error || data?.message || message;
+      } catch {}
+      throw new Error(message);
+    }
+
+    toast(t('roleDefs.saveSuccess'));
+    const modal = $('#role-edit-modal');
+    if (modal) modal.style.display = 'none';
+    subscribe('roleDefinitions', {});
+  } catch (e) {
+    toast(e.message || String(e), true);
+  }
 }
 
 window.addEventListener('DOMContentLoaded', async () => {

@@ -23,6 +23,8 @@ export interface MessageLogEntry {
   usage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number } | null;
   encrypt?: boolean;
   chatmode?: string;
+  peerName?: string;
+  peerType?: string;
   source?: 'daemon' | 'cli' | 'msg' | 'ctl' | 'owner-inject';
 }
 
@@ -87,6 +89,8 @@ export function buildInboundEntry(opts: {
   timestamp?: number;
   encrypt?: boolean;
   chatmode?: string;
+  peerName?: string;
+  peerType?: string;
   source?: 'daemon' | 'cli' | 'msg' | 'ctl' | 'owner-inject';
 }): MessageLogEntry {
   const ts = opts.timestamp || Date.now();
@@ -110,6 +114,8 @@ export function buildInboundEntry(opts: {
     durationMs: null,
     encrypt: opts.encrypt,
     chatmode: opts.chatmode,
+    peerName: opts.peerName,
+    peerType: opts.peerType,
     source: opts.source,
   };
 }
@@ -130,6 +136,7 @@ export function buildOutboundEntry(opts: {
   timestamp?: number;
   encrypt?: boolean;
   chatmode?: string;
+  peerType?: string;
   msgType?: 'text' | 'image' | 'file' | 'thought';
   source?: 'daemon' | 'cli' | 'msg' | 'ctl' | 'owner-inject';
 }): MessageLogEntry {
@@ -155,6 +162,7 @@ export function buildOutboundEntry(opts: {
     usage: opts.usage ?? null,
     encrypt: opts.encrypt,
     chatmode: opts.chatmode,
+    peerType: opts.peerType,
     source: opts.source ?? 'daemon',
   };
 }

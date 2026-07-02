@@ -71,7 +71,7 @@ function printHelp(): void {
   show --agent <aid> <triggerId> [--json]
   create --file <trigger.json|trigger-dir> [--enable] [--json]
     OR
-  create --agent <aid> --cron <expr> --prompt <text> [--enable] [其他flag]
+  create --agent <aid> --cron <expr>|--event <pattern> --prompt <text> [--enable] [其他flag]
   update --agent <aid> <triggerId> --file <trigger.json> [--json]
   enable --agent <aid> <triggerId>
   disable --agent <aid> <triggerId>
@@ -81,7 +81,7 @@ function printHelp(): void {
   template list|show <name> [--json]
 
 Flag 模式支持的参数（与 /trigger 命令一致）:
-  --delay <时长> | --at <ISO时间> | --cron <表达式> | --every <时长>
+  --delay <时长> | --at <ISO时间> | --cron <表达式> | --every <时长> | --event <事件模式>
   --prompt <文本>
   --script <路径> --runtime <node|python|bash>
   --mode <agent|direct>
@@ -253,6 +253,7 @@ function sourceFromParsed(parsed: any): any {
     return src;
   }
   if (parsed.scheduleType === 'interval') return { type: 'interval', everyMs: Number(parsed.scheduleValue) };
+  if (parsed.scheduleType === 'event') return { type: 'event', eventPattern: parsed.scheduleValue };
   throw new Error(`unsupported scheduleType: ${parsed.scheduleType}`);
 }
 

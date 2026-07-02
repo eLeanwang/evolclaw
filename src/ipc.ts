@@ -108,7 +108,6 @@ export class IpcServer {
   private queueActionExecutor?: QueueActionExecutor;
   private triggerExecutor?: TriggerExecutor;
   private bindExecutor?: BindExecutor;
-  private eventBus?: EventBus;
 
   // CPU 占用追踪：IPC handler 是一次性同步调用，无法在响应里做 200ms 异步采样，
   // 故用后台 1s interval 累积 process.cpuUsage() 增量，handler 直接读最近值。
@@ -130,11 +129,6 @@ export class IpcServer {
   /** Inject EvolAgentRegistry for evolagent.* IPC handlers */
   setAgentRegistry(registry: EvolAgentRegistryHandle): void {
     this.agentRegistry = registry;
-  }
-
-  /** Inject EventBus for lifecycle events emitted by IPC-triggered actions. */
-  setEventBus(eventBus: EventBus): void {
-    this.eventBus = eventBus;
   }
 
   /** Inject menu.* executor (ECWeb Control proxies menu requests through this) */
@@ -365,6 +359,7 @@ export class IpcServer {
       }
       case 'trigger.list':
       case 'trigger.show':
+      case 'trigger.eventCatalog':
       case 'trigger.create':
       case 'trigger.update':
       case 'trigger.setEnabled':
@@ -405,20 +400,6 @@ export class IpcServer {
           if (!this.agentRegistry.reload) return { ok: false, error: 'EvolAgentRegistry.reload not available' };
           await this.agentRegistry.reload(name, hooks);
           return { ok: true, result: `Agent "${name}" reloaded` };
-        } catch (e: any) {
-          return { ok: false, error: e?.message || String(e) };
-        }
-      }
-      case 'evolagent.bootstrapComplete': {
-        if (!this.agentRegistry) return { ok: false, error: 'EvolAgentRegistry not available' };
-        const aid = cmd.aid;
-        if (!aid || typeof aid !== 'string') return { ok: false, error: 'missing aid' };
-        const agent = this.agentRegistry.get(aid);
-        if (!agent) return { ok: false, error: `Agent "${aid}" not found` };
-        try {
-          agent.setLifecycle('active');
-          this.eventBus?.publish({ type: 'agent:bootstrap-complete', aid, timestamp: Date.now() });
-          return { ok: true, result: `Agent "${aid}" bootstrap complete` };
         } catch (e: any) {
           return { ok: false, error: e?.message || String(e) };
         }

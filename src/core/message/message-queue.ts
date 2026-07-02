@@ -312,8 +312,9 @@ export class MessageQueue {
     const rank: Record<SessionIdentity['role'], number> = {
       anonymous: 0,
       guest: 1,
-      admin: 2,
-      owner: 3,
+      member: 2,
+      admin: 3,
+      owner: 4,
     };
     let best: SessionIdentity['role'] | undefined;
     for (const item of items) {

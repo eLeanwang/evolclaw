@@ -179,19 +179,19 @@ export function parseTriggerUpdate(args: string): UpdateParseResult {
   } else {
     const spaceIdx = trimmed.indexOf(' ');
     if (spaceIdx === -1) {
-      return { ok: false, error: '至少需要指定一个修改参数（如 --prompt、--delay 等）' };
+      return { ok: false, error: '至少需要指定一个修改参数（如 --prompt、--delay、--event 等）' };
     }
     nameOrId = trimmed.slice(0, spaceIdx);
     rest = trimmed.slice(spaceIdx + 1).trim();
   }
 
   if (!rest) {
-    return { ok: false, error: '至少需要指定一个修改参数（如 --prompt、--delay 等）' };
+    return { ok: false, error: '至少需要指定一个修改参数（如 --prompt、--delay、--event 等）' };
   }
 
   const flags = parseFlags(rest);
   if (flags.size === 0) {
-    return { ok: false, error: '至少需要指定一个修改参数（如 --prompt、--delay 等）' };
+    return { ok: false, error: '至少需要指定一个修改参数（如 --prompt、--delay、--event 等）' };
   }
 
   const result: ParsedTriggerUpdate = {};
@@ -201,9 +201,10 @@ export function parseTriggerUpdate(args: string): UpdateParseResult {
   const hasAt = flags.has('at');
   const hasCron = flags.has('cron');
   const hasEvery = flags.has('every');
-  const timeCount = [hasDelay, hasAt, hasCron, hasEvery].filter(Boolean).length;
+  const hasEvent = flags.has('event');
+  const timeCount = [hasDelay, hasAt, hasCron, hasEvery, hasEvent].filter(Boolean).length;
   if (timeCount > 1) {
-    return { ok: false, error: '--delay、--at、--cron、--every 互斥，只能指定一个' };
+    return { ok: false, error: '--delay、--at、--cron、--every、--event 互斥，只能指定一个' };
   }
   if (hasDelay) {
     const raw = flags.get('delay') as string;
@@ -234,6 +235,11 @@ export function parseTriggerUpdate(args: string): UpdateParseResult {
     if (ms === null) return { ok: false, error: `无法解析 --every "${raw}"，支持格式：30s、15m、2h、1d` };
     result.scheduleType = 'interval';
     result.scheduleValue = String(ms);
+  } else if (hasEvent) {
+    const raw = flags.get('event');
+    if (!raw || raw === true) return { ok: false, error: '--event 不能为空' };
+    result.scheduleType = 'event';
+    result.scheduleValue = raw;
   }
 
   // Parse optional fields
@@ -359,13 +365,14 @@ export function parseTriggerSet(args: string): ParseResult {
   const hasAt = flags.has('at');
   const hasCron = flags.has('cron');
   const hasEvery = flags.has('every');
-  const timeCount = [hasDelay, hasAt, hasCron, hasEvery].filter(Boolean).length;
+  const hasEvent = flags.has('event');
+  const timeCount = [hasDelay, hasAt, hasCron, hasEvery, hasEvent].filter(Boolean).length;
 
   if (timeCount === 0) {
-    return { ok: false, error: '必须指定时间参数：--delay <时长> | --at <ISO时间> | --cron <表达式> | --every <时长>' };
+    return { ok: false, error: '必须指定触发参数：--delay <时长> | --at <ISO时间> | --cron <表达式> | --every <时长> | --event <事件模式>' };
   }
   if (timeCount > 1) {
-    return { ok: false, error: '--delay、--at、--cron、--every 互斥，只能指定一个' };
+    return { ok: false, error: '--delay、--at、--cron、--every、--event 互斥，只能指定一个' };
   }
 
   let scheduleType: TriggerScheduleType;
@@ -400,7 +407,7 @@ export function parseTriggerSet(args: string): ParseResult {
     }
     scheduleType = 'cron';
     scheduleValue = raw;
-  } else {
+  } else if (hasEvery) {
     const raw = flags.get('every');
     if (!raw || raw === true) {
       return { ok: false, error: '--every 不能为空' };
@@ -411,6 +418,13 @@ export function parseTriggerSet(args: string): ParseResult {
     }
     scheduleType = 'interval';
     scheduleValue = String(ms);
+  } else {
+    const raw = flags.get('event');
+    if (!raw || raw === true) {
+      return { ok: false, error: '--event 不能为空' };
+    }
+    scheduleType = 'event';
+    scheduleValue = raw;
   }
 
   const prompt = flags.get('prompt');

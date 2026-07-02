@@ -19,37 +19,44 @@ import fs from 'fs';
 import os from 'os';
 
 /** 判定用户是否为指定渠道的 owner */
-export type OwnerResolver = (channel: string, userId: string) => boolean;
+export type IdentityResolver = (channel: string, userId?: string) => SessionIdentity;
 /** 判定用户是否为指定渠道的 admin */
-export type AdminResolver = (channel: string, userId: string) => boolean;
+/** 判定用户是否为指定渠道的 member */
+export type ChatModeDefaultsProvider = (
+  channel: string,
+  chatType: string,
+  peerType?: string
+) => { private?: 'interactive' | 'proactive'; group?: 'interactive' | 'proactive'; nothuman?: 'interactive' | 'proactive' } | undefined;
 
 export class SessionManager {
   private sessionsDir: string;
   private eventBus: EventBus;
-  private ownerResolver?: OwnerResolver;
-  private adminResolver?: AdminResolver;
+  private identityResolver?: IdentityResolver;
+  private chatModeDefaultsProvider?: ChatModeDefaultsProvider;
   private fileAdapters = new Map<string, SessionFileAdapter>();
   private sessionEncryptState = new Map<string, boolean>();
 
-  constructor(sessionsDir: string, eventBus: EventBus, ownerResolver?: OwnerResolver, adminResolver?: AdminResolver) {
+  constructor(
+    sessionsDir: string,
+    eventBus: EventBus,
+    identityResolver?: IdentityResolver,
+    chatModeDefaultsProvider?: ChatModeDefaultsProvider,
+  ) {
     ensureDir(sessionsDir);
     this.sessionsDir = sessionsDir;
     this.eventBus = eventBus;
-    this.ownerResolver = ownerResolver;
-    this.adminResolver = adminResolver;
+    this.identityResolver = identityResolver;
+    this.chatModeDefaultsProvider = chatModeDefaultsProvider;
     this.migrateChannelKeyFormat();
   }
 
-  setOwnerResolver(resolver: OwnerResolver): void {
-    this.ownerResolver = resolver;
-  }
-
-  setAdminResolver(resolver: AdminResolver): void {
-    this.adminResolver = resolver;
+  setIdentityResolver(resolver: IdentityResolver): void {
+    this.identityResolver = resolver;
   }
 
   private resolveDefaultChatMode(channel: string, chatType?: string, peerType?: string): 'interactive' | 'proactive' {
     const ct = chatType || 'private';
+    const configured = this.chatModeDefaultsProvider?.(channel, ct, peerType);
 
     // 群聊强制 proactive
     if (ct === 'group') return 'proactive';
@@ -58,10 +65,9 @@ export class SessionManager {
     if (peerType === 'system') return 'interactive';
 
     // Agent-to-Agent 强制 proactive（避免无限循环）
-    if (peerType && peerType !== 'human') return 'proactive';
+    if (peerType && peerType !== 'human') return configured?.nothuman ?? 'proactive';
 
-    // Human-to-Agent 私聊永远是 interactive（暂不读 agent config，将来可通过前端+配置文件改为 proactive）
-    return 'interactive';
+    return configured?.private ?? 'interactive';
   }
 
   registerFileAdapter(adapter: SessionFileAdapter): void {
@@ -84,10 +90,7 @@ export class SessionManager {
   }
 
   resolveIdentity(channel: string, userId?: string): SessionIdentity {
-    if (!userId) return { role: 'anonymous', mode: 'interactive' };
-    if (this.ownerResolver?.(channel, userId)) return { role: 'owner', mode: 'interactive' };
-    if (this.adminResolver?.(channel, userId)) return { role: 'admin', mode: 'interactive' };
-    return { role: 'guest', mode: 'interactive' };
+    return this.identityResolver?.(channel, userId) ?? { role: 'anonymous', mode: 'interactive' };
   }
 
   async updateIdentity(sessionId: string, identity: SessionIdentity): Promise<void> {
@@ -544,7 +547,8 @@ export class SessionManager {
     baseagent?: string,
     selfAID?: string,
     channelType?: string,
-    peerType?: string
+    peerType?: string,
+    identity?: SessionIdentity
   ): Promise<Session> {
     if (!selfAID && channelType === 'aun') {
       throw new Error(`[SessionManager] getOrCreateSession requires selfAID for aun channel. channelId="${channelId}"`);
@@ -554,7 +558,7 @@ export class SessionManager {
     }
     if (threadId) {
       const session = this.getOrCreateThreadSession(channel, channelId, threadId, defaultProjectPath, metadata, name, baseagent, selfAID, channelType, peerType, chatType);
-      session.identity = this.resolveIdentity(channel, userId);
+      session.identity = identity ?? this.resolveIdentity(channel, userId);
       return session;
     }
 
@@ -565,7 +569,7 @@ export class SessionManager {
     if (active && !active.threadId) {
       const validSessionId = this.validateSessionFile(active);
       const session: Session = { ...active, agentSessionId: validSessionId };
-      session.identity = this.resolveIdentity(channel, userId);
+      session.identity = identity ?? this.resolveIdentity(channel, userId);
 
       let mutated = false;
       if (chatType && session.chatType !== chatType) {
@@ -583,6 +587,7 @@ export class SessionManager {
         if (!session.metadata) session.metadata = {};
         if (!session.metadata.peerId) { session.metadata.peerId = userId; mutated = true; }
         if (!session.metadata.peerName && metadata?.peerName) { session.metadata.peerName = metadata.peerName; mutated = true; }
+        if (metadata?.peerType && (session.metadata as any).peerType !== metadata.peerType) { (session.metadata as any).peerType = metadata.peerType; mutated = true; }
         if (metadata?.channelKey && session.metadata.channelKey !== metadata.channelKey) { session.metadata.channelKey = metadata.channelKey; mutated = true; }
       }
       if (metadata?.channelKey && chatType !== 'private') {
@@ -591,6 +596,11 @@ export class SessionManager {
           session.metadata.channelKey = metadata.channelKey;
           mutated = true;
         }
+      }
+      if (metadata?.peerType && (session.metadata as any)?.peerType !== metadata.peerType) {
+        if (!session.metadata) session.metadata = {};
+        (session.metadata as any).peerType = metadata.peerType;
+        mutated = true;
       }
       if (mutated) {
         this.persistSession(session, 'sync');
@@ -608,7 +618,7 @@ export class SessionManager {
     if (existing) {
       const validSessionId = this.validateSessionFile(existing);
       const session: Session = { ...existing, agentSessionId: validSessionId };
-      session.identity = this.resolveIdentity(channel, userId);
+      session.identity = identity ?? this.resolveIdentity(channel, userId);
 
       if (!session.metadata) session.metadata = {};
       if (session.selfAID !== selfAID) {
@@ -624,13 +634,16 @@ export class SessionManager {
       if (chatType === 'private' && metadata?.peerName && !session.metadata.peerName) {
         session.metadata.peerName = metadata.peerName;
       }
+      if (metadata?.peerType) {
+        (session.metadata as any).peerType = metadata.peerType;
+      }
       this.persistSession(session, 'sync');
       return session;
     }
 
     // Create new session
     const sessionMetadata: any = { ...(metadata || {}) };
-    const newIdentity = this.resolveIdentity(channel, userId);
+    const newIdentity = identity ?? this.resolveIdentity(channel, userId);
 
     if (!baseagent) {
       throw new Error('[SessionManager] getOrCreateSession: baseagent is empty');

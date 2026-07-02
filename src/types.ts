@@ -9,8 +9,6 @@ export interface FeishuChannelConfig {
   enabled?: boolean;
   appId: string;
   appSecret: string;
-  owner?: string;
-  admins?: string[];
   flushDelay?: number;  // flush 间隔(秒)，默认使用全局值
   debounce?: number;    // 入站消息去抖间隔(秒)，覆盖全局 debounce
   showActivities?: 'all' | 'none';  // 覆盖全局 showActivities
@@ -25,8 +23,6 @@ export interface WechatChannelConfig {
   enabled?: boolean;
   baseUrl?: string;
   token?: string;
-  owner?: string;
-  admins?: string[];
   flushDelay?: number;  // flush 间隔(秒)，默认 3
   debounce?: number;    // 入站消息去抖间隔(秒)，覆盖全局 debounce
   showActivities?: 'all' | 'none';  // 覆盖全局 showActivities
@@ -43,8 +39,6 @@ export interface AunChannelConfig {
   keystorePath?: string;  // AUN keystore 路径，默认 ~/.aun
   gatewayUrl?: string;    // Gateway WebSocket URL（well-known 自动发现失败时的 fallback）
   accessToken?: string;   // 认证 access token（降级 fallback）
-  owner?: string;
-  admins?: string[];
   flushDelay?: number;  // flush 间隔(秒)，默认 3
   pythonBin?: string;   // Python 可执行路径（仅 evolclaw tui 命令使用），默认 python3
   encryptionSeed?: string; // FileSecretStore 加密种子，留空时 SDK 自动从 {aun_path}/.seed 派生
@@ -59,8 +53,6 @@ export interface DingtalkChannelConfig {
   enabled?: boolean;
   clientId: string;
   clientSecret: string;
-  owner?: string;
-  admins?: string[];
   flushDelay?: number;
   debounce?: number;
   showActivities?: 'all' | 'none';
@@ -77,8 +69,6 @@ export interface QQBotChannelConfig {
   enabled?: boolean;
   appId: string;
   clientSecret: string;
-  owner?: string;
-  admins?: string[];
   flushDelay?: number;
   debounce?: number;
   showActivities?: 'all' | 'none';
@@ -93,8 +83,6 @@ export interface WecomChannelConfig {
   enabled?: boolean;
   botId: string;
   secret: string;
-  owner?: string;
-  admins?: string[];
   flushDelay?: number;
   debounce?: number;
   showActivities?: 'all' | 'none';
@@ -209,8 +197,8 @@ export interface SessionMetadata {
   resumeAt?: string;  // /rewind chat 标记的回退点（assistant message uuid）
 }
 
-/** Default permission mode applied to new sessions. Change here to affect all roles. */
-export const DEFAULT_PERMISSION_MODE = 'bypass';
+/** Default permission mode applied when no role/relation policy overrides it. */
+export const DEFAULT_PERMISSION_MODE = 'auto';
 
 export interface ReplyContext {
   sessionId?: string;
@@ -224,7 +212,7 @@ export interface ReplyContext {
 }
 
 export interface SessionIdentity {
-  role: 'owner' | 'admin' | 'guest' | 'anonymous';
+  role: string;
   mode: 'interactive';
 }
 
@@ -563,7 +551,7 @@ export interface AgentInfo {
   baseagent: string;
   model?: string;
   effort?: string;
-  owners?: string[];
+  owners: string[];
   lastActivity?: number;
   activeSessions?: number;
   error?: string;
@@ -586,10 +574,6 @@ export interface EvolAgentHandle {
   readonly config: EffectiveAgentConfig;
   lastActivity?: number;
   getContext(channelName: string, chatType: string, globalChatmode?: { private?: 'interactive' | 'proactive'; group?: 'interactive' | 'proactive' }): AgentContext;
-  getOwner(channelName: string): string | undefined;
-  isOwner(channelName: string, userId: string): boolean;
-  isAdmin(channelName: string, userId: string): boolean;
-  setOwner(channelName: string, userId: string): void;
   getShowActivities(channelName: string): 'all' | 'none';
   setShowActivities(channelName: string, mode: 'all' | 'none'): void;
   setActiveBaseagent(value: string | undefined): void;
@@ -615,10 +599,6 @@ export interface EvolAgentRegistryHandle {
   reload?(name: string, hooks: unknown): Promise<void>;
   stopAgent?(name: string, hooks: unknown): Promise<void>;
   startAgent?(name: string, hooks: unknown): Promise<void>;
-  isOwner(channelName: string, userId: string): boolean;
-  isAdmin(channelName: string, userId: string): boolean;
-  getOwner(channelName: string): string | undefined;
-  setChannelOwner(channelName: string, userId: string): void;
   getShowActivities(channelName: string): 'all' | 'none';
   setShowActivities(channelName: string, mode: 'all' | 'none'): void;
   invalidateAgentDisplayCache?(aid: string): void;
@@ -803,14 +783,10 @@ export interface ProactiveBehaviorBlock {
 // 元素必带 type + name，name 是该 agent 内 channel 类型下的本地标识（不含 '#'）。
 // AUN 类型一个 agent 只允许一个实例，name 通常约定 'main'。
 //
-// owners/admins 用该 channel 的原生 ID（飞书 user_id、钉钉 unionId 等），不要求 AID。
-
 interface ChannelInstanceCommon {
   type: string;
   name: string;
   enabled?: boolean;
-  owners?: string[];
-  admins?: string[];
   flushDelay?: number;
   debounce?: number;
   showActivities?: ShowActivitiesMode;
@@ -864,12 +840,12 @@ export type ChannelInstance =
   | WecomChannelInstance;
 
 // ════════════════════════════════════════════════════════════════════════
-// 配置体系 v3（统一到 config.json）
+// 配置体系 v3（H 配置链 + HA 行为链）
 //
-// 统一覆盖链：defaults.json → agent/config.json → role(config.roles) → relation/config.json
+// H 覆盖链：defaults.json → agent/config.json → relation/config.json。
+// HA 行为链：agent/behavior.json → role(behavior.roles) → relation/behavior.json。
 // 进程级 evolclaw.json 是链外单独作用域。
 //
-// 所有参数统一在 config.json，权限控制在 API 层而非文件层。
 // schema 是「字段 → 类型」唯一事实源（kits/schemas/）。
 // ════════════════════════════════════════════════════════════════════════
 
@@ -888,18 +864,20 @@ export interface ProcessConfig {
     enabled?: boolean;
     services?: Array<Record<string, unknown>>;
   };
+  idleMonitor?: {
+    enabled?: boolean;
+    timeout?: number;
+  };
   ecweb?: { enabled?: boolean; port?: number };
   watch?: { logTypes?: string[] };
 }
 
 /**
  * 全局级 agents/defaults.json —— 覆盖链最低优先级。
- * 提供所有配置参数的默认值，被 agent/config 和 relation/config 覆盖。
+ * 提供 H 链配置参数的默认值，被 agent/config 和 relation/config 覆盖。
  */
 export interface DefaultsConfig {
   $schema_version: number;
-  owners?: string[];     // list，与 agent/relation 并集
-  admins?: string[];     // list，同上
   models?: ModelsBlock;
   active_baseagent?: string;
   baseagents?: BaseagentsBlock;
@@ -910,9 +888,8 @@ export interface DefaultsConfig {
 
 /**
  * Agent 级 agents/<aid>/config.json —— 覆盖 defaults。
- * 包含 agent 的所有配置：身份、凭证、管控字段、模型配置、对话模式等。
+ * 包含 agent 的身份、凭证、管控字段与基础设施配置。
  *
- * 顶层 owners 是 AUN 渠道（即 agent 自身）的 owner 列表，元素为 AID。
  * channels[] 是该 agent 接入的所有渠道实例（含 AUN）。
  */
 export interface AgentConfig {
@@ -923,15 +900,15 @@ export interface AgentConfig {
   lifecycle?: AgentLifecycle;
   /** 首次连接 AUN 网络后置 true：触发"补全 agent.md + 发欢迎消息"的一次性流程。 */
   initialized?: boolean;
+  /** Agent owner AID 列表；当前控制面仍需要读取旧 config 字段。 */
   owners?: string[];
-  admins?: string[];
   aun?: AunRuntimeBlock;
   channels: ChannelInstance[];
   models?: ModelsBlock;
   projects?: ProjectsBlock;
   capabilities?: CapabilitiesBlock;
   debug?: DebugBlock;
-  /** 观察者模式：开启后入站/出站消息各转发一份给顶层 owners[]。默认 false。 */
+  /** 观察者模式：开启后入站/出站各转发一份给 owner 角色对端。默认 false。 */
   observable?: boolean;
   /** 快照额外备份声明（不得指向 .env）。 */
   extra_backup?: Array<{ path: string; pattern?: string }>;
@@ -965,12 +942,10 @@ export interface AgentConfig {
 
 /**
  * 关系级 agents/<aid>/relations/<peerKey>/config.json —— 覆盖链最高优先级。
- * 支持针对不同用户的个性化配置（29 个参数）。
+ * 支持针对不同用户的 H 链个性化配置；行为覆盖写 relation behavior.json。
  */
 export interface RelationConfig {
   $schema_version: number;
-  owners?: string[];
-  admins?: string[];
   extra_backup?: Array<{ path: string; pattern?: string }>;
 
   // Relation-level personalization parameters
@@ -991,8 +966,8 @@ export interface RelationConfig {
 
 /**
  * 运行时合并结果（下游统一视图）。
- * 覆盖链合并：defaults → agent/config → relation/config
- * 所有参数统一在 config.json。
+ * 先合并 H 链：defaults → agent/config → relation/config，
+ * 再叠加 HA 行为链：agent behavior → role → relation behavior。
  * 字段保持 optional——覆盖链全空即 undefined，由消费方按字段语义处理。
  */
 export interface EffectiveAgentConfig {
@@ -1002,7 +977,6 @@ export interface EffectiveAgentConfig {
   lifecycle?: AgentLifecycle;
   initialized?: boolean;
   owners?: string[];
-  admins?: string[];
   aun?: AunRuntimeBlock;
   channels: ChannelInstance[];
   models?: ModelsBlock;
@@ -1100,7 +1074,7 @@ export interface ChannelCapabilities {
 
 // ── Trigger types ──
 
-export type TriggerScheduleType = 'delay' | 'at' | 'cron' | 'interval';
+export type TriggerScheduleType = 'delay' | 'at' | 'cron' | 'interval' | 'event';
 export type TriggerSessionStrategy = 'latest' | 'thread';
 
 export interface Trigger {
@@ -1193,4 +1167,209 @@ export interface MenuResponse {
   name?: string;         // 回显 name（menu.list 无 name）
   data?: any;            // 成功（与 error 互斥）
   error?: { code: string; message: string };  // 失败（与 data 互斥）
+}
+
+// ── Command Authorization Types ──
+
+export type CommandSource = 'slash' | 'menu' | 'menu.cli' | 'ctl' | 'ipc' | 'ecweb' | 'control';
+
+export type CommandScope =
+  | 'relation'
+  | 'role'
+  | 'agent'
+  | 'process'
+  | 'filesystem'
+  | 'control'
+  | 'raw-cli';
+
+export type OperationCategory =
+  | 'read'
+  | 'diagnose'
+  | 'write-own'
+  | 'write-agent'
+  | 'process'
+  | 'dangerous';
+
+export interface OperationMeta {
+  id: string;
+  category: OperationCategory;
+  dangerous: boolean;
+  defaultScopes: CommandScope[];
+  description: string;
+  sources?: CommandSource[];
+}
+
+export interface CommandIntent {
+  operation: string;
+  scope: CommandScope;
+  source: CommandSource;
+  args: Record<string, unknown>;
+  rawArgv?: string[];
+  dangerous?: boolean;
+}
+
+export interface CommandAuthorizationContext {
+  intent: CommandIntent;
+
+  actorId?: string;
+  channel?: string;
+  channelId?: string;
+  chatType?: 'private' | 'group';
+
+  selfAid?: string;
+  peerKey?: string;
+  role: string;
+
+  isDaemonOwner?: boolean;
+  fromControlChannel?: boolean;
+  source: CommandSource;
+}
+
+export interface CommandPermissionConstraints {
+  ownPeerOnly?: boolean;
+  ownAgentOnly?: boolean;
+  privateOnly?: boolean;
+  groupOnly?: boolean;
+  requireDaemonOwner?: boolean;
+  requireControlChannel?: boolean;
+  requireExplicitDangerousGrant?: boolean;
+  requireFieldOverride?: string;
+
+  allowedArgs?: Record<string, Array<string | number | boolean>>;
+  deniedArgs?: Record<string, Array<string | number | boolean>>;
+  forbiddenFlags?: string[];
+  allowedConfigKeys?: string[];
+  allowedPrefixes?: string[];
+
+  timeoutMs?: number;
+  outputLimitBytes?: number;
+  cwdPolicy?: 'agentProject' | 'evolclawHome' | 'none';
+  envAllowlist?: string[];
+}
+
+export interface CommandPermission {
+  allow: boolean;
+  dangerous?: boolean;
+  scopes?: CommandScope[];
+  constraints?: CommandPermissionConstraints;
+  reason?: string;
+}
+
+export type CommandAuthorizationDecision =
+  | {
+      allow: true;
+      operation: string;
+      scope: CommandScope;
+      role: string;
+      dangerous: boolean;
+      matchedRule?: string;
+      constraints?: CommandPermissionConstraints;
+    }
+  | {
+      allow: false;
+      code:
+        | 'NO_PERMISSION'
+        | 'NOT_ALLOWED'
+        | 'SCOPE_MISMATCH'
+        | 'ARGUMENT_MISMATCH'
+        | 'DANGEROUS_NOT_GRANTED'
+        | 'ROLE_ACCESS_DENIED';
+      reason: string;
+      operation: string;
+      scope?: CommandScope;
+      role: string;
+      dangerous?: boolean;
+      matchedRule?: string;
+    };
+
+export interface CommandAuthorizationAuditEvent {
+  ts: number;
+  source: CommandSource;
+  operation: string;
+  scope: CommandScope;
+  dangerous: boolean;
+
+  actorId?: string;
+  selfAid?: string;
+  peerKey?: string;
+  channel?: string;
+  channelId?: string;
+  role: string;
+  isDaemonOwner?: boolean;
+  fromControlChannel?: boolean;
+
+  decision: 'allow' | 'deny';
+  code?: string;
+  reason?: string;
+  matchedRule?: string;
+
+  argvHash?: string;
+  argsSummary?: Record<string, unknown>;
+  durationMs?: number;
+  exitCode?: number;
+}
+
+// ── Role System Types ──
+
+export type BuiltinRole = 'owner' | 'admin' | 'member' | 'guest' | 'anonymous';
+
+export interface RolesConfig {
+  $schema_version: number;
+  defaultRoles?: {
+    private: string;
+    group: string;
+  };
+  roles: Record<string, RoleDefinition>;
+}
+
+export interface RoleDefinition {
+  description: string;
+  allowAccess?: boolean;  // 该角色是否允许访问，默认 true（anonymous 默认 false）
+  permissions: Record<string, FieldPermission>;
+  commandPermissions?: Record<string, CommandPermission>;  // 命令权限配置
+}
+
+export type RoleAssignmentScope = 'private' | 'group' | 'group-member';
+
+export interface RoleAssignment {
+  scope: RoleAssignmentScope;
+  peerId?: string;
+  groupId?: string;
+  role: string;
+  note?: string;
+  createdAt?: number;
+  updatedAt?: number;
+}
+
+export interface RoleAssignmentsConfig {
+  $schema_version: number;
+  assignments: Record<string, RoleAssignment>;
+}
+
+export interface FieldPermission<T = any> {
+  default: T;
+  allowOverride: boolean;
+  allowedModels?: string[];    // for baseagents.*.model
+  allowedValues?: T[];         // for enum fields
+  reason?: string;
+}
+
+export interface RoleContext {
+  self: string;
+  peerKey: string;
+  role: string;
+}
+
+export interface ConstraintViolation {
+  field: string;
+  reason: 'override_not_allowed' | 'model_not_allowed' | 'value_not_allowed';
+  attempted: any;
+  allowed: any;
+  role: string;
+}
+
+export interface ConstraintCheckResult {
+  valid: boolean;
+  violations: ConstraintViolation[];
+  effectiveConfig: any;  // Will be typed as BehaviorConfig in the implementation
 }

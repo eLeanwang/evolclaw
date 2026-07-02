@@ -14,12 +14,19 @@
 import { isHelpFlag, wantsHelp, getArgValue } from './help.js';
 import {
   ModelScopeError, normalizePeer, determineScope, activeBaseagent,
-  readScope, writeScope, clearScope, resolveEffectiveModel,
+  writeScope, clearScope, resolveEffectiveModel,
   type ScopeSelector, type ModelScope,
 } from '../core/model/config-scope.js';
 import { resolveEffective } from '../config/config-manager.js';
 import { resolveAnthropicConfig } from '../agents/baseagent.js';
 import { getCatalog, getModelInfo } from '../core/model/model-catalog.js';
+import { filterModelsForRole, validateModelSelectionForRole } from '../core/model/model-permission.js';
+import { resolvePaths } from '../paths.js';
+import { ipcQuery } from '../ipc.js';
+import { parsePeerKey } from '../core/relation/peer-identity.js';
+import { resolvePeerRoleDetail } from '../config/peer-role-resolver.js';
+import { authorizeCommand } from '../core/command/command-permission.js';
+import type { CommandIntent, CommandScope } from '../types.js';
 
 const ALL_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max', 'auto'];
 
@@ -43,6 +50,27 @@ function fail(formatJson: boolean, code: string, message: string): never {
     console.error(`❌ ${message} (${code})`);
   }
   process.exit(1);
+}
+
+function hasFlag(args: readonly string[], flag: string): boolean {
+  return args.includes(flag);
+}
+
+function isManagedSessionEnv(args: readonly string[]): boolean {
+  return !!process.env.EVOLCLAW_SESSION_ID
+    && !hasFlag(args, '--local')
+    && !getArgValue(args, '--self')
+    && !getArgValue(args, '--peer')
+    && !getArgValue(args, '--role');
+}
+
+async function runCtlCommand(cmd: string, formatJson: boolean): Promise<string> {
+  const sessionId = process.env.EVOLCLAW_SESSION_ID;
+  if (!sessionId) fail(formatJson, 'NO_SESSION', 'EVOLCLAW_SESSION_ID 未设置');
+  const result = await ipcQuery(resolvePaths().socket, { type: 'ctl', cmd, sessionId }, 10_000) as any;
+  if (!result) fail(formatJson, 'DAEMON_UNAVAILABLE', '无法连接 evolclaw 服务');
+  if (!result.ok) fail(formatJson, 'CTL_FAILED', result.error || 'ctl 执行失败');
+  return String(result.result || '');
 }
 
 /**
@@ -73,6 +101,115 @@ function parseSelector(args: string[], formatJson: boolean): ScopeSelector {
   return sel;
 }
 
+function explicitOrDerivedRole(args: readonly string[], sel: ScopeSelector): string | undefined {
+  const explicit = getArgValue(args, '--role');
+  if (explicit) return explicit;
+  if (!sel.self || !sel.peerKey) return undefined;
+
+  try {
+    const peer = parsePeerKey(sel.peerKey);
+    const detail = resolvePeerRoleDetail({
+      selfAid: sel.self,
+      channelType: peer.channelType,
+      chatType: 'private',
+      actorId: peer.channelId,
+      conversationId: peer.channelId,
+    });
+    return detail.effectiveRole;
+  } catch {
+    return undefined;
+  }
+}
+
+function selectorWithRole(sel: ScopeSelector, role?: string): ScopeSelector {
+  return role ? { ...sel, role } : sel;
+}
+
+const MODEL_OPERATION_BY_SUBCOMMAND: Record<string, string> = {
+  list: 'model.list',
+  current: 'model.current',
+  info: 'model.info',
+  check: 'model.check',
+  use: 'model.use',
+  effort: 'model.effort',
+  reset: 'model.reset',
+};
+
+function commandScopeForModelAuth(subcommand: string, sel: ScopeSelector, role?: string): CommandScope {
+  if (subcommand === 'check') return 'agent';
+  if (sel.self && sel.peerKey) return 'relation';
+  if (sel.self && role) return 'role';
+  return 'agent';
+}
+
+function buildModelIntentArgs(
+  args: readonly string[],
+  sel: ScopeSelector,
+  extra?: Record<string, unknown>,
+): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (let i = 1; i < args.length; i += 1) {
+    const arg = args[i];
+    if (!arg.startsWith('--')) continue;
+    const key = arg.slice(2);
+    if (!key) continue;
+    if (i + 1 < args.length && !args[i + 1].startsWith('--')) {
+      out[key] = args[i + 1];
+      i += 1;
+    } else {
+      out[key] = true;
+    }
+  }
+
+  if (sel.self) out.self = sel.self;
+  if (sel.peerKey) {
+    const peer = parsePeerKey(sel.peerKey);
+    out.peer = peer.channelId;
+    out.peerKey = sel.peerKey;
+  }
+  return { ...out, ...(extra ?? {}) };
+}
+
+function authorizeModelCommand(
+  subcommand: string,
+  args: readonly string[],
+  sel: ScopeSelector,
+  role: string | undefined,
+  formatJson: boolean,
+  extra?: Record<string, unknown>,
+): void {
+  if (!role) return;
+
+  const operation = MODEL_OPERATION_BY_SUBCOMMAND[subcommand];
+  if (!operation) return;
+
+  const peer = sel.peerKey ? parsePeerKey(sel.peerKey) : undefined;
+  const intent: CommandIntent = {
+    operation,
+    scope: commandScopeForModelAuth(subcommand, sel, role),
+    source: 'menu.cli',
+    args: buildModelIntentArgs(args, sel, extra),
+    rawArgv: ['model', ...args],
+  };
+  const decision = authorizeCommand({
+    intent,
+    actorId: peer?.channelId,
+    channel: peer ? `${peer.channelType}#${peer.channelId}` : undefined,
+    channelId: peer?.channelId,
+    chatType: peer ? 'private' : undefined,
+    selfAid: sel.self,
+    peerKey: sel.peerKey,
+    role,
+    isDaemonOwner: false,
+    fromControlChannel: false,
+    source: 'menu.cli',
+  });
+
+  if (!decision.allow) {
+    fail(formatJson, decision.code, decision.reason);
+  }
+}
+
 const HELP = `用法: evolclaw model <command> [options]
 
 Commands:
@@ -94,6 +231,8 @@ Commands:
 Options:
   --self <aid>        本端 AID
   --peer <X>          对端：channelType#channelId 或裸 aid（裸 aid 视为 aun#<aid>）
+  --role <role>       按角色过滤模型列表（本地调试）
+  --local             托管环境中强制使用本地 catalog 模式
   --effort <level>    （use 专用）同时设置推理强度
   --format json       输出 JSON
   --help, -h          各子命令均支持
@@ -124,29 +263,33 @@ async function dispatch(sub: string, args: string[], formatJson: boolean): Promi
 
 // ── list ──────────────────────────────────────────────────────────────
 
-const ICON: Record<ModelScope, string> = {
-  global: '⬡', agent: '◆', role: '●', relation: '★',
-};
-
 async function cmdList(args: string[], formatJson: boolean): Promise<void> {
   if (wantsHelp(args)) { console.log(HELP); return; }
+  if (isManagedSessionEnv(args)) {
+    const out = await runCtlCommand('/setmodel', formatJson);
+    console.log(out);
+    return;
+  }
   const sel = parseSelector(args, formatJson);
+  const role = explicitOrDerivedRole(args, sel);
+  authorizeModelCommand('list', args, sel, role, formatJson);
+  const effectiveSel = selectorWithRole(sel, role);
   const ba = activeBaseagent(sel.self);
   const cat = await getCatalog(sel.self, ba);
-  const resolved = resolveEffectiveModel(sel, ba);
-
-  // 各作用域当前值（仅可达作用域）
-  const scopes: Partial<Record<ModelScope, { model?: string; effort?: string }>> = {};
-  scopes.global = readScope('global', sel, ba);
-  if (sel.self) scopes.agent = readScope('agent', sel, ba);
-  if (sel.self && sel.peerKey) scopes.relation = readScope('relation', sel, ba);
+  const resolved = resolveEffectiveModel(effectiveSel, ba);
+  const allowedModelIds = role
+    ? filterModelsForRole(role, ba, cat.models.map(m => m.id))
+    : null;
+  const models = allowedModelIds
+    ? allowedModelIds.map(id => cat.models.find(m => m.id === id) ?? { id })
+    : cat.models;
 
   emit(formatJson, {
     ok: true,
     effective: { model: resolved.model ?? null, source: resolved.source ?? null },
-    scopes,
+    role: role ?? null,
     catalogSource: cat.source,
-    models: cat.models,
+    models,
   }, () => {
     const lines: string[] = [];
     lines.push(`当前生效: ${resolved.model ?? '(未设置，回落 SDK 默认)'}` +
@@ -155,18 +298,10 @@ async function cmdList(args: string[], formatJson: boolean): Promise<void> {
     const srcTag = cat.source === 'mock' ? ' [mock]'
       : cat.source === 'remote' ? ' [remote]'
       : '';
-    lines.push(`可用模型 (${cat.models.length})${srcTag}:`);
-    const byScope = (m: string): string => {
-      const tags: string[] = [];
-      for (const s of ['relation', 'agent', 'global'] as ModelScope[]) {
-        if (scopes[s]?.model === m) tags.push(`${ICON[s]}${SCOPE_LABEL[s]}`);
-      }
-      return tags.join(' ');
-    };
-    for (const e of cat.models) {
+    lines.push(`可用模型 (${models.length})${srcTag}:`);
+    for (const e of models) {
       const live = resolved.model === e.id ? '✓' : ' ';
-      const tag = byScope(e.id);
-      lines.push(`  ${live} ${e.id.padEnd(28)} ${tag}`.trimEnd());
+      lines.push(`  ${live} ${e.id}`);
     }
     return lines.join('\n');
   });
@@ -178,13 +313,16 @@ async function cmdCurrent(args: string[], formatJson: boolean): Promise<void> {
   if (wantsHelp(args)) { console.log(HELP); return; }
   const sel = parseSelector(args, formatJson);
   const ba = activeBaseagent(sel.self);
-  const resolved = resolveEffectiveModel(sel, ba);
+  const role = explicitOrDerivedRole(args, sel);
+  authorizeModelCommand('current', args, sel, role, formatJson);
+  const resolved = resolveEffectiveModel(selectorWithRole(sel, role), ba);
 
   emit(formatJson, {
     ok: true,
     model: resolved.model ?? null,
     effort: resolved.effort ?? null,
     source: resolved.source ?? null,
+    role: role ?? null,
     chain: resolved.chain.map(c => ({ scope: c.scope, model: c.model ?? null, hit: c.hit })),
   }, () => {
     const lines: string[] = [];
@@ -204,6 +342,9 @@ async function cmdInfo(args: string[], formatJson: boolean): Promise<void> {
   if (wantsHelp(args)) { console.log(HELP); return; }
   const modelId = args[1] && !args[1].startsWith('--') ? args[1] : undefined;
   if (!modelId) fail(formatJson, 'MISSING_MODEL_ID', 'info 需要 <model-id>');
+  const sel = parseSelector(args, formatJson);
+  const role = explicitOrDerivedRole(args, sel);
+  authorizeModelCommand('info', args, sel, role, formatJson, { model: modelId });
   const self = getArgValue(args, '--self');
   const info = await getModelInfo(modelId!, self);
 
@@ -249,14 +390,32 @@ async function cmdUse(args: string[], formatJson: boolean): Promise<void> {
   const modelId = args[1] && !args[1].startsWith('--') ? args[1] : undefined;
   if (!modelId) fail(formatJson, 'MISSING_MODEL_ID', 'use 需要 <model-id>');
 
+  if (isManagedSessionEnv(args)) {
+    const out = await runCtlCommand(`/model ${modelId}`, formatJson);
+    console.log(out);
+    return;
+  }
+
   const sel = parseSelector(args, formatJson);
+  const role = explicitOrDerivedRole(args, sel);
   const scope = determineScope(sel);
+  authorizeModelCommand('use', args, sel, role, formatJson, { model: modelId });
   const ba = activeBaseagent(sel.self);
 
   // 校验模型在 catalog 中
   const cat = await getCatalog(sel.self, ba);
   if (!cat.models.some(m => m.id === modelId)) {
     fail(formatJson, 'UNKNOWN_MODEL', `模型不在目录中: ${modelId}（model list 查看可用模型）`);
+  }
+
+  if (role) {
+    const decision = validateModelSelectionForRole({
+      role,
+      baseagent: ba,
+      requestedModel: modelId,
+      models: cat.models.map(m => m.id),
+    });
+    if (!decision.ok) fail(formatJson, decision.code || 'MODEL_NOT_ALLOWED', decision.message || `model not allowed: ${modelId}`);
   }
 
   const effort = getArgValue(args, '--effort');
@@ -283,7 +442,9 @@ async function cmdEffort(args: string[], formatJson: boolean): Promise<void> {
   }
 
   const sel = parseSelector(args, formatJson);
+  const role = explicitOrDerivedRole(args, sel);
   const scope = determineScope(sel);
+  authorizeModelCommand('effort', args, sel, role, formatJson, { effort: level });
   const ba = activeBaseagent(sel.self);
   const val = level === 'auto' ? null : level!;
 
@@ -299,7 +460,9 @@ async function cmdEffort(args: string[], formatJson: boolean): Promise<void> {
 async function cmdReset(args: string[], formatJson: boolean): Promise<void> {
   if (wantsHelp(args)) { console.log(HELP); return; }
   const sel = parseSelector(args, formatJson);
+  const role = explicitOrDerivedRole(args, sel);
   const scope = determineScope(sel);
+  authorizeModelCommand('reset', args, sel, role, formatJson);
   const ba = activeBaseagent(sel.self);
 
   try {
@@ -411,6 +574,9 @@ async function probeModel(baseUrl: string, apiKey: string | undefined, modelId: 
 async function cmdCheck(args: string[], formatJson: boolean): Promise<void> {
   if (wantsHelp(args)) { console.log(HELP); return; }
   const sel = parseSelector(args, formatJson);
+  const role = explicitOrDerivedRole(args, sel);
+  authorizeModelCommand('check', args, sel, role, formatJson);
+  const effectiveSel = selectorWithRole(sel, role);
   const ba = activeBaseagent(sel.self);
   const steps: CheckStep[] = [];
   const log = (step: CheckStep) => {
@@ -457,7 +623,7 @@ async function cmdCheck(args: string[], formatJson: boolean): Promise<void> {
 
   // ── 阶段 3：当前配置模型 ──────────────────────────────────────────
   if (!formatJson) console.log('');
-  const resolved = resolveEffectiveModel(sel, ba);
+  const resolved = resolveEffectiveModel(effectiveSel, ba);
   const configuredModel = resolved.model;
 
   if (!configuredModel) {
@@ -538,6 +704,7 @@ async function cmdCheck(args: string[], formatJson: boolean): Promise<void> {
       configuredModel: configuredModel ?? null,
       configModelAvailable: configModelOk ?? null,
       availableModels,
+      role: role ?? null,
       catalogSource: cat.source,
     }, () => '');
   }

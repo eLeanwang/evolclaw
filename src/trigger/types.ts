@@ -187,6 +187,13 @@ export interface TriggerSourceRunInfo {
   payload: Record<string, unknown>;
 }
 
+export type TriggerSubscriptionStatus = 'active' | 'inactive' | 'event-bus-unavailable' | 'not-event';
+
+export interface TriggerSubscriptionInfo {
+  status: TriggerSubscriptionStatus;
+  warning?: string;
+}
+
 export interface TriggerScriptResult {
   exitCode: number;
   durationMs: number;

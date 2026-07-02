@@ -31,6 +31,9 @@ import { gatewaySource } from './sources/gateway.js';
 import { queryStatsForDashboard, queryStatsExplorer, queryStatsByPeer, queryStatsByAgent, queryStatsOverview, queryUsageDetail, queryUsedModels } from './sources/stats.js';
 import { getSessionsAunDir, listLocalAids, listPeers, readMessages } from './fs-utils.js';
 import { ccProjectsDir } from './paths.js';
+import { roleAssignmentsSource, handleRoleAssignmentsApi, handlePeerRoleApi } from './sources/role-assignments.js';
+import { roleDefinitionsSource, handleRoleDefinitionsApi } from './sources/role-definitions.js';
+import { handleModelsApi } from './sources/models.js';
 import { detectBaseAgents } from './sources/baseagent-detector.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -41,7 +44,7 @@ const PAIRING_TTL_MS = 5 * 60 * 1000;       // 5min
 const DEFAULT_PORT = 42705;
 const PROTOCOL_VERSION = 1;                  // 与 evolclaw ping response 对齐的软校验版本
 
-const SOURCES: Record<ViewKind, WatchSource> = { agents: aidSource, msg: msgSource, session: sessionSource, cache: cacheSource, system: systemSource, triggers: triggersSource, monitor: monitorSource, gateway: gatewaySource };
+const SOURCES: Record<ViewKind, WatchSource> = { agents: aidSource, msg: msgSource, session: sessionSource, cache: cacheSource, system: systemSource, triggers: triggersSource, monitor: monitorSource, gateway: gatewaySource, roles: roleAssignmentsSource, roleDefinitions: roleDefinitionsSource };
 
 // ECWeb 自身版本：渲染 System 页时随快照下发（不走 daemon IPC，ECWeb 就是这个进程）。
 function readEcwebVersion(): string {
@@ -349,6 +352,28 @@ function isLocalDirect(req: http.IncomingMessage): boolean {
   return !providerAid || (Array.isArray(providerAid) ? providerAid.length === 0 : !providerAid.trim());
 }
 
+function headerValue(req: http.IncomingMessage, name: string): string {
+  const raw = req.headers[name.toLowerCase()];
+  return (Array.isArray(raw) ? raw[0] : raw || '').trim();
+}
+
+function trustedActorAid(req: http.IncomingMessage): string | null {
+  if (!isLocalhost(req) || !headerValue(req, 'x-aun-provider-aid')) return null;
+  const actor = headerValue(req, 'x-aun-visitor-aid')
+    || headerValue(req, 'x-aun-actor-aid')
+    || headerValue(req, 'x-aun-user-aid')
+    || headerValue(req, 'x-evolclaw-actor-aid');
+  if (!/^[a-z0-9_-]+\.(aid|agentid)\.pub$/i.test(actor)) return null;
+  return actor;
+}
+
+function roleWriteAuth(req: http.IncomingMessage): { localDirect: boolean; actorAid: string | null } {
+  return {
+    localDirect: isLocalDirect(req),
+    actorAid: trustedActorAid(req),
+  };
+}
+
 function genPairingCode(): string {
   return String(crypto.randomInt(0, 1000000)).padStart(6, '0');
 }
@@ -458,6 +483,19 @@ function handleConnection(ws: WebSocket, req: http.IncomingMessage, log: (s: str
           error: { code: 'INTERNAL', message: resp?.error ?? 'daemon unreachable' },
         } });
       }
+      return;
+    }
+    if (msg.type === 'ipc' && msg.payload) {
+      if (typeof msg.payload.type !== 'string' || !msg.payload.type.startsWith('trigger.')) {
+        send({ type: 'ipc.response', requestId: msg.requestId, data: { ok: false, error: 'unsupported ipc payload' } });
+        return;
+      }
+      const p = resolvePaths();
+      const timeoutMs = Number.isFinite(Number(msg.timeoutMs)) && Number(msg.timeoutMs) > 0
+        ? Math.min(Number(msg.timeoutMs), 120_000)
+        : 10000;
+      const resp = await ipcQuery<any>(p.socket, msg.payload, timeoutMs);
+      send({ type: 'ipc.response', requestId: msg.requestId, data: resp ?? { ok: false, error: 'daemon unreachable' } });
       return;
     }
   });
@@ -609,6 +647,68 @@ export async function startWatchWebServer(opts: { port?: number; log?: (s: strin
         return;
       }
       handleStatsApi(req, res);
+    } else if ((req.url || '').startsWith('/api/models/')) {
+      const authHeader = req.headers.authorization || '';
+      const bearerToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : '';
+      const { query } = parseUrl(req.url || '');
+      let token = bearerToken || query.token || '';
+      if (!token) {
+        const autoToken = issueLocalDirectToken(req, log);
+        if (autoToken) token = autoToken;
+      }
+      if (!token || !validateAndRenew(token, Date.now())) {
+        res.writeHead(401, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'unauthorized' }));
+        return;
+      }
+      handleModelsApi(req, res);
+    } else if ((req.url || '').startsWith('/api/roles/')) {
+      // Roles API — 与 Stats API 相同鉴权逻辑
+      const authHeader = req.headers.authorization || '';
+      const bearerToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : '';
+      const { query } = parseUrl(req.url || '');
+      let token = bearerToken || query.token || '';
+      if (!token) {
+        const autoToken = issueLocalDirectToken(req, log);
+        if (autoToken) token = autoToken;
+      }
+      if (!token || !validateAndRenew(token, Date.now())) {
+        res.writeHead(401, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'unauthorized' }));
+        return;
+      }
+      handleRoleAssignmentsApi(req, res, roleWriteAuth(req));
+    } else if ((req.url || '') === '/api/role-definitions' || (req.url || '').startsWith('/api/role-definitions/') || (req.url || '').startsWith('/api/role-definitions?')) {
+      // Role Definitions API（含集合端点 /api/role-definitions 与 /api/role-definitions/:role）
+      const authHeader = req.headers.authorization || '';
+      const bearerToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : '';
+      const { query } = parseUrl(req.url || '');
+      let token = bearerToken || query.token || '';
+      if (!token) {
+        const autoToken = issueLocalDirectToken(req, log);
+        if (autoToken) token = autoToken;
+      }
+      if (!token || !validateAndRenew(token, Date.now())) {
+        res.writeHead(401, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'unauthorized' }));
+        return;
+      }
+      handleRoleDefinitionsApi(req, res, roleWriteAuth(req));
+    } else if ((req.url || '').startsWith('/api/assignments/peer/')) {
+      const authHeader = req.headers.authorization || '';
+      const bearerToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : '';
+      const { query } = parseUrl(req.url || '');
+      let token = bearerToken || query.token || '';
+      if (!token) {
+        const autoToken = issueLocalDirectToken(req, log);
+        if (autoToken) token = autoToken;
+      }
+      if (!token || !validateAndRenew(token, Date.now())) {
+        res.writeHead(401, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'unauthorized' }));
+        return;
+      }
+      handlePeerRoleApi(req, res, roleWriteAuth(req));
     } else {
       serveStatic(req, res);
     }
