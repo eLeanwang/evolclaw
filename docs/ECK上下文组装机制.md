@@ -285,6 +285,8 @@ IMPORTANT: Use this context when it affects the current interaction.
 | venue-chattype | chatType != null | `$KITS_DOCS/venues/{{chatType}}.md` | 场景通用文档（private.md / group.md） |
 | venue-channel-chattype | chatType != null | `$KITS_DOCS/venues/{{channel}}-{{chatType}}.md` | 渠道+场景文档（feishu-group.md 等） |
 | venue-group-profile | groupId != null | `$VENUES_DIR/{{channel}}#{{groupId}}/profile.md` | 具体群环境文档（存在则加载） |
+| venue-group-rules | groupRulesPath != null | `$VENUES_DIR/{{venueKey}}/rules.md` | 从 AUN 群资源空间同步的群规则（存在则加载） |
+| venue-group-resource-index | groupResourceIndexPath != null | `$VENUES_DIR/{{venueKey}}/resource-index.md` | 从 AUN 群资源空间生成的可见资源索引（存在则加载） |
 | venue-client | clientType != null | `$KITS_DOCS/venues/client-{{clientType}}.md` | 设备环境文档（存在则加载） |
 
 ### 渠道层
@@ -317,8 +319,16 @@ $KITS_DOCS/venues/                          通用环境文档（随包发布，
 
 $AGENT_DIR/venues/                          agent 私有环境文档（按需创建）
 └── <channel>#<urlEncode(groupId)>/
-    └── profile.md                          具体群的特别内容
+    ├── profile.md                          具体群的特别内容
+    ├── rules.md                            AUN 群资源空间规则文件的本地缓存
+    ├── resource-index.md                   AUN 群资源空间可见资源索引
+    └── group-sync.json                     同步状态（远端路径、mtime、hash、错误）
 ```
+
+AUN 群聊会在组装 ECK 前通过 `ec fs` 同源的 `group.fs` facade 读取群资源空间。默认规则文件为
+`<group-aid>:/announce/evolclaw/rules.md`，默认索引根为 `<group-aid>:/`。同步只读远端并写入本地
+`venues/<venueKey>/` 缓存；远端权限、可见文件范围和写策略由群空间后端判定。mtime 未变化且仍在
+`group_venue_sync.refreshIntervalMs` 窗口内时复用本地缓存，远端不可读时保留旧缓存并注入同步状态。
 
 ## 加载顺序（order）
 
@@ -333,6 +343,8 @@ $AGENT_DIR/venues/                          agent 私有环境文档（按需创
 41  venue-chattype            场景通用文档
 42  venue-channel-chattype    渠道+场景文档
 43  venue-group-profile       具体群环境文档
+43.2 venue-group-rules        群资源空间同步的群规则
+43.4 venue-group-resource-index 群资源空间索引
 44  venue-client              设备环境文档
 50  channel-layer             渠道层模板
 55  commands                  命令集能力卡
@@ -391,4 +403,3 @@ $AGENT_DIR/venues/                          agent 私有环境文档（按需创
   "sections": [ ... ]
 }
 ```
-

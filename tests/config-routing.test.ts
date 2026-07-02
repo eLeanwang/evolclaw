@@ -21,6 +21,8 @@ describe('config ownership routing', () => {
   it('routes behavior paths to behavior targets and infra paths to H config', () => {
     expect(routeFieldPath('chatmode.private', 'agent').target).toBe(ConfigTarget.Behavior);
     expect(routeFieldPath('dispatch', 'agent').target).toBe(ConfigTarget.Behavior);
+    expect(routeFieldPath('group_venue_sync.rulesPath', 'agent').target).toBe(ConfigTarget.Behavior);
+    expect(routeFieldPath('group_venue_sync.rulesPath', 'relation').target).toBe(ConfigTarget.RelationBehavior);
     expect(routeFieldPath('permissionMode', 'relation').target).toBe(ConfigTarget.RelationBehavior);
     expect(routeFieldPath('baseagents.claude.model', 'agent').target).toBe(ConfigTarget.Behavior);
     expect(routeFieldPath('baseagents.codex.reasoning', 'relation').target).toBe(ConfigTarget.RelationBehavior);
@@ -40,12 +42,14 @@ describe('config ownership routing', () => {
     write(ConfigTarget.Behavior, {
       dispatch: 'broadcast',
       chatmode: { private: 'proactive' },
+      group_venue_sync: { rulesPath: '/announce/evolclaw/custom-rules.md' },
       baseagents: { claude: { model: 'claude-sonnet-4' } },
     }, sel);
 
     const effective = resolveEffective(sel);
     expect(effective.dispatch).toBe('broadcast');
     expect(effective.chatmode?.private).toBe('proactive');
+    expect(effective.group_venue_sync?.rulesPath).toBe('/announce/evolclaw/custom-rules.md');
     expect(effective.baseagents?.claude?.model).toBe('claude-sonnet-4');
 
     const p = resolvePaths();

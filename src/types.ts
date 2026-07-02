@@ -901,6 +901,7 @@ export interface DefaultsConfig {
   projects?: ProjectsBlock;
   aun?: AunRuntimeBlock;
   debug?: DebugBlock;
+  group_venue_sync?: GroupVenueSyncConfig;
 }
 
 /**
