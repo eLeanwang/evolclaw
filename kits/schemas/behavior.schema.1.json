@@ -59,6 +59,21 @@
         "tool_use_reminder": { "type": "boolean" }
       }
     },
+    "group_venue_sync": {
+      "type": "object",
+      "description": "Group venue resource sync policy.",
+      "x-merge": "dict",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "rulesPath": { "type": "string" },
+        "indexPath": { "type": "string" },
+        "maxIndexItems": { "type": "number" },
+        "maxRulesBytes": { "type": "number" },
+        "refreshIntervalMs": { "type": "number" },
+        "allowRemoteWrite": { "type": "boolean" }
+      }
+    },
     "render": {
       "type": "object",
       "x-merge": "dict",

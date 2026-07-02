@@ -779,6 +779,23 @@ export interface ProactiveBehaviorBlock {
   tool_use_reminder?: boolean;
 }
 
+export interface GroupVenueSyncConfig {
+  /** 是否从群资源空间同步群规则和资源索引。默认 true。 */
+  enabled?: boolean;
+  /** 群空间内的规则文件路径。默认 /announce/evolclaw/rules.md。 */
+  rulesPath?: string;
+  /** 群空间资源索引扫描根路径。默认 /。 */
+  indexPath?: string;
+  /** 注入资源索引的最大条目数。默认 80。 */
+  maxIndexItems?: number;
+  /** 规则文件最大字节数。默认 65536。 */
+  maxRulesBytes?: number;
+  /** 两次远端 mtime 检查最小间隔。默认 60000ms。 */
+  refreshIntervalMs?: number;
+  /** 预留：只有显式管理命令可写回远端；运行期同步不写远端。 */
+  allowRemoteWrite?: boolean;
+}
+
 // channels[].* —— per-agent，新结构里以列表形式存储。
 // 元素必带 type + name，name 是该 agent 内 channel 类型下的本地标识（不含 '#'）。
 // AUN 类型一个 agent 只允许一个实例，name 通常约定 'main'。
@@ -930,6 +947,8 @@ export interface AgentConfig {
   show_activities?: ShowActivitiesMode;
   // proactive 模式细粒度策略
   proactive?: ProactiveBehaviorBlock;
+  // 群 venue 资源同步
+  group_venue_sync?: GroupVenueSyncConfig;
   // 渲染
   render?: { private?: string; group?: string; inject?: string };
   // 富内容
@@ -958,6 +977,7 @@ export interface RelationConfig {
   dispatch?: 'mention' | 'broadcast';
   show_activities?: ShowActivitiesMode;
   proactive?: ProactiveBehaviorBlock;
+  group_venue_sync?: GroupVenueSyncConfig;
   render?: { private?: string; group?: string; inject?: string };
   enable_rich_content?: boolean;
   permissionMode?: string;
@@ -1003,6 +1023,7 @@ export interface EffectiveAgentConfig {
   show_activities?: ShowActivitiesMode;
   // proactive 模式细粒度策略
   proactive?: ProactiveBehaviorBlock;
+  group_venue_sync?: GroupVenueSyncConfig;
   // 渲染
   render?: { private?: string; group?: string; inject?: string };
   // 富内容

@@ -17,6 +17,7 @@ import type { Message, Session, ChannelAdapter, ChannelOptions, ChannelPolicy, C
 import { getPackageRoot, resolveRoot, resolvePaths } from '../../paths.js';
 import { renderKitSections, type KitRenderContext } from '../../eck/kit-renderer.js';
 import { renderMessageBody, type RenderMessageResult } from '../../eck/message-renderer.js';
+import { syncGroupVenueContext } from '../../eck/group-venue-sync.js';
 import { consumeHints, hintsToSubMessages, composeHintFallback } from './pending-hints.js';
 import type { SubMessage } from '../../types.js';
 import { normalizeBaseagent } from '../../agents/baseagent.js';
@@ -1278,6 +1279,15 @@ export class ResponseEngine implements IMessageProcessor {
 
         agentModel = (typeof (agent as any).getModel === 'function') ? (agent as any).getModel() as string : undefined;
 
+        const groupVenueVars = session.chatType === 'group' && currentChannelType === 'aun'
+          ? await syncGroupVenueContext({
+              selfAid,
+              groupId: session.metadata?.groupId || message.channelId,
+              channel: currentChannelType || message.channel,
+              config: effectiveAgentConfig?.group_venue_sync,
+            })
+          : {};
+
         // Kit renderer: 组装上下文
         const pkgRoot = getPackageRoot();
         const kitCtx: KitRenderContext = {
@@ -1353,6 +1363,7 @@ export class ResponseEngine implements IMessageProcessor {
             agentSessionId: session.agentSessionId || undefined,
             // 渲染模式：各类型当前激活的 modeName（从内存 config 读，渲染层据此选 manifest section）。
             renderModes: this.agentRegistry?.resolveByChannel(channelKey)?.config?.render ?? undefined,
+            ...groupVenueVars,
           },
           sessionId: session.id,
         };
