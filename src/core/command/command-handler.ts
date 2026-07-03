@@ -17,7 +17,7 @@ import crypto from 'crypto';
 import path from 'path';
 import fs from 'fs';
 import os from 'os';
-import { parseTriggerSet, parseTriggerUpdate } from '../../trigger/parser.js';
+import { parseDuration, parseTriggerSet, parseTriggerUpdate } from '../../trigger/parser.js';
 import type { ParsedTriggerSet } from '../../trigger/parser.js';
 import type { TriggerRuntimeScheduler } from '../../trigger/scheduler.js';
 import {
@@ -106,6 +106,7 @@ export class CommandHandler {
   private primaryRunnerKey: string;
   private agentRegistry?: EvolAgentRegistryHandle;
   private triggerSchedulerResolver?: (agentAid: string) => TriggerRuntimeScheduler | undefined;
+  private daemonStatusProvider?: () => any;
 
   /**
    * Get the runner for a (channel, baseagent) pair.
@@ -202,6 +203,10 @@ export class CommandHandler {
     this.triggerSchedulerResolver = resolver;
   }
 
+  setDaemonStatusProvider(provider: () => any): void {
+    this.daemonStatusProvider = provider;
+  }
+
   /** 返回管理当前通道的 EvolAgent，无则返回 null */
   private getOwningAgent(channel: string): EvolAgentHandle | null {
     if (!this.agentRegistry) return null;
@@ -218,11 +223,20 @@ export class CommandHandler {
   }
 
   private triggerSourceFromSchedule(scheduleType: string, scheduleValue: string): TriggerSource {
-    if (scheduleType === 'delay') return { type: 'delay', afterMs: Number(scheduleValue) };
+    if (scheduleType === 'delay') return { type: 'delay', afterMs: this.triggerDurationMs(scheduleValue) };
     if (scheduleType === 'at') return { type: 'at', at: scheduleValue };
     if (scheduleType === 'cron') return { type: 'cron', expression: scheduleValue };
-    if (scheduleType === 'interval') return { type: 'interval', everyMs: Number(scheduleValue) };
+    if (scheduleType === 'interval') return { type: 'interval', everyMs: this.triggerDurationMs(scheduleValue) };
+    if (scheduleType === 'event') return { type: 'event', eventPattern: scheduleValue };
     throw new Error(`unsupported scheduleType: ${scheduleType}`);
+  }
+
+  private triggerDurationMs(value: string): number {
+    const numeric = Number(value);
+    if (Number.isFinite(numeric)) return numeric;
+    const parsed = parseDuration(value);
+    if (parsed != null) return parsed;
+    return Number.NaN;
   }
 
   private scheduleViewFromSource(source: TriggerSource): { scheduleType: string; scheduleValue: string } {
@@ -273,7 +287,6 @@ export class CommandHandler {
       targetChannelType: target ? this.resolveChannelType(target.channelKey) : undefined,
       targetSessionStrategy: definition.execution.session.strategy,
       targetThreadId: definition.execution.session.threadId,
-      boundSessionId: definition.execution.session.sessionId,
       model: definition.execution.model,
       effort: definition.execution.effort,
       permissionMode: definition.execution.permissionMode,
@@ -291,6 +304,7 @@ export class CommandHandler {
       status: definition.enabled ? 'active' : 'disabled',
       limits: definition.limits,
       limitState: schedulerDetails?.limitState,
+      subscription: schedulerDetails?.subscription,
     };
   }
 
@@ -299,13 +313,95 @@ export class CommandHandler {
   }
 
   private failureFeedbackDisposition(definition: TriggerDefinition): FeedbackDisposition {
-    return definition.feedback.default;
+    return definition.feedback.onFailure;
   }
 
   private cloneDisposition(disp: FeedbackDisposition): FeedbackDisposition {
     if (disp.kind === 'silent') return { kind: 'silent' };
-    if (disp.kind === 'reply-origin') return { kind: 'reply-origin', template: disp.template };
+    if (disp.kind === 'reply-origin') return { kind: 'reply-origin', delivery: disp.delivery, template: disp.template };
     return { kind: 'forward', targets: disp.targets.map(t => ({ ...t })), template: disp.template };
+  }
+
+  private feedbackDelivery(value: unknown, fallback?: 'direct' | 'inbound'): 'direct' | 'inbound' | { error: string } {
+    if (value === undefined || value === null || value === '') {
+      return fallback ?? 'direct';
+    }
+    if (value === 'direct' || value === 'inbound') return value;
+    return { error: `无效 Feedback Delivery: ${String(value)}` };
+  }
+
+  private dispositionWithKind(
+    current: FeedbackDisposition,
+    kind: unknown,
+    target: FeedbackTarget | undefined,
+    fallbackTemplate?: string,
+    deliveryValue?: unknown,
+  ): FeedbackDisposition | { error: string } {
+    if (kind !== 'forward' && kind !== 'reply-origin' && kind !== 'silent') {
+      return { error: `无效反馈方式：${String(kind)}` };
+    }
+    const template = current.kind === 'silent' ? fallbackTemplate : (current.template ?? fallbackTemplate);
+    if (kind === 'silent') return { kind };
+    const existingDelivery = current.kind === 'reply-origin'
+      ? current.delivery
+      : current.kind === 'forward'
+        ? current.targets[0]?.delivery
+        : undefined;
+    const delivery = this.feedbackDelivery(deliveryValue, existingDelivery);
+    if (typeof delivery !== 'string') return delivery;
+    if (kind === 'reply-origin') return { kind, delivery, ...(template ? { template } : {}) };
+    if (!target) return { error: '反馈方式 forward 需要 target，但现有定义缺少 target' };
+    return { kind, targets: [{ ...target, delivery }], ...(template ? { template } : {}) };
+  }
+
+  private applyFeedbackKindPatch(
+    definition: TriggerDefinition,
+    branch: 'onReply' | 'onNoop' | 'onFailure',
+    kind: unknown,
+    fallbackTemplate?: string,
+    delivery?: unknown,
+  ): { ok: true } | { ok: false; error: string } {
+    const target = this.primaryFeedbackTarget(definition);
+    const next = this.dispositionWithKind(definition.feedback[branch], kind, target, fallbackTemplate, delivery);
+    if ('error' in next) return { ok: false, error: next.error };
+    definition.feedback[branch] = next;
+    return { ok: true };
+  }
+
+  private applyFeedbackPatch(
+    definition: TriggerDefinition,
+    patch: unknown,
+  ): { ok: true } | { ok: false; error: string } {
+    if (!patch || typeof patch !== 'object' || Array.isArray(patch)) {
+      return { ok: false, error: 'feedback patch 必须是对象' };
+    }
+    const raw = patch as Record<string, any>;
+    const branches: Array<['onReply' | 'onNoop' | 'onFailure', string | undefined]> = [
+      ['onReply', definition.execution.mode === 'script' ? '{{reply.text}}' : undefined],
+      ['onNoop', '{{reply.text}}'],
+      ['onFailure', '❌ 触发器执行失败：{{error.message}}'],
+    ];
+    for (const key of Object.keys(raw)) {
+      if (!['onReply', 'onNoop', 'onFailure'].includes(key)) {
+        return { ok: false, error: `无效 feedback 分支: ${key}` };
+      }
+    }
+    for (const [branch, fallbackTemplate] of branches) {
+      if (raw[branch] === undefined) continue;
+      const branchPatch = raw[branch];
+      if (!branchPatch || typeof branchPatch !== 'object' || Array.isArray(branchPatch)) {
+        return { ok: false, error: `feedback.${branch} 必须是对象` };
+      }
+      const applied = this.applyFeedbackKindPatch(
+        definition,
+        branch,
+        branchPatch.kind,
+        branchPatch.template !== undefined ? String(branchPatch.template) : fallbackTemplate,
+        branchPatch.delivery,
+      );
+      if (!applied.ok) return applied;
+    }
+    return { ok: true };
   }
 
   private primaryFeedbackTarget(definition: TriggerDefinition): FeedbackTarget | undefined {
@@ -401,14 +497,7 @@ export class CommandHandler {
       threadId: parsed.targetThreadId,
     };
 
-    if (strategy === 'current') {
-      if (parsed.targetChannel && parsed.targetChannel !== channel) {
-        return { error: '跨渠道不支持 --session current，请改用 latest 或 thread' };
-      }
-      const active = await this.sessionManager.getActiveSession(channel, channelId);
-      if (!active) return { error: '当前没有活跃会话，改用 --session latest 或 thread' };
-      // sessionId stored in execution.session, not in target
-    } else if (strategy === 'thread') {
+    if (strategy === 'thread') {
       const adapter = this.adapters.get(targetChannelName);
       if (!adapter?.capabilities.thread) return { error: '目标渠道不支持 thread 会话' };
       const explicitThread = typeof parsed.targetThreadId === 'string' && parsed.targetThreadId !== 'true' ? parsed.targetThreadId : undefined;
@@ -466,10 +555,9 @@ export class CommandHandler {
         mode: script ? 'script' : 'agent',
         ...(script ? { script } : { prompt: parsed.prompt || '' }),
         session: {
-          strategy: strategy === 'current' ? 'main' : (strategy === 'thread' ? 'thread' : 'isolated'),
+          strategy: strategy === 'thread' ? 'thread' : 'isolated',
           channelKey: target.channelKey,
           channelId: target.channelId,
-          ...(strategy === 'current' && activeSession ? { sessionId: activeSession.id } : {}),
           ...(strategy === 'thread' ? { threadId: target.threadId } : {}),
         },
         model: parsed.model,
@@ -489,7 +577,7 @@ export class CommandHandler {
           targets: [feedbackTarget],
           template: '{{error.message}}',
         } : { kind: 'silent' },
-        default: onFailureMode === 'notify' ? {
+        onFailure: onFailureMode === 'notify' ? {
           kind: 'forward',
           targets: [feedbackTarget],
           template: '❌ 触发器执行失败：{{error.message}}',
@@ -1013,9 +1101,15 @@ export class CommandHandler {
       if (payload.kind === 'command.error') {
         return { error: payload.text || '执行失败', code: 'EXEC_FAILED' };
       }
-      const data: Record<string, any> = { action, success: true };
+      const data: Record<string, any> = payload.structured && typeof payload.structured === 'object'
+        ? { ...payload.structured }
+        : {};
+      data.action = action;
+      data.success = true;
       if (payload.text) data.message = payload.text;
-      if (payload.structured) data.structured = payload.structured;
+      if (payload.structured && typeof payload.structured === 'object') {
+        data.structured = payload.structured;
+      }
       // 对于切换/创建类动作，附加切换后的活跃 session 信息便于客户端继续操作
       if (opts.enrichSession) {
         const newSession = await this.sessionManager.getActiveSession(channel, channelId);
@@ -1175,7 +1269,7 @@ export class CommandHandler {
       output += `权限: ${definition.execution.permissionMode ?? 'inherit'}\n`;
       output += `反馈: ${this.primaryFeedbackDisposition(definition).kind}\n`;
       output += `失败通知: ${this.failureFeedbackDisposition(definition).kind === 'silent' ? 'silent' : 'notify'}\n`;
-      if (definition.execution.mode === 'script') output += `脚本: ${definition.execution.script!.runtime} ${definition.execution.script!.path}\n`;
+      if (definition.execution.mode === 'script') output += `脚本: ${this.scriptCommandLabel(definition.execution.script!)}\n`;
       if (definition.limits?.maxRuns !== undefined || definition.limits?.maxDuration !== undefined) {
         const limitParts = [
           definition.limits.maxRuns !== undefined ? `maxRuns=${definition.limits.maxRuns}` : undefined,
@@ -1317,7 +1411,7 @@ export class CommandHandler {
       feedback: {
         onReply: this.cloneDisposition(definition.feedback.onReply),
         onNoop: this.cloneDisposition(definition.feedback.onNoop),
-        default: this.cloneDisposition(definition.feedback.default),
+        onFailure: this.cloneDisposition(definition.feedback.onFailure),
       },
       reliability: {
         ...definition.reliability,
@@ -1327,6 +1421,23 @@ export class CommandHandler {
     };
 
     if (patch.name !== undefined) updated.name = String(patch.name);
+    if (patch.executionMode !== undefined) {
+      if (patch.executionMode !== 'agent' && patch.executionMode !== 'script') {
+        return { ok: false, error: `无效 executionMode: ${patch.executionMode}` };
+      }
+      if (patch.executionMode === 'agent' && updated.execution.mode !== 'agent') {
+        updated.execution = {
+          mode: 'agent',
+          prompt: String(patch.prompt ?? this.triggerPrompt(definition)),
+          session: updated.execution.session,
+          model: updated.execution.model,
+          effort: updated.execution.effort,
+          permissionMode: updated.execution.permissionMode,
+          onError: 'retry',
+          noopSentinel: '[[NOOP]]',
+        };
+      }
+    }
     if (patch.prompt !== undefined) {
       if (updated.execution.mode === 'agent') {
         updated.execution.prompt = String(patch.prompt);
@@ -1339,10 +1450,27 @@ export class CommandHandler {
     }
     if (patch.scheduleType !== undefined || patch.scheduleValue !== undefined) {
       const current = this.scheduleViewFromSource(definition.source);
-      updated.source = this.triggerSourceFromSchedule(
-        patch.scheduleType ?? current.scheduleType,
-        String(patch.scheduleValue ?? current.scheduleValue),
-      );
+      const nextScheduleType = patch.scheduleType ?? current.scheduleType;
+      const nextScheduleValue = String(patch.scheduleValue ?? current.scheduleValue);
+      if (nextScheduleType === 'event') {
+        if (!/^\*$|^[A-Za-z0-9_-]+:[A-Za-z0-9_-]+$|^[A-Za-z0-9_-]+:\*$/.test(nextScheduleValue)) {
+          return { ok: false, error: `无效 eventPattern: ${nextScheduleValue}` };
+        }
+      }
+      updated.source = this.triggerSourceFromSchedule(nextScheduleType, nextScheduleValue);
+    }
+
+    if (patch.eventFilter !== undefined) {
+      if (updated.source.type !== 'event') return { ok: false, error: 'eventFilter 仅适用于 event trigger' };
+      if (
+        patch.eventFilter === null
+        || patch.eventFilter === ''
+        || (typeof patch.eventFilter === 'object' && Object.keys(patch.eventFilter).length === 0)
+      ) {
+        delete updated.source.filter;
+      } else {
+        updated.source.filter = patch.eventFilter;
+      }
     }
 
     if (
@@ -1362,40 +1490,50 @@ export class CommandHandler {
         return { ok: false, error: '暂不支持把 trigger 跨 agent 迁移，请新建触发器' };
       }
 
-      const strategy = patch.targetThreadId ? 'thread' : (patch.targetSessionStrategy ?? 'isolated');
-      const newTarget: FeedbackTarget = {
-        channelKey: targetChannelName,
-        channelId: String(patch.targetChannelId ?? previousTarget.channelId),
-        delivery: previousTarget.delivery,
-        threadId: strategy === 'thread' ? String(patch.targetThreadId ?? threadId ?? messageId ?? previousTarget.threadId ?? `trigger:${definition.id}`) : undefined,
-      };
-
-      if (strategy === 'current') {
-        if (patch.targetChannel && patch.targetChannel !== channel) {
-          return { ok: false, error: '跨渠道不支持 --session current，请改用 latest 或 thread' };
-        }
-        const active = await this.sessionManager.getActiveSession(channel, channelId);
-        if (!active) return { ok: false, error: '目标渠道当前没有活跃会话，改用 latest 或先在该渠道发一条消息' };
-        updated.execution.session.sessionId = active.id;
+      if (patch.targetSessionStrategy === 'current') {
+        return { ok: false, error: 'targetSessionStrategy=current 已停用，请改用 latest 或 thread' };
+      }
+      if (
+        patch.targetSessionStrategy !== undefined
+        && patch.targetSessionStrategy !== 'latest'
+        && patch.targetSessionStrategy !== 'thread'
+      ) {
+        return { ok: false, error: `无效 targetSessionStrategy: ${patch.targetSessionStrategy}` };
       }
 
+      const previousStrategy = definition.execution.session.strategy === 'thread' ? 'thread' : 'latest';
+      const patchThreadId = typeof patch.targetThreadId === 'string' && patch.targetThreadId.trim()
+        ? patch.targetThreadId.trim()
+        : undefined;
+      const strategy = patchThreadId
+        ? 'thread'
+        : (patch.targetSessionStrategy ?? previousStrategy);
+      const newTargetBase = {
+        channelKey: targetChannelName,
+        channelId: String(patch.targetChannelId ?? previousTarget.channelId),
+        threadId: strategy === 'thread' ? String(patchThreadId ?? threadId ?? messageId ?? previousTarget.threadId ?? `trigger:${definition.id}`) : undefined,
+      };
+      const targetWithDelivery = (delivery: FeedbackTarget['delivery']): FeedbackTarget => ({
+        ...newTargetBase,
+        delivery,
+      });
+
       updated.execution.session = {
-        strategy: strategy === 'current' ? 'main' : (strategy === 'thread' ? 'thread' : 'isolated'),
-        channelKey: newTarget.channelKey,
-        channelId: newTarget.channelId,
-        sessionId: strategy === 'current' ? updated.execution.session.sessionId : undefined,
-        threadId: newTarget.threadId,
+        strategy: strategy === 'thread' ? 'thread' : 'isolated',
+        channelKey: newTargetBase.channelKey,
+        channelId: newTargetBase.channelId,
+        threadId: newTargetBase.threadId,
       };
 
       // Update all feedback targets
       if (updated.feedback.onReply.kind === 'forward') {
-        updated.feedback.onReply.targets = [newTarget];
+        updated.feedback.onReply.targets = [targetWithDelivery(updated.feedback.onReply.targets[0]?.delivery ?? previousTarget.delivery)];
       }
-      if (updated.feedback.default.kind === 'forward') {
-        updated.feedback.default.targets = [newTarget];
+      if (updated.feedback.onFailure.kind === 'forward') {
+        updated.feedback.onFailure.targets = [targetWithDelivery(updated.feedback.onFailure.targets[0]?.delivery ?? previousTarget.delivery)];
       }
       if (updated.feedback.onNoop.kind === 'forward') {
-        updated.feedback.onNoop.targets = [newTarget];
+        updated.feedback.onNoop.targets = [targetWithDelivery(updated.feedback.onNoop.targets[0]?.delivery ?? previousTarget.delivery)];
       }
     }
 
@@ -1404,16 +1542,26 @@ export class CommandHandler {
       (updated.source as any).timezone = patch.timezone || undefined;
     }
 
-    if (patch.scriptPath !== undefined || patch.scriptRuntime !== undefined || patch.scriptArgs !== undefined) {
-      if (patch.scriptPath && patch.scriptRuntime) {
+    if (patch.executionMode === 'script' || patch.scriptPath !== undefined || patch.scriptRuntime !== undefined || patch.scriptArgs !== undefined) {
+      const previousScript = updated.execution.mode === 'script' ? updated.execution.script : undefined;
+      const scriptPath = patch.scriptPath === null
+        ? undefined
+        : (patch.scriptPath !== undefined ? String(patch.scriptPath) : previousScript?.path);
+      const scriptRuntime = patch.scriptRuntime === null
+        ? undefined
+        : (patch.scriptRuntime !== undefined ? String(patch.scriptRuntime) : previousScript?.runtime);
+      if (scriptPath && scriptRuntime) {
         const target = this.primaryFeedbackTarget(updated);
+        const scriptArgs = patch.scriptArgs !== undefined
+          ? patch.scriptArgs
+          : (patch.scriptPath !== undefined ? undefined : previousScript?.args);
         updated.execution = {
           mode: 'script',
           script: {
-            path: patch.scriptPath,
-            runtime: patch.scriptRuntime,
-            args: patch.scriptArgs,
-            timeoutMs: updated.execution.mode === 'script' ? updated.execution.script!.timeoutMs ?? 30_000 : 30_000,
+            path: scriptPath,
+            runtime: scriptRuntime,
+            args: scriptArgs,
+            timeoutMs: previousScript?.timeoutMs ?? 30_000,
           },
           session: updated.execution.session,
           model: updated.execution.model,
@@ -1426,11 +1574,11 @@ export class CommandHandler {
         if (target && updated.feedback.onReply.kind !== 'forward') {
           updated.feedback.onReply = { kind: 'forward', targets: [target], template: '{{reply.text}}' };
         }
-      } else if (patch.scriptPath === null || patch.scriptRuntime === null) {
+      } else if (patch.scriptPath === null || patch.scriptRuntime === null || patch.executionMode === 'agent') {
         // Convert script mode back to agent mode
         updated.execution = {
           mode: 'agent',
-          prompt: this.triggerPrompt(definition),
+          prompt: String(patch.prompt ?? this.triggerPrompt(definition)),
           session: updated.execution.session,
           model: updated.execution.model,
           effort: updated.execution.effort,
@@ -1441,18 +1589,32 @@ export class CommandHandler {
       }
     }
 
+    if (patch.feedback !== undefined) {
+      const applied = this.applyFeedbackPatch(updated, patch.feedback);
+      if (!applied.ok) return { ok: false, error: applied.error };
+    }
+
     if (patch.mode !== undefined) {
-      const delivery: 'direct' | 'inbound' = patch.mode === 'direct-message' || patch.mode === 'direct' ? 'direct' : 'inbound';
-      // Update delivery mode for all forward targets
-      if (updated.feedback.onReply.kind === 'forward') {
-        updated.feedback.onReply.targets = updated.feedback.onReply.targets.map(t => ({ ...t, delivery }));
-      }
-      if (updated.feedback.default.kind === 'forward') {
-        updated.feedback.default.targets = updated.feedback.default.targets.map(t => ({ ...t, delivery }));
-      }
-      if (updated.feedback.onNoop.kind === 'forward') {
-        updated.feedback.onNoop.targets = updated.feedback.onNoop.targets.map(t => ({ ...t, delivery }));
-      }
+      const mode = String(patch.mode);
+      const delivery = mode === 'direct' || mode === 'direct-message'
+        ? 'direct'
+        : mode === 'agent' || mode === 'agent-runner'
+          ? 'inbound'
+          : undefined;
+      if (!delivery) return { ok: false, error: `无效 mode: ${patch.mode}` };
+      const withDelivery = (disposition: FeedbackDisposition): FeedbackDisposition => {
+        if (disposition.kind === 'reply-origin') return { ...disposition, delivery };
+        if (disposition.kind === 'forward') {
+          return {
+            ...disposition,
+            targets: disposition.targets.map(target => ({ ...target, delivery })),
+          };
+        }
+        return disposition;
+      };
+      updated.feedback.onReply = withDelivery(updated.feedback.onReply);
+      updated.feedback.onNoop = withDelivery(updated.feedback.onNoop);
+      updated.feedback.onFailure = withDelivery(updated.feedback.onFailure);
     }
 
     if (patch.onFailure !== undefined) {
@@ -1462,13 +1624,13 @@ export class CommandHandler {
       const primaryTarget = this.primaryFeedbackTarget(updated);
       if (patch.onFailure === 'notify') {
         if (!primaryTarget) return { ok: false, error: 'onFailure notify 需要 target，但现有定义缺少 target' };
-        updated.feedback.default = {
+        updated.feedback.onFailure = {
           kind: 'forward',
           targets: [{ ...primaryTarget }],
           template: '❌ 触发器执行失败：{{error.message}}',
         };
       } else {
-        updated.feedback.default = { kind: 'silent' };
+        updated.feedback.onFailure = { kind: 'silent' };
       }
     }
 
@@ -1491,24 +1653,50 @@ export class CommandHandler {
 
     if (patch.maxRuns !== undefined || patch.maxDuration !== undefined) {
       const limits = updated.limits ? { ...updated.limits } : {};
-      if (patch.maxRuns !== undefined) limits.maxRuns = Number(patch.maxRuns);
-      if (patch.maxDuration !== undefined) limits.maxDuration = String(patch.maxDuration);
+      if (patch.maxRuns !== undefined) {
+        if (patch.maxRuns === null || patch.maxRuns === '') delete limits.maxRuns;
+        else limits.maxRuns = Number(patch.maxRuns);
+      }
+      if (patch.maxDuration !== undefined) {
+        if (patch.maxDuration === null || patch.maxDuration === '') delete limits.maxDuration;
+        else limits.maxDuration = String(patch.maxDuration);
+      }
       updated.limits = Object.keys(limits).length > 0 ? limits : undefined;
     }
 
+    if (patch.concurrency !== undefined) {
+      if (patch.concurrency !== 'forbid' && patch.concurrency !== 'replace' && patch.concurrency !== 'allow') {
+        return { ok: false, error: `无效 concurrency: ${patch.concurrency}` };
+      }
+      updated.reliability.concurrency = patch.concurrency;
+    }
+
+    if (patch.missedPolicy !== undefined) {
+      if (patch.missedPolicy !== 'skip' && patch.missedPolicy !== 'run_once' && patch.missedPolicy !== 'run_all') {
+        return { ok: false, error: `无效 missedPolicy: ${patch.missedPolicy}` };
+      }
+      updated.reliability.missedPolicy = patch.missedPolicy;
+    }
+
     if (patch.model !== undefined) {
-      updated.execution.model = String(patch.model);
+      if (patch.model === null || patch.model === '') delete updated.execution.model;
+      else updated.execution.model = String(patch.model);
     }
 
     if (patch.effort !== undefined) {
-      updated.execution.effort = patch.effort as TriggerDefinition['execution']['effort'];
+      if (patch.effort === null || patch.effort === '') delete updated.execution.effort;
+      else updated.execution.effort = patch.effort as TriggerDefinition['execution']['effort'];
     }
 
     if (patch.permissionMode !== undefined) {
-      const permissionMode = patch.permissionMode as TriggerPermissionMode;
-      const permissionError = this.validateTriggerPermissionModeForRole(permissionMode, isAdmin);
-      if (permissionError) return { ok: false, error: permissionError };
-      updated.execution.permissionMode = permissionMode;
+      if (patch.permissionMode === null || patch.permissionMode === '') {
+        delete updated.execution.permissionMode;
+      } else {
+        const permissionMode = patch.permissionMode as TriggerPermissionMode;
+        const permissionError = this.validateTriggerPermissionModeForRole(permissionMode, isAdmin);
+        if (permissionError) return { ok: false, error: permissionError };
+        updated.execution.permissionMode = permissionMode;
+      }
     }
 
     try {
@@ -1546,12 +1734,24 @@ export class CommandHandler {
     return limits.maxRuns === undefined && limits.maxDuration === undefined ? undefined : limits;
   }
 
+  private scriptCommandLabel(script: NonNullable<TriggerDefinition['execution']['script']>): string {
+    const args = Array.isArray(script.args) ? script.args.map(arg => this.shellQuoteArg(String(arg))).join(' ') : '';
+    const command = this.shellQuoteArg(script.path);
+    return `${script.runtime} ${command}${args ? ` ${args}` : ''}`;
+  }
+
+  private shellQuoteArg(value: string): string {
+    if (!value) return "''";
+    return /[\s"'\\]/.test(value) ? `"${value.replace(/(["\\$`])/g, '\\$1')}"` : value;
+  }
+
   private limitDurationMs(value: string): number {
     const amount = Number(value.slice(0, -1));
     const unit = value.slice(-1);
     if (unit === 'd') return amount * 86_400_000;
     if (unit === 'h') return amount * 3_600_000;
-    return amount * 60_000;
+    if (unit === 'm') return amount * 60_000;
+    return amount * 1_000;
   }
 
   // ── /rewind helpers ──

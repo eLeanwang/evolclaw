@@ -52,6 +52,10 @@ export class TriggerEventSource {
     this.subscriptions.delete(triggerId);
   }
 
+  has(triggerId: string): boolean {
+    return this.subscriptions.has(triggerId);
+  }
+
   stop(): void {
     for (const triggerId of [...this.subscriptions.keys()]) {
       this.unregister(triggerId);

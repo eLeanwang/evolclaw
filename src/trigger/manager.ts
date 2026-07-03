@@ -72,7 +72,13 @@ export class TriggerDefinitionManager {
 
   update(triggerId: string, input: unknown, files: TriggerCreateFile[] = []): TriggerDefinition {
     const existing = this.require(triggerId);
-    const updated = normalizeTriggerDefinition({ ...(input as Record<string, unknown>), id: triggerId }, { now: Date.now() });
+    const rawInput = isRecord(input) ? input : {};
+    const origin = mergeOrigin(existing.origin, rawInput.origin);
+    const updated = normalizeTriggerDefinition({
+      ...rawInput,
+      id: triggerId,
+      ...(origin ? { origin } : {}),
+    }, { now: Date.now() });
     this.assertAgent(updated);
     updated.createdAt = existing.createdAt;
     updated.updatedAt = Date.now();
@@ -242,6 +248,23 @@ export class TriggerDefinitionManager {
     }
   }
 
+}
+
+function optionalString(value: unknown): string | undefined {
+  return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+
+function mergeOrigin(
+  existing: TriggerDefinition['origin'],
+  incoming: unknown,
+): TriggerDefinition['origin'] {
+  if (existing?.channel && existing.peerId) return existing;
+  if (!isRecord(incoming)) return existing;
+  const channel = optionalString(incoming.channel) ?? existing?.channel;
+  const peerId = optionalString(incoming.peerId) ?? existing?.peerId;
+  const sessionKey = optionalString(incoming.sessionKey) ?? existing?.sessionKey;
+  if (!channel && !peerId && !sessionKey) return undefined;
+  return { channel, peerId, sessionKey };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

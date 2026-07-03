@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { loadSchema } from '../../../config/schema-registry.js';
+import { loadSchema } from '../../../src/config/schema-registry.js';
 
 describe('roles schema v4', () => {
   it('should load with the current schema registry', () => {

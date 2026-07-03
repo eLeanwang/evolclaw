@@ -1,8 +1,8 @@
 /**
  * field-scope: 顶层配置字段的多作用域读写（通用框架）。
  *
- * 与 config-scope.ts（model 专用，深耦合 baseagents/behavior.json）互补：
- *   - config-scope：model/effort/permissionMode → behavior.json 的嵌套结构
+ * 与 config-scope.ts（model 专用，处理 baseagents/roles 嵌套结构）互补：
+ *   - config-scope：model/effort/permissionMode → config.json / relation config.json 的嵌套结构
  *   - field-scope：顶层字段（如 response_modes）→ config.json（H 链）
  *
  * 复用 config-scope 的作用域判定与 peer 归一化（同一套语义，不重复造）。

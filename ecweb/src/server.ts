@@ -469,8 +469,11 @@ function handleConnection(ws: WebSocket, req: http.IncomingMessage, log: (s: str
     }
     if (msg.type === 'menu' && msg.payload) {
       const p = resolvePaths();
+      const timeoutMs = Number.isFinite(Number(msg.timeoutMs)) && Number(msg.timeoutMs) > 0
+        ? Math.min(Number(msg.timeoutMs), 120_000)
+        : 5000;
       const resp = await ipcQuery<{ ok: boolean; response?: any; error?: string }>(
-        p.socket, { type: 'menu.exec', payload: msg.payload }, 5000,
+        p.socket, { type: 'menu.exec', payload: msg.payload }, timeoutMs,
       );
       if (resp?.ok) {
         send({ type: 'menu.response', requestId: msg.requestId, data: resp.response });
@@ -480,6 +483,19 @@ function handleConnection(ws: WebSocket, req: http.IncomingMessage, log: (s: str
           error: { code: 'INTERNAL', message: resp?.error ?? 'daemon unreachable' },
         } });
       }
+      return;
+    }
+    if (msg.type === 'ipc' && msg.payload) {
+      if (typeof msg.payload.type !== 'string' || !msg.payload.type.startsWith('trigger.')) {
+        send({ type: 'ipc.response', requestId: msg.requestId, data: { ok: false, error: 'unsupported ipc payload' } });
+        return;
+      }
+      const p = resolvePaths();
+      const timeoutMs = Number.isFinite(Number(msg.timeoutMs)) && Number(msg.timeoutMs) > 0
+        ? Math.min(Number(msg.timeoutMs), 120_000)
+        : 10000;
+      const resp = await ipcQuery<any>(p.socket, msg.payload, timeoutMs);
+      send({ type: 'ipc.response', requestId: msg.requestId, data: resp ?? { ok: false, error: 'daemon unreachable' } });
       return;
     }
   });

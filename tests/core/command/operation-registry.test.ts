@@ -5,7 +5,7 @@ import {
   listOperationsByCategory,
   listDangerousOperations,
   hasOperation,
-} from '../operation-registry.js';
+} from '../../../src/core/command/operation-registry.js';
 
 describe('Operation Registry', () => {
   describe('getOperationMeta', () => {

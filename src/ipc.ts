@@ -359,6 +359,7 @@ export class IpcServer {
       }
       case 'trigger.list':
       case 'trigger.show':
+      case 'trigger.eventCatalog':
       case 'trigger.create':
       case 'trigger.update':
       case 'trigger.setEnabled':

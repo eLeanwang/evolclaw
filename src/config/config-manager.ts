@@ -666,6 +666,7 @@ const BEHAVIOR_TOP_FIELDS = new Set([
   'dispatch',
   'show_activities',
   'proactive',
+  'group_venue_sync',
   'render',
   'enable_rich_content',
   'permissionMode',

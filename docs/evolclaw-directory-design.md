@@ -872,7 +872,10 @@ agent_view:
 ```
 venues/
 ├── <channelType>#<urlEncode(groupId)>/    具体群的环境文档（按需创建）
-│   └── profile.md                          群的特别内容（通用文档覆盖不到的）
+│   ├── profile.md                          群的特别内容（通用文档覆盖不到的）
+│   ├── rules.md                            群资源空间规则文件的本地缓存
+│   ├── resource-index.md                   群资源空间可见资源索引
+│   └── group-sync.json                     同步状态（远端路径、mtime、hash、错误）
 └── ...
 ```
 
@@ -900,6 +903,12 @@ agent_view:
 ```
 
 **创建时机**：agent 观察到某个群有通用文档无法覆盖的特别内容时主动创建。大多数群不需要单独建文档——通用场景文档（`$KITS_DOCS/venues/group.md`）和渠道场景文档（`$KITS_DOCS/venues/feishu-group.md`）已经提供了足够的行为指引。
+
+**AUN 群资源同步**：AUN 群聊进入上下文组装前，会尝试读取群资源空间中的规则文件并生成资源索引。默认读取
+`<group-aid>:/announce/evolclaw/rules.md`，资源索引默认扫描 `<group-aid>:/`，结果落在当前群的
+`rules.md`、`resource-index.md` 和 `group-sync.json`。同步只读远端，远端写入/权限变更不在运行期自动执行；
+群空间是否可读、能看到哪些资源、规则文件由谁维护，均由群空间 ACL 和群管理员策略决定。可通过
+`group_venue_sync.rulesPath`、`indexPath`、`maxIndexItems`、`maxRulesBytes`、`refreshIntervalMs` 调整。
 
 #### sessions/ — 会话存储
 

@@ -281,7 +281,7 @@ export function classifyError(error: any): ErrorType {
     return ErrorType.MODEL_UNAVAILABLE;
   }
 
-  if (msg.includes('401') || msg.includes('authentication_error')) {
+  if (msg.includes('401') || msg.includes('authentication_error') || msg.includes('unauthorized')) {
     return ErrorType.AUTH_ERROR;
   }
 
@@ -318,7 +318,7 @@ export function isRetryableError(error: any): boolean {
   if (rule) return rule.action === 'retry';
 
   // 内置兜底规则（结构性错误码）
-  if (lower.includes('401') || lower.includes('authentication_error')) {
+  if (lower.includes('401') || lower.includes('authentication_error') || lower.includes('unauthorized')) {
     return false;  // 认证错误不可重试
   }
 
@@ -368,8 +368,11 @@ export function getErrorMessage(error: any, terminalReason?: string, includeEmoj
   if (msg.includes('CONTEXT_COMPACT_FAILED') || isContextTooLongText(msg)) {
     return `${warnPrefix}上下文过长，自动压缩失败，请手动输入 /compact 重试`;
   }
-  if (msg.includes('401') || msg.includes('authentication_error')) {
+  if (msg.includes('401') || msg.includes('authentication_error') || msg.toLowerCase().includes('unauthorized')) {
     return `${errPrefix}API Key 无效，请检查密钥配置。使用 /status 查看当前配置`;
+  }
+  if (hasRetryableHttpStatus(msg)) {
+    return `${warnPrefix}API 服务暂时不可用，请稍后重试`;
   }
   if (msg.includes('timeout')) {
     return `${warnPrefix}请求超时，请重试`;

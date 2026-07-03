@@ -28,6 +28,7 @@ function normalizeAgent(item: any): { aid: string; label: string } | null {
 }
 
 async function listTriggersForAgent(agentAid: string, agentLabel: string): Promise<any[]> {
+  const p = resolvePaths();
   const resp = await menuExec({
     type: 'menu.options',
     id: `tr-list-${agentAid}`,
@@ -36,10 +37,31 @@ async function listTriggersForAgent(agentAid: string, agentLabel: string): Promi
     agent: agentAid,
   });
   const items = Array.isArray(resp?.data) ? resp.data : [];
-  return items.map((trigger: any) => ({
-    ...trigger,
-    agentAid: trigger.agentAid || trigger.schedulerAid || agentAid,
-    agentLabel: trigger.agentLabel || agentLabel,
+  return Promise.all(items.map(async (trigger: any) => {
+    const effectiveAgentAid = trigger.agentAid || trigger.schedulerAid || agentAid;
+    let definition: any = null;
+    let scriptPreview: any = null;
+    let subscription: any = null;
+    try {
+      const shown = await ipcQuery<any>(
+        p.socket,
+        { type: 'trigger.show', agentAid: effectiveAgentAid, triggerId: trigger.id ?? trigger.value },
+        5000,
+      );
+      if (shown?.ok) {
+        definition = shown.definition ?? null;
+        scriptPreview = shown.scriptPreview ?? null;
+        subscription = shown.subscription ?? null;
+      }
+    } catch { /* detail is best-effort; menu data remains usable */ }
+    return {
+      ...trigger,
+      agentAid: effectiveAgentAid,
+      agentLabel: trigger.agentLabel || agentLabel,
+      definition,
+      scriptPreview,
+      subscription,
+    };
   }));
 }
 

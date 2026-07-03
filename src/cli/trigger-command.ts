@@ -71,7 +71,7 @@ function printHelp(): void {
   show --agent <aid> <triggerId> [--json]
   create --file <trigger.json|trigger-dir> [--enable] [--json]
     OR
-  create --agent <aid> --cron <expr> --prompt <text> [--enable] [其他flag]
+  create --agent <aid> --cron <expr>|--event <pattern> --prompt <text> [--enable] [其他flag]
   update --agent <aid> <triggerId> --file <trigger.json> [--json]
   enable --agent <aid> <triggerId>
   disable --agent <aid> <triggerId>
@@ -81,17 +81,17 @@ function printHelp(): void {
   template list|show <name> [--json]
 
 Flag 模式支持的参数（与 /trigger 命令一致）:
-  --delay <时长> | --at <ISO时间> | --cron <表达式> | --every <时长>
+  --delay <时长> | --at <ISO时间> | --cron <表达式> | --every <时长> | --event <事件模式>
   --prompt <文本>
   --script <路径> --runtime <node|python|bash>
   --mode <agent|direct>
   --model <模型>  --effort <low|medium|high|xhigh|max>
   --on-fail <notify|silent>  --on-noop <notify|silent>
-  --max-runs <次数>  --max-duration <时长: 30m|12h|3d>
+  --max-runs <次数>  --max-duration <时长: 30s|15m|2h|1d>
   --permission <auto|bypass|readonly|plan|edit|request|noask>
   --tz <时区> (仅 cron)
   --channel <名称> --channelid <ID>
-  --session <latest|current|thread>
+  --session <latest|thread>
   --name <名称>`);
 }
 
@@ -138,11 +138,11 @@ async function showTrigger(args: string[], json: boolean): Promise<void> {
     }
     console.log(`limit state: ${parts.join(', ')}`);
   }
-  if (t.execution.mode === 'script') console.log(`script: ${t.execution.script!.runtime} ${t.execution.script!.path}`);
+  if (t.execution.mode === 'script') console.log(`script: ${scriptCommandLabel(t.execution.script!)}`);
   console.log(`model: ${t.execution.model ?? 'inherit'}`);
   console.log(`effort: ${t.execution.effort ?? 'inherit'}`);
   console.log(`permission: ${t.execution.permissionMode ?? 'inherit'}`);
-  console.log(`feedback: reply=${t.feedback.onReply.kind}, noop=${t.feedback.onNoop.kind}, default=${t.feedback.default.kind}`);
+  console.log(`feedback: reply=${t.feedback.onReply.kind}, noop=${t.feedback.onNoop.kind}, failure=${t.feedback.onFailure.kind}`);
   const active = Array.isArray(res.active) ? res.active : [];
   console.log(`active runs: ${active.length}`);
   const recent = Array.isArray(res.recentRuns) ? res.recentRuns : [];
@@ -186,10 +186,6 @@ async function createTrigger(args: string[], json: boolean): Promise<void> {
   if (!parsed.targetChannel || !parsed.targetChannelId) {
     throw new Error('flag 模式需要显式指定 --channel <channelKey> --channelid <id>');
   }
-  if (parsed.targetSessionStrategy === 'current') {
-    throw new Error('flag 模式没有当前会话上下文，不支持 --session current');
-  }
-
   // Build V3 definition directly. File mode still normalizes imported
   // definitions, but persisted trigger definitions should be V3.
   const now = Date.now();
@@ -257,6 +253,7 @@ function sourceFromParsed(parsed: any): any {
     return src;
   }
   if (parsed.scheduleType === 'interval') return { type: 'interval', everyMs: Number(parsed.scheduleValue) };
+  if (parsed.scheduleType === 'event') return { type: 'event', eventPattern: parsed.scheduleValue };
   throw new Error(`unsupported scheduleType: ${parsed.scheduleType}`);
 }
 
@@ -273,7 +270,7 @@ function feedbackFromParsed(parsed: any, _mode: string | undefined, hasScript: b
     onNoop: onNoopMode === 'notify'
       ? { kind: 'forward', targets: [target], template: '{{reply.text}}' }
       : { kind: 'silent' },
-    default: onFailureMode === 'notify'
+    onFailure: onFailureMode === 'notify'
       ? { kind: 'forward', targets: [target], template: '❌ 触发器执行失败：{{error.message}}' }
       : { kind: 'silent' },
   };
@@ -291,7 +288,19 @@ function limitDurationMs(value: string): number {
   const unit = value.slice(-1);
   if (unit === 'd') return amount * 86_400_000;
   if (unit === 'h') return amount * 3_600_000;
-  return amount * 60_000;
+  if (unit === 'm') return amount * 60_000;
+  return amount * 1_000;
+}
+
+function scriptCommandLabel(script: NonNullable<TriggerDefinition['execution']['script']>): string {
+  const args = Array.isArray(script.args) ? script.args.map(arg => shellQuoteArg(String(arg))).join(' ') : '';
+  const command = shellQuoteArg(script.path);
+  return `${script.runtime} ${command}${args ? ` ${args}` : ''}`;
+}
+
+function shellQuoteArg(value: string): string {
+  if (!value) return "''";
+  return /[\s"'\\]/.test(value) ? `"${value.replace(/(["\\$`])/g, '\\$1')}"` : value;
 }
 
 async function updateTrigger(args: string[], json: boolean): Promise<void> {
@@ -357,7 +366,12 @@ function handleTemplate(args: string[]): void {
 }
 
 async function request(cmd: { type: string; [key: string]: unknown }, timeoutMs = 10_000): Promise<any> {
-  const res = await ipcQuery<any>(resolvePaths().socket, cmd, timeoutMs);
+  const actorSessionId = process.env.EVOLCLAW_SESSION_ID;
+  const res = await ipcQuery<any>(
+    resolvePaths().socket,
+    actorSessionId ? { ...cmd, actorSessionId } : cmd,
+    timeoutMs,
+  );
   if (!res) throw new Error('错误: 无法连接 evolclaw 服务');
   if (res.ok === false || res.error) throw new Error(res.error || 'trigger command failed');
   return res;

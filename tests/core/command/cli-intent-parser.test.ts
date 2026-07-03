@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { parseCliIntent, rawCliIntent, withDefaultRelationContext } from '../cli-intent-parser.js';
+import { parseCliIntent, rawCliIntent, withDefaultRelationContext } from '../../../src/core/command/cli-intent-parser.js';
 
 describe('CLI Intent Parser', () => {
   describe('Model commands', () => {

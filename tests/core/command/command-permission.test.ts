@@ -1,8 +1,8 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { authorizeCommand } from '../command-permission.js';
-import { ConfigTarget, write } from '../../../config/config-manager.js';
-import { clearRolesCache } from '../../../config/roles.js';
-import type { CommandAuthorizationContext } from '../../../types.js';
+import { authorizeCommand } from '../../../src/core/command/command-permission.js';
+import { ConfigTarget, write } from '../../../src/config/config-manager.js';
+import { clearRolesCache } from '../../../src/config/roles.js';
+import type { CommandAuthorizationContext } from '../../../src/types.js';
 
 describe('Command Permission', () => {
   beforeEach(() => {

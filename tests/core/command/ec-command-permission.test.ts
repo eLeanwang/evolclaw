@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { parseEcOperationId, authorizeEcCommand } from '../ec-command-permission.js';
-import type { EcCommandAuthorizationContext } from '../ec-command-permission.js';
+import { parseEcOperationId, authorizeEcCommand } from '../../../src/core/command/ec-command-permission.js';
+import type { EcCommandAuthorizationContext } from '../../../src/core/command/ec-command-permission.js';
 
 describe('EC Command Permission', () => {
   describe('parseEcOperationId', () => {

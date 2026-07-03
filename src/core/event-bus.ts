@@ -93,7 +93,7 @@ export type AgentLifecycleEvent =
   | { type: 'agent:started'; aid: string; timestamp?: number }
   | { type: 'agent:stopped'; aid: string; timestamp?: number }
   | { type: 'agent:error'; aid: string; action?: string; error: string; timestamp?: number }
-  | { type: 'agent:baseagent-changed'; aid: string; baseagent: string; previousBaseagent?: string; scope: 'default'; timestamp?: number };
+  | { type: 'agent:baseagent-changed'; aid: string; baseagent: string; previousBaseagent?: string; scope: 'agent'; timestamp?: number };
 export type GatewayEvent =
   | SystemEvent
   | ChannelEvent

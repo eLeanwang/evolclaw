@@ -23,6 +23,7 @@ import { snapshot as configSnapshot, retentionCleanup, readCurrent, readWVersion
 import { appendBootLog, selfDiagnose } from './config/boot-log.js';
 import type { Config, EffectiveAgentConfig, AgentConfig, DefaultsConfig, SessionIdentity } from './types.js';
 import { CONFIG_SCHEMA_VERSION } from './types.js';
+import type { Session } from './types.js';
 import { SessionManager } from './core/session/session-manager.js';
 import { ClaudeAgentPlugin } from './agents/claude-runner.js';
 import { CodexAgentPlugin } from './agents/codex-runner.js';
@@ -44,6 +45,7 @@ import { BootstrapService } from './core/bootstrap-service.js';
 import { MessageCache } from './core/message/message-cache.js';
 import { CommandHandler, isProcessLevelOwner } from './core/command/command-handler.js';
 import { EventBus, GatewayEvent } from './core/event-bus.js';
+import { getEventCatalog } from './core/event-catalog.js';
 import { StatsCollector } from './utils/stats.js';
 import { AidStatsCollector } from './utils/stats.js';
 import { PermissionGateway } from './core/permission.js';
@@ -166,6 +168,23 @@ function daemonConversationWatchdogMs(settings: { idleMonitor?: { timeout?: numb
   return Math.ceil(idleMs * 5 + 60_000);
 }
 
+function hasOriginIdentity(origin: unknown): boolean {
+  if (!origin || typeof origin !== 'object' || Array.isArray(origin)) return false;
+  const raw = origin as Record<string, unknown>;
+  return typeof raw.channel === 'string' && raw.channel.length > 0
+    && typeof raw.peerId === 'string' && raw.peerId.length > 0;
+}
+
+function originFromActorSession(session: Session): TriggerDefinition['origin'] | undefined {
+  const peerId = session.metadata?.peerId;
+  if (!peerId) return undefined;
+  return {
+    channel: session.metadata?.channelKey || session.channel,
+    peerId,
+    sessionKey: session.sessionKey,
+  };
+}
+
 function seedUpgradeCheckTrigger(manager: TriggerDefinitionManager, owner: { aid: string; originPeerId?: string; baseagent: string }): void {
   const now = Date.now();
   const scriptName = 'upgrade-check.sh';
@@ -206,7 +225,7 @@ function seedUpgradeCheckTrigger(manager: TriggerDefinitionManager, owner: { aid
     feedback: {
       onReply: { kind: 'silent' },
       onNoop: { kind: 'silent' },
-      default: { kind: 'silent' },
+      onFailure: { kind: 'silent' },
     },
     reliability: {
       concurrency: 'forbid',
@@ -990,7 +1009,7 @@ async function main() {
     const dispositions: FeedbackDisposition[] = [
       definition.feedback.onReply,
       definition.feedback.onNoop,
-      definition.feedback.default,
+      definition.feedback.onFailure,
     ];
     for (const disposition of dispositions) {
       if (disposition.kind !== 'forward') continue;
@@ -1000,6 +1019,18 @@ async function main() {
         }
       }
     }
+  };
+  const definitionWithActorOrigin = async (rawDefinition: unknown, actorSessionId: unknown): Promise<unknown> => {
+    if (!rawDefinition || typeof rawDefinition !== 'object' || Array.isArray(rawDefinition)) return rawDefinition;
+    const definition = rawDefinition as Record<string, unknown>;
+    let actorOrigin: TriggerDefinition['origin'] | undefined;
+    if (typeof actorSessionId === 'string' && actorSessionId) {
+      const actorSession = await sessionManager.getSessionById(actorSessionId);
+      actorOrigin = actorSession ? originFromActorSession(actorSession) : undefined;
+    }
+    if (actorOrigin) return { ...definition, origin: actorOrigin };
+    if (hasOriginIdentity(definition.origin)) return definition;
+    return definition;
   };
   const startTriggerScheduler = async (owner: { aid: string; baseagent: string; projectPath: string }, opts: { seedUpgradeCheck?: boolean } = {}) => {
     triggerSchedulers.get(owner.aid)?.stop();
@@ -1741,6 +1772,23 @@ async function main() {
   // M3: direct call (not cast) — wire EvolAgentRegistry into IPC for evolagent.* handlers
   ipcServer.setAgentRegistry(agentRegistry);
   ipcServer.setMenuExecutor((payload) => cmdHandler.execMenuForEcweb(payload));
+  cmdHandler.setDaemonStatusProvider(() => {
+    const aidState = controlChannel?.getAidState?.();
+    return {
+      aid: evolclawCfg.aid ?? null,
+      aun: aidState ? {
+        connected: aidState.status === 'connected',
+        status: aidState.status,
+        reconnectCount: aidState.reconnectCount ?? 0,
+        flapCount: aidState.flapCount ?? 0,
+        ...(aidState.lastError ? { lastError: String(aidState.lastError).slice(0, 80) } : {}),
+        ...(aidState.kickDetail?.reason ? { kickReason: String(aidState.kickDetail.reason).slice(0, 80) } : {}),
+      } : {
+        connected: false,
+        status: evolclawCfg.aid ? 'disconnected' : 'disabled',
+      },
+    };
+  });
   if (bindService) {
     ipcServer.setBindExecutor({
       begin: (cmd) => bindService.begin(cmd),
@@ -2016,8 +2064,11 @@ async function main() {
         if (!cmd.triggerId) throw new Error('missing triggerId');
         return { ok: true, ...schedulerFor(agentAid).show(cmd.triggerId) };
       }
+      case 'trigger.eventCatalog': {
+        return { ok: true, ...getEventCatalog({ includeInternal: cmd.includeInternal === true }) };
+      }
       case 'trigger.create': {
-        const definition = normalizeTriggerDefinition(cmd.definition);
+        const definition = normalizeTriggerDefinition(await definitionWithActorOrigin(cmd.definition, cmd.actorSessionId));
         requireAgent(definition.agentAid);
         validateTriggerFeedbackChannels(definition);
         const trigger = schedulerFor(definition.agentAid).create(definition, cmd.files ?? [], { enable: cmd.enable });
@@ -2055,7 +2106,16 @@ async function main() {
         const agentAid = requireAgent(cmd.agentAid);
         if (!cmd.triggerId) throw new Error('missing triggerId');
         const result = await schedulerFor(agentAid).run(cmd.triggerId, { dryRun: cmd.dryRun === true });
-        return { ok: result.ok, result };
+        return {
+          ok: result.ok,
+          result,
+          runId: result.runId,
+          triggerId: result.triggerId,
+          status: result.status,
+          reason: result.reason,
+          error: result.error,
+          audit: result.audit,
+        };
       }
       default:
         return { ok: false, error: `unknown trigger command: ${cmd.type}` };

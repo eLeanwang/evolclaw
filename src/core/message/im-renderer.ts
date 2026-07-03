@@ -2,7 +2,7 @@ import type { AgentEvent } from '../../agents/runner-types.js';
 import type { ChannelAdapter, OutboundEnvelope, OutboundPayload, ReplyContext, ThoughtItem } from '../../types.js';
 import { logger } from '../../utils/logger.js';
 import { summarizeToolInput } from '../permission.js';
-import { CONTEXT_TOO_LONG_PATTERN, isContextTooLongText } from '../../utils/error-utils.js';
+import { CONTEXT_TOO_LONG_PATTERN, getErrorMessage, isContextTooLongText } from '../../utils/error-utils.js';
 import fs from 'fs';
 import path from 'path';
 import { resolvePaths } from '../../paths.js';
@@ -184,6 +184,16 @@ export class IMRenderer {
     this.itemsQueue = [];
     this.textBuffer = '';
     this.allText = '';
+  }
+
+  /** 仅丢弃尚未发送的正文，保留 notice/tool 等活动项。 */
+  discardPendingText(): void {
+    if (this.timer) {
+      clearTimeout(this.timer);
+      this.timer = undefined;
+    }
+    this.itemsQueue = this.itemsQueue.filter(it => it.kind !== 'text');
+    this.textBuffer = '';
   }
 
   /** 当前 buffer 中尚未 flush 的文本 */
@@ -630,7 +640,8 @@ export class IMRenderer {
       case 'error': {
         // 上下文过长错误不输出（留给外层 auto-compact 处理）
         if (isContextTooLongText(event.error || '')) return null;
-        return { kind: 'notice', text: event.error, severity: 'warn' };
+        const text = getErrorMessage(new Error(event.error || '任务执行失败'), undefined, false);
+        return { kind: 'notice', text, severity: 'warn' };
       }
 
       case 'complete': {
@@ -643,9 +654,10 @@ export class IMRenderer {
         }
         if (event.isError) {
           const errText = event.errors?.join('; ') || event.result || '任务失败';
+          const text = getErrorMessage(new Error(errText), event.terminalReason, false);
           const item: any = {
             kind: 'summary',
-            text: errText,
+            text,
             is_error: true,
           };
           if (event.subtype !== undefined) item.subtype = event.subtype;

@@ -19,6 +19,7 @@ export type BehaviorConfig = Partial<Pick<
   | 'dispatch'
   | 'show_activities'
   | 'proactive'
+  | 'group_venue_sync'
   | 'render'
   | 'enable_rich_content'
   | 'permissionMode'

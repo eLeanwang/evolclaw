@@ -34,10 +34,10 @@ export type TriggerSource =
   | TriggerEventSource;
 
 export type TriggerExecutionMode = 'agent' | 'script';
-export type TriggerExecutionSessionStrategy = 'isolated' | 'thread' | 'main';
+export type TriggerExecutionSessionStrategy = 'isolated' | 'thread';
 export type TriggerConcurrency = 'forbid' | 'replace' | 'allow';
 export type TriggerMissedPolicy = 'skip' | 'run_once' | 'run_all';
-export type TriggerFeedbackBranch = 'onReply' | 'onNoop' | 'default';
+export type TriggerFeedbackBranch = 'onReply' | 'onNoop' | 'onFailure';
 export type TriggerRunPhase = 'running' | 'feedback-pending';
 export type TriggerRunStatus = 'completed' | 'noop' | 'skipped' | 'failed' | 'dry-run';
 export type TriggerPermissionMode = PermissionMode;
@@ -56,12 +56,21 @@ export interface TriggerScriptConfig {
   timeoutMs?: number;
 }
 
+export interface TriggerScriptPreview {
+  path: string;
+  runtime: string;
+  content?: string;
+  sizeBytes?: number;
+  truncated?: boolean;
+  mtime?: number;
+  error?: string;
+}
+
 export interface TriggerExecutionSession {
   strategy: TriggerExecutionSessionStrategy;
   baseagent?: string;
   channelKey?: string;
   channelId?: string;
-  sessionId?: string;
   threadId?: string;
   name?: string;
 }
@@ -89,13 +98,13 @@ export interface FeedbackTarget {
 
 export type FeedbackDisposition =
   | { kind: 'forward'; targets: FeedbackTarget[]; template?: string }
-  | { kind: 'reply-origin'; template?: string }
+  | { kind: 'reply-origin'; delivery: FeedbackDelivery; template?: string }
   | { kind: 'silent' };
 
 export interface TriggerFeedbackConfig {
   onReply: FeedbackDisposition;
   onNoop: FeedbackDisposition;
-  default: FeedbackDisposition;
+  onFailure: FeedbackDisposition;
 }
 
 export interface TriggerReliability {
@@ -176,6 +185,13 @@ export interface TriggerSourceRunInfo {
   scheduledAt?: number;
   firedAt: number;
   payload: Record<string, unknown>;
+}
+
+export type TriggerSubscriptionStatus = 'active' | 'inactive' | 'event-bus-unavailable' | 'not-event';
+
+export interface TriggerSubscriptionInfo {
+  status: TriggerSubscriptionStatus;
+  warning?: string;
 }
 
 export interface TriggerScriptResult {
