@@ -3,12 +3,12 @@ import { ConfigTarget, read, validateConfig } from '../src/config/config-manager
 import { privateAssignmentKey, setPrivateRoleAssignment, writeRoleAssignments } from '../src/config/role-assignments.js';
 
 describe('role source cleanup verification', () => {
-  it('rejects old agent-level role assignment lists', () => {
+  it('accepts static agent owners but rejects old admin/member lists', () => {
     expect(validateConfig(ConfigTarget.Agent, {
       aid: 'legacy.agentid.pub',
       channels: [],
       owners: ['alice.aid.pub'],
-    })).not.toEqual([]);
+    })).toEqual([]);
 
     expect(validateConfig(ConfigTarget.Agent, {
       aid: 'legacy.agentid.pub',

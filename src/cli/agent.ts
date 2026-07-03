@@ -12,7 +12,6 @@ import { isValidChannelName } from '../core/channel-loader.js';
 import { commandExists } from '../utils/cross-platform.js';
 import { getCodexAppServerAvailability, isCodexAppServerAvailable } from '../agents/codex-runner.js';
 import { agentProjectRootFromDefaults, deriveAgentProjectPath } from '../utils/project-path.js';
-import { setPrivateRoleAssignment } from '../config/role-assignments.js';
 
 // ==================== Types ====================
 
@@ -26,6 +25,14 @@ export interface AgentListItem {
   baseagent: string | null;
   model?: string | null;
   lastActivity: number | null;
+}
+
+function withStaticOwner(config: AgentConfig, owner?: string): AgentConfig {
+  const value = owner?.trim();
+  if (!value) return config;
+  const owners = config.owners ?? [];
+  if (owners.includes(value)) return config;
+  return { ...config, owners: [...owners, value] };
 }
 
 export interface AgentConnectionInfo {
@@ -536,17 +543,16 @@ export async function agentCreateInteractive(opts: AgentCreateInteractiveOpts = 
 
     if (ownRl) rl.close();
 
-    const agentConfig: AgentConfig = {
+    const agentConfig: AgentConfig = withStaticOwner({
       $schema_version: CONFIG_SCHEMA_VERSION,
       aid,
       enabled: true,
       lifecycle: 'created',
       channels: [],
       projects: { defaultPath: projectPath },
-    };
+    }, owner);
 
     saveAgent(agentConfig);
-    if (owner) setPrivateRoleAssignment(aid, owner, 'owner', { note: 'created by cli agent wizard' });
     saveInitialBehavior(aid, baseagent);
     ensureAgentDirSkeleton(aid);
 
@@ -665,7 +671,7 @@ async function promptAgentOwnerManually(aid: string): Promise<string | undefined
         console.log(`  ⚠ 无法加载 agent 配置: ${aid}`);
         return undefined;
       }
-      setPrivateRoleAssignment(aid, owner, 'owner', { note: 'set manually by cli' });
+      saveAgent(withStaticOwner(agent, owner));
       try {
         const result = await ipcQuery<any>(resolvePaths().socket, { type: 'evolagent.reload', name: aid }, 30_000);
         if (result?.ok) console.log('  ✓ agent owner 已热重载');
@@ -774,18 +780,17 @@ export async function agentCreateNonInteractive(opts: AgentCreateNonInteractiveO
     } catch { /* ignore */ }
   }
 
-  const agentConfig: AgentConfig = {
+  const agentConfig: AgentConfig = withStaticOwner({
     $schema_version: CONFIG_SCHEMA_VERSION,
     aid: opts.aid,
     enabled: true,
     lifecycle: preservedLifecycle,
     channels: [],
     projects: { defaultPath: opts.project },
-  };
+  }, opts.owner);
 
   opts.onPhase?.('config_saved', 'begin');
   saveAgent(agentConfig);
-  if (opts.owner) setPrivateRoleAssignment(opts.aid, opts.owner, 'owner', { note: 'created by cli agent' });
   saveInitialBehavior(opts.aid, baseagent);
   ensureAgentDirSkeleton(opts.aid);
   opts.onPhase?.('config_saved', 'done');

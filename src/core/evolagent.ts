@@ -160,6 +160,7 @@ export class EvolAgent {
    * Uses the role-assignments system.
    */
   isOwner(_channelKey: string, userId: string): boolean {
+    if (this.merged.owners?.includes(userId)) return true;
     const assignments = listRoleAssignments(this.aid, { scope: 'private', role: 'owner', peerId: userId });
     return assignments.length > 0;
   }
@@ -169,6 +170,7 @@ export class EvolAgent {
    * Uses the role-assignments system.
    */
   isAdmin(_channelKey: string, userId: string): boolean {
+    if (this.isOwner(_channelKey, userId)) return true;
     const assignments = listRoleAssignments(this.aid, { scope: 'private', role: 'admin', peerId: userId });
     return assignments.length > 0;
   }
@@ -178,6 +180,7 @@ export class EvolAgent {
    * Returns the peerId of the first owner assignment.
    */
   getOwner(_channelKey: string): string | undefined {
+    if (this.merged.owners?.[0]) return this.merged.owners[0];
     const owners = listRoleAssignments(this.aid, { scope: 'private', role: 'owner' });
     return owners[0]?.peerId;
   }

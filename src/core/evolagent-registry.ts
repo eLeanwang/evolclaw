@@ -520,9 +520,12 @@ export class EvolAgentRegistry {
     const responseModeGroup = rmConfig?.default_group || 'proactive';
 
     // 从 role-assignments 系统读取 owners
-    const owners = listRoleAssignments(agent.aid, { scope: 'private', role: 'owner' })
-      .map(a => a.peerId)
-      .filter((peerId): peerId is string => !!peerId);
+    const owners = Array.from(new Set([
+      ...(agent.config.owners ?? []),
+      ...listRoleAssignments(agent.aid, { scope: 'private', role: 'owner' })
+        .map(a => a.peerId)
+        .filter((peerId): peerId is string => !!peerId),
+    ]));
 
     return {
       name: displayName || agent.name || agent.aid,

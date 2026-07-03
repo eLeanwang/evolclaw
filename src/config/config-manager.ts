@@ -464,15 +464,23 @@ function migrateRolesToV4(raw: any, file: string): RolesConfig {
 }
 
 export function resolveAgentConfig(sel: { self?: string; peerKey?: string }, opts: ReadOpts = {}): AgentConfig {
-  // 字段表用 agent-config（H 链主 schema；relation-config 字段是其子集 owners/admins/extra_backup，merge 语义一致）
+  // Use agent-config as the H-chain field table, but static owners only come from agent config.
   const fields = loadSchema('agent-config').fields;
+  const agentConfig = sel.self ? read<AgentConfig>(ConfigTarget.Agent, sel, opts) : null;
+  const relationConfig = (sel.self && sel.peerKey) ? read<RelationConfig>(ConfigTarget.Relation, sel, opts) as any : null;
   const layers: Array<Partial<AgentConfig> | null> = [
-    read<DefaultsConfig>(ConfigTarget.Defaults, undefined, opts) as any,
-    sel.self ? read<AgentConfig>(ConfigTarget.Agent, sel, opts) : null,
-    (sel.self && sel.peerKey) ? read<RelationConfig>(ConfigTarget.Relation, sel, opts) as any : null,
+    stripStaticOwnerField(read<DefaultsConfig>(ConfigTarget.Defaults, undefined, opts) as any),
+    agentConfig,
+    stripStaticOwnerField(relationConfig),
   ];
   const merged = mergeLayers<AgentConfig>(layers, fields);
   return merged;
+}
+
+function stripStaticOwnerField<T extends Record<string, any>>(config: T | null): T | null {
+  if (!config || !Object.prototype.hasOwnProperty.call(config, 'owners')) return config;
+  const { owners: _owners, ...rest } = config;
+  return rest as T;
 }
 
 // ── effective（合并视图）────────────────────────────────────────────────────
@@ -513,6 +521,7 @@ export function resolveEffective(sel: Selector, opts: ReadOpts = {}): EffectiveA
     enabled: config.enabled,
     lifecycle: config.lifecycle,
     initialized: config.initialized,
+    owners: config.owners,
     aun: config.aun,
     channels: config.channels ?? [],
     models: config.models,

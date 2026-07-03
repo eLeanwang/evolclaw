@@ -159,12 +159,12 @@ describe('resolveAgentConfig（H 链三级）', () => {
   afterEach(() => cleanup(root));
 
   it('defaults → agent → relation 逐级合并；owners list 并集', () => {
-    write(ConfigTarget.Defaults, { $schema_version: 1, owners: ['ops.agentid.pub'] });
+    write(ConfigTarget.Defaults, { $schema_version: 1, owners: ['ops.agentid.pub'] } as any, undefined, { skipValidate: true });
     write(ConfigTarget.Agent, { $schema_version: 1, aid: AID, channels: [], owners: ['bob.agentid.pub'] }, { self: AID });
     ensureFile(ConfigTarget.Relation, { self: AID, peerKey: PEER });
-    write(ConfigTarget.Relation, { $schema_version: 1, owners: ['carol.agentid.pub'] }, { self: AID, peerKey: PEER });
+    write(ConfigTarget.Relation, { $schema_version: 1, owners: ['carol.agentid.pub'] } as any, { self: AID, peerKey: PEER }, { skipValidate: true });
     const merged = resolveAgentConfig({ self: AID, peerKey: PEER });
-    expect((merged.owners || []).sort()).toEqual(['bob.agentid.pub', 'carol.agentid.pub', 'ops.agentid.pub']);
+    expect(merged.owners).toEqual(['bob.agentid.pub']);
   });
 });
 
@@ -202,7 +202,7 @@ describe('resolveBehavior（HA 链含角色层）', () => {
   });
 
   it('HA 链无 defaults 层：defaults 不影响 behavior', () => {
-    write(ConfigTarget.Defaults, { $schema_version: 1, owners: ['x.agentid.pub'] });
+    write(ConfigTarget.Defaults, { $schema_version: 1, models: { default: 'x' } });
     write(ConfigTarget.AgentBehavior, { $schema_version: 1, show_activities: 'none' }, { self: AID });
     const beh = resolveBehavior({ self: AID });
     expect(beh.show_activities).toBe('none');

@@ -82,7 +82,13 @@ describe('config ownership routing', () => {
     expect(validateConfig(ConfigTarget.Process, { idleMonitor: { enabled: false, timeout: 10 } })).toEqual([]);
   });
 
-  it('rejects old role assignment fields from agent and relation config', () => {
+  it('accepts static owners and rejects old mutable role fields', () => {
+    expect(validateConfig(ConfigTarget.Agent, {
+      aid: 'owner-schema.agentid.pub',
+      channels: [],
+      owners: ['root.agentid.pub'],
+    })).toEqual([]);
+
     expect(validateConfig(ConfigTarget.Agent, {
       aid: 'member-schema.agentid.pub',
       channels: [],

@@ -79,6 +79,34 @@ describe('peer role assignments', () => {
 describe('peer role resolver', () => {
   const aid = 'resolver.agentid.pub';
 
+  it('uses static agent owners before scoped role assignments', () => {
+    const staticAid = 'static-owner.agentid.pub';
+    const owner = 'root.agentid.pub';
+    write(ConfigTarget.Agent, {
+      aid: staticAid,
+      channels: [],
+      owners: [owner],
+    }, { self: staticAid });
+    setPrivateRoleAssignment(staticAid, owner, 'guest');
+    setGroupMemberRoleAssignment(staticAid, 'team.group', owner, 'member');
+
+    expect(resolvePeerRoleDetail({
+      selfAid: staticAid,
+      channelType: 'aun',
+      chatType: 'private',
+      actorId: owner,
+      conversationId: owner,
+    })).toMatchObject({ effectiveRole: 'owner', source: 'agent-config-owner' });
+
+    expect(resolvePeerRoleDetail({
+      selfAid: staticAid,
+      channelType: 'aun',
+      chatType: 'group',
+      actorId: owner,
+      conversationId: 'team.group',
+    })).toMatchObject({ effectiveRole: 'owner', source: 'agent-config-owner' });
+  });
+
   it('uses private role assignments as explicit private role source', () => {
     setPrivateRoleAssignment(aid, 'owner.aid.pub', 'owner');
 

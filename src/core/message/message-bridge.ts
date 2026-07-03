@@ -6,7 +6,7 @@ import { buildEnvelope } from './message-utils.js';
 import { chatDirPath } from '../session/session-fs-store.js';
 import { tryParseChannelKey } from '../channel-loader.js';
 import { resolvePaths } from '../../paths.js';
-import { resolvePeerRoleDetail, roleToSessionIdentity, type ResolvedPeerRole } from '../../config/peer-role-resolver.js';
+import { listStaticAgentOwners, resolvePeerRoleDetail, roleToSessionIdentity, type ResolvedPeerRole } from '../../config/peer-role-resolver.js';
 import { hasRoleAssignment, setPrivateRoleAssignment } from '../../config/role-assignments.js';
 import type { SessionManager } from '../session/session-manager.js';
 import type { IMessageProcessor } from './message-processor-interface.js';
@@ -541,6 +541,7 @@ export class MessageBridge {
 
   /** 首次交互自动绑定 owner —— 通过 channel-routed self-agent 完成 */
   private async autoBindOwner(selfAid: string, channelKey: string, userId: string): Promise<void> {
+    if (listStaticAgentOwners(selfAid).length > 0) return;
     if (hasRoleAssignment(selfAid, { scope: 'private', role: 'owner' })) return;
     setPrivateRoleAssignment(selfAid, userId, 'owner', { note: 'auto-bound first inbound peer' });
     logger.info(`[Owner] Auto-bound ${channelKey} owner: ${userId}`);

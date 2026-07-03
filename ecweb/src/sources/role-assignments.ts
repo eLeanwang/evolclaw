@@ -157,6 +157,33 @@ async function authorizeRoleAssignmentWrite(
       }).effectiveRole
       : 'anonymous';
 
+  const targetPeerId = typeof args.peerId === 'string' ? args.peerId : undefined;
+  if (targetPeerId && modules.resolver.isStaticAgentOwner?.(aid, targetPeerId)) {
+    const reason = `Static owner ${targetPeerId} is defined in agents/${aid}/config.json and cannot be changed by scoped role assignments`;
+    await audit.auditCommandAuthorization({
+      ts: Date.now(),
+      source: 'ecweb',
+      operation,
+      scope: 'agent',
+      dangerous: false,
+      actorId: auth.localDirect ? 'local-direct' : auth.actorAid || undefined,
+      selfAid: aid,
+      role: actorRole,
+      decision: 'deny',
+      code: 'IMMUTABLE_STATIC_OWNER',
+      reason,
+      argsSummary: { ...args, targetRole },
+    });
+    return {
+      allow: false,
+      status: 403,
+      error: 'forbidden: static owner cannot be changed by role assignments',
+      code: 'IMMUTABLE_STATIC_OWNER',
+      reason,
+      actorRole,
+    };
+  }
+
   const decision = permission.authorizeCommand({
     intent: {
       operation,

@@ -776,7 +776,8 @@ async function promptAgentOwnerForAunManually(rl: readline.Interface, aid: strin
     console.log(`  ⚠ 无法加载 agent 配置: ${aid}`);
     return;
   }
-  setPrivateRoleAssignment(aid, fallback, 'owner', { note: 'set manually by init-channel' });
+  const owners = [fallback, ...(agent.owners ?? []).filter(owner => owner !== fallback)];
+  saveAgent({ ...agent, owners });
   try {
     const result = await ipcQuery<any>(resolvePaths().socket, { type: 'evolagent.reload', name: aid }, 30_000);
     if (result?.ok) console.log('  ✓ agent owner 已热重载');

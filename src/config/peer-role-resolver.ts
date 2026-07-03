@@ -7,7 +7,8 @@ import {
   privateAssignmentKey,
 } from './role-assignments.js';
 import { readRolesConfig } from './roles.js';
-import type { RoleAssignment } from '../types.js';
+import { ConfigTarget, read } from './config-manager.js';
+import type { AgentConfig, RoleAssignment } from '../types.js';
 
 export interface PeerRoleContext {
   selfAid: string;
@@ -20,7 +21,7 @@ export interface PeerRoleContext {
 
 export interface ResolvedPeerRole {
   effectiveRole: string;
-  source: 'assignment' | 'private-inherited' | 'group-default' | 'default';
+  source: 'agent-config-owner' | 'assignment' | 'private-inherited' | 'group-default' | 'default';
   assignmentKey?: string;
   assignment?: RoleAssignment;
   isAuthenticated: boolean;
@@ -57,8 +58,32 @@ function defaultRoleFor(chatType: 'private' | 'group'): string {
   return rolesConfig.defaultRoles?.[chatType] || (chatType === 'group' ? 'guest' : 'anonymous');
 }
 
+export function listStaticAgentOwners(aid: string): string[] {
+  if (!aid) return [];
+  try {
+    const config = read<AgentConfig>(ConfigTarget.Agent, { self: aid }, { cache: true });
+    if (!Array.isArray(config?.owners)) return [];
+    return Array.from(new Set(
+      config.owners
+        .map(owner => String(owner || '').trim())
+        .filter(Boolean)
+    ));
+  } catch {
+    return [];
+  }
+}
+
+export function isStaticAgentOwner(aid: string, actorId: string): boolean {
+  if (!aid || !actorId) return false;
+  return listStaticAgentOwners(aid).includes(actorId);
+}
+
 export function resolvePeerRoleDetail(ctx: PeerRoleContext): ResolvedPeerRole {
   const auth = isAuthenticated(ctx.actorId);
+
+  if (isStaticAgentOwner(ctx.selfAid, ctx.actorId)) {
+    return resultFor('owner', 'agent-config-owner', auth);
+  }
 
   if (ctx.chatType === 'private') {
     const found = getPrivateRoleAssignment(ctx.selfAid, ctx.actorId);

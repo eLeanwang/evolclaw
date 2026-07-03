@@ -392,6 +392,24 @@ export function validateAgentConfig(cfg: AgentConfig): string[] {
     errs.push('channels must be an array');
     return errs;
   }
+  if (cfg.owners !== undefined) {
+    if (!Array.isArray(cfg.owners)) {
+      errs.push('owners must be an array');
+    } else {
+      const seenOwners = new Set<string>();
+      cfg.owners.forEach((owner, i) => {
+        if (typeof owner !== 'string' || !isValidAid(owner)) {
+          errs.push(`owners[${i}] invalid aid: ${owner}`);
+          return;
+        }
+        if (seenOwners.has(owner)) {
+          errs.push(`owners[${i}] duplicate aid: ${owner}`);
+          return;
+        }
+        seenOwners.add(owner);
+      });
+    }
+  }
 
   let aunCount = 0;
   const seenNamesByType = new Map<string, Set<string>>();

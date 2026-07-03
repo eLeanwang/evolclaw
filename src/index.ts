@@ -1223,7 +1223,12 @@ async function main() {
         const owningAgent = agentRegistry.resolveByChannel(channelKey);
         return {
           observable: owningAgent?.getObservable() ?? false,
-          owners: owningAgent ? listRoleAssignments(owningAgent.aid, { scope: 'private', role: 'owner' }).map(a => a.peerId).filter((peerId): peerId is string => !!peerId) : [],
+          owners: owningAgent ? Array.from(new Set([
+            ...(owningAgent.config.owners ?? []),
+            ...listRoleAssignments(owningAgent.aid, { scope: 'private', role: 'owner' })
+              .map(a => a.peerId)
+              .filter((peerId): peerId is string => !!peerId),
+          ])) : [],
         };
       });
     }

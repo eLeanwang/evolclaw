@@ -20,6 +20,16 @@
       "x-merge": "scalar"
     },
     "initialized": { "type": "boolean", "description": "Deprecated: AUN 首次初始化标记，仅兼容旧配置", "x-merge": "scalar" },
+    "owners": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?){2,}$"
+      },
+      "uniqueItems": true,
+      "description": "Static agent owner AID allowlist. These owners resolve to owner before scoped role assignments and relation-level config.",
+      "x-merge": "list"
+    },
     "channels": {
       "type": "array",
       "items": { "type": "object" },
