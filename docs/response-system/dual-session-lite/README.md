@@ -12,7 +12,7 @@
 
 ### 1.1 什么是双会话响应模式（简化版）
 
-双会话响应模式简化版是 EvolClaw 针对**群聊场景**设计的智能响应架构。通过**辅助会话**和**主会话**的配合，解决多 agent 场景下的核心痛点。
+双会话响应模式简化版是 EvolClaw 针对**群聊和单聊场景**设计的智能响应架构。通过**辅助会话**和**主会话**的配合，解决多 agent 场景（群聊）和快慢模型不对齐（单聊/群聊）的核心痛点。
 
 ### 1.2 核心问题
 
@@ -300,26 +300,24 @@ if (interrupt && mainSession.status === 'processing' && currentBatchSize < 50) {
 ### 3.5 反馈机制
 
 #### 主会话生成总结
+主会话在 turn 内自己通过 CLI 发送回复，turn 结束时输出自然语言总结（<200字）。
+
+代码层组装反馈：
 ```typescript
-// 处理完一个批次后
-const summary = {
-  batchId: 'batch-001',
-  processedAt: '2026-07-01T10:30:00Z',
-  messageIds: ['msg-001', 'msg-002', 'msg-003'],
-  summary: '处理了 Owner 关于报错的求助，已回复解决方案',
-  replies: [
-    '这个报错是因为...',
-  ],
+// 从主会话输出中提取自然语言总结
+const summary = extractSummary(mainSessionOutput); // "处理了 Owner 关于报错的求助，已回复解决方案"
+
+// 从工具调用历史中提取回复内容
+const replies = extractRepliesFromToolCalls(); // ["这个报错是因为..."]
+
+// 组装 MainFeedback
+const feedback: MainFeedback = {
+  summary,
+  replies,
 };
 
-// 追加到 jsonl 文件
-fs.appendFileSync(
-  `${AGENT_DIR}/relations/${peerKey}/main-feedback.jsonl`,
-  JSON.stringify(summary) + '\n'
-);
-
-// 通知辅助会话
-triggerAuxiliary('main-feedback', summary);
+// 直接通知辅助会话（不写文件）
+auxiliarySession.processFeedback(feedback);
 ```
 
 #### 辅助会话处理反馈
@@ -328,7 +326,6 @@ triggerAuxiliary('main-feedback', summary);
 {
   type: 'main-feedback',
   mainFeedback: {
-    processedMessageIds: ['msg-001', 'msg-002', 'msg-003'],
     summary: '处理了 Owner 关于报错的求助，已回复解决方案',
     replies: ['这个报错是因为...'],
   }
@@ -343,8 +340,7 @@ triggerAuxiliary('main-feedback', summary);
 }
 
 // 代码层处理
-// 1. 将反馈内容追加到辅助会话上下文
-// 2. 从辅助队列中移除已处理的消息
+// 将反馈内容追加到辅助会话上下文
 ```
 
 ### 3.6 辅助会话 new 机制（带压缩）
@@ -613,7 +609,63 @@ interface AuxiliaryOutput {
 
 ---
 
-## 七、与现有系统的对比
+## 七、单聊与群聊的差异
+
+双会话响应模式同时支持单聊和群聊场景，两者使用相同的核心机制，但有以下差异：
+
+### 7.1 辅助会话输出类型
+
+| 场景 | 输出类型 | 说明 |
+|------|---------|------|
+| **群聊** | `hold / delay / transfer` | hold: 与本 agent 无关的闲聊 |
+| **单聊** | `delay / transfer` | 一对一都相关，无 hold |
+
+### 7.2 延迟投递随机数
+
+| 场景 | 延迟计算 | 原因 |
+|------|---------|------|
+| **群聊** | `delayMs + 0-60秒随机` | 避免多 agent 竞争回复 |
+| **单聊** | `delayMs`（无随机数） | 无多 agent 竞争 |
+
+### 7.3 触发条件
+
+| 触发条件 | 群聊 | 单聊 |
+|---------|------|------|
+| 防抖时间 | 3 秒（可配置） | 3 秒（可配置 0-6 秒） |
+| 最早消息强制触发 | 15 秒 | 15 秒 |
+| **队列满强制触发** | **50 条** | **15 条** |
+| 延迟投递超时 | 有 | 有 |
+| **主会话空闲触发** | 无 | **有**（单聊特有） |
+
+### 7.4 主会话空闲触发（单聊特有）
+
+单聊场景下，当主会话从 `processing` 变为 `idle` 时，立即触发辅助队列检查并投递：
+
+```typescript
+mainSession.on('statusChange', (oldStatus, newStatus) => {
+  if (oldStatus === 'processing' && newStatus === 'idle') {
+    const undelivered = auxiliaryQueue.getAllUndelivered();
+    if (undelivered.length > 0) {
+      // 立即触发辅助会话判断
+      auxiliarySession.process(undelivered, 'main-idle');
+    }
+  }
+});
+```
+
+**效果**：
+- 延迟投递（delay）在主会话空闲后立即重新判断，通常会变为 transfer
+- 降低单聊场景下的响应延迟
+
+### 7.5 辅助会话提示词
+
+单聊和群聊使用不同的提示词 fragment（通过 ECK 的 `when` 条件加载）：
+- **群聊版**：`auxiliary-base-group.md`（包含 hold / delay / transfer）
+- **单聊版**：`auxiliary-base-private.md`（只有 delay / transfer）
+
+---
+
+## 八、与现有系统的对比
 
 | 维度 | 传统单会话 | 双会话简化版 |
 |------|-----------|-------------|

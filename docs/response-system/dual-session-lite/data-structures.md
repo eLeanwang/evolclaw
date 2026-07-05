@@ -45,9 +45,18 @@ interface QueuedMessage {
   message: Message;                // 原始消息
   state: MessageState;             // 消息状态
   enqueuedAt: Date;                // 入队时间
+  processedByAuxiliary: boolean;   // 是否已被辅助会话处理
   
   // 如果 state = DELAY
   transferAt?: Date;               // 计划投递时间
+  
+  // 如果 state = HOLD
+  holdSince?: number;              // 首次 HOLD 的时间（毫秒时间戳）
+  
+  // 错误处理
+  hasError?: boolean;              // 是否处理失败
+  lastErrorTime?: number;          // 上次失败时间（毫秒时间戳）
+  errorCount?: number;             // 失败次数
   
   // 元数据
   processedCount?: number;         // 被辅助会话处理的次数
@@ -61,6 +70,10 @@ enum MessageState {
   TRANSFERRED = 'transferred',     // 已投递到主队列
 }
 ```
+
+**HOLD 超时机制**：
+- HOLD 状态的消息，如果 `holdSince` 超过 1 小时 → 自动投递到主队列
+- 检查时机：每次辅助会话处理时检查
 
 ---
 
@@ -112,19 +125,70 @@ interface AuxiliaryDecision {
   action: 'hold' | 'delay' | 'transfer';
   
   // 如果 action = 'delay'
-  delayMs?: number;                // 基础延迟时间（默认3000，代码层会加0-60秒随机）
+  delayMs?: number;                // 基础延迟时间（已废弃，使用 delayLevel 代替）
+  delayLevel?: 'short' | 'medium' | 'long';  // 延迟等级：short=1分钟, medium=2分钟(默认), long=3分钟，群聊会加随机数，单聊不加
   
   // 如果 action = 'transfer'
   interrupt?: boolean;             // 是否打断主会话（默认false）
+  interruptReason?: string;        // 打断原因（interrupt=true 时必填）
+  previousMessageStrategy?: 'ignore' | 'defer' | 'continue';  // 被打断消息处理策略（interrupt=true 时必填）
   
   // 简短说明（<50字）
   reason: string;
 }
 
+/**
+ * delayLevel 延迟等级说明：
+ * - short (1分钟)：高相关性、紧急问题
+ * - medium (2分钟，默认)：中等相关性
+ * - long (3分钟)：低相关性、不紧急
+ * 
+ * 群聊会在基础时间上加随机数（减少多 agent 碰撞），单聊不加随机数
+ */
+
+/**
+ * previousMessageStrategy 三种策略：
+ * - ignore：忽略被打断的消息，只处理新消息
+ * - defer：先处理新消息，完成后再处理被打断的消息
+ * - continue：继续处理被打断的消息，但考虑新消息的内容
+ */
+
 interface FeedbackAck {
   reason: '已知悉' | '已更新上下文';
 }
 ```
+
+**辅助会话输出格式**：
+
+辅助会话的输出包含两部分（以自然语言形式）：
+
+1. **思考过程**（<200字）
+2. **JSON 判断结果**
+
+**示例**：
+```
+【思考过程】
+Owner 提了一个关于报错的紧急问题，主会话正忙着处理闲聊消息，需要打断。新问题优先，但闲聊消息不重要可以忽略。
+
+【判断结果】
+{
+  "action": "transfer",
+  "interrupt": true,
+  "interruptReason": "Owner 提出紧急问题",
+  "previousMessageStrategy": "ignore",
+  "reason": "紧急问题优先处理，闲聊可忽略"
+}
+```
+
+**Schema 插入方式**：
+- Schema 作为辅助会话系统提示词的一部分（`.md` 文件）
+- 通过 ECK 的模板渲染机制注入
+- 兼容所有 base agent（Claude Code、Codex、Gemini CLI 等）
+
+**输出验证**：
+- 代码层提取 JSON 部分
+- 验证 schema 是否符合 `AuxiliaryDecision`
+- 验证失败时，提示辅助会话重新输出
 
 ---
 
@@ -132,19 +196,15 @@ interface FeedbackAck {
 
 ```typescript
 interface MainFeedback {
-  batchId: string;                 // 批次唯一 ID
-  processedAt: string;             // 处理时间（ISO 8601）
-  processedMessageIds: string[];   // 处理了哪些消息
-  summary: string;                 // 处理总结（<200字）
-  replies: string[];               // 回复内容列表
-  
-  // 可选字段
-  failedReplies?: {                // 发送失败的回复
-    reply: string;
-    error: string;
-  }[];
+  summary: string;                 // 主会话输出的自然语言总结（<200字）
+  replies: string[];               // 从工具调用历史提取的回复内容
 }
 ```
+
+**说明**：
+- `summary`: 主会话在 turn 结束时输出的自然语言总结，代码层从输出中提取
+- `replies`: 代码层从主会话的工具调用历史中提取所有 `ec group send` / `ec msg send` 的消息正文
+- MainFeedback 由代码层组装后直接传递给辅助会话（不写文件）
 
 ---
 
@@ -158,16 +218,21 @@ interface DualSessionConfig {
   auxiliaryModel: string;          // 辅助会话模型（默认：deepseek-v4-flash）
   mainModel: string;               // 主会话模型（默认：claude-opus）
   
+  // mention 机制配置
+  mentionMode: 'disabled' | 'fast-track';  // 默认：disabled
+  // - disabled: 所有消息进入辅助队列，由辅助会话判断
+  // - fast-track: 被 @ 的消息直接投递到主队列并打断
+  
   // 队列配置
-  debounceMs: number;              // 防抖时间（默认：3000）
+  debounceMs: number;              // 防抖时间（默认：3000，可配置 0-6000）
   maxWaitMs: number;               // 最早消息最长等待（默认：15000）
-  maxQueueSize: number;            // 队列最大容量（默认：50）
+  maxQueueSize: number;            // 队列最大容量（群聊：50，单聊：15）
   maxBatchSize: number;            // 每批最多消息数（默认：50）
   maxBatchBytes: number;           // 每批最多字节数（默认：10240）
   
   // 延迟配置
   baseDelayMs: number;             // 基础延迟时间（默认：3000）
-  randomDelayMaxMs: number;        // 随机延迟最大值（默认：60000）
+  randomDelayMaxMs: number;        // 随机延迟最大值（群聊：60000，单聊：0）
   
   // 压缩配置
   auxiliaryMaxTokens: number;      // 辅助会话触发压缩阈值（默认：40000）
@@ -180,6 +245,11 @@ interface DualSessionConfig {
   enableDebug: boolean;            // 是否启用调试输出（默认：false）
 }
 ```
+
+**单聊与群聊配置差异**：
+- `maxQueueSize`: 群聊 50 条，单聊 15 条
+- `randomDelayMaxMs`: 群聊 60000（60秒），单聊 0（不加随机数）
+- 单聊场景下会启用主会话空闲监听机制
 
 ---
 
@@ -205,25 +275,9 @@ interface AgentConfig {
 
 ## 三、存储数据结构
 
-### 3.1 FeedbackStore（jsonl 文件）
+### 3.1 QueueState（队列状态持久化）
 
-每行一个 JSON 对象（`MainFeedback`）：
-
-```jsonl
-{"batchId":"batch-001","processedAt":"2026-07-01T10:30:00Z","processedMessageIds":["msg-001","msg-002"],"summary":"处理了Owner关于报错的问题","replies":["这个报错是因为..."]}
-{"batchId":"batch-002","processedAt":"2026-07-01T10:35:00Z","processedMessageIds":["msg-003"],"summary":"回复了技术讨论","replies":["关于这个技术选型..."]}
-```
-
-**存储位置**：
-```
-$AGENT_DIR/relations/<channel>#<urlEncode(peerId)>/main-feedback.jsonl
-```
-
----
-
-### 3.2 QueueState（队列状态，可选持久化）
-
-如果需要持久化队列状态（重启后恢复）：
+持久化队列状态（支持重启后恢复）：
 
 ```typescript
 interface QueueState {
@@ -394,6 +448,15 @@ interface SessionAPI {
 interface AuxiliarySessionAPI extends SessionAPI {
   process(batch: Message[], reason: TriggerReason): Promise<void>;
   processFeedback(feedback: MainFeedback): Promise<void>;
+  
+  // 错误状态
+  errorState: AuxiliaryErrorState;
+}
+
+interface AuxiliaryErrorState {
+  isInError: boolean;           // 是否处于错误状态
+  consecutiveFailures: number;  // 连续失败次数
+  lastSuccessTime?: number;     // 上次成功时间（毫秒时间戳）
 }
 
 interface MainSessionAPI extends SessionAPI {
@@ -402,6 +465,17 @@ interface MainSessionAPI extends SessionAPI {
   getCurrentBatchSize(): number;
 }
 ```
+
+**辅助会话错误状态说明**：
+- `isInError = true`：辅助会话处于错误状态，后续调用失败时不重试，直接降级
+- `consecutiveFailures`：记录连续失败次数
+- `lastSuccessTime`：记录上次成功时间，用于判断是否恢复
+
+**降级策略**：
+- 第一次失败：重试 3 次（5秒、10秒、30秒退避）
+- 重试失败：延迟 2 分钟投递，标记 `isInError = true`
+- 后续失败：延迟 2 分钟投递（不重试）
+- 调用成功：清除错误状态
 
 ---
 

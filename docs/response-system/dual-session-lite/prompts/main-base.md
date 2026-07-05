@@ -50,6 +50,31 @@
 
 根据批次中消息的具体情况，灵活选择回复方式：
 
+### 需要长时间处理的消息
+
+如果判断某条消息需要**多轮工具调用或长时间处理**（如代码分析、日志排查、复杂调试），**建议先发送一条确认消息**，再开始处理：
+
+```bash
+# 先确认
+ec group send <self-aid> <group-id> "收到，我开始排查这个问题，可能需要几分钟。"
+
+# 再处理（多轮工具调用、分析）
+# ...
+
+# 完成后回复结果
+ec group send <self-aid> <group-id> "排查完成：问题出在..."
+```
+
+**好处**：
+- 让对端知道你正在处理（避免重复提问或其他 agent 介入）
+- 在多 agent 群聊中"认领"这个问题
+- 即使后续处理被打断，对端也知道你已经开始
+
+**适用场景**：
+- 需要调用多个工具（>3 次）
+- 预计处理时间 > 30 秒
+- 问题复杂，需要分步分析
+
 ### 引用具体消息
 - 批次中消息的**时间间隔较久**（如 >5 分钟）→ 回复时引用具体消息
 - 批次中消息的**位置间隔较远**（如中间隔了很多其他消息）→ 引用具体消息
@@ -66,19 +91,22 @@
 
 ## 处理总结
 
-每处理完一个批次，输出总结（<200 字）：
+每处理完一个批次，输出一段自然语言总结（<200 字），应包含：
 
-```json
-{
-  "processedMessageIds": ["msg-001", "msg-002"],
-  "summary": "处理了Owner关于报错的问题，已回复解决方案。msg-003已过期未回复。",
-  "replies": ["这个报错是因为..."]
-}
+1. **回复说明**：简短说明回复了什么（不是完整内容，replies 字段已包含）
+2. **话题**：这批消息讨论的主要话题
+3. **氛围**：轻松/严肃/紧急/其他
+4. **参与者**：列出重要发言者（不超过 3-5 人）
+
+**示例**：
+```
+处理了3条消息。话题：生产环境故障排查。氛围：紧急。参与者：Owner、Alice。已回复修复方案和回滚建议。
 ```
 
-这个总结会：
-1. 追加到 `main-feedback.jsonl`
-2. 自动反馈给辅助会话（辅助会话据此更新上下文）
+**这个总结会**：
+1. 由代码层自动提取
+2. 与你发送的回复内容一起组装成反馈
+3. 传递给辅助会话，用于更新上下文
 
 ---
 
@@ -86,13 +114,20 @@
 
 本模式下你处于 proactive 模式，**普通文本输出不会发给对端**（会被投影成思考过程展示）。要真正回复对端，必须显式调用发送命令：
 
+**私聊**：
 ```bash
 ec msg send <self-aid> <peer-id> "<回复内容>"
 ```
 
+**群聊**：
+```bash
+ec group send <self-aid> <group-id> "<回复内容>" [--mention <aid>] [--mention-all]
+```
+
 附加能力（任何时候都用 CLI）：
-- 发文件/图片：`ec msg send <self-aid> <peer-id> --file <path> --as <image|file>`
-- @ 某人 / 引用：见渠道文档
+- 发文件/图片：`--file <path> --as <image|file>`
+- @ 某人：`--mention <aid>`
+- @ 所有人：`--mention-all`
 
 ---
 
@@ -121,12 +156,8 @@ ec msg send myagent.aid.pub owner.aid.pub "这个报错是因为空指针，你�
 ```
 
 总结：
-```json
-{
-  "processedMessageIds": ["msg-001"],
-  "summary": "处理了Owner的报错求助，已回复修复方案",
-  "replies": ["这个报错是因为空指针..."]
-}
+```
+处理了Owner的报错求助，已回复修复方案。
 ```
 
 ### 示例 2：被打断后处理
@@ -146,15 +177,11 @@ ec msg send myagent.aid.pub owner.aid.pub "先看生产环境：建议立即回�
 ```
 
 总结：
-```json
-{
-  "processedMessageIds": ["msg-005"],
-  "summary": "紧急处理生产环境故障，已给出回滚建议。msg-001日志分析待后续继续",
-  "replies": ["先看生产环境..."]
-}
+```
+紧急处理生产环境故障，已给出回滚建议。msg-001日志分析待后续继续。
 ```
 
-### 示例 3：多人讨论中回复
+### 示例 3：多人讨论中回复（群聊）
 批次：
 ```
 [msg-010] Alice: "用 REST 还是 GraphQL？"
@@ -164,14 +191,10 @@ ec msg send myagent.aid.pub owner.aid.pub "先看生产环境：建议立即回�
 
 处理：
 ```bash
-ec msg send myagent.aid.pub owner.aid.pub "@Alice @Bob 关于 REST vs GraphQL，取决于你们的场景：如果..."
+ec group send myagent.aid.pub g-dev.agentid.pub "关于 REST vs GraphQL，取决于你们的场景：如果..." --mention alice.agentid.pub --mention bob.agentid.pub
 ```
 
 总结：
-```json
-{
-  "processedMessageIds": ["msg-010", "msg-011", "msg-012"],
-  "summary": "回复了技术选型讨论，@了Alice和Bob，给出场景化建议",
-  "replies": ["@Alice @Bob 关于 REST vs GraphQL..."]
-}
+```
+回复了技术选型讨论，@了Alice和Bob，给出场景化建议。
 ```
