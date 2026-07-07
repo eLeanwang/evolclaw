@@ -121,6 +121,57 @@
           "pattern": { "type": "string" }
         }
       }
+    },
+    "lifecycle": {
+      "type": "string",
+      "enum": ["created", "bootstrapping", "active"],
+      "description": "Agent 生命周期状态",
+      "x-merge": "scalar"
+    },
+    "capabilities": {
+      "type": "object",
+      "description": "Agent 能力配置",
+      "x-merge": "dict"
+    },
+    "flush_delay": {
+      "type": "number",
+      "description": "消息 flush 间隔（毫秒）",
+      "x-merge": "scalar"
+    },
+    "debounce": {
+      "type": "number",
+      "description": "入站消息去抖间隔（毫秒）",
+      "x-merge": "scalar"
+    },
+    "show_activities": {
+      "type": "boolean",
+      "description": "中间活动可见性",
+      "x-merge": "scalar"
+    },
+    "proactive": {
+      "type": "object",
+      "description": "Proactive 模式策略配置",
+      "x-merge": "dict"
+    },
+    "render": {
+      "type": "object",
+      "description": "渲染配置",
+      "x-merge": "dict"
+    },
+    "enable_rich_content": {
+      "type": "boolean",
+      "description": "启用富内容渲染",
+      "x-merge": "scalar"
+    },
+    "permissionMode": {
+      "type": "string",
+      "description": "权限模式",
+      "x-merge": "scalar"
+    },
+    "roles": {
+      "type": "object",
+      "description": "角色配置（RBAC）",
+      "x-merge": "dict"
     }
   }
 }

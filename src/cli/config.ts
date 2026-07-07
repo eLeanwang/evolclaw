@@ -357,7 +357,11 @@ function cmdCurrent(args: string[], formatJson: boolean): void {
   const fellBack = last?.fellBack && last.actualVersion;
   emit(formatJson, { ok: true, current: cur, lastBoot: last ?? null }, () => {
     const lines: string[] = [];
-    lines.push(`选定版本: ${cur ? `${cur.full} / ${cur.delta}` : '(无 current.json)'}`);
+    if (cur) {
+      lines.push(`当前版本: ${cur.delta}（基于完整快照 ${cur.full}）`);
+    } else {
+      lines.push('(无 current.json)');
+    }
     if (fellBack) {
       lines.push(`⚠ 选定版本未实际启动；实际运行 actualVersion=${last.actualVersion!.delta}（上次启动回落）`);
     }
