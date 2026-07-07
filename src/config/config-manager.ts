@@ -838,3 +838,97 @@ export function listFields(scope: ConfigScope): FieldRoute[] {
 }
 
 export { ConfigTarget as Target };
+
+// ── 来源追踪（Source Tracking）────────────────────────────────────────────────
+
+/** 字段来源信息 */
+export interface FieldSource {
+  target: ConfigTarget;
+  file: string;  // 相对于 root 的路径
+}
+
+/** 带来源的值 */
+export interface ValueWithSource<T = any> {
+  value: T;
+  source: FieldSource;
+}
+
+/**
+ * 读取单个字段并返回来源信息。
+ * 沿覆盖链查找，返回第一个定义该字段的层级。
+ */
+export function readFieldWithSource(
+  field: string,
+  sel: Selector,
+  opts: ReadOpts = {}
+): ValueWithSource | null {
+  const parts = field.split('.');
+  const topField = parts[0];
+
+  // 按覆盖链顺序查找：relation → agent → defaults
+  const targets: ConfigTarget[] = [];
+  if (sel.peerKey) targets.push(ConfigTarget.Relation);
+  if (sel.self) targets.push(ConfigTarget.Agent);
+  targets.push(ConfigTarget.Defaults);
+
+  for (const target of targets) {
+    const config = read<any>(target, sel, opts);
+    if (!config) continue;
+
+    // 检查顶层字段是否存在
+    if (!(topField in config)) continue;
+
+    // 提取字段值（支持嵌套）
+    let value = config[topField];
+    for (let i = 1; i < parts.length; i++) {
+      if (value && typeof value === 'object' && parts[i] in value) {
+        value = value[parts[i]];
+      } else {
+        value = undefined;
+        break;
+      }
+    }
+
+    // 如果值存在，返回带来源
+    if (value !== undefined) {
+      const file = path.relative(resolvePaths().root, targetPath(target, sel));
+      return {
+        value,
+        source: { target, file }
+      };
+    }
+  }
+
+  return null;
+}
+
+/**
+ * 解析 effective 配置并标注每字段来源。
+ * 返回一个对象，每个字段都带有 value 和 source。
+ */
+export function resolveEffectiveWithSources(
+  sel: Selector,
+  opts: ReadOpts = {}
+): Record<string, ValueWithSource> {
+  const effective = resolveEffective(sel, opts);
+  const result: Record<string, ValueWithSource> = {};
+
+  // 对每个顶层字段查找来源
+  for (const [key, value] of Object.entries(effective)) {
+    if (value === undefined) continue;
+
+    const withSource = readFieldWithSource(key, sel, opts);
+    if (withSource) {
+      result[key] = withSource;
+    } else {
+      // 如果找不到来源（可能是默认值），标记为 agent
+      const file = path.relative(resolvePaths().root, targetPath(ConfigTarget.Agent, sel));
+      result[key] = {
+        value,
+        source: { target: ConfigTarget.Agent, file }
+      };
+    }
+  }
+
+  return result;
+}

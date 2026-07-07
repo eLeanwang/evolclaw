@@ -13,6 +13,7 @@ import { normalizePeer, ModelScopeError } from '../core/model/config-scope.js';
 import {
   ConfigTarget, read, write, ensureFile, resolveEffective,
   routeFieldPath, listFields, initConfigManager, ConfigError,
+  readFieldWithSource, resolveEffectiveWithSources,
   type Selector, type FieldRoute,
 } from '../config/config-manager.js';
 import {
@@ -144,17 +145,30 @@ function cmdGet(args: string[], formatJson: boolean): void {
     return emit(formatJson, { ok: true, field, value: val ?? null, scope }, () =>
       `${field} = ${JSON.stringify(val ?? null)}  (process，链外单层)`);
   }
-  // effective 值 + 解析链：合并 H 链（defaults → agent → relation）
-  const eff = resolveEffective(sel);
-  let route: FieldRoute;
-  try { route = routeFieldPath(field!, scope === 'defaults' ? 'defaults' : scope); }
-  catch (e) { return failFromConfigErr(e, formatJson); }
-  const value = getNested(eff, field!);
+
+  // 使用来源追踪函数获取值和来源
+  const withSource = readFieldWithSource(field!, sel);
+
+  if (!withSource) {
+    return emit(formatJson, { ok: true, field, value: null, scope }, () =>
+      `${field} = null  (未定义)`);
+  }
+
+  const { value, source } = withSource;
   emit(formatJson, {
-    ok: true, field, value: value ?? null, scope,
-    permission: formatPermission(route.permission), file: route.schema,
+    ok: true,
+    field,
+    value: value ?? null,
+    scope,
+    source: {
+      target: source.target,
+      file: source.file
+    }
   }, () => {
-    return `${field} = ${JSON.stringify(value ?? null)}`;
+    const sourceLabel = source.target === ConfigTarget.Defaults ? 'defaults' :
+                       source.target === ConfigTarget.Agent ? 'agent' :
+                       source.target === ConfigTarget.Relation ? 'relation' : source.target;
+    return `${field} = ${JSON.stringify(value ?? null)}  [来自: ${sourceLabel}]`;
   });
 }
 
@@ -240,8 +254,34 @@ function cmdEffective(args: string[], formatJson: boolean): void {
     const cfg = read(ConfigTarget.Process, sel) || {};
     return emit(formatJson, { ok: true, scope, effective: cfg }, () => JSON.stringify(cfg, null, 2));
   }
-  const eff = resolveEffective(sel);
-  emit(formatJson, { ok: true, scope, effective: eff }, () => JSON.stringify(eff, null, 2));
+
+  // 使用来源追踪函数
+  const effWithSources = resolveEffectiveWithSources(sel);
+
+  if (formatJson) {
+    // JSON 格式：返回带来源的完整对象
+    const result: Record<string, any> = {};
+    for (const [key, item] of Object.entries(effWithSources)) {
+      result[key] = {
+        value: item.value,
+        source: item.source.target
+      };
+    }
+    emit(formatJson, { ok: true, scope, effective: result }, () => '');
+  } else {
+    // 文本格式：每个字段一行，带来源标注
+    const lines: string[] = [];
+    for (const [key, item] of Object.entries(effWithSources)) {
+      const sourceLabel = item.source.target === ConfigTarget.Defaults ? 'defaults' :
+                         item.source.target === ConfigTarget.Agent ? 'agent' :
+                         item.source.target === ConfigTarget.Relation ? 'relation' : item.source.target;
+      const valueStr = typeof item.value === 'object'
+        ? JSON.stringify(item.value)
+        : JSON.stringify(item.value);
+      lines.push(`${key}: ${valueStr}  [${sourceLabel}]`);
+    }
+    emit(formatJson, { ok: true, scope }, () => lines.join('\n'));
+  }
 }
 
 function cmdFields(args: string[], formatJson: boolean): void {

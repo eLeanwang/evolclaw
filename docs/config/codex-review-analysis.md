@@ -15,7 +15,7 @@
 | 2. roles 系统缺文档 | P1 | ⏸️ 暂缓 | - | 等 roles 系统稳定后处理 |
 | 3. 快照漏掉 roles | P1 | ⏸️ 暂缓 | - | 等 roles 系统稳定后处理 |
 | 4. 权限是 schema 级 | P2 | ⏸️ 待决策 | 待定 | 需要选择方案A或方案B |
-| 5. 来源标注未实现 | P2 | ⏸️ 待决策 | 待定 | 需要确认是否实施 |
+| 5. 来源标注未实现 | P2 | ✅ 已解决 | 方案A | 已实现基本来源标注功能 |
 | 6. ecweb API 不存在 | P2 | ✅ 已解决 | 方案B | 文档已更新为实际 API |
 
 ---
@@ -862,3 +862,82 @@ grep -n "/api/config" ecweb/src/server.ts
 **更新时间**：2026-07-08  
 **当前状态**：2个已解决，2个暂缓，2个待决策  
 **下一步**：等待用户对问题4和问题5的决策
+
+---
+
+#### ✅ 问题5：来源标注未实现（2026-07-08）
+
+**实施方案**：方案A（实现来源标注）
+
+**修改内容**：
+1. `src/config/config-manager.ts`
+   - 新增接口：`FieldSource`、`ValueWithSource`
+   - 新增函数：`readFieldWithSource()` - 读取单个字段并返回来源
+   - 新增函数：`resolveEffectiveWithSources()` - 解析完整配置并标注来源
+
+2. `src/cli/config.ts`
+   - 修改 `cmdGet`：使用 `readFieldWithSource()`，输出格式为 `field = value  [来自: target]`
+   - 修改 `cmdEffective`：使用 `resolveEffectiveWithSources()`，每字段标注来源
+   - JSON 格式包含 `source` 对象（target + file）
+
+**测试结果**：
+```bash
+# get 命令
+$ ec config get active_baseagent --self dddd.agentid.pub
+active_baseagent = "claude"  [来自: agent]
+
+# effective 命令（部分）
+$ ec config effective --self dddd.agentid.pub
+$schema_version: 1  [agent]
+aid: "dddd.agentid.pub"  [agent]
+models: {...}  [defaults]
+active_baseagent: "claude"  [agent]
+```
+
+**设计说明**：
+- 采用**最小侵入式**实现：新增函数，不修改现有 API
+- 来源标注对于**合并字段**（list/dict）显示**最高优先级层**
+- 完全准确的多层来源追踪（追踪每个元素/键的来源）可作为未来增强
+
+**验证**：
+- ✅ get 命令显示来源
+- ✅ effective 命令显示来源
+- ✅ JSON 格式包含来源信息
+- ✅ 编译通过
+- ✅ 功能正常
+
+---
+
+### 待决策的问题（更新）
+
+#### ⏸️ 问题4：字段级权限（仍需决策）
+
+**当前状态**：已分析，等待决策
+
+**可选方案**：
+- **方案A**：实现字段级权限（~4小时）
+- **方案B**：修改文档承认现状（~30分钟）
+
+**建议**：先用方案B，等 roles 系统稳定后再考虑方案A
+
+---
+
+## 🎯 后续行动（更新）
+
+### 已完成 ✅
+1. ✅ 问题1：修正 dispatch 枚举和文档
+2. ✅ 问题5：实现来源标注功能
+3. ✅ 问题6：修正 ecweb 文档
+
+### 待 roles 稳定后处理 ⏸️
+4. 问题2：新增 roles 系统文档
+5. 问题3：快照包含 roles 文件
+
+### 需要决策 ⏸️
+6. 问题4：字段级权限（方案A vs 方案B）
+
+---
+
+**更新时间**：2026-07-08  
+**当前状态**：3个已解决，2个暂缓，1个待决策  
+**下一步**：问题4等待决策；问题2、3等 roles 系统稳定
