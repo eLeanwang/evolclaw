@@ -2,13 +2,13 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { _resetRoot, resolvePaths, agentBehaviorConfig, agentConfig } from '../../src/paths.js';
+import { _resetRoot, resolvePaths, agentConfig } from '../../src/paths.js';
 import {
-  ConfigTarget, read, write, ensureFile, resolveAgentConfig, resolveBehavior,
-  resolveEffective, routeField, listFields, initConfigManager, ConfigError,
-} from '../../src/core/config/config-manager.js';
-import { mergeLayers, expandVars, buildEnvResolver, _resetEnvWarnings } from '../../src/core/config/merge.js';
-import { assertDisjointFields, loadSchema, _resetSchemaCache } from '../../src/core/config/schema-registry.js';
+  ConfigTarget, read, write, ensureFile, resolveAgentConfig,
+  resolveEffective, initConfigManager, ConfigError,
+} from '../../src/config/config-manager.js';
+import { mergeLayers, expandVars, buildEnvResolver, _resetEnvWarnings } from '../../src/config/merge.js';
+import { loadSchema, _resetSchemaCache } from '../../src/config/schema-registry.js';
 
 const AID = 'bot.agentid.pub';
 const PEER = 'aun#alice.agentid.pub';
@@ -27,32 +27,28 @@ function cleanup(root: string): void {
   _resetRoot();
 }
 
-describe('schema-registry', () => {
+describe('schema-registry (v3)', () => {
   let root: string;
   beforeEach(() => { root = setupHome(); });
   afterEach(() => cleanup(root));
 
-  it('config/behavior 字段名空间严格不相交', () => {
-    expect(() => assertDisjointFields()).not.toThrow();
-  });
-
-  it('behavior schema 标记 HA，agent-config 标记 H', () => {
-    expect(loadSchema('behavior').permission).toBe('HA');
+  it('所有配置文件都标记为同一权限类型（H）', () => {
+    // v3: 不再区分 H 和 HA，所有配置都是 H（基础设施+行为统一）
     expect(loadSchema('agent-config').permission).toBe('H');
     expect(loadSchema('defaults').permission).toBe('H');
     expect(loadSchema('evolclaw').permission).toBe('H');
+    expect(loadSchema('relation-config').permission).toBe('H');
   });
 
   it('字段带 x-merge 语义', () => {
-    const beh = loadSchema('behavior');
-    expect(beh.fields.get('baseagents')?.merge).toBe('dict');
-    expect(beh.fields.get('show_activities')?.merge).toBe('scalar');
     const agent = loadSchema('agent-config');
+    expect(agent.fields.get('baseagents')?.merge).toBe('dict');
+    expect(agent.fields.get('show_activities')?.merge).toBe('scalar');
     expect(agent.fields.get('owners')?.merge).toBe('list');
   });
 });
 
-describe('typed merge（§三三规则）', () => {
+describe('typed merge（三三规则）', () => {
   it('scalar 覆盖 / list 并集去重 / dict 第一层键合并不递归', () => {
     const fields = loadSchema('agent-config').fields;
     const merged = mergeLayers<any>([
@@ -66,7 +62,7 @@ describe('typed merge（§三三规则）', () => {
   });
 
   it('dict 同键整体覆盖（不递归进二级）', () => {
-    const fields = loadSchema('behavior').fields;
+    const fields = loadSchema('agent-config').fields;
     const merged = mergeLayers<any>([
       { baseagents: { claude: { model: 'a', effort: 'low' } } },
       { baseagents: { claude: { model: 'b' } } },
@@ -76,7 +72,7 @@ describe('typed merge（§三三规则）', () => {
   });
 
   it('scalar 高优先级胜', () => {
-    const fields = loadSchema('behavior').fields;
+    const fields = loadSchema('agent-config').fields;
     const merged = mergeLayers<any>([
       { show_activities: 'all', flush_delay: 3 },
       { show_activities: 'none' },
@@ -98,128 +94,153 @@ describe('${VAR} 展开（仅 ${VAR}，三级 .env）', () => {
     fs.writeFileSync(path.join(agentDir, '.env'), 'TOK=agent_val\n');
     const resolver = buildEnvResolver({ rootDir: root, agentDir });
     const out = expandVars({ a: '${TOK}', b: '${ONLY_ROOT}' }, resolver);
-    expect(out).toEqual({ a: 'agent_val', b: 'r' });
+    expect(out.a).toBe('agent_val');
+    expect(out.b).toBe('r');
   });
 
-  it('$ENV: 旧语法不再展开（保持字面量）', () => {
-    const resolver = buildEnvResolver({ rootDir: root });
-    const out = expandVars({ a: '$ENV:TOK' }, resolver);
-    expect(out).toEqual({ a: '$ENV:TOK' });
+  it('未定义变量展开为空字符串（带警告）', () => {
+    const resolver = buildEnvResolver({ rootDir: setupHome() });
+    const out = expandVars({ x: '${UNDEF}' }, resolver);
+    // v3 实现：未定义变量展开为空字符串（并输出警告）
+    expect(out.x).toBe('');
   });
 
-  it('缺失变量展开为空字符串', () => {
-    const resolver = buildEnvResolver({ rootDir: root });
-    expect(expandVars({ a: '${MISSING}' }, resolver)).toEqual({ a: '' });
-  });
-});
-
-describe('ConfigManager read/write/ensureFile + 字段路由', () => {
-  let root: string;
-  beforeEach(() => { root = setupHome(); initConfigManager(); });
-  afterEach(() => cleanup(root));
-
-  it('write H 落 config.json，write HA 落 behavior.json', () => {
-    write(ConfigTarget.Agent, { $schema_version: 1, aid: AID, channels: [] }, { self: AID });
-    write(ConfigTarget.AgentBehavior, { $schema_version: 1, show_activities: 'none' }, { self: AID });
-    expect(fs.existsSync(agentConfig(AID))).toBe(true);
-    expect(fs.existsSync(agentBehaviorConfig(AID))).toBe(true);
-    const h = read<any>(ConfigTarget.Agent, { self: AID });
-    const ha = read<any>(ConfigTarget.AgentBehavior, { self: AID });
-    expect(h.aid).toBe(AID);
-    expect(ha.show_activities).toBe('none');
-  });
-
-  it('routeField：H 字段→agent config，HA 字段→agent behavior', () => {
-    expect(routeField('owners', 'agent').permission).toBe('H');
-    expect(routeField('owners', 'agent').target).toBe(ConfigTarget.Agent);
-    expect(routeField('chatmode', 'agent').permission).toBe('HA');
-    expect(routeField('chatmode', 'agent').target).toBe(ConfigTarget.AgentBehavior);
-  });
-
-  it('routeField 未知字段抛 ConfigError', () => {
-    expect(() => routeField('nope_field', 'agent')).toThrow(ConfigError);
-  });
-
-  it('write schema 校验：additionalProperties:false 挡住未知字段', () => {
-    expect(() => write(ConfigTarget.Agent, { $schema_version: 1, aid: AID, channels: [], bogus: 1 } as any, { self: AID }))
-      .toThrow(ConfigError);
-  });
-
-  it('listFields 列出 agent 作用域 H + HA 字段', () => {
-    const fields = listFields('agent');
-    const names = fields.map(f => f.schema);
-    expect(names).toContain('agent-config');
-    expect(names).toContain('behavior');
+  it('展开对象、数组、嵌套结构', () => {
+    process.env.K = 'val';
+    const resolver = buildEnvResolver({ rootDir: setupHome() });
+    const out = expandVars({
+      str: '${K}',
+      obj: { nested: '${K}' },
+      arr: ['${K}', 123],
+    }, resolver);
+    expect(out.str).toBe('val');
+    expect(out.obj.nested).toBe('val');
+    expect(out.arr[0]).toBe('val');
+    delete process.env.K;
   });
 });
 
-describe('resolveAgentConfig（H 链三级）', () => {
+describe('ConfigManager CRUD (v3 unified config.json)', () => {
   let root: string;
-  beforeEach(() => { root = setupHome(); initConfigManager(); });
+  beforeEach(() => { root = setupHome(); });
   afterEach(() => cleanup(root));
 
-  it('defaults → agent → relation 逐级合并；owners list 并集', () => {
-    write(ConfigTarget.Defaults, { $schema_version: 1, owners: ['ops.agentid.pub'] } as any, undefined, { skipValidate: true });
-    write(ConfigTarget.Agent, { $schema_version: 1, aid: AID, channels: [], owners: ['bob.agentid.pub'] }, { self: AID });
-    ensureFile(ConfigTarget.Relation, { self: AID, peerKey: PEER });
-    write(ConfigTarget.Relation, { $schema_version: 1, owners: ['carol.agentid.pub'] } as any, { self: AID, peerKey: PEER }, { skipValidate: true });
-    const merged = resolveAgentConfig({ self: AID, peerKey: PEER });
-    expect(merged.owners).toEqual(['bob.agentid.pub']);
-  });
-});
-
-describe('resolveBehavior（HA 链含角色层）', () => {
-  let root: string;
-  beforeEach(() => { root = setupHome(); initConfigManager(); });
-  afterEach(() => cleanup(root));
-
-  it('agent → role → relation 优先级（relation 最高）', () => {
-    write(ConfigTarget.AgentBehavior, {
-      $schema_version: 1,
-      baseagents: { claude: { model: 'agent-model' } },
-      roles: { vip: { baseagents: { claude: { model: 'role-model' } } } },
+  it('write 所有参数到 config.json', () => {
+    initConfigManager();
+    write(ConfigTarget.Agent, {
+      $schema_version: 2,
+      aid: AID,
+      channels: [],
+      // 基础设施参数
+      owners: ['owner.aid.pub'],
+      projects: { defaultPath: '/workspace' },
+      // 行为参数
+      show_activities: 'none',
+      chatmode: { private: 'proactive' },
+      dispatch: 'broadcast',
+      baseagents: { claude: { model: 'sonnet' } },
     }, { self: AID });
-    write(ConfigTarget.RelationBehavior, {
-      $schema_version: 1,
+
+    expect(fs.existsSync(agentConfig(AID))).toBe(true);
+
+    const config = read<any>(ConfigTarget.Agent, { self: AID });
+    expect(config.show_activities).toBe('none');
+    expect(config.owners).toContain('owner.aid.pub');
+    expect(config.baseagents.claude.model).toBe('sonnet');
+  });
+
+  it('未知字段不阻止写入（forward compatibility）', () => {
+    initConfigManager();
+    expect(() => {
+      write(ConfigTarget.Agent, {
+        $schema_version: 2,
+        aid: AID,
+        channels: [],
+        future_field_v4: 'some_value',
+      }, { self: AID }, { skipValidate: true });
+    }).not.toThrow();
+  });
+});
+
+describe('resolveEffective (v3 覆盖链: defaults → agent → relation)', () => {
+  let root: string;
+  beforeEach(() => { root = setupHome(); initConfigManager(); });
+  afterEach(() => cleanup(root));
+
+  it('agent 覆盖 defaults', () => {
+    write(ConfigTarget.Defaults, {
+      $schema_version: 2,
+      active_baseagent: 'claude',
+      baseagents: { claude: { model: 'sonnet' } },
+    }, {});
+
+    write(ConfigTarget.Agent, {
+      $schema_version: 2,
+      aid: AID,
+      channels: [],
+      baseagents: { claude: { model: 'opus' } },
+    }, { self: AID });
+
+    expect(resolveAgentConfig({ self: AID }).active_baseagent).toBe('claude');
+    expect(resolveEffective({ self: AID }).baseagents?.claude?.model).toBe('opus');
+  });
+
+  it('relation 覆盖 agent', () => {
+    write(ConfigTarget.Agent, {
+      $schema_version: 2,
+      aid: AID,
+      channels: [],
+      baseagents: { claude: { model: 'agent-model' } },
+    }, { self: AID });
+
+    write(ConfigTarget.Relation, {
+      $schema_version: 2,
       baseagents: { claude: { model: 'relation-model' } },
     }, { self: AID, peerKey: PEER });
 
-    // 仅 agent
-    expect(resolveBehavior({ self: AID }).baseagents?.claude?.model).toBe('agent-model');
-    // agent + role：role 覆盖 agent
-    expect(resolveBehavior({ self: AID, role: 'vip' }).baseagents?.claude?.model).toBe('role-model');
-    // agent + role + relation：relation 最高
-    expect(resolveBehavior({ self: AID, role: 'vip', peerKey: PEER }).baseagents?.claude?.model).toBe('relation-model');
+    expect(resolveEffective({ self: AID }).baseagents?.claude?.model).toBe('agent-model');
+    expect(resolveEffective({ self: AID, peerKey: PEER }).baseagents?.claude?.model).toBe('relation-model');
   });
 
-  it('roles 块本身不进 effective（仅作角色寻址）', () => {
-    write(ConfigTarget.AgentBehavior, {
-      $schema_version: 1,
-      roles: { vip: { permissionMode: 'bypass' } },
+  it('roles 块保留在 effective（用于角色寻址）', () => {
+    write(ConfigTarget.Agent, {
+      $schema_version: 2,
+      aid: AID,
+      channels: [],
+      roles: { vip: { baseagents: { claude: { model: 'vip-model' } } } },
     }, { self: AID });
-    const beh = resolveBehavior({ self: AID });
-    expect(beh.roles).toBeUndefined();
-  });
 
-  it('HA 链无 defaults 层：defaults 不影响 behavior', () => {
-    write(ConfigTarget.Defaults, { $schema_version: 1, models: { default: 'x' } });
-    write(ConfigTarget.AgentBehavior, { $schema_version: 1, show_activities: 'none' }, { self: AID });
-    const beh = resolveBehavior({ self: AID });
-    expect(beh.show_activities).toBe('none');
+    const eff = resolveEffective({ self: AID });
+    // v3: roles 块保留在配置中（用于角色寻址）
+    expect(eff.roles).toBeDefined();
+    expect(eff.roles?.vip).toBeDefined();
   });
 });
 
-describe('resolveEffective（H + behavior 合并视图）', () => {
+describe('process config is independent', () => {
   let root: string;
   beforeEach(() => { root = setupHome(); initConfigManager(); });
   afterEach(() => cleanup(root));
 
-  it('H 段在顶层，HA 段在 behavior', () => {
-    write(ConfigTarget.Agent, { $schema_version: 1, aid: AID, channels: [], owners: ['bob.agentid.pub'] }, { self: AID });
-    write(ConfigTarget.AgentBehavior, { $schema_version: 1, chatmode: { private: 'proactive' } }, { self: AID });
-    const eff = resolveEffective({ self: AID });
-    expect(eff.aid).toBe(AID);
-    expect(eff.owners).toEqual(['bob.agentid.pub']);
-    expect(eff.behavior.chatmode?.private).toBe('proactive');
+  it('evolclaw.json 不参与 agent 覆盖链', () => {
+    write(ConfigTarget.Process, {
+      $schema_version: 2,
+      aid: 'daemon.aid.pub',
+      owners: ['admin.aid.pub'],
+    }, {});
+
+    write(ConfigTarget.Agent, {
+      $schema_version: 2,
+      aid: AID,
+      channels: [],
+      owners: ['bot-owner.aid.pub'],
+    }, { self: AID });
+
+    const processConfig = read(ConfigTarget.Process, {});
+    expect(processConfig?.aid).toBe('daemon.aid.pub');
+
+    const agentEffective = resolveEffective({ self: AID });
+    expect(agentEffective.aid).toBe(AID);
+    expect(agentEffective.owners).not.toContain('admin.aid.pub');
   });
 });

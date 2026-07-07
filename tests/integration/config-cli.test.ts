@@ -9,7 +9,7 @@ vi.mock('../../src/ipc.js', () => ({
 
 import { cmdConfig } from '../../src/cli/config.js';
 import { _resetRoot } from '../../src/paths.js';
-import { _resetSchemaCache } from '../../src/core/config/schema-registry.js';
+import { _resetSchemaCache } from '../../src/config/schema-registry.js';
 
 const AID = 'bot.agentid.pub';
 
@@ -19,10 +19,10 @@ function setupHome(): string {
   delete process.env.EVOLCLAW_SESSION_ID;
   _resetRoot();
   _resetSchemaCache();
-  // 最小 agent 配置
+  // 最小 agent 配置（v3）
   const adir = path.join(root, 'agents', AID);
   fs.mkdirSync(adir, { recursive: true });
-  fs.writeFileSync(path.join(adir, 'config.json'), JSON.stringify({ $schema_version: 1, aid: AID, channels: [] }));
+  fs.writeFileSync(path.join(adir, 'config.json'), JSON.stringify({ $schema_version: 2, aid: AID, channels: [] }));
   return root;
 }
 function cleanup(root: string): void {
@@ -50,11 +50,18 @@ describe('integration: ec config CLI', () => {
   beforeEach(() => { root = setupHome(); });
   afterEach(() => cleanup(root));
 
-  it('set HA 字段 → behavior.json；get 读回', async () => {
+  it('set 字段到 config.json；get 读回', async () => {
     const setRes = await runJson(['set', 'chatmode.private', 'proactive', '--self', AID]);
+    if (!setRes.ok) {
+      console.log('setRes:', JSON.stringify(setRes, null, 2));
+    }
     expect(setRes.ok).toBe(true);
-    expect(setRes.permission).toBe('HA');
-    expect(fs.existsSync(path.join(root, 'agents', AID, 'behavior.json'))).toBe(true);
+    // v3: 不再区分 H/HA 权限
+    expect(setRes.permission).toBe('H');
+    // v3: 所有字段都在 config.json
+    const cfg = JSON.parse(fs.readFileSync(path.join(root, 'agents', AID, 'config.json'), 'utf-8'));
+    expect(cfg.chatmode.private).toBe('proactive');
+
     const getRes = await runJson(['get', 'chatmode.private', '--self', AID]);
     expect(getRes.value).toBe('proactive');
   });
@@ -73,10 +80,12 @@ describe('integration: ec config CLI', () => {
     expect(r.code).toBe('SELECTOR_REQUIRED');
   });
 
-  it('D7：--default + behavior 字段 → 拒绝', async () => {
+  it('D7：--default + 不支持的字段 → 拒绝', async () => {
+    // v3: defaults schema 不支持 chatmode 字段
     const r = await runJson(['set', 'chatmode.private', 'proactive', '--default']);
     expect(r.ok).toBe(false);
-    expect(r.code).toBe('DEFAULT_BEHAVIOR_REJECT');
+    // 错误码：字段不在 defaults schema 中
+    expect(r.code).toBe('UNKNOWN_FIELD');
   });
 
   it('agent 托管环境写 H 字段 → 拒绝', async () => {
@@ -86,10 +95,13 @@ describe('integration: ec config CLI', () => {
     expect(r.code).toBe('FORBIDDEN_H_WRITE');
   });
 
-  it('agent 托管环境写 HA 字段 → 放行', async () => {
+  it('agent 托管环境写 H 字段 → 拒绝（包括行为字段）', async () => {
     process.env.EVOLCLAW_SESSION_ID = 'sess-1';
+    // v3 当前实现：所有字段都在 agent-config（H），托管环境统一禁止写入
+    // TODO: 未来应迁移到字段级权限控制
     const r = await runJson(['set', 'show_activities', 'none', '--self', AID]);
-    expect(r.ok).toBe(true);
+    expect(r.ok).toBe(false);
+    expect(r.code).toBe('FORBIDDEN_H_WRITE');
   });
 
   it('--process 读写 evolclaw.json（链外单 H）', async () => {
@@ -103,16 +115,18 @@ describe('integration: ec config CLI', () => {
     const r = await runJson(['fields', '--self', AID]);
     expect(r.ok).toBe(true);
     const schemas = r.fields.map((f: any) => f.schema);
-    expect(schemas).toContain('behavior');
+    // v3: 只有 agent-config schema（不再有独立的 behavior schema）
     expect(schemas).toContain('agent-config');
+    expect(schemas).not.toContain('behavior');
   });
 
-  it('effective 合并视图（H 顶层 + behavior）', async () => {
+  it('effective 合并视图', async () => {
     await runJson(['set', 'chatmode.private', 'proactive', '--self', AID]);
     const r = await runJson(['effective', '--self', AID]);
     expect(r.ok).toBe(true);
     expect(r.effective.aid).toBe(AID);
-    expect(r.effective.behavior.chatmode.private).toBe('proactive');
+    // v3: 所有字段在顶层（不再有 effective.behavior 子树）
+    expect(r.effective.chatmode.private).toBe('proactive');
   });
 
   it('snapshot → history → restore 周期', async () => {

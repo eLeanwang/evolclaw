@@ -44,17 +44,17 @@ function runCli(args: string[], timeoutMs = 10000): { stdout: string; stderr: st
 function seedAgent(aid: string, enabled = true): void {
   const agentDir = path.join(TEST_HOME, 'agents', aid);
   fs.mkdirSync(agentDir, { recursive: true });
-  // 配置体系 v2：H 字段进 config.json，HA 字段（active_baseagent/baseagents）进 behavior.json。
   const config = {
-    $schema_version: 1,
+    $schema_version: 2,
     aid,
     enabled,
     channels: [],
     projects: { defaultPath: '/tmp/test' },
+    // v3: 行为参数也在 config.json
+    active_baseagent: 'claude',
+    baseagents: { claude: {} },
   };
   fs.writeFileSync(path.join(agentDir, 'config.json'), JSON.stringify(config, null, 2));
-  const behavior = { $schema_version: 1, active_baseagent: 'claude', baseagents: { claude: {} } };
-  fs.writeFileSync(path.join(agentDir, 'behavior.json'), JSON.stringify(behavior, null, 2));
 }
 
 function seedAgentMd(aid: string, name: string, description = ''): void {
@@ -273,29 +273,7 @@ describe('integration: agent CLI', () => {
     });
   });
 
-  describe('agent rename', () => {
-    it('errors when agent.md missing', () => {
-      seedAgent('alice.agentid.pub');
-      const r = runCli(['agent', 'rename', 'alice.agentid.pub', 'NewName']);
-      expect(r.code).toBe(1);
-      expect(r.stderr).toMatch(/agent\.md not found/);
-    });
-
-    it('updates name in agent.md', () => {
-      seedAgent('alice.agentid.pub');
-      seedAgentMd('alice.agentid.pub', 'OldName', 'desc');
-
-      const r = runCli(['agent', 'rename', 'alice.agentid.pub', 'NewName']);
-      expect(r.code).toBe(0);
-      expect(r.stdout).toMatch(/NewName/);
-
-      const agentMdContent = fs.readFileSync(
-        path.join(TEST_HOME, 'AIDs', 'alice.agentid.pub', 'agent.md'),
-        'utf-8'
-      );
-      expect(agentMdContent).toMatch(/name:\s*"NewName"/);
-    });
-  });
+  // agent rename 命令已废弃，相关测试已移除
 
   describe('agent delete', () => {
     it('removes config without --purge', () => {

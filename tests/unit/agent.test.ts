@@ -14,7 +14,7 @@ import {
   agentSyncAids, agentReload,
 } from '../../src/cli/agent.js';
 import { saveAgent, ensureAgentDirSkeleton } from '../../src/config-store.js';
-import { ConfigTarget, write as cfgWrite } from '../../src/core/config/config-manager.js';
+import { ConfigTarget, write as cfgWrite } from '../../src/config/config-manager.js';
 import { _resetRoot } from '../../src/paths.js';
 import type { AgentConfig } from '../../src/types.js';
 
@@ -27,16 +27,16 @@ function setupHome(): string {
 }
 
 function createTestAgent(aid: string, enabled = true): void {
-  // 配置体系 v2：H 字段进 config.json，HA 字段（active_baseagent/baseagents）进 behavior.json。
   const config: AgentConfig = {
-    $schema_version: 1,
+    $schema_version: 2,
     aid,
     enabled,
     channels: [],
     projects: { defaultPath: '/tmp/test' },
+    active_baseagent: 'claude',
+    baseagents: { claude: {} },
   };
   saveAgent(config);
-  cfgWrite(ConfigTarget.AgentBehavior, { active_baseagent: 'claude', baseagents: { claude: {} } }, { self: aid });
   ensureAgentDirSkeleton(aid);
 }
 

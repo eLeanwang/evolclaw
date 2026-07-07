@@ -41,22 +41,17 @@ function runCli(args: string[], timeoutMs = 10000): { stdout: string; stderr: st
 function seedAgent(aid: string, baseagent = 'claude', enabled = true): void {
   const agentDir = path.join(TEST_HOME, 'agents', aid);
   fs.mkdirSync(agentDir, { recursive: true });
-  // 配置体系 v2：H 字段进 config.json，HA 字段进 behavior.json。
   const config = {
-    $schema_version: 1,
+    $schema_version: 2,
     aid,
     enabled,
     channels: [],
     projects: { defaultPath: `/tmp/${aid.split('.')[0]}` },
-  };
-  fs.writeFileSync(path.join(agentDir, 'config.json'), JSON.stringify(config, null, 2));
-  const behavior = {
-    $schema_version: 1,
     active_baseagent: baseagent,
     baseagents: { [baseagent]: {} },
     chatmode: { private: 'interactive', group: 'proactive' },
   };
-  fs.writeFileSync(path.join(agentDir, 'behavior.json'), JSON.stringify(behavior, null, 2));
+  fs.writeFileSync(path.join(agentDir, 'config.json'), JSON.stringify(config, null, 2));
 }
 
 function seedAgentMd(aid: string, name: string, description: string): void {
