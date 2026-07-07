@@ -38,7 +38,7 @@ import type {
 import { CONFIG_SCHEMA_VERSION } from './types.js';
 import { resolveAgentConfig, resolveEffective } from './config/config-manager.js';
 import { expandVars, buildEnvResolver } from './config/merge.js';
-import { mergeBehaviorIntoEffective } from './config/behavior.js';
+// behavior.js 已删除（v3 设计去除 behavior.json）
 import { normalizeAgentLifecycle } from './config/lifecycle.js';
 import { logger } from './utils/logger.js';
 
@@ -456,7 +456,8 @@ export function validateAgentConfig(cfg: AgentConfig): string[] {
  */
 export function mergeForAgent(agent: AgentConfig, defaults: DefaultsConfig | null): AgentConfig {
   const hMerged = defaults ? deepMergeObject(defaults, agent) as AgentConfig : { ...agent };
-  return mergeBehaviorIntoEffective(hMerged, { self: agent.aid }) as AgentConfig;
+  // v3 设计：不再有 behavior 链，直接返回合并结果
+  return hMerged as AgentConfig;
 }
 
 // ── 目录骨架 ───────────────────────────────────────────────────────────

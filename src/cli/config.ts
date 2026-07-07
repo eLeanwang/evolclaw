@@ -375,11 +375,9 @@ function targetsForScope(scope: Scope, sel?: Selector): Array<{ t: ConfigTarget;
   if (scope === 'defaults') return [{ t: ConfigTarget.Defaults }];
   if (scope === 'agent') return [
     { t: ConfigTarget.Agent, s: sel },
-    { t: ConfigTarget.Behavior, s: sel },
   ];
   return [
     { t: ConfigTarget.Relation, s: sel },
-    { t: ConfigTarget.RelationBehavior, s: sel },
   ];
 }
 

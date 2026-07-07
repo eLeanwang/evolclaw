@@ -50,7 +50,7 @@ export function writeRoleAssignments(aid: string, config: RoleAssignmentsConfig)
   validateAssignments(config);
   ensureFile(ConfigTarget.RoleAssignments, { self: aid });
   write(ConfigTarget.RoleAssignments, config, { self: aid });
-  syncNoOverrideRoleModelsForAgent(aid, readRolesConfig());
+  syncNoOverrideRoleModelsForAgent(); // stub 版本不需要参数
 }
 
 function setScopedRoleAssignment(

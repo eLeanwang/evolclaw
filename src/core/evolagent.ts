@@ -373,12 +373,12 @@ export class EvolAgent {
     saveAgent(this.rawAgent);
   }
 
-  /** 读改写 agent 级 behavior.json（走 ConfigManager 唯一写入口）。 */
+  /** 读改写 agent 级 config.json（v3 设计，走 ConfigManager 唯一写入口）。 */
   private mutateBehavior(fn: (b: AgentConfig) => void): void {
     const sel = { self: this.aid };
-    const cur = (cfgRead<AgentConfig>(ConfigTarget.Behavior, sel) as AgentConfig) || {};
+    const cur = (cfgRead<AgentConfig>(ConfigTarget.Agent, sel) as AgentConfig) || {};
     fn(cur);
-    cfgEnsure(ConfigTarget.Behavior, sel);
-    cfgWrite(ConfigTarget.Behavior, cur, sel);
+    cfgEnsure(ConfigTarget.Agent, sel);
+    cfgWrite(ConfigTarget.Agent, cur, sel);
   }
 }

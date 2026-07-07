@@ -1,14 +1,14 @@
 /**
  * config-scope: 会话配置参数（model/effort/permissionMode）的多作用域读写与解析。
  *
- * model/effort/permissionMode/roles 等 HA 行为参数存储在 behavior.json。
- * H 链仍经 ConfigManager；本模块是面向 CLI / 运行时的薄封装：
+ * 所有参数统一在 config.json。
+ * 存储经 ConfigManager（全项目唯一合并实现点）。本模块是面向 CLI / 运行时的薄封装：
  * 把"作用域 + baseagent"语义映射到 config 链的读写。
  *
  * 作用域（越具体越优先）：关系 > 角色 > agent。
- *   agent  agents/<self>/behavior.json                          → baseagents.<ba>.{model,effort}
- *   角色   agents/<self>/behavior.json 的 roles.<role> 块         → baseagents / permissionMode（内嵌）
- *   关系   agents/<self>/relations/<peerKey>/behavior.json       → baseagents / permissionMode
+ *   agent  agents/<self>/config.json                          → baseagents.<ba>.{model,effort}
+ *   角色   agents/<self>/config.json 的 roles.<role> 块         → baseagents / permissionMode（内嵌）
+ *   关系   agents/<self>/relations/<peerKey>/config.json       → baseagents / permissionMode
  *   global（历史保留）：全局 model 作用域已退场，只读 agent 兜底。
  *
  * 改任一作用域后，对应范围所有会话的下一条消息即时生效（运行时每条消息解析，不缓存）。
@@ -18,19 +18,10 @@
 
 import { formatPeerKey, parsePeerKey } from '../relation/peer-identity.js';
 import {
-  ConfigTarget, read,
+  ConfigTarget, read, write, ensureFile, resolveEffective,
+  type Selector,
 } from '../../config/config-manager.js';
-import {
-  readAgentBehavior,
-  readRelationBehavior,
-  writeAgentBehavior,
-  writeRelationBehavior,
-  resolveBehavior,
-  type BehaviorConfig,
-} from '../../config/behavior.js';
-import { mergeWithRoleConstraints } from '../../config/role-constraints.js';
-import { constrainResolvedModelForRole } from './model-permission.js';
-import type { AgentConfig, RelationConfig, RoleOverride } from '../../types.js';
+import type { AgentConfig, RelationConfig, EffectiveAgentConfig, RoleOverride } from '../../types.js';
 
 export type ModelScope = 'global' | 'agent' | 'role' | 'relation';
 
@@ -101,41 +92,45 @@ export function determineScope(sel: ScopeSelector): ModelScope {
 export function activeBaseagent(self?: string): string {
   try {
     if (self) {
-      const behavior = readAgentBehavior(self, { cache: true });
-      if (behavior?.active_baseagent) return behavior.active_baseagent;
-      const config = read<AgentConfig>(ConfigTarget.Agent, { self }, { cache: true });
-      if (config?.active_baseagent) return config.active_baseagent;
+      const b = read<AgentConfig>(ConfigTarget.Agent, { self }, { cache: true });
+      if (b?.active_baseagent) return b.active_baseagent;
     }
   } catch { /* fall through */ }
   return 'claude';
+}
+
+/** codex 的推理强度字段名是 reasoning，其余是 effort。 */
+function effortField(ba: string): 'effort' | 'reasoning' {
+  return ba === 'codex' ? 'reasoning' : 'effort';
 }
 
 // ── 读：单作用域 ──────────────────────────────────────────────────────
 
 /** 读取指定作用域当前存的 {model,effort,permissionMode}（未设为空对象）。不抛出。 */
 export function readScope(scope: ModelScope, sel: ScopeSelector, ba: string): ModelPrefs {
+  const ef = effortField(ba);
   try {
     switch (scope) {
       case 'global':
         // 全局 model 作用域已退场，返回空。
         return {};
       case 'agent': {
-        const b = sel.self ? readAgentBehaviorWithConfigFallback(sel.self, { cache: true }) : null;
+        const b = sel.self ? read<AgentConfig>(ConfigTarget.Agent, { self: sel.self }, { cache: true }) : null;
         const c = ((b?.baseagents || {}) as any)[ba] || {};
-        return { model: c.model, effort: c.effort ?? c.reasoning };
+        return { model: c.model, effort: c[ef] };
       }
       case 'role': {
-        const b = sel.self ? readAgentBehaviorWithConfigFallback(sel.self, { cache: true }) : null;
+        const b = sel.self ? read<AgentConfig>(ConfigTarget.Agent, { self: sel.self }, { cache: true }) : null;
         const ov = (b?.roles || {})[sel.role!] as RoleOverride | undefined;
         const c = ((ov?.baseagents || {}) as any)[ba] || {};
-        return { model: c.model, effort: c.effort ?? c.reasoning, permissionMode: ov?.permissionMode };
+        return { model: c.model, effort: c[ef], permissionMode: ov?.permissionMode };
       }
       case 'relation': {
         const b = (sel.self && sel.peerKey)
-          ? readRelationBehaviorWithConfigFallback(sel.self, sel.peerKey, { cache: true })
+          ? read<RelationConfig>(ConfigTarget.Relation, { self: sel.self, peerKey: sel.peerKey }, { cache: true })
           : null;
         const c = ((b?.baseagents || {}) as any)[ba] || {};
-        return { model: c.model, effort: c.effort ?? c.reasoning, permissionMode: b?.permissionMode };
+        return { model: c.model, effort: c[ef], permissionMode: b?.permissionMode };
       }
     }
   } catch {
@@ -152,57 +147,63 @@ export function writeScope(
   ba: string,
   patch: { model?: string | null; effort?: string | null },
 ): void {
+  const ef = effortField(ba);
   if (scope === 'global') {
     throw new ModelScopeError('NO_GLOBAL_SCOPE', '全局 model 作用域已退场：请用 --self 逐 agent 设置');
   }
   if (scope === 'agent') {
     requireSelf(sel);
-    const cur = readAgentBehavior(sel.self!) || {};
-    applyBaPatch(cur, ba, patch);
-    writeAgentBehavior(sel.self!, cur);
+    const target = ConfigTarget.Agent;
+    const cur = (read<AgentConfig>(target, { self: sel.self }) as AgentConfig) || {};
+    applyBaPatch(cur, ba, ef, patch);
+    ensureFile(target, { self: sel.self });
+    write(target, cur, { self: sel.self });
     return;
   }
   if (scope === 'role') {
     requireSelf(sel);
-    const cur = readAgentBehavior(sel.self!) || {};
+    const target = ConfigTarget.Agent;
+    const cur = (read<AgentConfig>(target, { self: sel.self }) as AgentConfig) || {};
     cur.roles = cur.roles || {};
     const ov: RoleOverride = (cur.roles[sel.role!] = cur.roles[sel.role!] || {});
     ov.baseagents = ov.baseagents || {};
-    applyBaPatchTo(ov.baseagents as any, ba, patch);
-    writeAgentBehavior(sel.self!, cur);
+    applyBaPatchTo(ov.baseagents as any, ba, ef, patch);
+    ensureFile(target, { self: sel.self });
+    write(target, cur, { self: sel.self });
     return;
   }
   // relation
   requirePeer(sel);
-  const cur = readRelationBehavior(sel.self!, sel.peerKey!) || {};
-  applyBaPatch(cur, ba, patch);
-  writeRelationBehavior(sel.self!, sel.peerKey!, cur);
+  const target = ConfigTarget.Relation;
+  const selr: Selector = { self: sel.self, peerKey: sel.peerKey };
+  const cur = (read<RelationConfig>(target, selr) as RelationConfig) || {};
+  applyBaPatch(cur, ba, ef, patch);
+  ensureFile(target, selr);
+  write(target, cur, selr);
 }
 
-function applyBaPatch(cfg: BehaviorConfig, ba: string, patch: { model?: string | null; effort?: string | null }): void {
+function applyBaPatch(cfg: AgentConfig | RelationConfig, ba: string, ef: string, patch: { model?: string | null; effort?: string | null }): void {
   cfg.baseagents = cfg.baseagents || {};
-  applyBaPatchTo(cfg.baseagents as any, ba, patch);
+  applyBaPatchTo(cfg.baseagents as any, ba, ef, patch);
 }
-function applyBaPatchTo(block: Record<string, any>, ba: string, patch: { model?: string | null; effort?: string | null }): void {
+function applyBaPatchTo(block: Record<string, any>, ba: string, ef: string, patch: { model?: string | null; effort?: string | null }): void {
   block[ba] = block[ba] || {};
   const sub = block[ba];
   if (patch.model === null) delete sub.model;
   else if (patch.model !== undefined) sub.model = patch.model;
-  if (patch.effort === null) {
-    delete sub.effort;
-    delete sub.reasoning;
-  } else if (patch.effort !== undefined) {
-    sub.effort = patch.effort;
-    delete sub.reasoning;
-  }
+  if (patch.effort === null) delete sub[ef];
+  else if (patch.effort !== undefined) sub[ef] = patch.effort;
 }
 
 /** 写关系级 permissionMode（供 /perm 命令使用）。null 删除字段。 */
 export function writeRelationPermissionMode(self: string, peerKey: string, mode: string | null): void {
-  const cur = readRelationBehavior(self, peerKey) || {};
+  const target = ConfigTarget.Relation;
+  const sel: Selector = { self, peerKey };
+  const cur = (read<RelationConfig>(target, sel) as RelationConfig) || {};
   if (mode === null) delete cur.permissionMode;
   else cur.permissionMode = mode;
-  writeRelationBehavior(self, peerKey, cur);
+  ensureFile(target, sel);
+  write(target, cur, sel);
 }
 
 // ── 清除：单作用域 ────────────────────────────────────────────────────
@@ -216,35 +217,19 @@ export function clearScope(scope: ModelScope, sel: ScopeSelector, ba: string): v
 // ── permissionMode 解析 ────────────────────────────────────────────────────
 
 const BUILTIN_PERMISSION_BY_ROLE: Record<string, string> = {
-  owner: 'bypass', admin: 'request', member: 'auto', guest: 'readonly', anonymous: 'readonly',
+  owner: 'bypass', admin: 'bypass', guest: 'readonly', anonymous: 'readonly',
 };
 const FALLBACK_PERMISSION_MODE = 'auto';
 
 /**
  * 解析实际生效的 permissionMode。不抛出——运行时 per-message 调用。
- * 链：关系 > 角色(roles.<role>) > 出厂默认[role] > 'auto'。
- * 应用角色约束（优先使用 sel.role，避免在群聊/非AUN渠道重算角色）。
+ * 链：关系 > 角色(roles.<role>) > agent > 出厂默认[role] > 'auto'。
+ * 经 ConfigManager.resolveEffective（含角色层）取合并后的 permissionMode。
  */
 export function resolvePermissionMode(sel: ScopeSelector): string {
   try {
-    const relation = sel.self && sel.peerKey ? readScope('relation', sel, activeBaseagent(sel.self)) : {};
-    if (relation.permissionMode) {
-      // 应用角色约束（优先使用 sel.role）
-      if (sel.self && sel.peerKey && sel.role) {
-        try {
-          const role = sel.role;
-          const constrained = mergeWithRoleConstraints(role, {
-            permissionMode: relation.permissionMode
-          });
-          return constrained.effectiveConfig.permissionMode;
-        } catch (err) {
-          console.warn('[config-scope] Failed to apply role constraints to permissionMode:', err);
-        }
-      }
-      return relation.permissionMode;
-    }
-    const role = sel.self && sel.role ? readScope('role', sel, activeBaseagent(sel.self)) : {};
-    if (role.permissionMode) return role.permissionMode;
+    const config = resolveEffective(toSelector(sel), { cache: true });
+    if (config.permissionMode) return config.permissionMode;
     if (sel.role && BUILTIN_PERMISSION_BY_ROLE[sel.role]) return BUILTIN_PERMISSION_BY_ROLE[sel.role];
     return FALLBACK_PERMISSION_MODE;
   } catch {
@@ -271,13 +256,19 @@ export interface ResolvedModel {
 }
 
 /**
- * 按 关系>角色>agent 解析实际生效的 model/effort。
- * final 值遵循 behavior 的 x-merge:dict 语义；chain 逐层展示可见来源。
+ * 按 关系>角色>agent 解析实际生效的 model/effort（model 与 effort 各自独立回退）。
+ * 经 ConfigManager.resolveEffective（含角色层）取合并后的 baseagents.<ba>。
  * chain 仅就可达作用域逐层展示（用于 CLI 来源标注）。
- * 应用角色约束（关系级别）。
  */
 export function resolveEffectiveModel(sel: ScopeSelector, ba?: string): ResolvedModel {
   const baseagent = ba || activeBaseagent(sel.self);
+  const ef = effortField(baseagent);
+
+  // 合并后的最终值（含角色层）
+  const config = safeResolveEffective(toSelector(sel));
+  const mergedBa = ((config.baseagents || {}) as any)[baseagent] || {};
+  const finalModel: string | undefined = mergedBa.model;
+  const finalEffort: string | undefined = mergedBa[ef];
 
   // 逐层 chain（仅展示；命中标记按从高到低首个非空）
   const order: ModelScope[] = [];
@@ -288,92 +279,16 @@ export function resolveEffectiveModel(sel: ScopeSelector, ba?: string): Resolved
   const chain: ResolvedChainEntry[] = [];
   let modelSource: ModelScope | undefined;
   let effortSource: ModelScope | undefined;
-  let finalModel: string | undefined;
-  let finalEffort: string | undefined;
-
   for (const scope of order) {
     const prefs = readScope(scope, sel, baseagent);
-    let scopeModel = prefs.model;
-    let scopeEffort = prefs.effort;
-
-    // 在关系级别应用角色约束（优先使用 sel.role）
-    if (scope === 'relation' && sel.self && sel.peerKey && sel.role && (scopeModel || scopeEffort)) {
-      try {
-        const role = sel.role;
-        const constraintInput: Record<string, any> = {};
-        if (scopeModel) constraintInput[`baseagents.${baseagent}.model`] = scopeModel;
-        if (scopeEffort) constraintInput[`baseagents.${baseagent}.effort`] = scopeEffort;
-
-        const constrained = mergeWithRoleConstraints(role, constraintInput);
-        scopeModel = constrained.effectiveConfig.baseagents?.[baseagent]?.model || scopeModel;
-        scopeEffort = constrained.effectiveConfig.baseagents?.[baseagent]?.effort || scopeEffort;
-      } catch (err) {
-        console.warn('[config-scope] Failed to apply role constraints to model/effort:', err);
-      }
-    }
-
-    const modelHit = !!scopeModel && modelSource === undefined;
+    const modelHit = !!prefs.model && modelSource === undefined;
     if (modelHit) modelSource = scope;
-    if (modelHit) finalModel = scopeModel;
-    const effortHit = !!scopeEffort && effortSource === undefined;
-    if (effortHit) effortSource = scope;
-    if (effortHit) finalEffort = scopeEffort;
-    chain.push({ scope, model: scopeModel, effort: scopeEffort, hit: modelHit });
+    if (!!prefs.effort && effortSource === undefined) effortSource = scope;
+    chain.push({ scope, model: prefs.model, effort: prefs.effort, hit: modelHit });
   }
-
-  const mergedBehavior = resolveBehavior(toSelector(sel), { cache: true });
-  const mergedBa = ((mergedBehavior.baseagents || {}) as any)[baseagent] || {};
-  if (mergedBehavior.baseagents && Object.prototype.hasOwnProperty.call(mergedBehavior.baseagents as any, baseagent)) {
-    let mergedModel = mergedBa.model;
-    let mergedEffort = mergedBa.effort ?? mergedBa.reasoning;
-
-    // 如果有 peerKey，应用角色约束到合并后的结果（优先使用 sel.role）
-    if (sel.self && sel.peerKey && sel.role && (mergedModel || mergedEffort)) {
-      try {
-        const role = sel.role;
-        const constraintInput: Record<string, any> = {};
-        if (mergedModel) constraintInput[`baseagents.${baseagent}.model`] = mergedModel;
-        if (mergedEffort) constraintInput[`baseagents.${baseagent}.effort`] = mergedEffort;
-
-        const constrained = mergeWithRoleConstraints(role, constraintInput);
-        mergedModel = constrained.effectiveConfig.baseagents?.[baseagent]?.model || mergedModel;
-        mergedEffort = constrained.effectiveConfig.baseagents?.[baseagent]?.effort || mergedEffort;
-      } catch (err) {
-        console.warn('[config-scope] Failed to apply role constraints to merged model/effort:', err);
-      }
-    }
-
-    finalModel = mergedModel;
-    finalEffort = mergedEffort;
-  }
-
-  // 如果最终没有值，但有 peerKey，应用角色默认值（确保 guest 等角色总是受限）
-  if (sel.self && sel.peerKey && sel.role && (!finalModel || !finalEffort)) {
-    try {
-      const role = sel.role;
-      const constraintInput: Record<string, any> = {};
-      // 使用空配置触发角色默认值
-      if (!finalModel) constraintInput[`baseagents.${baseagent}.model`] = finalModel || '';
-      if (!finalEffort) constraintInput[`baseagents.${baseagent}.effort`] = finalEffort || '';
-
-      const constrained = mergeWithRoleConstraints(role, constraintInput);
-      if (!finalModel && constrained.effectiveConfig.baseagents?.[baseagent]?.model) {
-        finalModel = constrained.effectiveConfig.baseagents[baseagent].model;
-      }
-      if (!finalEffort && constrained.effectiveConfig.baseagents?.[baseagent]?.effort) {
-        finalEffort = constrained.effectiveConfig.baseagents[baseagent].effort;
-      }
-    } catch (err) {
-      console.warn('[config-scope] Failed to apply role default model/effort:', err);
-    }
-  }
-
-  const constrainedModel = sel.role
-    ? constrainResolvedModelForRole({ role: sel.role, baseagent, model: finalModel }).model
-    : finalModel;
 
   return {
-    model: constrainedModel,
+    model: finalModel,
     effort: finalEffort,
     source: modelSource,
     effortSource,
@@ -386,27 +301,12 @@ export function resolveEffectiveModel(sel: ScopeSelector, ba?: string): Resolved
 function toSelector(sel: ScopeSelector): Selector {
   return { self: sel.self, peerKey: sel.peerKey, role: sel.role };
 }
+function safeResolveEffective(sel: Selector): EffectiveAgentConfig {
+  try { return resolveEffective(sel, { cache: true }); } catch { return {} as EffectiveAgentConfig; }
+}
 function requireSelf(sel: ScopeSelector): void {
   if (!sel.self) throw new ModelScopeError('AGENT_NOT_FOUND', 'agent 作用域需要 --self');
 }
 function requirePeer(sel: ScopeSelector): void {
   if (!sel.self || !sel.peerKey) throw new ModelScopeError('PEER_WITHOUT_SELF', '关系作用域需要 --self + --peer');
-}
-
-type Selector = ScopeSelector;
-
-function readAgentBehaviorWithConfigFallback(self: string, opts: { cache?: boolean } = {}): BehaviorConfig | null {
-  const behavior = readAgentBehavior(self, opts);
-  if (behavior && hasBehaviorFields(behavior)) return behavior;
-  return read<AgentConfig>(ConfigTarget.Agent, { self }, { cache: opts.cache }) as any;
-}
-
-function readRelationBehaviorWithConfigFallback(self: string, peerKey: string, opts: { cache?: boolean } = {}): BehaviorConfig | null {
-  const behavior = readRelationBehavior(self, peerKey, opts);
-  if (behavior && hasBehaviorFields(behavior)) return behavior;
-  return read<RelationConfig>(ConfigTarget.Relation, { self, peerKey }, { cache: opts.cache }) as any;
-}
-
-function hasBehaviorFields(value: BehaviorConfig): boolean {
-  return Object.keys(value).some(k => k !== '$schema_version');
 }

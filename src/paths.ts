@@ -93,9 +93,6 @@ export function agentDir(aid: string): string {
 export function agentConfig(aid: string): string {
   return path.join(agentDir(aid), 'config.json');
 }
-export function agentBehaviorConfig(aid: string): string {
-  return path.join(agentDir(aid), 'behavior.json');
-}
 export function agentRoleAssignmentsConfig(aid: string): string {
   return path.join(agentDir(aid), 'role-assignments.json');
 }
@@ -104,9 +101,6 @@ export function agentPersonalDir(aid: string): string {
 }
 export function agentRelationsDir(aid: string): string {
   return path.join(agentDir(aid), 'relations');
-}
-export function agentRelationBehaviorConfig(aid: string, peerKey: string): string {
-  return path.join(agentRelationsDir(aid), peerKey, 'behavior.json');
 }
 /** @deprecated Use agentRelationsDir instead */
 export function agentIdentitiesDir(aid: string): string {

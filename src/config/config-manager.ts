@@ -15,10 +15,8 @@ import path from 'path';
 import {
   resolvePaths,
   agentConfig as agentConfigPath,
-  agentBehaviorConfig,
   agentRoleAssignmentsConfig,
   agentRelationConfig,
-  agentRelationBehaviorConfig,
   agentDir,
   agentRelationsDir,
   rolesConfig,
@@ -32,7 +30,7 @@ import {
   type SchemaEntry,
 } from './schema-registry.js';
 import { mergeLayers, expandVars, buildEnvResolver, type EnvScope } from './merge.js';
-import { mergeBehaviorIntoEffective } from './behavior.js';
+// behavior.js 已删除（v3 设计去除 behavior.json）
 import { normalizeAgentLifecycle } from './lifecycle.js';
 import { mergeWithRoleConstraints } from './role-constraints.js';
 import { mergeRolesConfig, diffRolesConfig } from './roles-merge.js';
@@ -56,8 +54,7 @@ export enum ConfigTarget {
   Defaults = 'defaults',                // agents/defaults.json
   Agent = 'agent',                      // agents/{aid}/config.json
   Relation = 'relation',                // agents/{aid}/relations/{peerKey}/config.json
-  Behavior = 'behavior',                // agents/{aid}/behavior.json
-  RelationBehavior = 'relation-behavior', // agents/{aid}/relations/{peerKey}/behavior.json
+  // Behavior 和 RelationBehavior 已删除（v3 设计去除 behavior.json）
   Roles = 'roles',                      // roles.json（全局角色定义，overlay 模型）
   RoleAssignments = 'role-assignments',  // agents/{aid}/role-assignments.json
 }
@@ -73,8 +70,6 @@ const TARGET_SCHEMA: Record<ConfigTarget, LogicalSchemaName> = {
   [ConfigTarget.Defaults]: 'defaults',
   [ConfigTarget.Agent]: 'agent-config',
   [ConfigTarget.Relation]: 'relation-config',
-  [ConfigTarget.Behavior]: 'behavior',
-  [ConfigTarget.RelationBehavior]: 'behavior',
   [ConfigTarget.Roles]: 'roles',
   [ConfigTarget.RoleAssignments]: 'role-assignments',
 };
@@ -115,12 +110,7 @@ function targetPath(target: ConfigTarget, sel?: Selector): string {
     case ConfigTarget.Relation:
       requirePeer(sel, target);
       return agentRelationConfig(sel!.self!, sel!.peerKey!);
-    case ConfigTarget.Behavior:
-      requireSelf(sel, target);
-      return agentBehaviorConfig(sel!.self!);
-    case ConfigTarget.RelationBehavior:
-      requirePeer(sel, target);
-      return agentRelationBehaviorConfig(sel!.self!, sel!.peerKey!);
+    // Behavior 和 RelationBehavior cases 已删除（v3 设计）
   }
 }
 
@@ -192,10 +182,7 @@ function groupFor(target: ConfigTarget, sel?: Selector): string {
   if (sel?.self && target === ConfigTarget.Agent) {
     return `config:${sel.self}`;
   }
-  if (sel?.self && target === ConfigTarget.Behavior) {
-    return `behavior:${sel.self}`;
-  }
-  if (target === ConfigTarget.Relation || target === ConfigTarget.RelationBehavior) {
+  if (target === ConfigTarget.Relation) {
     return 'relation-prefs';
   }
   return 'config';
@@ -216,17 +203,16 @@ export function write<T = any>(target: ConfigTarget, value: T, sel?: Selector, o
   const migrated = target === ConfigTarget.Roles
     ? migrateIfNeeded(target, withVer, file)
     : withVer;
-  const normalized = target === ConfigTarget.RelationBehavior && sel?.self && sel?.peerKey
-    ? normalizeRelationBehaviorForAssignedRole(sel.self, sel.peerKey, migrated as any, resolveRoles({ cache: true })) as T
-    : migrated;
+  // v3 设计：不再有单独的 behavior 归一化
+  const normalized = migrated;
 
   // 1. Schema 校验
   if (!opts.skipValidate) {
     validateOrThrow(schema, normalized, target);
   }
 
-  // 2. 角色约束校验（仅对 RelationBehavior）
-  if (target === ConfigTarget.RelationBehavior && sel?.self && sel?.peerKey) {
+  // 2. 角色约束校验（仅对 Relation）
+  if (target === ConfigTarget.Relation && sel?.self && sel?.peerKey) {
     try {
       const validation = validateConfigWrite(target, normalized as any, sel);
       if (!validation.valid) {
@@ -281,7 +267,7 @@ export function writeRoles(full: RolesConfig, opts: WriteOpts = {}): void {
   const diff = diffRolesConfig(getBuiltinRolesConfig(), full);
   write(ConfigTarget.Roles, diff, undefined, opts);
   clearRolesCache();
-  syncNoOverrideRoleModelsForAllAgents(full);
+  syncNoOverrideRoleModelsForAllAgents(); // stub 版本不需要参数
 }
 
 function validateOrThrow(schema: SchemaEntry, value: unknown, target: ConfigTarget): void {
@@ -546,8 +532,8 @@ export function resolveEffective(sel: Selector, opts: ReadOpts = {}): EffectiveA
     roles: config.roles,
   };
 
-  // 先合并行为链
-  let result = mergeBehaviorIntoEffective(effective, sel, opts);
+  // v3 设计：不再有 behavior 链，直接返回 effective
+  let result = effective;
 
   // 如果有 peerKey，应用角色约束（优先使用 sel.role）
   if (sel.self && sel.peerKey && sel.role) {
@@ -628,13 +614,13 @@ export function validateConfigWrite(
   config: Record<string, any>,
   sel: Selector
 ): { valid: boolean; violations: any[]; effectiveConfig: any } {
-  // 只对 RelationBehavior 进行角色约束检查
-  if (target !== ConfigTarget.RelationBehavior) {
+  // v3 设计：只对 Relation 进行角色约束检查
+  if (target !== ConfigTarget.Relation) {
     return { valid: true, violations: [], effectiveConfig: config };
   }
 
   if (!sel.self || !sel.peerKey) {
-    throw new ConfigError('SELECTOR_REQUIRED', 'RelationBehavior requires self and peerKey');
+    throw new ConfigError('SELECTOR_REQUIRED', 'Relation requires self and peerKey');
   }
 
   try {
@@ -718,7 +704,8 @@ export function routeFieldPath(
   if (scope === 'defaults') return routeIn('defaults', ConfigTarget.Defaults, topField);
 
   if (isBehaviorFieldPath(fieldPath)) {
-    const target = scope === 'relation' ? ConfigTarget.RelationBehavior : ConfigTarget.Behavior;
+    // v3 设计：relation 也用 relation-config
+    const target = ConfigTarget.Relation;
     return routeIn('behavior', target, topField);
   }
 
@@ -758,11 +745,11 @@ export function listFields(scope: ConfigScope): FieldRoute[] {
   if (scope === 'defaults') { add('defaults', ConfigTarget.Defaults); return out; }
   if (scope === 'agent') {
     add('agent-config', ConfigTarget.Agent);
-    add('behavior', ConfigTarget.Behavior);
+    // v3 设计：不再有单独的 behavior schema
     return out;
   }
+  // relation
   add('relation-config', ConfigTarget.Relation);
-  add('behavior', ConfigTarget.RelationBehavior);
   return out;
 }
 

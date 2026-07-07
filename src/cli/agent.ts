@@ -178,9 +178,9 @@ function saveInitialBehavior(aid: string, baseagent: Baseagent): void {
     dispatch: DEFAULT_DISPATCH,
   };
   const sel = { self: aid };
-  const existingBehavior = cfgRead(ConfigTarget.Behavior, sel) || {};
-  cfgEnsure(ConfigTarget.Behavior, sel);
-  cfgWrite(ConfigTarget.Behavior, { ...existingBehavior, ...behavior }, sel);
+  const existingBehavior = cfgRead(ConfigTarget.Agent, sel) || {};
+  cfgEnsure(ConfigTarget.Agent, sel);
+  cfgWrite(ConfigTarget.Agent, { ...existingBehavior, ...behavior }, sel);
 }
 
 function readAgentMdIdentity(aid: string): { name: string | null; description: string | null } {
