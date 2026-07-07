@@ -3,9 +3,10 @@
  *
  * 不允许散落的 fs.readFileSync 直接操作配置文件。
  *
- * H 覆盖链：defaults.json → agent/config.json → relation/config.json。
- * HA 行为链：agent/behavior.json → role → relation/behavior.json。
- * 进程级 evolclaw.json：独立，不参与覆盖链。
+ * v3 设计（2026-06-19）：
+ * - 覆盖链：defaults.json → agent/config.json → relation/config.json
+ * - 所有参数统一在 config.json，不再有 behavior.json
+ * - 进程级 evolclaw.json：独立，不参与覆盖链
  *
  * 详见 docs/config/01-overview.md
  */
@@ -23,6 +24,7 @@ import {
 } from '../paths.js';
 import { atomicReadJson, atomicWriteJson } from '../utils/atomic-write.js';
 import { fileCache } from '../core/daemon-file-cache.js';
+import { isValidAid } from '../aun/aid/validation.js';
 import {
   loadSchema,
   currentVersion,
@@ -30,7 +32,6 @@ import {
   type SchemaEntry,
 } from './schema-registry.js';
 import { mergeLayers, expandVars, buildEnvResolver, type EnvScope } from './merge.js';
-// behavior.js 已删除（v3 设计去除 behavior.json）
 import { normalizeAgentLifecycle } from './lifecycle.js';
 import { mergeWithRoleConstraints } from './role-constraints.js';
 import { mergeRolesConfig, diffRolesConfig } from './roles-merge.js';
@@ -54,7 +55,6 @@ export enum ConfigTarget {
   Defaults = 'defaults',                // agents/defaults.json
   Agent = 'agent',                      // agents/{aid}/config.json
   Relation = 'relation',                // agents/{aid}/relations/{peerKey}/config.json
-  // Behavior 和 RelationBehavior 已删除（v3 设计去除 behavior.json）
   Roles = 'roles',                      // roles.json（全局角色定义，overlay 模型）
   RoleAssignments = 'role-assignments',  // agents/{aid}/role-assignments.json
 }
@@ -110,7 +110,6 @@ function targetPath(target: ConfigTarget, sel?: Selector): string {
     case ConfigTarget.Relation:
       requirePeer(sel, target);
       return agentRelationConfig(sel!.self!, sel!.peerKey!);
-    // Behavior 和 RelationBehavior cases 已删除（v3 设计）
   }
 }
 
@@ -157,16 +156,26 @@ export function read<T = any>(target: ConfigTarget, sel?: Selector, opts: ReadOp
   // schema 版本迁移（read 时若 $schema_version < current）
   const migrated = migrateIfNeeded(target, raw, file);
   const normalized = target === ConfigTarget.Agent
-    ? normalizeAgentConfigForRead(migrated as any) as T
+    ? normalizeAgentConfigForRead(migrated as any, sel?.self) as T
     : migrated;
   if (!opts.expand) return normalized;
   const resolver = buildEnvResolver(envScopeFor(sel));
   return expandVars(normalized, resolver);
 }
 
-function normalizeAgentConfigForRead<T extends Record<string, any>>(value: T): T {
+function normalizeAgentConfigForRead<T extends Record<string, any>>(value: T, aid?: string): T {
   const config = normalizeAgentLifecycle(value) as T;
   const mutable = config as Record<string, any>;
+
+  // AID 校验（如果提供了 aid）
+  if (aid && mutable.aid && mutable.aid !== aid) {
+    const filePath = targetPath(ConfigTarget.Agent, { self: aid });
+    throw new ConfigError(
+      'VALIDATION_ERROR',
+      `${filePath}: aid field "${mutable.aid}" != directory name "${aid}"`
+    );
+  }
+
   // Legacy configs used top-level "agents" for baseagent settings.
   // Keep read compatibility, but never write the obsolete field back.
   if (mutable.agents && typeof mutable.agents === 'object' && !Array.isArray(mutable.agents)) {
@@ -175,6 +184,12 @@ function normalizeAgentConfigForRead<T extends Record<string, any>>(value: T): T
       : mutable.agents;
     delete mutable.agents;
   }
+
+  // 清理 projects.defaultPath 尾部斜杠
+  if (mutable.projects?.defaultPath && typeof mutable.projects.defaultPath === 'string') {
+    mutable.projects.defaultPath = mutable.projects.defaultPath.replace(/[/\\]+$/, '');
+  }
+
   return config;
 }
 
@@ -195,6 +210,33 @@ export interface WriteOpts {
   skipValidate?: boolean;
 }
 
+function normalizeAgentConfigForWrite<T extends Record<string, any>>(value: T): T {
+  const mutable = { ...value } as Record<string, any>;
+
+  // AID 格式校验
+  if (mutable.aid && !isValidAid(mutable.aid)) {
+    throw new ConfigError(
+      'VALIDATION_ERROR',
+      `Invalid aid "${mutable.aid}" (must be a valid multi-level domain like mybot.agentid.pub)`
+    );
+  }
+
+  // 规范化 projects 字段：只保留 rootPath 和 defaultPath
+  if (mutable.projects && typeof mutable.projects === 'object') {
+    const projects = mutable.projects as Record<string, any>;
+    const normalized: Record<string, any> = {};
+    if (typeof projects.rootPath === 'string') normalized.rootPath = projects.rootPath;
+    if (typeof projects.defaultPath === 'string') normalized.defaultPath = projects.defaultPath;
+    if (Object.keys(normalized).length > 0) {
+      mutable.projects = normalized;
+    } else {
+      delete mutable.projects;
+    }
+  }
+
+  return mutable as T;
+}
+
 /** 写入：① schema 校验 ② ensureFile 目录 ③ 原子写入。快照由调用方/启动流程统筹。 */
 export function write<T = any>(target: ConfigTarget, value: T, sel?: Selector, opts: WriteOpts = {}): void {
   const schema = loadSchema(TARGET_SCHEMA[target]);
@@ -203,8 +245,11 @@ export function write<T = any>(target: ConfigTarget, value: T, sel?: Selector, o
   const migrated = target === ConfigTarget.Roles
     ? migrateIfNeeded(target, withVer, file)
     : withVer;
-  // v3 设计：不再有单独的 behavior 归一化
-  const normalized = migrated;
+
+  // Agent config 写入规范化（aid 校验、projects 字段清理）
+  const normalized = target === ConfigTarget.Agent
+    ? normalizeAgentConfigForWrite(migrated as any) as any
+    : migrated;
 
   // 1. Schema 校验
   if (!opts.skipValidate) {
@@ -267,7 +312,7 @@ export function writeRoles(full: RolesConfig, opts: WriteOpts = {}): void {
   const diff = diffRolesConfig(getBuiltinRolesConfig(), full);
   write(ConfigTarget.Roles, diff, undefined, opts);
   clearRolesCache();
-  syncNoOverrideRoleModelsForAllAgents(); // stub 版本不需要参数
+  syncNoOverrideRoleModelsForAllAgents(full); // v3: 传入 roles 参数
 }
 
 function validateOrThrow(schema: SchemaEntry, value: unknown, target: ConfigTarget): void {
@@ -496,8 +541,8 @@ function deepMerge(target: any, source: any): any {
 }
 
 /**
- * 合并视图：先合并 H 链，再叠加 HA 行为链，最后应用角色约束。
- * 同名行为字段以 behavior.json 链为高优先级。
+ * 合并视图：合并覆盖链（defaults → agent/config → relation/config），
+ * 然后应用角色约束（如有）。v3 设计所有参数统一在 config.json。
  */
 export function resolveEffective(sel: Selector, opts: ReadOpts = {}): EffectiveAgentConfig {
   const config = resolveAgentConfig(sel, opts);
@@ -532,7 +577,7 @@ export function resolveEffective(sel: Selector, opts: ReadOpts = {}): EffectiveA
     roles: config.roles,
   };
 
-  // v3 设计：不再有 behavior 链，直接返回 effective
+  // v3 设计：直接返回 effective，然后应用角色约束（如有）
   let result = effective;
 
   // 如果有 peerKey，应用角色约束（优先使用 sel.role）
@@ -602,7 +647,7 @@ export function resolveEffective(sel: Selector, opts: ReadOpts = {}): EffectiveA
 
 /**
  * 配置写入前的角色约束校验
- * 仅对 RelationBehavior 进行角色约束检查
+ * 仅对 Relation 进行角色约束检查
  *
  * @param target 配置目标
  * @param config 待写入配置
@@ -693,7 +738,7 @@ export function routeField(
 
 /**
  * 给定 selector 作用域 + 完整字段路径，判定 canonical 写入落点。
- * H 字段写 config/defaults/evolclaw；HA 行为字段写 behavior.json。
+ * v3 设计：所有参数统一在 config.json，按作用域路由到对应层级。
  */
 export function routeFieldPath(
   fieldPath: string,
@@ -704,9 +749,12 @@ export function routeFieldPath(
   if (scope === 'defaults') return routeIn('defaults', ConfigTarget.Defaults, topField);
 
   if (isBehaviorFieldPath(fieldPath)) {
-    // v3 设计：relation 也用 relation-config
-    const target = ConfigTarget.Relation;
-    return routeIn('behavior', target, topField);
+    // v3 设计：行为字段按作用域路由到对应的 schema
+    if (scope === 'agent') {
+      return routeIn('agent-config', ConfigTarget.Agent, topField);
+    }
+    // relation 作用域：行为字段在 relation-config 中
+    return routeIn('relation-config', ConfigTarget.Relation, topField);
   }
 
   if (scope === 'agent') return routeIn('agent-config', ConfigTarget.Agent, topField);
@@ -745,7 +793,6 @@ export function listFields(scope: ConfigScope): FieldRoute[] {
   if (scope === 'defaults') { add('defaults', ConfigTarget.Defaults); return out; }
   if (scope === 'agent') {
     add('agent-config', ConfigTarget.Agent);
-    // v3 设计：不再有单独的 behavior schema
     return out;
   }
   // relation

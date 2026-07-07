@@ -36,9 +36,8 @@ import type {
   DebugBlock,
 } from './types.js';
 import { CONFIG_SCHEMA_VERSION } from './types.js';
-import { resolveAgentConfig, resolveEffective } from './config/config-manager.js';
+import { ConfigTarget, read as cfgRead, write as cfgWrite, resolveAgentConfig, resolveEffective } from './config/config-manager.js';
 import { expandVars, buildEnvResolver } from './config/merge.js';
-// behavior.js 已删除（v3 设计去除 behavior.json）
 import { normalizeAgentLifecycle } from './config/lifecycle.js';
 import { logger } from './utils/logger.js';
 
@@ -255,36 +254,22 @@ export function autoMigrateIfNeeded(): void {
   /* no-op: legacy migration removed (config-system v2 fresh init) */
 }
 
+/**
+ * @deprecated Use ConfigManager.read(ConfigTarget.Agent, { self: aid }, { expand: true, cache: true }) instead.
+ * This wrapper exists for backward compatibility. All logic (aid validation, path cleaning, env expansion)
+ * is now handled by ConfigManager.
+ */
 export function loadAgent(aid: string): AgentConfig | null {
-  const p = agentConfigPath(aid);
-  const raw = atomicReadJson<AgentConfig>(p);
-  if (raw === null) return null;
-  if (raw.aid !== aid) {
-    throw new Error(`[config] ${p}: aid field "${raw.aid}" != directory name "${aid}"`);
-  }
-  const cfg = normalizeAgentLifecycle(expandEnvRefsForAgent(raw, aid));
-  if (cfg.projects?.defaultPath) {
-    cfg.projects.defaultPath = cfg.projects.defaultPath.replace(/[/\\]+$/, '');
-  }
-  return cfg;
+  return cfgRead<AgentConfig>(ConfigTarget.Agent, { self: aid }, { expand: true, cache: true });
 }
 
+/**
+ * @deprecated Use ConfigManager.write(ConfigTarget.Agent, value, { self: value.aid }) instead.
+ * This wrapper exists for backward compatibility. All logic (aid validation, projects normalization)
+ * is now handled by ConfigManager.
+ */
 export function saveAgent(value: AgentConfig): void {
-  if (value.projects) {
-    const projects = value.projects;
-    const normalized: NonNullable<AgentConfig['projects']> = {};
-    if (typeof projects.rootPath === 'string') normalized.rootPath = projects.rootPath;
-    if (typeof projects.defaultPath === 'string') normalized.defaultPath = projects.defaultPath;
-    if (Object.keys(normalized).length > 0) value = { ...value, projects: normalized };
-    else {
-      const { projects: _projects, ...rest } = value;
-      value = rest as AgentConfig;
-    }
-  }
-  if (!isValidAid(value.aid)) {
-    throw new Error(`[config] saveAgent: invalid aid "${value.aid}" (must be a valid multi-level domain like mybot.agentid.pub)`);
-  }
-  atomicWriteJson(agentConfigPath(value.aid), value);
+  cfgWrite(ConfigTarget.Agent, value, { self: value.aid });
 }
 
 export interface AgentLoadIssue {
@@ -447,18 +432,6 @@ export function validateAgentConfig(cfg: AgentConfig): string[] {
 }
 
 // ── 合并 ───────────────────────────────────────────────────────────────
-
-/**
- * @deprecated Compatibility shim for older callers/tests.
- *
- * Runtime merging is owned by ConfigManager.resolveEffective(). This helper keeps
- * the old direct API alive while also overlaying HA fields from behavior.json.
- */
-export function mergeForAgent(agent: AgentConfig, defaults: DefaultsConfig | null): AgentConfig {
-  const hMerged = defaults ? deepMergeObject(defaults, agent) as AgentConfig : { ...agent };
-  // v3 设计：不再有 behavior 链，直接返回合并结果
-  return hMerged as AgentConfig;
-}
 
 // ── 目录骨架 ───────────────────────────────────────────────────────────
 

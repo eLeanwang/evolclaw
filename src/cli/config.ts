@@ -5,7 +5,7 @@
  *            snapshot prune history diff restore current boots
  * selector：--self / --peer / --default / --process
  *
- * 字段按 owner 路由：H 字段写 config/defaults/evolclaw，HA 行为字段写 behavior.json。
+ * v3 设计：所有参数统一在 config.json，权限控制在 API 层。
  */
 
 import { isHelpFlag, wantsHelp, getArgValue } from './help.js';
@@ -137,7 +137,7 @@ function cmdGet(args: string[], formatJson: boolean): void {
     return emit(formatJson, { ok: true, field, value: val ?? null, scope }, () =>
       `${field} = ${JSON.stringify(val ?? null)}  (process，链外单层)`);
   }
-  // effective 值 + 解析链：合并 H + behavior
+  // effective 值 + 解析链：合并 H 链（defaults → agent → relation）
   const eff = resolveEffective(sel);
   let route: FieldRoute;
   try { route = routeFieldPath(field!, scope === 'defaults' ? 'defaults' : scope); }
@@ -390,7 +390,7 @@ const HELP = `用法: evolclaw config <command> [options]
 
 参数读写:
   get <field>              读 effective 值 + 来源标注
-  set <field> <value>      写参数（scope 由 selector 推断，config/behavior 自动判定）
+  set <field> <value>      写参数（scope 由 selector 推断，自动判定写入目标）
   unset <field>            删除某层显式设置，回落下一层
   show                     查看某一层文件原始内容（不合并，凭证显示 \${VAR}）
   effective                打印合并后的全部生效配置 + 来源

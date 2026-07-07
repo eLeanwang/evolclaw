@@ -1,9 +1,8 @@
 /**
  * snapshot —— 配置快照与回滚。
  *
- * 快照范围 = 整个配置文件体系（evolclaw.json + agents/defaults.json + 每 agent 的
- * config.json/behavior.json + 每关系的 config.json/behavior.json）+ extra_backup 声明文件。
- * **不含 .env**（凭证不进版本库）。
+ * v3 设计快照范围：evolclaw.json + agents/defaults.json + 每 agent 的 config.json
+ * + 每关系的 config.json + extra_backup 声明文件。**不含 .env**（凭证不进版本库）。
  *
  * 版本号：全量百位递增（v100/v200…），增量嵌套其下（v101…v199，每全量 ≤99 个增量）。
  * 目录：{root}/backups/config/v100/{meta.json, snapshot/...} + v101/{meta.json, delta/...}
@@ -62,7 +61,6 @@ export function collectConfigFiles(root: string): string[] {
       if (!entry.isDirectory()) continue;
       const adir = path.join(agentsRoot, entry.name);
       pushIf(path.join(adir, 'config.json'));
-      pushIf(path.join(adir, 'behavior.json'));
       // extra_backup 声明
       collectExtraBackup(adir, root, out);
       const relations = path.join(adir, 'relations');
@@ -71,7 +69,6 @@ export function collectConfigFiles(root: string): string[] {
           if (!pk.isDirectory() || pk.name.startsWith('_')) continue;
           const rdir = path.join(relations, pk.name);
           pushIf(path.join(rdir, 'config.json'));
-          pushIf(path.join(rdir, 'behavior.json'));
           collectExtraBackup(rdir, root, out);
         }
       }

@@ -857,10 +857,9 @@ export type ChannelInstance =
   | WecomChannelInstance;
 
 // ════════════════════════════════════════════════════════════════════════
-// 配置体系 v3（H 配置链 + HA 行为链）
+// 配置体系 v3
 //
-// H 覆盖链：defaults.json → agent/config.json → relation/config.json。
-// HA 行为链：agent/behavior.json → role(behavior.roles) → relation/behavior.json。
+// 覆盖链：defaults.json → agent/config.json → relation/config.json
 // 进程级 evolclaw.json 是链外单独作用域。
 //
 // schema 是「字段 → 类型」唯一事实源（kits/schemas/）。
@@ -962,7 +961,7 @@ export interface AgentConfig {
 
 /**
  * 关系级 agents/<aid>/relations/<peerKey>/config.json —— 覆盖链最高优先级。
- * 支持针对不同用户的 H 链个性化配置；行为覆盖写 relation behavior.json。
+ * 支持针对不同用户的个性化配置（v3 设计所有参数统一在 config.json）。
  */
 export interface RelationConfig {
   $schema_version: number;
@@ -987,8 +986,8 @@ export interface RelationConfig {
 
 /**
  * 运行时合并结果（下游统一视图）。
- * 先合并 H 链：defaults → agent/config → relation/config，
- * 再叠加 HA 行为链：agent behavior → role → relation behavior。
+ * 合并覆盖链：defaults → agent/config → relation/config，
+ * 然后应用角色约束（如有）。
  * 字段保持 optional——覆盖链全空即 undefined，由消费方按字段语义处理。
  */
 export interface EffectiveAgentConfig {
