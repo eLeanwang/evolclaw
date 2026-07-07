@@ -102,10 +102,9 @@
 | 5.9 | `baseagents.claude.excludeDynamicSections` | ❌ | ❌ | ❌ | ❌ | agent / relation | H | ✅ ★ | 排除动态章节 |
 | 5.10 | `baseagents.codex.model` | ❌ | ❌ | ❌ | ❌ | defaults / agent / relation | H | ✅ ★ | Codex 模型 |
 | 5.11 | `baseagents.codex.effort` | ❌ | ❌ | ❌ | ❌ | defaults / agent / relation | H | ✅ ★ | Codex 推理强度 |
-| 5.12 | `baseagents.codex.enableRequestUserInput` | ❌ | ❌ | ❌ | ❌ | agent / relation | H | ✅ ★ | 启用用户输入请求 |
-| 5.13 | `baseagents.codex.approvalsReviewer` | ❌ | ❌ | ❌ | ❌ | agent / relation | H | ✅ ★ | 审批审查者 |
-
-`baseagents.codex.reasoning` 已并入 `baseagents.codex.effort`；旧配置仍兼容读取，但新写入不再生成 `reasoning`。
+| 5.12 | `baseagents.codex.reasoning` | ❌ | ❌ | ❌ | ❌ | defaults / agent / relation | H | ✅ ★ | Codex 推理模式 |
+| 5.13 | `baseagents.codex.enableRequestUserInput` | ❌ | ❌ | ❌ | ❌ | agent / relation | H | ✅ ★ | 启用用户输入请求 |
+| 5.14 | `baseagents.codex.approvalsReviewer` | ❌ | ❌ | ❌ | ❌ | agent / relation | H | ✅ ★ | 审批审查者 |
 | 5.15 | `baseagents.gemini.model` | ❌ | ❌ | ❌ | ❌ | defaults / agent / relation | H | ✅ ★ | Gemini 模型 |
 | 5.16 | `baseagents.gemini.mode` | ❌ | ❌ | ❌ | ❌ | agent / relation | H | ✅ ★ | Gemini 模式（cli/sdk） |
 
@@ -157,14 +156,14 @@
 
 ---
 
-## 十、项目与工作目录（2个参数）
+## 十、项目与工作目录（4个参数）
 
 | # | 参数名 | process | defaults | agent | relation | 建议存放层级 | 建议权限 | 支持关系级 | 说明 |
 |---|--------|---------|----------|-------|----------|-------------|---------|-----------|------|
-| 10.1 | `projects.rootPath` | ❌ | ✅ | ❌ | ❌ | defaults | H | ❌ | 创建 agent 时派生默认项目路径 |
-| 10.2 | `projects.defaultPath` | ❌ | ✅ | ✅ | ❌ | defaults / agent | H | ❌ | Agent 项目路径 |
-
-`projects.rootPath` 仅用于 defaults 作用域的创建兜底；单个 agent 为单项目模型，ECWeb / menu update 只允许写 `projects.defaultPath`。`projects.autoCreate` 与 `projects.list` 已不再是公开配置契约。
+| 10.1 | `projects.rootPath` | ❌ | ❌ | ❌ | ❌ | defaults / agent | H | ❌ | 项目根路径（代码支持但未配置） |
+| 10.2 | `projects.defaultPath` | ❌ | ❌ | ✅ | ❌ | defaults / agent | H | ❌ | 默认项目路径 |
+| 10.3 | `projects.autoCreate` | ❌ | ❌ | ✅ | ❌ | agent | H | ❌ | 自动创建项目 |
+| 10.4 | `projects.list` | ❌ | ❌ | ✅ (对象) | ❌ | agent | H | ❌ | 项目列表（名称→路径映射） |
 
 ---
 
