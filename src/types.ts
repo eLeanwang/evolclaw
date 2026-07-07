@@ -740,7 +740,7 @@ export interface ChatmodeBlock {
  * 响应模式配置块（响应系统插件化）。
  *
  * 解析优先级（高→低）：overrides[peerKey] > default_private/default_group > 系统兜底。
- * 接入点：src/response-modes/resolver.ts。
+ * 接入点：src/response-system/resolver.ts。
  *
  * 注：当前与 chatmode/dispatch 并存（过渡期）。Phase 6 真实模式接管后，
  * chatmode/dispatch 将被删除（D4），届时 interactive/proactive 成为内置响应模式。

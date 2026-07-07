@@ -148,7 +148,7 @@ modes/dual-session-lite/
 **完整实施计划参考**：
 - `docs/response-system/RESPONSE-MODE-ARCHITECTURE-V2.md`（架构设计）
 - `docs/response-system/dual-session-lite/ARCHITECTURE-FINAL.md`（详细架构）
-- `docs/response-system/dual-session-lite/IMPLEMENTATION-PLAN.md`（原实施计划）
+- `docs/response-system/dual-session-lite/IMPLEMENTATION-PLAN.md`（完整实施计划，已对齐方案 1）
 
 ---
 

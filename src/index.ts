@@ -15,7 +15,7 @@ import { CodexSessionFileAdapter } from './core/session/adapters/codex-session-f
 import { GeminiSessionFileAdapter } from './core/session/adapters/gemini-session-file-adapter.js';
 import { resolveAnthropicConfig } from './agents/baseagent.js';
 import { loadDefaults, loadAllAgents, ensureAgentDirSkeleton, migrateIdentitiesIfNeeded, migrateProcessConfigIfNeeded, loadEvolclawConfig } from './config-store.js';
-import { initConfigManager } from './config/config-manager.js';
+import { initConfigManager, resolveEffective } from './config/config-manager.js';
 import { shouldFailFastForMissingOwners } from './config/owner-policy.js';
 import { resolvePeerRoleDetail, roleToSessionIdentity } from './config/peer-role-resolver.js';
 import { getFirstRoleAssignment, listRoleAssignments } from './config/role-assignments.js';
@@ -783,9 +783,29 @@ async function main() {
     return roleToSessionIdentity(detail.effectiveRole);
   };
 
+  const modeIdToChatMode = (modeId: unknown): 'interactive' | 'proactive' | undefined => (
+    modeId === 'interactive' || modeId === 'proactive' ? modeId : undefined
+  );
+
   const sessionManager = new SessionManager(paths.sessionsDir, eventBus,
     resolveSessionIdentity,
-    (channel) => agentRegistry.resolveByChannel(channel)?.config.chatmode,
+    (channel) => {
+      const owningAgent = agentRegistry.resolveByChannel(channel);
+      if (!owningAgent?.aid) return undefined;
+      try {
+        const effective = resolveEffective({ self: owningAgent.aid }, { cache: true });
+        const legacy = effective.chatmode ?? owningAgent.config.chatmode;
+        const responseModes = effective.response_modes;
+        return {
+          private: modeIdToChatMode(responseModes?.default_private) ?? legacy?.private,
+          group: modeIdToChatMode(responseModes?.default_group) ?? legacy?.group,
+          nothuman: legacy?.nothuman,
+        };
+      } catch (e) {
+        logger.warn('[SessionManager] resolve chatMode defaults failed for channel=' + channel + ': ' + (e instanceof Error ? e.message : String(e)));
+        return owningAgent.config.chatmode;
+      }
+    },
   );
 
   // chatMode 作为新 session 初始值读取 owning agent effective config；已有 session 保持自身状态。

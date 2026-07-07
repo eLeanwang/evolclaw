@@ -71,7 +71,7 @@ export class ResponseModeCoordinator {
     rmConfig: any,
     chatModeFallback: string | undefined,
     contextDeps: Omit<ContextDeps, 'modeConfig'>,
-  ): { mode: ResponseMode; context: ResponseModeContext } | null {
+  ): { mode: ResponseMode; context: ResponseModeContext; source: string } | null {
     try {
       let resolved = this.resolver.resolve(chatType, peerKey, rmConfig);
       if (resolved.source !== 'override' && chatModeFallback && this.registry.has(chatModeFallback)) {
@@ -79,8 +79,9 @@ export class ResponseModeCoordinator {
         resolved = { mode, config: rmConfig?.configs?.[chatModeFallback] ?? {}, source: 'session' };
       }
       const mode = resolved.mode;
+      contextDeps.logger.debug('[ResponseSystem] resolveMode mode=' + mode.id + ' source=' + resolved.source + ' chatType=' + chatType + ' peerKey=' + (peerKey ?? 'none'));
       const context = this.contextBuilder.build(mode.id, { ...contextDeps, modeConfig: resolved.config });
-      return { mode, context };
+      return { mode, context, source: resolved.source };
     } catch (e) {
       contextDeps.logger.warn(`[Coordinator] resolveMode failed: ${e instanceof Error ? e.message : String(e)}`);
       return null;
@@ -111,6 +112,7 @@ export class ResponseModeCoordinator {
       }
 
       const mode = resolved.mode;
+      deps.contextDeps.logger.debug('[ResponseSystem] resolveInbound mode=' + mode.id + ' source=' + resolved.source + ' chatType=' + chatType + ' peerKey=' + (deps.peerKey ?? 'none') + ' fallback=' + (chatModeFallback ?? 'none'));
       const context = this.contextBuilder.build(mode.id, {
         ...deps.contextDeps,
         modeConfig: resolved.config,

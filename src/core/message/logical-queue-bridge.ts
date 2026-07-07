@@ -15,9 +15,9 @@
  * 默认行为：无逻辑队列时退化为纯 FIFO（与重构前一致）。
  */
 
-import type { MessageQueueInterface, InboundMessage } from '../../response-modes/types.js';
+import type { MessageQueueInterface, InboundMessage } from '../../response-system/types.js';
 import type { Message } from '../../types.js';
-import { FIFOQueue } from '../../response-modes/queues/fifo-queue.js';
+import { FIFOQueue } from '../../response-system/queues/fifo-queue.js';
 
 /** 从物理队列项中提取 messageId 的最小形状 */
 interface HasMessage {

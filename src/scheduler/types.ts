@@ -5,7 +5,7 @@
  * 接口已定义，为未来扩展预留扩展点
  */
 
-import type { ResponseMode } from '../response-modes/types.js';
+import type { ResponseMode } from '../response-system/types.js';
 
 // ============================================================================
 // 调度上下文

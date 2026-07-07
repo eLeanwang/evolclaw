@@ -116,6 +116,7 @@ aun/__MACOSX/
 
 # 项目文档（不公开）
 CLAUDE.md
+AGENTS.md
 DEPLOYMENT.md
 src/experimental/
 

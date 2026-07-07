@@ -17,7 +17,7 @@ import {
   readField, writeField, determineFieldScope, normalizePeer, ModelScopeError,
   type ScopeSelector,
 } from '../core/model/field-scope.js';
-import { BUILTIN_MODE_META, findBuiltinMeta } from '../response-modes/builtin-meta.js';
+import { BUILTIN_MODE_META, findBuiltinMeta } from '../response-system/builtin-meta.js';
 import type { ResponseModesConfig } from '../types.js';
 
 const FIELD = 'response_modes';

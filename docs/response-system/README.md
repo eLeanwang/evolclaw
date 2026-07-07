@@ -1,5 +1,7 @@
 # 响应模式插件化系统文档
 
+> 当前响应系统设计与实施的唯一事实来源入口：docs/response-system/INDEX.md。新设计统一采用 src/response-system/engines + modes，旧 src/response-modes/ 仅作为 V1 迁移来源或历史参考。
+
 ## 概述
 
 响应模式插件化系统是 EvolClaw 的核心架构升级，旨在将会话响应机制从硬编码转变为灵活的插件化架构。通过这套系统，你可以：

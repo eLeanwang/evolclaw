@@ -38,10 +38,10 @@ import { normalizeUsage } from '../../stats/normalizer.js';
 import { resolvePrices } from '../../stats/price-resolver.js';
 import { getBudgetStatus } from '../../stats/budget.js';
 import { snapshot } from './response-snapshot.js';
-import { ResponseModeCoordinator, type ResolvedInbound } from '../../response-modes/coordinator.js';
-import { ResponseModeRegistry } from '../../response-modes/registry.js';
-import { registerBuiltinModes } from '../../response-modes/core/index.js';
-import type { ProcessContext, ToolUseContext, CompleteContext, AfterProcessContext, RunConfig } from '../../response-modes/types.js';
+import { ResponseModeCoordinator, type ResolvedInbound } from '../../response-system/coordinator.js';
+import { ResponseModeRegistry } from '../../response-system/registry.js';
+import { registerBuiltinModes } from '../../response-system/modes/index.js';
+import type { ProcessContext, ToolUseContext, CompleteContext, AfterProcessContext, RunConfig } from '../../response-system/types.js';
 
 type StreamRunResult = {
   isError: boolean;
@@ -923,6 +923,12 @@ export class ResponseEngine implements IMessageProcessor {
             agentDir: resolvePaths().agentsDir,
           },
         );
+
+    if (resolvedMode) {
+      logger.info('[ResponseSystem] selected mode=' + resolvedMode.mode.id + ' source=' + resolvedMode.source + ' chatType=' + chatType + ' peerKey=' + (peerKey ?? 'none') + ' fallback=' + chatModeFallback);
+    } else {
+      logger.info('[ResponseSystem] selected mode=override/fallback source=trigger-or-resolve-failed chatType=' + chatType + ' peerKey=' + (peerKey ?? 'none') + ' fallback=' + chatModeFallback);
+    }
 
     // 最终 chatMode：trigger override > 插件解析结果 > fallback
     const effectiveChatMode = message.triggerMeta?.chatModeOverride
@@ -2407,7 +2413,7 @@ export class ResponseEngine implements IMessageProcessor {
     shouldSuppress: () => boolean,
     proactive?: ProactiveRuntimeState | null,
     /** [迁移点4/5] 响应模式插件 + 状态，用于调 onToolUse/onComplete 钩子 */
-    modeHooks?: { mode: import('../../response-modes/types.js').ResponseMode; state: Map<string, any> }
+    modeHooks?: { mode: import('../../response-system/types.js').ResponseMode; state: Map<string, any> }
   ): Promise<StreamRunResult> {
     // Per-session agent name for stats bucketing
     const statsChannelKey = session.channel === 'daemon' ? session.channel : (session.metadata?.channelKey || session.channel);
