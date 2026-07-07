@@ -165,22 +165,24 @@ ConfigManager
 
 ### API 端点
 
+**注意**：当前 ECWeb 主要提供角色管理相关的 API，通用配置管理 API（`/api/config/*`）尚未实现。配置管理请使用 CLI 命令 `ec config`。
+
+当前可用的 API：
+
 | 端点 | 方法 | 功能 |
 |------|------|------|
-| `/api/config/list` | GET | 列出所有配置文件 |
-| `/api/config/get` | GET | 读取配置（支持 selector） |
-| `/api/config/effective` | GET | 读取合并后配置 |
-| `/api/config/set` | POST | 修改配置 |
-| `/api/config/snapshot` | POST | 创建快照 |
-| `/api/config/history` | GET | 快照历史 |
-| `/api/config/diff` | GET | 版本对比 |
-| `/api/config/restore` | POST | 恢复版本 |
+| `/api/roles/*` | GET/POST | 角色分配管理 |
+| `/api/role-definitions/*` | GET/POST | 角色定义管理 |
+| `/api/assignments/peer/*` | GET/POST | 对端角色分配 |
+| `/api/stats/*` | GET | 统计数据 |
+| `/api/models/*` | GET | 模型信息 |
+| `/api/available-baseagents` | GET | 可用的 base agent |
+| `/api/pair-code` | GET | 获取配对码 |
 
 **权限验证**：
-- 所有 API 需要 token 认证
-- 操作权限与 CLI 一致
-- 只读操作允许 viewer 角色
-- 写操作需要 owner 权限
+- 所有 API 需要 token 认证（通过配对码获取）
+- 当前主要用于 ECWeb 面板的只读展示和角色管理
+- 配置修改操作请使用 CLI
 
 ---
 

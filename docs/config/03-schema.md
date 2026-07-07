@@ -106,7 +106,7 @@ export function migrate(old: object): object;   // 旧版本完整 JSON → 新�
   "schemas": {
     "evolclaw":       { "currentVersion": 1 },
     "defaults":       { "currentVersion": 1 },
-    "agent-config":   { "currentVersion": 2 },
+    "agent-config":   { "currentVersion": 1 },
     "relation-config":{ "currentVersion": 1 }
   },
   "history": [
