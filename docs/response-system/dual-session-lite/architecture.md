@@ -178,10 +178,26 @@ class AuxiliaryQueue {
   private extractBatch(): Message[] {
     const batch: Message[] = [];
     let totalBytes = 0;
+    let batchRole: string | undefined;  // 批次内统一的角色
     
     for (const [id, qm] of this.messages) {
       if (qm.state === MessageState.PENDING || 
           (qm.state === MessageState.DELAY && qm.transferAt && qm.transferAt <= new Date())) {
+        
+        // 【角色权限一致性】群聊中检查发送者角色是否一致
+        if (this.chatType === 'group') {
+          const messageRole = qm.message.role;  // owner | admin | guest | anonymous
+          
+          if (batch.length === 0) {
+            // 第一条消息，记录角色
+            batchRole = messageRole;
+          } else if (batchRole !== messageRole) {
+            // 角色不一致，停止提取当前批次
+            // 当前消息留在队列中，等待下一轮提取
+            break;
+          }
+        }
+        
         batch.push(qm.message);
         totalBytes += JSON.stringify(qm.message).length;
         
@@ -458,6 +474,33 @@ class MainQueue {
   
   // 提取批次
   extractBatch(): Message[] {
+    // 【角色权限一致性】群聊中检查发送者角色是否一致
+    if (this.chatType === 'group') {
+      const batch: Message[] = [];
+      let batchRole: string | undefined;
+      
+      for (let i = 0; i < Math.min(this.queue.length, this.config.maxBatchSize); i++) {
+        const message = this.queue[i];
+        const messageRole = message.role;
+        
+        if (i === 0) {
+          batchRole = messageRole;
+          batch.push(message);
+        } else if (batchRole === messageRole) {
+          batch.push(message);
+        } else {
+          // 角色不一致，停止提取
+          break;
+        }
+      }
+      
+      // 从队列中移除已提取的消息
+      this.queue.splice(0, batch.length);
+      this.processing = batch;
+      return batch;
+    }
+    
+    // 私聊：直接提取
     const batch = this.queue.splice(0, this.config.maxBatchSize);
     this.processing = batch;
     return batch;
@@ -818,6 +861,11 @@ class MainSession {
 **批次边界规则**：
 - 遇到第一个带 `hasError` 标记的消息时截止（除非它是批次第一条）
 - 错误消息不与正常消息混在同一批次
+- **【群聊权限控制】群聊中，批次内所有消息的发送者角色（role）必须一致**
+  - 角色包括：owner / admin / member / guest / anonymous
+  - 遇到第一条角色不一致的消息时停止提取（该消息留在队列）
+  - **原因**：Agent 处理批次时可能调用需要权限判断的命令（如 `ec config`），使用批次的统一角色（batchRole）进行权限判断
+  - **安全性**：防止低权限用户的消息与高权限用户的消息合并处理，避免权限提升
 
 **错误消息提取规则**：
 ```
@@ -902,6 +950,162 @@ HOLD 状态的消息
 - ✅ 批量处理降低 token 消耗（2 分钟内消息累积）
 - ✅ 系统鲁棒性（辅助会话挂了主会话仍能工作）
 - ✅ 自动恢复（辅助会话恢复后清除错误状态）
+
+---
+
+### 3.8 群聊批次角色权限一致性
+
+**问题背景**：
+
+在群聊场景中，Agent 处理消息批次时可能会调用需要权限判断的命令（如 `ec config set`）。这些命令通过 PreToolUse Hook 获取当前会话的 `batchRole` 进行权限判断。
+
+如果一个批次包含不同角色的发送者（如 owner 和 guest），会导致权限判断不明确：
+- 使用 owner 的权限？→ 会让 guest 的消息"借用"owner 权限（权限提升）
+- 使用 guest 的权限？→ 会导致 owner 的合法操作被拒绝
+- 使用最高权限？→ 同样存在权限提升风险
+
+**解决方案：批次角色一致性约束**
+
+#### 实现机制
+
+**1. 角色层级**
+```typescript
+const roleRank = {
+  anonymous: 0,
+  guest: 1,
+  member: 2,
+  admin: 3,
+  owner: 4,
+};
+```
+
+**2. 批次提取时检查**
+
+辅助队列（AuxiliaryQueue）和主队列（MainQueue）在提取批次时：
+
+```typescript
+// 群聊模式
+if (chatType === 'group') {
+  let batchRole: string | undefined;
+  
+  for (const message of queue) {
+    if (batch.length === 0) {
+      batchRole = message.role;  // 第一条消息的角色
+      batch.push(message);
+    } else if (message.role === batchRole) {
+      batch.push(message);  // 角色相同，继续
+    } else {
+      break;  // 角色不同，停止提取
+    }
+  }
+}
+```
+
+**3. batchRole 计算**
+
+消息队列在合并批次时计算 `batchRole`：
+
+```typescript
+function commonRole(messages: Message[]): string | undefined {
+  let role: string | undefined;
+  for (const msg of messages) {
+    if (!msg.role) return undefined;  // 有未知角色
+    if (!role) {
+      role = msg.role;
+    } else if (role !== msg.role) {
+      return undefined;  // 角色不一致
+    }
+  }
+  return role;  // 所有消息角色一致
+}
+```
+
+**4. 权限判断使用 batchRole**
+
+PreToolUse Hook 中：
+```typescript
+const session = sessionManager.getActiveSession(sessionId);
+const role = message.batchRole || session.identity?.role || 'anonymous';
+
+// 基础设施字段：只有 owner 能改
+if (isInfrastructureField(field) && role !== 'owner') {
+  return { decision: 'block', reason: '仅 owner 可修改基础设施配置' };
+}
+
+// 运行时配置字段：owner 和 admin 能改
+if (isRuntimeConfigField(field) && role !== 'owner' && role !== 'admin') {
+  return { decision: 'block', reason: '需要 admin 以上权限' };
+}
+```
+
+#### 权限矩阵
+
+| 批次场景 | batchRole | 基础设施字段 | 运行时配置字段 |
+|---------|-----------|-------------|---------------|
+| 全部 owner | owner | ✅ 允许 | ✅ 允许 |
+| 全部 admin | admin | ❌ 拒绝 | ✅ 允许 |
+| 全部 guest | guest | ❌ 拒绝 | ❌ 拒绝 |
+| **混合角色** | undefined | ❌ 拒绝 | ❌ 拒绝 |
+
+**关键**：混合角色批次的 `batchRole` 为 `undefined`，所有需要权限的操作都被拒绝。
+
+#### 场景示例
+
+**场景 A：角色一致（正常）**
+```
+队列：
+  - 消息 A（Alice, owner）："帮我统计数据"
+  - 消息 B（Alice, owner）："顺便改个配置"
+  - 消息 C（Alice, owner）："谢谢"
+
+提取批次：[A, B, C]
+batchRole: owner
+权限判断：✅ owner 可以修改配置
+```
+
+**场景 B：角色混合（安全拒绝）**
+```
+队列：
+  - 消息 A（Alice, owner）："帮我统计数据"
+  - 消息 B（Bob, guest）："顺便改个配置"
+  - 消息 C（Charlie, admin）："检查状态"
+
+提取批次 1：[A]（只提取 Alice）
+batchRole: owner
+权限判断：✅ owner 可以修改配置
+
+提取批次 2：[B]（只提取 Bob）
+batchRole: guest
+权限判断：❌ guest 不能修改配置
+```
+
+**场景 C：角色交替**
+```
+队列：
+  - 消息 1（owner）
+  - 消息 2（guest）
+  - 消息 3（owner）
+  - 消息 4（owner）
+
+提取批次 1：[消息 1]
+提取批次 2：[消息 2]
+提取批次 3：[消息 3, 消息 4]
+```
+
+#### 优势
+
+- ✅ **防止权限提升**：低权限用户无法"搭便车"借用高权限
+- ✅ **保守安全**：混合角色批次拒绝敏感操作
+- ✅ **批次完整性**：相同角色的消息合并处理，符合语义
+- ✅ **审计清晰**：每个批次有明确的权限上下文
+
+#### 实现位置
+
+- **文档**：`docs/response-system/dual-session-lite/architecture.md`（本文档）
+- **代码**：
+  - `src/core/message/message-queue.ts` - `commonRole()` 计算
+  - `src/agents/claude-runner.ts` - PreToolUse Hook 权限判断
+  - `src/core/command/ec-command-permission.ts` - ec 命令权限控制
 
 ---
 

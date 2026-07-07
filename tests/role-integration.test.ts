@@ -17,8 +17,9 @@ describe('role constraints integration', () => {
   });
 
   it('applies role constraints only from the explicit selector role', () => {
+    // v3: RelationBehavior → Relation（行为参数统一到 config.json）
     write(
-      ConfigTarget.RelationBehavior,
+      ConfigTarget.Relation,
       {
         permissionMode: 'bypass',
         baseagents: { claude: { model: 'claude-opus-4-8' } },
@@ -39,8 +40,9 @@ describe('role constraints integration', () => {
   });
 
   it('does not infer a role from peerKey when selector role is missing', () => {
+    // v3: RelationBehavior → Relation
     write(
-      ConfigTarget.RelationBehavior,
+      ConfigTarget.Relation,
       { permissionMode: 'bypass', baseagents: { claude: { model: 'claude-opus-4-8' } } },
       { self: aid, peerKey },
     );
@@ -51,15 +53,16 @@ describe('role constraints integration', () => {
   });
 
   it('validates relation behavior writes with provided role and defaults to guest otherwise', () => {
+    // v3: RelationBehavior → Relation
     const ownerResult = validateConfigWrite(
-      ConfigTarget.RelationBehavior,
+      ConfigTarget.Relation,
       { permissionMode: 'bypass' },
       { self: aid, peerKey, role: 'owner' },
     );
     expect(ownerResult.valid).toBe(true);
 
     const defaultResult = validateConfigWrite(
-      ConfigTarget.RelationBehavior,
+      ConfigTarget.Relation,
       { permissionMode: 'bypass' },
       { self: aid, peerKey },
     );

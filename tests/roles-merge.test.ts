@@ -4,10 +4,9 @@
 
 import { describe, it, expect } from 'vitest';
 import { mergeRolesConfig, diffRolesConfig } from '../src/config/roles-merge.js';
-import { ConfigTarget, read, writeRoles } from '../src/config/config-manager.js';
+import { ConfigTarget, read, write, writeRoles } from '../src/config/config-manager.js';
 import { rolesConfig } from '../src/paths.js';
 import { getBuiltinRolesConfig } from '../src/config/roles.js';
-import { readRelationBehavior, writeRelationBehavior } from '../src/config/behavior.js';
 import { setPrivateRoleAssignment } from '../src/config/role-assignments.js';
 import fs from 'fs';
 import type { RolesConfig } from '../src/types.js';
@@ -250,9 +249,15 @@ describe('writeRoles', () => {
     const peerId = 'guest-peer.agentid.pub';
     const peerKey = `aun#${peerId}`;
     setPrivateRoleAssignment(aid, peerId, 'guest');
-    writeRelationBehavior(aid, peerKey, {
-      baseagents: { claude: { model: 'claude-opus-4-8' } },
-    });
+    // v3: writeRelationBehavior → write(ConfigTarget.Relation)
+    write(
+      ConfigTarget.Relation,
+      {
+        $schema_version: 1,
+        baseagents: { claude: { model: 'claude-opus-4-8' } }
+      },
+      { self: aid, peerKey },
+    );
 
     const full = getBuiltinRolesConfig();
     full.roles.guest.permissions['baseagents.claude.model'] = {
@@ -262,7 +267,9 @@ describe('writeRoles', () => {
     };
     writeRoles(full);
 
-    expect(readRelationBehavior(aid, peerKey)?.baseagents?.claude?.model)
+    // v3: readRelationBehavior → read(ConfigTarget.Relation)
+    const relationConfig = read<any>(ConfigTarget.Relation, { self: aid, peerKey });
+    expect(relationConfig?.baseagents?.claude?.model)
       .toBe('claude-haiku-4-5-20251001');
   });
 });

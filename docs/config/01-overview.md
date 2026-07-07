@@ -1,7 +1,6 @@
 # 配置体系总体架构
 
 > EvolClaw 配置体系 v3 - 2026-06-19
-> 核心变更：去除 behavior.json，所有参数统一在 config.json，权限控制在 API 层
 
 ---
 
@@ -10,14 +9,9 @@
 ### 核心决策
 
 **所有参数统一在 config.json**
-- 不再区分 H 文件(config.json) 和 HA 文件(behavior.json)
-- 所有参数（基础设施 + 行为参数）都在同一个 config.json 中
+- 所有参数都在同一个 config.json 中
 - 权限控制在 API 层，而非文件级
-
-**为什么去除 behavior.json？**
-- 实际所有配置修改都通过 evolclaw 代码/CLI 完成
-- Hook 可以直接禁止 agent 直接读写**所有**配置文件
-- 文件级权限控制过于粗粒度，API 层控制更灵活
+- Hook 禁止 agent 直接读写所有配置文件
 
 ---
 
@@ -445,8 +439,4 @@ enum ConfigTarget {
 
 ---
 
-**版本历史**
-
-- v3 (2026-06-19)：去除 behavior.json，所有参数统一在 config.json
-- v2 (2026-06-14)：引入 H/HA 物理分离（已废弃）
-- v1 (2026-06-10)：初版设计
+**版本**：v3 (2026-06-19)

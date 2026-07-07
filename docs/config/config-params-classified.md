@@ -26,13 +26,13 @@
 
 | # | 参数名 | process | defaults | agent | relation | 建议存放层级 | 建议权限 | 支持关系级 | 说明 |
 |---|--------|---------|----------|-------|----------|-------------|---------|-----------|------|
-| 1.1 | `$schema_version` | ✅ | ✅ | ✅ | ❌ | process / defaults / agent / relation | H | ✅ | Schema 版本号 |
-| 1.2 | `aid` | ✅ | ❌ | ✅ | ❌ | process / agent | H | ❌ | Agent/进程 AID |
-| 1.3 | `owners[]` | ✅ | ❌ | ✅ | ❌ | process / defaults / agent | H | ❌ | 控制面鉴权名单（list 合并） |
-| 1.4 | `admins[]` | ❌ | ❌ | ❌ | ❌ | defaults / agent | H | ❌ | 管理员名单（代码支持但未配置） |
-| 1.5 | `enabled` | ❌ | ❌ | ✅ | ❌ | agent | H | ❌ | Agent 启用状态 |
-| 1.6 | `initialized` | ❌ | ❌ | ✅ | ❌ | agent | H | ❌ | AUN 首次初始化标记 |
-| 1.7 | `observable` | ❌ | ❌ | ✅ | ❌ | agent | H | ❌ | 观察者模式：入站/出站转发给 owners |
+| 1.1 | `$schema_version` | ✅ | ✅ | ✅ | ❌ | process / defaults / agent / relation | human-only | ✅ | Schema 版本号 |
+| 1.2 | `aid` | ✅ | ❌ | ✅ | ❌ | process / agent | human-only | ❌ | Agent/进程 AID |
+| 1.3 | `owners[]` | ✅ | ❌ | ✅ | ❌ | process / defaults / agent | human-only | ❌ | 控制面鉴权名单（list 合并） |
+| 1.4 | `admins[]` | ❌ | ❌ | ❌ | ❌ | defaults / agent | human-only | ❌ | 管理员名单（代码支持但未配置） |
+| 1.5 | `enabled` | ❌ | ❌ | ✅ | ❌ | agent | human-only | ❌ | Agent 启用状态 |
+| 1.6 | `initialized` | ❌ | ❌ | ✅ | ❌ | agent | human-only | ❌ | AUN 首次初始化标记 |
+| 1.7 | `observable` | ❌ | ❌ | ✅ | ❌ | agent | human-only | ❌ | 观察者模式：入站/出站转发给 owners |
 
 ---
 
@@ -40,12 +40,12 @@
 
 | # | 参数名 | process | defaults | agent | relation | 建议存放层级 | 建议权限 | 支持关系级 | 说明 |
 |---|--------|---------|----------|-------|----------|-------------|---------|-----------|------|
-| 2.1 | `aun.encryptionSeed` | ✅ | ❌ | ❌ | ❌ | process | H | ❌ | AUN 加密种子（仅进程级） |
-| 2.2 | `aun.keystorePath` | ❌ | ❌ | ❌ | ❌ | process | H | ❌ | AUN keystore 路径（代码支持但未配置） |
-| 2.3 | `aun.gatewayUrl` | ❌ | ❌ | ❌ | ❌ | defaults / agent | H | ❌ | AUN Gateway URL（代码支持但未配置） |
-| 2.4 | `baseagents.claude.baseUrl` | ❌ | ✅ | ❌ | ❌ | defaults / agent | H | ❌ | Claude API 端点 |
-| 2.5 | `baseagents.codex.baseUrl` | ❌ | ❌ | ❌ | ❌ | defaults / agent | H | ❌ | Codex API 端点（代码支持但未配置） |
-| 2.6 | `baseagents.gemini.baseUrl` | ❌ | ❌ | ❌ | ❌ | defaults / agent | H | ❌ | Gemini API 端点（代码支持但未配置） |
+| 2.1 | `aun.encryptionSeed` | ✅ | ❌ | ❌ | ❌ | process | human-only | ❌ | AUN 加密种子（仅进程级） |
+| 2.2 | `aun.keystorePath` | ❌ | ❌ | ❌ | ❌ | process | human-only | ❌ | AUN keystore 路径（代码支持但未配置） |
+| 2.3 | `aun.gatewayUrl` | ❌ | ❌ | ❌ | ❌ | defaults / agent | human-only | ❌ | AUN Gateway URL（代码支持但未配置） |
+| 2.4 | `baseagents.claude.baseUrl` | ❌ | ✅ | ❌ | ❌ | defaults / agent | human-only | ❌ | Claude API 端点 |
+| 2.5 | `baseagents.codex.baseUrl` | ❌ | ❌ | ❌ | ❌ | defaults / agent | human-only | ❌ | Codex API 端点（代码支持但未配置） |
+| 2.6 | `baseagents.gemini.baseUrl` | ❌ | ❌ | ❌ | ❌ | defaults / agent | human-only | ❌ | Gemini API 端点（代码支持但未配置） |
 
 ---
 
@@ -53,12 +53,12 @@
 
 | # | 参数名 | process | defaults | agent | relation | 建议存放层级 | 建议权限 | 支持关系级 | 说明 |
 |---|--------|---------|----------|-------|----------|-------------|---------|-----------|------|
-| 3.1 | `baseagents.claude.apiKey` | ❌ | ✅ ($ENV) | ❌ | ❌ | defaults / agent | H | ❌ | Claude API Key（引用 .env） |
-| 3.2 | `baseagents.codex.apiKey` | ❌ | ❌ | ❌ | ❌ | defaults / agent | H | ❌ | Codex API Key（代码支持但未配置） |
-| 3.3 | `baseagents.gemini.apiKey` | ❌ | ❌ | ❌ | ❌ | defaults / agent | H | ❌ | Gemini API Key（代码支持但未配置） |
-| 3.4 | `channels[].appId` | ❌ | ❌ | ❌ | ❌ | agent | H | ❌ | 飞书 appId（引用 .env） |
-| 3.5 | `channels[].appSecret` | ❌ | ❌ | ❌ | ❌ | agent | H | ❌ | 飞书 appSecret（引用 .env） |
-| 3.6 | `channels[].token` | ❌ | ❌ | ❌ | ❌ | agent | H | ❌ | 微信 token（引用 .env） |
+| 3.1 | `baseagents.claude.apiKey` | ❌ | ✅ ($ENV) | ❌ | ❌ | defaults / agent | human-only | ❌ | Claude API Key（引用 .env） |
+| 3.2 | `baseagents.codex.apiKey` | ❌ | ❌ | ❌ | ❌ | defaults / agent | human-only | ❌ | Codex API Key（代码支持但未配置） |
+| 3.3 | `baseagents.gemini.apiKey` | ❌ | ❌ | ❌ | ❌ | defaults / agent | human-only | ❌ | Gemini API Key（代码支持但未配置） |
+| 3.4 | `channels[].appId` | ❌ | ❌ | ❌ | ❌ | agent | human-only | ❌ | 飞书 appId（引用 .env） |
+| 3.5 | `channels[].appSecret` | ❌ | ❌ | ❌ | ❌ | agent | human-only | ❌ | 飞书 appSecret（引用 .env） |
+| 3.6 | `channels[].token` | ❌ | ❌ | ❌ | ❌ | agent | human-only | ❌ | 微信 token（引用 .env） |
 
 **说明**：还有更多渠道凭证字段（clientId, clientSecret, botId, secret, accessToken 等），为简洁省略
 
@@ -68,20 +68,20 @@
 
 | # | 参数名 | process | defaults | agent | relation | 建议存放层级 | 建议权限 | 支持关系级 | 说明 |
 |---|--------|---------|----------|-------|----------|-------------|---------|-----------|------|
-| 4.1 | `channels[]` | ❌ | ❌ | ✅ (空) | ❌ | agent | H | ❌ | 渠道实例列表 |
-| 4.2 | `channels[].type` | ❌ | ❌ | ❌ | ❌ | agent | H | ❌ | 渠道类型（aun/feishu/wechat/...） |
-| 4.3 | `channels[].name` | ❌ | ❌ | ❌ | ❌ | agent | H | ❌ | 实例名（agent 内唯一标识） |
-| 4.4 | `channels[].enabled` | ❌ | ❌ | ❌ | ❌ | agent | H | ❌ | 渠道启用状态 |
-| 4.5 | `channels[].baseUrl` | ❌ | ❌ | ❌ | ❌ | agent | H | ❌ | 微信 baseUrl |
-| 4.6 | `channels[].gatewayUrl` | ❌ | ❌ | ❌ | ❌ | agent | H | ❌ | AUN Gateway URL（渠道级） |
-| 4.7 | `channels[].owners[]` | ❌ | ❌ | ❌ | ❌ | agent | H | ❌ | 渠道级 owner |
-| 4.8 | `channels[].admins[]` | ❌ | ❌ | ❌ | ❌ | agent | H | ❌ | 渠道级 admin |
-| 4.9 | `channels[].flushDelay` | ❌ | ❌ | ❌ | ❌ | agent | H | ❌ | 渠道级 flush 间隔 |
-| 4.10 | `channels[].debounce` | ❌ | ❌ | ❌ | ❌ | agent | H | ❌ | 渠道级去抖间隔 |
-| 4.11 | `channels[].showActivities` | ❌ | ❌ | ❌ | ❌ | agent | H | ❌ | 渠道级活动可见性 |
-| 4.12 | `channels[].pythonBin` | ❌ | ❌ | ❌ | ❌ | agent | H | ❌ | Python 可执行路径（AUN TUI） |
-| 4.13 | `channels[].requireMention` | ❌ | ❌ | ❌ | ❌ | agent | H | ❌ | 钉钉：群聊需要 @mention |
-| 4.14 | `channels[].freeResponseChats[]` | ❌ | ❌ | ❌ | ❌ | agent | H | ❌ | 钉钉：跳过 @mention 白名单 |
+| 4.1 | `channels[]` | ❌ | ❌ | ✅ (空) | ❌ | agent | human-only | ❌ | 渠道实例列表 |
+| 4.2 | `channels[].type` | ❌ | ❌ | ❌ | ❌ | agent | human-only | ❌ | 渠道类型（aun/feishu/wechat/...） |
+| 4.3 | `channels[].name` | ❌ | ❌ | ❌ | ❌ | agent | human-only | ❌ | 实例名（agent 内唯一标识） |
+| 4.4 | `channels[].enabled` | ❌ | ❌ | ❌ | ❌ | agent | human-only | ❌ | 渠道启用状态 |
+| 4.5 | `channels[].baseUrl` | ❌ | ❌ | ❌ | ❌ | agent | human-only | ❌ | 微信 baseUrl |
+| 4.6 | `channels[].gatewayUrl` | ❌ | ❌ | ❌ | ❌ | agent | human-only | ❌ | AUN Gateway URL（渠道级） |
+| 4.7 | `channels[].owners[]` | ❌ | ❌ | ❌ | ❌ | agent | human-only | ❌ | 渠道级 owner |
+| 4.8 | `channels[].admins[]` | ❌ | ❌ | ❌ | ❌ | agent | human-only | ❌ | 渠道级 admin |
+| 4.9 | `channels[].flushDelay` | ❌ | ❌ | ❌ | ❌ | agent | human-only | ❌ | 渠道级 flush 间隔 |
+| 4.10 | `channels[].debounce` | ❌ | ❌ | ❌ | ❌ | agent | human-only | ❌ | 渠道级去抖间隔 |
+| 4.11 | `channels[].showActivities` | ❌ | ❌ | ❌ | ❌ | agent | human-only | ❌ | 渠道级活动可见性 |
+| 4.12 | `channels[].pythonBin` | ❌ | ❌ | ❌ | ❌ | agent | human-only | ❌ | Python 可执行路径（AUN TUI） |
+| 4.13 | `channels[].requireMention` | ❌ | ❌ | ❌ | ❌ | agent | human-only | ❌ | 钉钉：群聊需要 @mention |
+| 4.14 | `channels[].freeResponseChats[]` | ❌ | ❌ | ❌ | ❌ | agent | human-only | ❌ | 钉钉：跳过 @mention 白名单 |
 
 **说明**：还有 clientId, clientSecret, botId, secret, accessToken 等凭证字段（已列在"三、API 凭证"中）
 
@@ -91,22 +91,22 @@
 
 | # | 参数名 | process | defaults | agent | relation | 建议存放层级 | 建议权限 | 支持关系级 | 说明 |
 |---|--------|---------|----------|-------|----------|-------------|---------|-----------|------|
-| 5.1 | `models.default` | ❌ | ❌ | ❌ | ❌ | defaults / agent / relation | H | ✅ ★ | 默认模型（对不同用户可不同） |
-| 5.2 | `models.allowed[]` | ❌ | ❌ | ❌ | ❌ | defaults / agent | H | ❌ | 模型白名单（安全边界） |
-| 5.3 | `active_baseagent` | ❌ | ✅ | ✅ | ❌ | defaults / agent | H | ❌ | 当前活跃的 base agent |
-| 5.4 | `baseagents.claude.model` | ❌ | ✅ | ❌ | 📝 (model) | defaults / agent / relation | H | ✅ ★ | Claude 模型 |
-| 5.5 | `baseagents.claude.effort` | ❌ | ✅ | ❌ | ❌ | defaults / agent / relation | H | ✅ ★ | Claude 推理强度 |
-| 5.6 | `baseagents.claude.pathToClaudeCodeExecutable` | ❌ | ❌ | ❌ | ❌ | agent | H | ❌ | Claude Code 可执行路径 |
-| 5.7 | `baseagents.claude.useSettingSources` | ❌ | ❌ | ❌ | ❌ | agent | H | ❌ | 使用 settings.json |
-| 5.8 | `baseagents.claude.agentProgressSummaries` | ❌ | ❌ | ❌ | ❌ | agent / relation | H | ✅ ★ | Agent 进度摘要 |
-| 5.9 | `baseagents.claude.excludeDynamicSections` | ❌ | ❌ | ❌ | ❌ | agent / relation | H | ✅ ★ | 排除动态章节 |
-| 5.10 | `baseagents.codex.model` | ❌ | ❌ | ❌ | ❌ | defaults / agent / relation | H | ✅ ★ | Codex 模型 |
-| 5.11 | `baseagents.codex.effort` | ❌ | ❌ | ❌ | ❌ | defaults / agent / relation | H | ✅ ★ | Codex 推理强度 |
-| 5.12 | `baseagents.codex.reasoning` | ❌ | ❌ | ❌ | ❌ | defaults / agent / relation | H | ✅ ★ | Codex 推理模式 |
-| 5.13 | `baseagents.codex.enableRequestUserInput` | ❌ | ❌ | ❌ | ❌ | agent / relation | H | ✅ ★ | 启用用户输入请求 |
-| 5.14 | `baseagents.codex.approvalsReviewer` | ❌ | ❌ | ❌ | ❌ | agent / relation | H | ✅ ★ | 审批审查者 |
-| 5.15 | `baseagents.gemini.model` | ❌ | ❌ | ❌ | ❌ | defaults / agent / relation | H | ✅ ★ | Gemini 模型 |
-| 5.16 | `baseagents.gemini.mode` | ❌ | ❌ | ❌ | ❌ | agent / relation | H | ✅ ★ | Gemini 模式（cli/sdk） |
+| 5.1 | `models.default` | ❌ | ❌ | ❌ | ❌ | defaults / agent / relation | human-only | ✅ ★ | 默认模型（对不同用户可不同） |
+| 5.2 | `models.allowed[]` | ❌ | ❌ | ❌ | ❌ | defaults / agent | human-only | ❌ | 模型白名单（安全边界） |
+| 5.3 | `active_baseagent` | ❌ | ✅ | ✅ | ❌ | defaults / agent | human-only | ❌ | 当前活跃的 base agent |
+| 5.4 | `baseagents.claude.model` | ❌ | ✅ | ❌ | 📝 (model) | defaults / agent / relation | human-only | ✅ ★ | Claude 模型 |
+| 5.5 | `baseagents.claude.effort` | ❌ | ✅ | ❌ | ❌ | defaults / agent / relation | human-only | ✅ ★ | Claude 推理强度 |
+| 5.6 | `baseagents.claude.pathToClaudeCodeExecutable` | ❌ | ❌ | ❌ | ❌ | agent | human-only | ❌ | Claude Code 可执行路径 |
+| 5.7 | `baseagents.claude.useSettingSources` | ❌ | ❌ | ❌ | ❌ | agent | human-only | ❌ | 使用 settings.json |
+| 5.8 | `baseagents.claude.agentProgressSummaries` | ❌ | ❌ | ❌ | ❌ | agent / relation | human-only | ✅ ★ | Agent 进度摘要 |
+| 5.9 | `baseagents.claude.excludeDynamicSections` | ❌ | ❌ | ❌ | ❌ | agent / relation | human-only | ✅ ★ | 排除动态章节 |
+| 5.10 | `baseagents.codex.model` | ❌ | ❌ | ❌ | ❌ | defaults / agent / relation | human-only | ✅ ★ | Codex 模型 |
+| 5.11 | `baseagents.codex.effort` | ❌ | ❌ | ❌ | ❌ | defaults / agent / relation | human-only | ✅ ★ | Codex 推理强度 |
+| 5.12 | `baseagents.codex.reasoning` | ❌ | ❌ | ❌ | ❌ | defaults / agent / relation | human-only | ✅ ★ | Codex 推理模式 |
+| 5.13 | `baseagents.codex.enableRequestUserInput` | ❌ | ❌ | ❌ | ❌ | agent / relation | human-only | ✅ ★ | 启用用户输入请求 |
+| 5.14 | `baseagents.codex.approvalsReviewer` | ❌ | ❌ | ❌ | ❌ | agent / relation | human-only | ✅ ★ | 审批审查者 |
+| 5.15 | `baseagents.gemini.model` | ❌ | ❌ | ❌ | ❌ | defaults / agent / relation | human-only | ✅ ★ | Gemini 模型 |
+| 5.16 | `baseagents.gemini.mode` | ❌ | ❌ | ❌ | ❌ | agent / relation | human-only | ✅ ★ | Gemini 模式（cli/sdk） |
 
 **说明**：还有 gemini 的其他配置字段（cliPath, useVertex, project, location 等），为简洁省略部分
 
@@ -116,14 +116,14 @@
 
 | # | 参数名 | process | defaults | agent | relation | 建议存放层级 | 建议权限 | 支持关系级 | 说明 |
 |---|--------|---------|----------|-------|----------|-------------|---------|-----------|------|
-| 6.1 | `chatmode.private` | ❌ | ❌ | ❌ | ❌ | agent / relation | H | ✅ ★ | 私聊对话模式（interactive/proactive） |
-| 6.2 | `chatmode.group` | ❌ | ❌ | ❌ | ❌ | agent / relation | H | ✅ ★ | 群聊对话模式（对不同群可不同） |
-| 6.3 | `chatmode.nothuman` | ❌ | ❌ | ❌ | ❌ | agent / relation | H | ✅ ★ | 非人类对话模式 |
-| 6.4 | `flush_delay` | ❌ | ❌ | ❌ | ❌ | agent / relation | H | ✅ ★ | 消息 flush 间隔（对不同用户可调整） |
-| 6.5 | `debounce` | ❌ | ❌ | ❌ | ❌ | agent / relation | H | ✅ ★ | 入站消息去抖间隔 |
-| 6.6 | `dispatch` | ❌ | ❌ | ❌ | ❌ | agent / relation | H | ✅ ★ | 群聊分发策略（mention/broadcast） |
-| 6.7 | `show_activities` | ❌ | ❌ | ❌ | ❌ | agent / relation | H | ✅ ★ | 中间活动可见性（技术用户显示，普通用户隐藏） |
-| 6.8 | `enable_rich_content` | ❌ | ❌ | ❌ | ❌ | agent / relation | H | ✅ ★ | 启用富内容渲染 |
+| 6.1 | `chatmode.private` | ❌ | ❌ | ❌ | ❌ | agent / relation | human-only | ✅ ★ | 私聊对话模式（interactive/proactive） |
+| 6.2 | `chatmode.group` | ❌ | ❌ | ❌ | ❌ | agent / relation | human-only | ✅ ★ | 群聊对话模式（对不同群可不同） |
+| 6.3 | `chatmode.nothuman` | ❌ | ❌ | ❌ | ❌ | agent / relation | human-only | ✅ ★ | 非人类对话模式 |
+| 6.4 | `flush_delay` | ❌ | ❌ | ❌ | ❌ | agent / relation | human-only | ✅ ★ | 消息 flush 间隔（对不同用户可调整） |
+| 6.5 | `debounce` | ❌ | ❌ | ❌ | ❌ | agent / relation | human-only | ✅ ★ | 入站消息去抖间隔 |
+| 6.6 | `dispatch` | ❌ | ❌ | ❌ | ❌ | agent / relation | human-only | ✅ ★ | 群聊分发策略（mention/broadcast） |
+| 6.7 | `show_activities` | ❌ | ❌ | ❌ | ❌ | agent / relation | human-only | ✅ ★ | 中间活动可见性（技术用户显示，普通用户隐藏） |
+| 6.8 | `enable_rich_content` | ❌ | ❌ | ❌ | ❌ | agent / relation | human-only | ✅ ★ | 启用富内容渲染 |
 
 ---
 
@@ -131,8 +131,8 @@
 
 | # | 参数名 | process | defaults | agent | relation | 建议存放层级 | 建议权限 | 支持关系级 | 说明 |
 |---|--------|---------|----------|-------|----------|-------------|---------|-----------|------|
-| 7.1 | `proactive.pre_tool_1stmsgchk` | ❌ | ❌ | ❌ | ❌ | agent / relation | H | ✅ ★ | Proactive 下首次工具调用前必须先 send/file 表态 |
-| 7.2 | `proactive.tool_use_reminder` | ❌ | ❌ | ❌ | ❌ | agent / relation | H | ✅ ★ | Proactive 下启用队列未读提醒和工具汇报提醒 |
+| 7.1 | `proactive.pre_tool_1stmsgchk` | ❌ | ❌ | ❌ | ❌ | agent / relation | human-only | ✅ ★ | Proactive 下首次工具调用前必须先 send/file 表态 |
+| 7.2 | `proactive.tool_use_reminder` | ❌ | ❌ | ❌ | ❌ | agent / relation | human-only | ✅ ★ | Proactive 下启用队列未读提醒和工具汇报提醒 |
 
 ---
 
@@ -140,9 +140,9 @@
 
 | # | 参数名 | process | defaults | agent | relation | 建议存放层级 | 建议权限 | 支持关系级 | 说明 |
 |---|--------|---------|----------|-------|----------|-------------|---------|-----------|------|
-| 8.1 | `render.private` | ❌ | ❌ | ❌ | ❌ | agent / relation | H | ✅ ★ | 私聊渲染模式名称（对不同用户可用不同渲染） |
-| 8.2 | `render.group` | ❌ | ❌ | ❌ | ❌ | agent / relation | H | ✅ ★ | 群聊渲染模式名称（对不同群可不同） |
-| 8.3 | `render.inject` | ❌ | ❌ | ❌ | ❌ | agent / relation | H | ✅ ★ | 注入渲染模式名称 |
+| 8.1 | `render.private` | ❌ | ❌ | ❌ | ❌ | agent / relation | human-only | ✅ ★ | 私聊渲染模式名称（对不同用户可用不同渲染） |
+| 8.2 | `render.group` | ❌ | ❌ | ❌ | ❌ | agent / relation | human-only | ✅ ★ | 群聊渲染模式名称（对不同群可不同） |
+| 8.3 | `render.inject` | ❌ | ❌ | ❌ | ❌ | agent / relation | human-only | ✅ ★ | 注入渲染模式名称 |
 
 ---
 
@@ -150,9 +150,9 @@
 
 | # | 参数名 | process | defaults | agent | relation | 建议存放层级 | 建议权限 | 支持关系级 | 说明 |
 |---|--------|---------|----------|-------|----------|-------------|---------|-----------|------|
-| 9.1 | `permissionMode` | ❌ | ❌ | ❌ | ❌ | agent / relation | H | ✅ ★ | 执行权限模式（对信任用户 bypass，对陌生用户 readonly） |
-| 9.2 | `roles.<role>.baseagents` | ❌ | ❌ | ❌ | ❌ | agent / relation | H | ✅ ★ | 角色级 baseagents 覆盖 |
-| 9.3 | `roles.<role>.permissionMode` | ❌ | ❌ | ❌ | ❌ | agent / relation | H | ✅ ★ | 角色级 permissionMode 覆盖 |
+| 9.1 | `permissionMode` | ❌ | ❌ | ❌ | ❌ | agent / relation | human-only | ✅ ★ | 执行权限模式（对信任用户 bypass，对陌生用户 readonly） |
+| 9.2 | `roles.<role>.baseagents` | ❌ | ❌ | ❌ | ❌ | agent / relation | human-only | ✅ ★ | 角色级 baseagents 覆盖 |
+| 9.3 | `roles.<role>.permissionMode` | ❌ | ❌ | ❌ | ❌ | agent / relation | human-only | ✅ ★ | 角色级 permissionMode 覆盖 |
 
 ---
 
@@ -160,10 +160,10 @@
 
 | # | 参数名 | process | defaults | agent | relation | 建议存放层级 | 建议权限 | 支持关系级 | 说明 |
 |---|--------|---------|----------|-------|----------|-------------|---------|-----------|------|
-| 10.1 | `projects.rootPath` | ❌ | ❌ | ❌ | ❌ | defaults / agent | H | ❌ | 项目根路径（代码支持但未配置） |
-| 10.2 | `projects.defaultPath` | ❌ | ❌ | ✅ | ❌ | defaults / agent | H | ❌ | 默认项目路径 |
-| 10.3 | `projects.autoCreate` | ❌ | ❌ | ✅ | ❌ | agent | H | ❌ | 自动创建项目 |
-| 10.4 | `projects.list` | ❌ | ❌ | ✅ (对象) | ❌ | agent | H | ❌ | 项目列表（名称→路径映射） |
+| 10.1 | `projects.rootPath` | ❌ | ❌ | ❌ | ❌ | defaults / agent | human-only | ❌ | 项目根路径（代码支持但未配置） |
+| 10.2 | `projects.defaultPath` | ❌ | ❌ | ✅ | ❌ | defaults / agent | human-only | ❌ | 默认项目路径 |
+| 10.3 | `projects.autoCreate` | ❌ | ❌ | ✅ | ❌ | agent | human-only | ❌ | 自动创建项目 |
+| 10.4 | `projects.list` | ❌ | ❌ | ✅ (对象) | ❌ | agent | human-only | ❌ | 项目列表（名称→路径映射） |
 
 ---
 
@@ -171,11 +171,11 @@
 
 | # | 参数名 | process | defaults | agent | relation | 建议存放层级 | 建议权限 | 支持关系级 | 说明 |
 |---|--------|---------|----------|-------|----------|-------------|---------|-----------|------|
-| 11.1 | `debug.logLevel` | ❌ | ❌ | ❌ | ❌ | process / defaults / agent | H | ❌ | 日志级别（DEBUG/INFO/WARN/ERROR） |
-| 11.2 | `debug.flusherDiag` | ❌ | ❌ | ❌ | ❌ | process / defaults / agent | H | ❌ | Flusher 诊断开关 |
-| 11.3 | `debug.aunTrace` | ❌ | ❌ | ❌ | ❌ | process / defaults / agent | H | ❌ | AUN trace 开关 |
-| 11.4 | `debug.aunSdkLog` | ❌ | ❌ | ❌ | ❌ | process / defaults / agent | H | ❌ | AUN SDK log 开关 |
-| 11.5 | `debug.upmsg` | ❌ | ❌ | ❌ | ❌ | defaults / agent | H | ❌ | 上行消息调试开关 |
+| 11.1 | `debug.logLevel` | ❌ | ❌ | ❌ | ❌ | process / defaults / agent | human-only | ❌ | 日志级别（DEBUG/INFO/WARN/ERROR） |
+| 11.2 | `debug.flusherDiag` | ❌ | ❌ | ❌ | ❌ | process / defaults / agent | human-only | ❌ | Flusher 诊断开关 |
+| 11.3 | `debug.aunTrace` | ❌ | ❌ | ❌ | ❌ | process / defaults / agent | human-only | ❌ | AUN trace 开关 |
+| 11.4 | `debug.aunSdkLog` | ❌ | ❌ | ❌ | ❌ | process / defaults / agent | human-only | ❌ | AUN SDK log 开关 |
+| 11.5 | `debug.upmsg` | ❌ | ❌ | ❌ | ❌ | defaults / agent | human-only | ❌ | 上行消息调试开关 |
 
 ---
 
@@ -183,7 +183,7 @@
 
 | # | 参数名 | process | defaults | agent | relation | 建议存放层级 | 建议权限 | 支持关系级 | 说明 |
 |---|--------|---------|----------|-------|----------|-------------|---------|-----------|------|
-| 12.1 | `extra_backup[]` | ❌ | ❌ | ❌ | ❌ | agent | H | ❌ | 快照额外备份文件声明（不得指向 .env） |
+| 12.1 | `extra_backup[]` | ❌ | ❌ | ❌ | ❌ | agent | human-only | ❌ | 快照额外备份文件声明（不得指向 .env） |
 
 ---
 
@@ -191,11 +191,11 @@
 
 | # | 参数名 | process | defaults | agent | relation | 建议存放层级 | 建议权限 | 支持关系级 | 说明 |
 |---|--------|---------|----------|-------|----------|-------------|---------|-----------|------|
-| 13.1 | `tunnel.targets[]` | ❌ | ❌ | ❌ | ❌ | process | H | ❌ | Tunnel 目标配置 |
-| 13.2 | `serviceProxy.enabled` | ❌ | ❌ | ❌ | ❌ | process | H | ❌ | Service Proxy 总开关 |
-| 13.3 | `serviceProxy.services[]` | ❌ | ❌ | ❌ | ❌ | process | H | ❌ | Service Proxy 服务列表 |
-| 13.4 | `ecweb.enabled` | ✅ | ❌ | ❌ | ❌ | process | H | ❌ | ECWeb 自动启动开关 |
-| 13.5 | `ecweb.port` | ✅ | ❌ | ❌ | ❌ | process | H | ❌ | ECWeb 监听端口 |
+| 13.1 | `tunnel.targets[]` | ❌ | ❌ | ❌ | ❌ | process | human-only | ❌ | Tunnel 目标配置 |
+| 13.2 | `serviceProxy.enabled` | ❌ | ❌ | ❌ | ❌ | process | human-only | ❌ | Service Proxy 总开关 |
+| 13.3 | `serviceProxy.services[]` | ❌ | ❌ | ❌ | ❌ | process | human-only | ❌ | Service Proxy 服务列表 |
+| 13.4 | `ecweb.enabled` | ✅ | ❌ | ❌ | ❌ | process | human-only | ❌ | ECWeb 自动启动开关 |
+| 13.5 | `ecweb.port` | ✅ | ❌ | ❌ | ❌ | process | human-only | ❌ | ECWeb 监听端口 |
 
 ---
 
@@ -203,7 +203,7 @@
 
 | # | 参数名 | process | defaults | agent | relation | 建议存放层级 | 建议限 | 支持关系级 | 说明 |
 |---|--------|---------|----------|-------|----------|-------------|---------|-----------|------|
-| 14.1 | `watch.logTypes[]` | ❌ | ❌ | ❌ | ❌ | process | H | ❌ | 前端勾选的日志类型 |
+| 14.1 | `watch.logTypes[]` | ❌ | ❌ | ❌ | ❌ | process | human-only | ❌ | 前端勾选的日志类型 |
 
 ---
 
@@ -250,10 +250,6 @@
 61+ 个参数代码支持但未配置，是否需要：
 - 补充默认值到 schema
 - 在文档中说明这些参数的用途
-
-### 问题 3：H/HA 物理分离
-**当前**：defaults.json 和 agent/config.json 混有应该属于 HA 的字段（active_baseagent, baseagents）  
-**决定**：按你之前的决定，暂时保持现状，等权限体系实现后再迁移
 
 ---
 

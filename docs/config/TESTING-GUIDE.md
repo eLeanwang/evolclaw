@@ -479,7 +479,7 @@ evolclaw config history
 
 # 期望输出：
 # 版本号 | 类型 | 触发 | 时间 | 说明
-# v200   | full | manual | 2026-06-20 00:05 | 合并 behavior.json
+# v200   | full | manual | 2026-06-20 00:05 | 配置体系迁移
 # ...
 ```
 

@@ -12,7 +12,8 @@ describe('role selector runtime behavior', () => {
   });
 
   it('uses sel.role for permission mode constraints', () => {
-    write(ConfigTarget.RelationBehavior, { permissionMode: 'bypass' }, { self: aid, peerKey });
+    // v3: RelationBehavior → Relation
+    write(ConfigTarget.Relation, { permissionMode: 'bypass' }, { self: aid, peerKey });
 
     expect(resolvePermissionMode({ self: aid, peerKey, role: 'owner' })).toBe('bypass');
     expect(resolvePermissionMode({ self: aid, peerKey, role: 'admin' })).toBe('request');
@@ -20,14 +21,16 @@ describe('role selector runtime behavior', () => {
   });
 
   it('does not infer a role when sel.role is absent', () => {
-    write(ConfigTarget.RelationBehavior, { permissionMode: 'bypass' }, { self: aid, peerKey });
+    // v3: RelationBehavior → Relation
+    write(ConfigTarget.Relation, { permissionMode: 'bypass' }, { self: aid, peerKey });
 
     expect(resolvePermissionMode({ self: aid, peerKey })).toBe('bypass');
   });
 
   it('uses sel.role for model constraints', () => {
+    // v3: RelationBehavior → Relation
     write(
-      ConfigTarget.RelationBehavior,
+      ConfigTarget.Relation,
       { baseagents: { claude: { model: 'claude-opus-4-8' } } },
       { self: aid, peerKey },
     );
@@ -45,8 +48,9 @@ describe('role selector runtime behavior', () => {
   });
 
   it('validates nested relation behavior config using the selector role', () => {
+    // v3: RelationBehavior → Relation
     const validation = validateConfigWrite(
-      ConfigTarget.RelationBehavior,
+      ConfigTarget.Relation,
       { baseagents: { claude: { model: 'claude-opus-4-8' } } },
       { self: aid, peerKey, role: 'guest' },
     );

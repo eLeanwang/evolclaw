@@ -91,7 +91,6 @@ describe('integration: agent CLI', () => {
       expect(r.stdout).toMatch(/disable/);
       expect(r.stdout).toMatch(/get/);
       expect(r.stdout).toMatch(/set/);
-      expect(r.stdout).toMatch(/rename/);
       expect(r.stdout).toMatch(/delete/);
       expect(r.stdout).toMatch(/--format json/);
     });

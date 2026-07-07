@@ -1,5 +1,5 @@
 import { ConfigTarget, ensureFile, read, write } from './config-manager.js';
-import { readRolesConfig } from './roles.js';
+import { readRolesConfig, getBuiltinRolesConfig } from './roles.js';
 import { syncNoOverrideRoleModelsForAgent } from './role-model-sync.js';
 import type { RoleAssignment, RoleAssignmentsConfig, RoleAssignmentScope } from '../types.js';
 
@@ -50,7 +50,9 @@ export function writeRoleAssignments(aid: string, config: RoleAssignmentsConfig)
   validateAssignments(config);
   ensureFile(ConfigTarget.RoleAssignments, { self: aid });
   write(ConfigTarget.RoleAssignments, config, { self: aid });
-  syncNoOverrideRoleModelsForAgent(); // stub 版本不需要参数
+
+  // v3: 传入 roles 参数以触发自动同步
+  syncNoOverrideRoleModelsForAgent(aid, getBuiltinRolesConfig());
 }
 
 function setScopedRoleAssignment(

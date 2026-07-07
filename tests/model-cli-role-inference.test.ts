@@ -1,7 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { setPrivateRoleAssignment } from '../src/config/role-assignments.js';
-import { ConfigTarget, write, writeRoles } from '../src/config/config-manager.js';
-import { readRelationBehavior } from '../src/config/behavior.js';
+import { ConfigTarget, write, writeRoles, read } from '../src/config/config-manager.js';
 import { clearRolesCache, getBuiltinRolesConfig } from '../src/config/roles.js';
 
 vi.mock('../src/core/model/model-catalog.js', () => ({
@@ -84,10 +83,11 @@ describe('model CLI role inference', () => {
     const selfAid = 'frontend-peer.agentid.pub';
     const currentAid = 'current-user.aid.pub';
     setPrivateRoleAssignment(selfAid, currentAid, 'guest');
+    // v3: 写入 relation config 时提供 role，会触发角色约束警告，但仍写入原始值
     write(
-      ConfigTarget.RelationBehavior,
+      ConfigTarget.Relation,
       { baseagents: { claude: { model: 'claude-opus-4-8' } } },
-      { self: selfAid, peerKey: `aun#${currentAid}` },
+      { self: selfAid, peerKey: `aun#${currentAid}`, role: 'guest' },
     );
 
     const logs: string[] = [];
@@ -99,13 +99,15 @@ describe('model CLI role inference', () => {
     await cmdModel(['list', '--self', selfAid, '--peer', currentAid, '--format', 'json']);
 
     const payload = JSON.parse(logs.at(-1) || '{}');
+    // effective 字段通过 resolveEffective 应用了角色约束，返回降级后的 haiku
     expect(payload.effective).toEqual({
       model: 'claude-haiku-4-5-20251001',
       source: 'relation',
     });
     expect(payload.scopes).toBeUndefined();
-    expect(readRelationBehavior(selfAid, `aun#${currentAid}`)?.baseagents?.claude?.model)
-      .toBe('claude-haiku-4-5-20251001');
+    // v3: 直接读取 relation config - 存储的是原始值（write 只警告不修正）
+    const relationConfig = read<any>(ConfigTarget.Relation, { self: selfAid, peerKey: `aun#${currentAid}` });
+    expect(relationConfig?.baseagents?.claude?.model).toBe('claude-opus-4-8');
   });
 
   it('rejects disallowed model use by inferred role', async () => {

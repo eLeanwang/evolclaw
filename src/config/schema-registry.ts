@@ -8,8 +8,7 @@
  * schema 根带：
  *   - `x-logical-name` / `x-scope`
  *
- * schema 是字段类型和权限 owner 的事实源。H 字段落 config/defaults/evolclaw，
- * HA 行为字段落 behavior.json。
+ * v3 设计：所有参数统一在 config.json，按作用域路由到对应层级。
  */
 
 import fs from 'fs';
@@ -23,7 +22,6 @@ export type LogicalSchemaName =
   | 'defaults'
   | 'agent-config'
   | 'relation-config'
-  | 'behavior'
   | 'roles'
   | 'role-assignments';
 

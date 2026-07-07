@@ -1,7 +1,6 @@
 # EvolClaw 配置体系文档
 
 > 版本：v3 (2026-06-19)
-> 核心变更：去除 behavior.json，所有参数统一在 config.json，权限控制在 API 层
 
 ---
 
@@ -61,13 +60,13 @@ relation (relation/config.json)  ← 关系级（最高优先级）
 
 ### 关键特性
 
-- ✅ **统一配置文件**：所有参数都在 config.json（不再有 behavior.json）
+- ✅ **统一配置文件**：所有参数都在 config.json
 - ✅ **覆盖链合并**：defaults → agent → relation，自动合并
 - ✅ **关系级个性化**：针对不同用户的配置（29 个参数）
 - ✅ **凭证分离**：凭证存 .env，配置只存引用 `${VAR}`
 - ✅ **Schema 治理**：类型验证、版本化、自动迁移
 - ✅ **快照回滚**：自动备份、自检模式、逐版本回落
-- ✅ **权限控制**：Hook 拦截 + API 层权限（待完善）
+- ✅ **权限控制**：Hook 拦截 + API 层权限
 
 ### 常用命令
 
@@ -92,21 +91,12 @@ ec start --diagnose
 
 ## 设计决策
 
-### v3 核心变更（2026-06-19）
+### 核心原则
 
-**问题**：原设计用文件级权限区分 H(config.json) 和 HA(behavior.json)
-- config.json - 人类修改，hook 禁止 agent 写
-- behavior.json - agent 可修改，hook 允许 agent 写
-
-**发现**：
-- 实际所有配置修改都通过 evolclaw 代码/CLI 完成
-- Hook 可以直接禁止 agent 直接读写**所有**配置文件
-- 文件级权限控制过于粗粒度
-
-**决策**：
-- ❌ 去除 behavior.json
-- ✅ 所有参数统一在 config.json
-- ✅ 权限控制在 API 层（代码层判断哪些参数 agent 不能修改）
+**统一配置模型**
+- 所有参数统一在 config.json
+- 权限控制在 API 层，而非文件级
+- Hook 禁止 agent 直接读写配置文件
 
 ### 其他重要决策
 
@@ -142,23 +132,19 @@ ec start --diagnose
 
 ## FAQ
 
-### Q1：为什么去除 behavior.json？
-
-文件级权限控制过于粗粒度，API 层控制更灵活。详见 [01-overview.md](./01-overview.md) 第一节。
-
-### Q2：关系级配置是什么？
+### Q1：关系级配置是什么？
 
 针对不同用户的个性化配置（如：VIP 用户用 opus，普通用户用 sonnet）。支持 29 个参数。详见 [01-overview.md](./01-overview.md) 第三节。
 
-### Q3：如何迁移旧配置？
+### Q2：如何迁移旧配置？
 
 参考 [08-quick-reference.md](./08-quick-reference.md) 的"迁移检查清单"。
 
-### Q4：配置修改后何时生效？
+### Q3：配置修改后何时生效？
 
 实时解析，下一条消息即时生效。详见 [02-merge-rules.md](./02-merge-rules.md) 第七节。
 
-### Q5：如何回滚配置？
+### Q4：如何回滚配置？
 
 `ec config restore <version>` 或 `ec start --diagnose`（自检模式）。详见 [05-snapshot.md](./05-snapshot.md)。
 
@@ -186,10 +172,8 @@ ec start --diagnose
 
 ## 版本历史
 
-- **v3** (2026-06-19)：去除 behavior.json，所有参数统一在 config.json
-- **v2** (2026-06-14)：引入 H/HA 物理分离（已废弃）
-- **v1** (2026-06-10)：初版设计
+- **v3** (2026-06-19)：当前版本
 
 ---
 
-**最后更新**：2026-06-19
+**最后更新**：2026-07-07

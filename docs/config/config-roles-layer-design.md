@@ -5,15 +5,15 @@
 
 ## 目标
 
-为 agent 引入一套自定义角色（RBAC）：人为 agent 定义若干角色，把对端指派到角色，角色持有该类对端共享的配置。全程人专属（H 类），agent 不可写。
+为 agent 引入一套自定义角色（RBAC）：人为 agent 定义若干角色，把对端指派到角色，角色持有该类对端共享的配置。全程人类专属，agent 不可写。
 
 ## 三段式落位
 
 | 位置 | 文件/字段 | 作用 | 权限 |
 |------|----------|------|------|
-| Agent 级 | `config.json` 的 `roles` 字段 | **注册表**：本 agent 有哪些角色 + 优先级顺序（声明顺序，靠后压靠前） | H |
-| 关系级 | `relations/{peerKey}/config.json` 的 `roles` 字段 | **成员关系**：该对端属于哪些角色（无序集合） | H |
-| 角色配置 | `roles/{name}.json` | 该角色独有的具体配置，一角色一文件 | H |
+| Agent 级 | `config.json` 的 `roles` 字段 | **注册表**：本 agent 有哪些角色 + 优先级顺序（声明顺序，靠后压靠前） | human-only |
+| 关系级 | `relations/{peerKey}/config.json` 的 `roles` 字段 | **成员关系**：该对端属于哪些角色（无序集合） | human-only |
+| 角色配置 | `roles/{name}.json` | 该角色独有的具体配置，一角色一文件 | human-only |
 
 ```jsonc
 // agents/{aid}/config.json —— 注册表，顺序即优先级

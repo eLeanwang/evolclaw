@@ -332,19 +332,15 @@ ec config diff v100 v103
 
 ## 十二、迁移检查清单
 
-从旧配置体系迁移到 v3：
+从旧配置迁移到 v3：
 
-- [x] 备份所有配置文件
-- [x] 将 behavior.json 的内容合并到 config.json（代码已完成）
+- [ ] 备份所有配置文件
 - [ ] 将 preferences.json 的 model 字段迁移到 relation/config.json（如有数据）
 - [ ] 检查所有凭证已移入 .env
-- [x] 删除 behavior.json 文件（schema 已删除）
 - [ ] 运行 schema 验证：`ec config validate`
 - [ ] 创建迁移后快照：`ec config snapshot --full --desc "迁移到 v3"`
 - [ ] 测试配置读取
 - [ ] 测试配置修改
-
-**注意**：当前系统无历史 behavior.json 数据，无需数据迁移。
 
 ---
 

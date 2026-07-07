@@ -9,20 +9,9 @@
 
 **权限控制在 API 层，而非文件级。**
 
-### 为什么不用文件级权限？
+### 设计要点
 
-**原设计（已废弃）**：
-- config.json(H) - 人类修改，hook 禁止 agent 写
-- behavior.json(HA) - agent 可修改，hook 允许 agent 写
-
-**问题**：
-- 实际所有配置修改都通过 evolclaw 代码/CLI 完成
-- Hook 可以直接禁止 agent 直接读写**所有**配置文件
-- 文件级权限控制过于粗粒度
-- behavior.json 的存在增加了复杂性
-
-**新设计（v3）**：
-- 所有参数统一在 config.json（不再有 behavior.json）
+- 所有参数统一在 config.json
 - Hook 禁止所有配置文件的直接读写
 - Agent 通过 CLI（`ec model`, `ec ctl`, `ec config`）修改配置
 - CLI 内部根据参数类型和调用方身份判断是否允许

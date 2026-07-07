@@ -1,6 +1,5 @@
 import path from 'path';
 import { logger } from '../utils/logger.js';
-import { saveAgent } from '../config-store.js';
 import { formatChannelKey } from './channel-loader.js';
 import { agentPersonalDir } from '../paths.js';
 import { fileCache } from './daemon-file-cache.js';
@@ -31,7 +30,7 @@ type GlobalChatmode = ChatmodeBlock;
  * 输入：EffectiveAgentConfig（defaults + per-agent 合并后的 effective 形态）。
  * 持有该 agent 的 channels Map、活跃状态、生命周期。
  *
- * 写入永远落到 agents/<aid>/config.json（通过 ConfigStore.saveAgent 走双 rename），
+ * 写入永远落到 agents/<aid>/config.json（通过 ConfigManager 走原子写入），
  * 不再有 "DefaultAgent" 概念，不再有 globalWriter / configPath null 的路径。
  */
 export class EvolAgent {
@@ -150,7 +149,7 @@ export class EvolAgent {
 
   setShowActivities(_channelKey: string, mode: ShowActivitiesMode): void {
     this.merged.show_activities = mode;
-    this.mutateBehavior(b => { b.show_activities = mode; });
+    this.updateAgentConfig(b => { b.show_activities = mode; });
   }
 
   // ── Role-based Access Control ─────────────────────────────────────────
@@ -195,10 +194,10 @@ export class EvolAgent {
 
   // ── Baseagent 字段写入 ────────────────────────────
 
-  /** 切换当前活跃 baseagent（写 behavior.active_baseagent）。 */
+  /** 切换当前活跃 baseagent（写入 config.json）。 */
   setActiveBaseagent(value: string | undefined): void {
     this.merged.active_baseagent = value;
-    this.mutateBehavior(b => {
+    this.updateAgentConfig(b => {
       if (value === undefined) delete b.active_baseagent;
       else b.active_baseagent = value;
     });
@@ -209,7 +208,7 @@ export class EvolAgent {
     if (!this.merged.baseagents) (this.merged as any).baseagents = {};
     const mBlock = (((this.merged as any).baseagents)[ba] ??= {});
     if (value === undefined) delete mBlock.model; else mBlock.model = value;
-    this.mutateBehavior(b => {
+    this.updateAgentConfig(b => {
       b.baseagents = b.baseagents || {};
       const blk = ((b.baseagents as any)[ba] ??= {});
       if (value === undefined) delete blk.model; else blk.model = value;
@@ -227,7 +226,7 @@ export class EvolAgent {
       mBlock.effort = value;
       delete mBlock.reasoning;
     }
-    this.mutateBehavior(b => {
+    this.updateAgentConfig(b => {
       b.baseagents = b.baseagents || {};
       const blk = ((b.baseagents as any)[ba] ??= {});
       if (value === undefined) {
@@ -244,7 +243,7 @@ export class EvolAgent {
   setChatmodePrivate(value: 'interactive' | 'proactive' | undefined): void {
     if (!this.merged.chatmode) this.merged.chatmode = {};
     this.merged.chatmode.private = value;
-    this.mutateBehavior(b => {
+    this.updateAgentConfig(b => {
       b.chatmode = b.chatmode || {};
       if (value === undefined) delete b.chatmode.private; else b.chatmode.private = value;
     });
@@ -253,7 +252,7 @@ export class EvolAgent {
   /** 设置群聊 dispatch 默认值（mention | broadcast）。 */
   setDispatch(value: 'mention' | 'broadcast' | undefined): void {
     this.merged.dispatch = value;
-    this.mutateBehavior(b => {
+    this.updateAgentConfig(b => {
       if (value === undefined) delete b.dispatch; else b.dispatch = value;
     });
   }
@@ -370,11 +369,11 @@ export class EvolAgent {
   }
 
   private persist(): void {
-    saveAgent(this.rawAgent);
+    cfgWrite(ConfigTarget.Agent, this.rawAgent, { self: this.aid });
   }
 
   /** 读改写 agent 级 config.json（v3 设计，走 ConfigManager 唯一写入口）。 */
-  private mutateBehavior(fn: (b: AgentConfig) => void): void {
+  private updateAgentConfig(fn: (b: AgentConfig) => void): void {
     const sel = { self: this.aid };
     const cur = (cfgRead<AgentConfig>(ConfigTarget.Agent, sel) as AgentConfig) || {};
     fn(cur);

@@ -110,7 +110,7 @@ export function migrate(old: object): object;   // 旧版本完整 JSON → 新�
     "relation-config":{ "currentVersion": 1 }
   },
   "history": [
-    { "schema": "agent-config", "version": 2, "date": "2026-06-19", "description": "去除 behavior.json，所有参数统一在 config.json" }
+    { "schema": "agent-config", "version": 2, "date": "2026-06-19", "description": "统一配置模型" }
   ]
 }
 ```
@@ -184,9 +184,9 @@ export function migrate(old: object): object;   // 旧版本完整 JSON → 新�
 
 ---
 
-## 六、Schema 元数据（x- 扩展）
+## 六、Schema 元数据（x- 展）
 
-虽然去除了 H/HA 文件物理分离，但可以保留元数据标注用于文档和未来扩展：
+可以通过元数据标注区分参数的权限级别和功能分类：
 
 ```json
 {
@@ -201,7 +201,7 @@ export function migrate(old: object): object;   // 旧版本完整 JSON → 新�
       "type": "object",
       "description": "对话模式",
       "x-permission": "configurable",
-      "x-category": "behavior"
+      "x-category": "interaction"
     }
   }
 }

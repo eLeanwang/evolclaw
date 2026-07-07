@@ -11,8 +11,9 @@ describe('resolveEffective role constraints', () => {
   });
 
   it('allows owner-level relation behavior when role is explicit', () => {
+    // v3: RelationBehavior → Relation
     write(
-      ConfigTarget.RelationBehavior,
+      ConfigTarget.Relation,
       {
         dispatch: 'broadcast',
         chatmode: { private: 'proactive' },
@@ -28,8 +29,9 @@ describe('resolveEffective role constraints', () => {
   });
 
   it('constrains guest relation behavior when role is explicit', () => {
+    // v3: RelationBehavior → Relation
     write(
-      ConfigTarget.RelationBehavior,
+      ConfigTarget.Relation,
       {
         permissionMode: 'bypass',
         dispatch: 'broadcast',
@@ -45,8 +47,9 @@ describe('resolveEffective role constraints', () => {
   });
 
   it('keeps raw relation behavior when role is not supplied', () => {
+    // v3: RelationBehavior → Relation
     write(
-      ConfigTarget.RelationBehavior,
+      ConfigTarget.Relation,
       {
         permissionMode: 'bypass',
         dispatch: 'broadcast',

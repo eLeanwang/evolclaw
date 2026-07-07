@@ -127,35 +127,7 @@ describe('scenario: agent CLI workflows', () => {
     });
   });
 
-  describe('Scenario 2: 修改 agent 名称并验证', () => {
-    it('rename updates agent.md and is reflected in show', () => {
-      seedAgent('alice.agentid.pub');
-      seedAgentMd('alice.agentid.pub', 'OldName', 'Description here');
-
-      // Initial name
-      const before = runCli(['agent', 'show', 'alice.agentid.pub', '--format', 'json']);
-      expect(JSON.parse(before.stdout).identity.name).toBe('OldName');
-
-      // Rename
-      const rename = runCli(['agent', 'rename', 'alice.agentid.pub', 'BrandNewName']);
-      expect(rename.code).toBe(0);
-
-      // Verify in show
-      const after = runCli(['agent', 'show', 'alice.agentid.pub', '--format', 'json']);
-      const detail = JSON.parse(after.stdout);
-      expect(detail.identity.name).toBe('BrandNewName');
-      // Description should be preserved
-      expect(detail.identity.description).toBe('Description here');
-
-      // Verify file content directly
-      const mdContent = fs.readFileSync(
-        path.join(TEST_HOME, 'AIDs', 'alice.agentid.pub', 'agent.md'),
-        'utf-8'
-      );
-      expect(mdContent).toMatch(/name:\s*"BrandNewName"/);
-      expect(mdContent).toMatch(/description:\s*"Description here"/);
-    });
-  });
+  // Scenario 2: agent rename 命令已废弃，相关测试已移除
 
   describe('Scenario 3: 删除 agent 的两种模式', () => {
     it('delete without --purge keeps data, with --purge removes all', () => {

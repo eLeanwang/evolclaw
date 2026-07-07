@@ -5,8 +5,8 @@ import path from 'path';
 import { _resetRoot, resolvePaths } from '../../src/paths.js';
 import {
   snapshot, restore, diffVersions, listAllVersions, readCurrent, prune, collectConfigFiles, incrementSuccessCount,
-} from '../../src/core/config/snapshot.js';
-import { appendBootLog, readBootLog, selfDiagnose } from '../../src/core/config/boot-log.js';
+} from '../../src/config/snapshot.js';
+import { appendBootLog, readBootLog, selfDiagnose } from '../../src/config/boot-log.js';
 
 function setupHome(): string {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'evolclaw-snap-'));
