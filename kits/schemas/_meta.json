@@ -2,7 +2,7 @@
   "schemas": {
     "evolclaw":        { "currentVersion": 1 },
     "defaults":        { "currentVersion": 1 },
-    "agent-config":    { "currentVersion": 2 },
+    "agent-config":    { "currentVersion": 1 },
     "relation-config": { "currentVersion": 1 },
     "roles":           { "currentVersion": 4 },
     "role-assignments": { "currentVersion": 2 }

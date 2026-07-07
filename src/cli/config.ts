@@ -36,6 +36,13 @@ function fail(formatJson: boolean, code: string, message: string): never {
   process.exit(1);
 }
 
+/** 转换权限标记：内部 H/HA → 输出 human-only/configurable */
+function formatPermission(permission: string): string {
+  if (permission === 'H') return 'human-only';
+  if (permission === 'HA') return 'configurable';
+  return permission;
+}
+
 /** agent 托管环境标志（runner 注入 EVOLCLAW_SESSION_ID）。 */
 function isAgentEnv(): boolean {
   return !!process.env.EVOLCLAW_SESSION_ID;
@@ -145,7 +152,7 @@ function cmdGet(args: string[], formatJson: boolean): void {
   const value = getNested(eff, field!);
   emit(formatJson, {
     ok: true, field, value: value ?? null, scope,
-    permission: route.permission, file: route.schema,
+    permission: formatPermission(route.permission), file: route.schema,
   }, () => {
     return `${field} = ${JSON.stringify(value ?? null)}`;
   });
@@ -183,7 +190,7 @@ function cmdSet(args: string[], formatJson: boolean): void {
     write(target, existing, sel);
   } catch (e) { return failFromConfigErr(e, formatJson); }
 
-  emit(formatJson, { ok: true, field, value: coerced, scope, permission: route.permission, file: route.schema }, () =>
+  emit(formatJson, { ok: true, field, value: coerced, scope, permission: formatPermission(route.permission), file: route.schema }, () =>
     `✓ 已设置 ${field} = ${JSON.stringify(coerced)}  [config/${scope}]\n  生效：该范围所有会话下条消息起。`);
 }
 
@@ -240,11 +247,18 @@ function cmdEffective(args: string[], formatJson: boolean): void {
 function cmdFields(args: string[], formatJson: boolean): void {
   const { scope } = parseScope(args, formatJson, false);
   const fields = listFields(scope === 'defaults' ? 'defaults' : scope === 'process' ? 'process' : scope);
-  emit(formatJson, { ok: true, scope, fields }, () => {
+
+  // JSON 输出时转换权限标记
+  const fieldsFormatted = formatJson
+    ? fields.map(f => ({ ...f, permission: formatPermission(f.permission) }))
+    : fields;
+
+  emit(formatJson, { ok: true, scope, fields: fieldsFormatted }, () => {
     const lines = [`# ${scope} 可设字段（来源 schema）`];
     for (const f of fields) {
+      const perm = formatPermission(f.permission);
       const en = f.enum ? `  enum=[${f.enum.join('|')}]` : '';
-      lines.push(`  ${pad(f.field, 20)} ${f.permission === 'HA' ? 'HA' : 'H '}  merge=${pad(f.merge, 6)}${en}`);
+      lines.push(`  ${pad(f.field, 20)} ${pad(perm, 12)}  merge=${pad(f.merge, 6)}${en}`);
     }
     return lines.join('\n');
   });

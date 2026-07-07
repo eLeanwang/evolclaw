@@ -89,6 +89,31 @@ export function initConfigManager(): void {
   _initialized = true;
 }
 
+/**
+ * 启动时检查 schema 版本（daemon 启动时调用）。
+ * 扫描所有配置文件，如有版本不匹配则警告一次。
+ */
+export function checkSchemaVersionsOnStartup(selfAid?: string): void {
+  schemaVersionWarningsEnabled = true;
+  const p = resolvePaths();
+
+  // 检查 process 层
+  try { read(ConfigTarget.Process); } catch {}
+
+  // 检查 defaults 层
+  try { read(ConfigTarget.Defaults); } catch {}
+
+  // 检查 agent 层（如果提供了 AID）
+  if (selfAid) {
+    try { read(ConfigTarget.Agent, { self: selfAid }); } catch {}
+  }
+
+  schemaVersionWarningsEnabled = false;
+}
+
+// Schema 版本警告控制：只在启动时检查一次
+let schemaVersionWarningsEnabled = false;
+
 function configWarn(...args: unknown[]): void {
   console.warn(...args);
 }
@@ -402,7 +427,7 @@ function migrateIfNeeded<T>(target: ConfigTarget, raw: T, file: string): T {
   const logical = TARGET_SCHEMA[target];
   const cur = currentVersion(logical);
   const have = (raw as any)?.$schema_version;
-  if (typeof have === 'number' && have < cur) {
+  if (typeof have === 'number' && have < cur && schemaVersionWarningsEnabled) {
     // P0：迁移函数尚未存在（全 v1）。留 seam：未来在此 require migrations/{logical}.{N}-to-{N+1}.
     configWarn(`[config] ${file}: $schema_version ${have} < current ${cur} for "${logical}" — migration pending (seam)`);
   }
@@ -772,6 +797,18 @@ function isBehaviorFieldPath(fieldPath: string): boolean {
 }
 
 function routeIn(name: LogicalSchemaName, target: ConfigTarget, topField: string): FieldRoute {
+  // $schema_version 是元数据字段，特殊处理
+  if (topField === '$schema_version') {
+    return {
+      field: topField,
+      target,
+      schema: name,
+      permission: 'H',
+      merge: 'replace' as const,
+      enum: undefined
+    };
+  }
+
   const s = loadSchema(name);
   if (!s.fields.has(topField)) throw new ConfigError('UNKNOWN_FIELD', `未知配置字段: ${topField}（${name}）`);
   return mkRoute(s, target, topField);
