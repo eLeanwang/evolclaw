@@ -5,6 +5,15 @@ import crypto from 'crypto';
 import { BaseagentRunnerUnavailableError, type AgentRunnerFull, hasCompact, hasClearSession, type AgentEvent, type Compactable, type AgentTokenUsage, type AgentContextUsage, type AgentLastModelCall, type AgentModelCall, autoCompactWindowForModel, isClaudeContextUsageModel } from '../../agents/runner-types.js';
 import { SessionManager } from '../session/session-manager.js';
 import { appendMessageLog, buildOutboundEntry } from './message-log.js';
+import {
+  appendHandoffConsumedEvent,
+  buildTaskRuntimeEnv,
+  formatEcMsgSendCommand,
+  selectConsumableHandoff,
+  toConsumedHandoffContext,
+  type ConsumedHandoffContext,
+  type TaskRuntimeContext,
+} from './handoff.js';
 import { IMRenderer } from './im-renderer.js';
 import { MessageCache } from './message-cache.js';
 import type { MessageQueue } from './message-queue.js';
@@ -13,7 +22,7 @@ import { logger } from '../../utils/logger.js';
 import { getErrorMessage, classifyError, ErrorType, ERROR_PREFIX, isInfraError, prefixErrorType, isRetryableError, isContextTooLongText } from '../../utils/error-utils.js';
 import { EventBus } from '../event-bus.js';
 import { isEvolclawSendCommandForSession, summarizeToolInput } from '../permission.js';
-import type { Message, Session, ChannelAdapter, ChannelOptions, ChannelPolicy, CommandHandler as CommandHandlerFn, ReplyContext, AgentContext, EvolAgentRegistryHandle, GlobalSettings, OutboundEnvelope, OutboundPayload, InteractionRequest, InteractionKind, ActionInteraction, CommandCard, ProactiveBehaviorBlock } from '../../types.js';
+import type { Message, Session, ChannelAdapter, ChannelOptions, ChannelPolicy, CommandHandler as CommandHandlerFn, ReplyContext, AgentContext, EvolAgentHandle, EvolAgentRegistryHandle, GlobalSettings, OutboundEnvelope, OutboundPayload, InteractionRequest, InteractionKind, ActionInteraction, CommandCard, ProactiveBehaviorBlock } from '../../types.js';
 import { getPackageRoot, resolveRoot, resolvePaths } from '../../paths.js';
 import { renderKitSections, type KitRenderContext } from '../../eck/kit-renderer.js';
 import { renderMessageBody, type RenderMessageResult } from '../../eck/message-renderer.js';
@@ -32,7 +41,7 @@ export { buildEnvelope, sendInteractionPayload } from './message-utils.js';
 import { resolveEffectiveModel, resolvePermissionMode } from '../model/config-scope.js';
 import { resolveEffective } from '../../config/config-manager.js';
 import { getFirstRoleAssignment } from '../../config/role-assignments.js';
-import { checkRoleAccess } from '../../config/peer-role-resolver.js';
+import { checkRoleAccess, isAuthenticated } from '../../config/peer-role-resolver.js';
 import { insertUsageEvent, insertContextBreakdown, insertModelCalls } from '../../stats/writer.js';
 import { normalizeUsage } from '../../stats/normalizer.js';
 import { resolvePrices } from '../../stats/price-resolver.js';
@@ -80,9 +89,15 @@ type ContextRecoveryOptions = {
   absoluteProjectPath: string;
   effectiveSystemPrompt: string | undefined;
   modelOverride: { model?: string; effort?: string; permissionMode?: string } | undefined;
+  runtimeEnv?: Record<string, string>;
   resetTimer: () => void;
   shouldSuppress: () => boolean;
   proactive: ProactiveRuntimeState | null;
+};
+
+type RoleAwareHandle = {
+  isOwner?: (channel: string, userId: string) => boolean;
+  isAdmin?: (channel: string, userId: string) => boolean;
 };
 
 const RETRY_EXHAUSTED_MARK = Symbol('evolclaw.retryExhausted');
@@ -144,7 +159,20 @@ function getStreamErrorText(result: StreamRunResult): string {
 
 function getStreamErrorMessage(result: StreamRunResult, includeEmoji = false): string {
   const raw = getStreamErrorText(result) || '任务执行失败';
-  return getErrorMessage(new Error(raw), result.terminalReason, includeEmoji);
+  const mapped = getErrorMessage(new Error(raw), result.terminalReason, includeEmoji);
+  const generic = includeEmoji ? '❌ 处理消息时出错，请稍后重试' : '处理消息时出错，请稍后重试';
+  if (!result.terminalReason && raw && mapped === generic) {
+    return includeEmoji ? `❌ ${raw}` : raw;
+  }
+  return mapped;
+}
+
+function getRuntimeErrorMessage(raw: string, includeEmoji = false): string {
+  const fallback = raw || '任务执行失败';
+  const mapped = getErrorMessage(new Error(fallback), undefined, includeEmoji);
+  const generic = includeEmoji ? '❌ 处理消息时出错，请稍后重试' : '处理消息时出错，请稍后重试';
+  if (mapped === generic) return includeEmoji ? `❌ ${fallback}` : fallback;
+  return mapped;
 }
 
 function normalizeComparableText(text: string): string {
@@ -275,6 +303,8 @@ export class ResponseEngine implements IMessageProcessor {
   private messageQueue?: MessageQueue;
   /** sessionId → 活跃的空闲监控器，用于等待用户交互期间暂停/恢复计时 */
   private activeMonitors = new Map<string, StreamIdleMonitor>();
+  /** sessionId → 当前正在处理任务的运行时上下文，供 in-task CLI 通过 IPC 查询。 */
+  private activeTaskRuntimeContexts = new Map<string, TaskRuntimeContext>();
 
   /** 响应模式协调器（插件化机制中枢）。内置模式在构造时注册。 */
   private responseCoordinator: ResponseModeCoordinator;
@@ -299,6 +329,8 @@ export class ResponseEngine implements IMessageProcessor {
       const evolName = owner?.name || '<unknown>';
       const key = `${evolName}::${baseagent}`;
       if (this.agentMap.has(key)) return this.agentMap.get(key)!;
+      const singleRunnerKey = `<unknown>::${baseagent}`;
+      if (this.agentMap.has(singleRunnerKey)) return this.agentMap.get(singleRunnerKey)!;
       if (owner) {
         throw new BaseagentRunnerUnavailableError(evolName, baseagent, this.getAvailableBaseagentsForOwner(evolName));
       }
@@ -331,9 +363,38 @@ export class ResponseEngine implements IMessageProcessor {
       channel: channelKey,
       channelId,
       agentName: error.evolagentName,
-      chatmode: session.chatMode === 'proactive' ? 'proactive' : 'interactive',
+      chatmode: this.resolveEffectiveChatmodeForSession(session, channelKey, channelId),
       replyContext,
     }), { kind: 'system.error', text, subtype: 'baseagent_unavailable', recoverable: true });
+  }
+
+  private resolveEffectiveChatmodeForSession(
+    session: Session,
+    channelKey: string,
+    channelId: string,
+  ): 'interactive' | 'proactive' {
+    const field = session.chatType === 'group'
+      ? 'group'
+      : ((session.metadata as any)?.peerType && (session.metadata as any).peerType !== 'human')
+        ? 'nothuman'
+        : 'private';
+    const fallback = field === 'private' ? 'interactive' : 'proactive';
+    try {
+      const self = session.selfAID || this.agentRegistry?.resolveByChannel(channelKey)?.aid;
+      const channelType = session.channelType || channelKey.split('#')[0] || channelKey;
+      const peerKeyId = session.chatType === 'group'
+        ? (session.metadata?.groupId || channelId)
+        : (session.metadata?.peerId || channelId);
+      const peerKey = channelType && peerKeyId ? formatPeerKey(channelType, peerKeyId) : undefined;
+      const configured = resolveEffective({
+        self: self || undefined,
+        peerKey,
+        role: session.identity?.role,
+      }, { cache: true }).chatmode?.[field];
+      return configured === 'interactive' || configured === 'proactive' ? configured : fallback;
+    } catch {
+      return fallback;
+    }
   }
 
   /** 获取可用 agent 列表 */
@@ -398,6 +459,10 @@ export class ResponseEngine implements IMessageProcessor {
     this.messageQueue = queue;
   }
 
+  getTaskRuntimeContext(sessionId: string): TaskRuntimeContext | null {
+    return this.activeTaskRuntimeContexts.get(sessionId) ?? null;
+  }
+
   private agentRegistry?: EvolAgentRegistryHandle;
 
   setAgentRegistry(registry: EvolAgentRegistryHandle): void {
@@ -408,6 +473,39 @@ export class ResponseEngine implements IMessageProcessor {
   private touchAgentActivity(channelKey: string): void {
     const owning = this.agentRegistry?.resolveByChannel(channelKey);
     if (owning) owning.lastActivity = Date.now();
+  }
+
+  private inferPrimaryBaseagent(): string | undefined {
+    const idx = this.primaryRunnerKey.lastIndexOf('::');
+    return idx >= 0 ? this.primaryRunnerKey.slice(idx + 2) : this.primaryRunnerKey || undefined;
+  }
+
+  private ensureSessionBaseagent(session: Session, fallback?: string): void {
+    const legacyAgentId = typeof (session as any).agentId === 'string' ? (session as any).agentId : undefined;
+    if (!(session as any).baseagent) {
+      (session as any).baseagent = fallback || legacyAgentId || this.inferPrimaryBaseagent();
+    }
+  }
+
+  private inferDirectSessionIdentity(
+    message: Message,
+    owningAgent?: EvolAgentHandle | null,
+  ): { role: string; mode: 'interactive' } | undefined {
+    const actorId = message.peerId || message.channelId;
+    if (!actorId || !this.agentRegistry) return undefined;
+    const channel = message.channel;
+    const registryRoles = this.agentRegistry as EvolAgentRegistryHandle & RoleAwareHandle;
+    const agentRoles = owningAgent as (EvolAgentHandle & RoleAwareHandle) | null | undefined;
+    if (registryRoles.isOwner?.(channel, actorId) || agentRoles?.isOwner?.(channel, actorId)) {
+      return { role: 'owner', mode: 'interactive' };
+    }
+    if (registryRoles.isAdmin?.(channel, actorId) || agentRoles?.isAdmin?.(channel, actorId)) {
+      return { role: 'admin', mode: 'interactive' };
+    }
+    if (isAuthenticated(actorId)) {
+      return { role: 'guest', mode: 'interactive' };
+    }
+    return undefined;
   }
 
   private getAgentContext(channelName: string, chatType: string): AgentContext | null {
@@ -513,6 +611,7 @@ export class ResponseEngine implements IMessageProcessor {
       absoluteProjectPath,
       effectiveSystemPrompt,
       modelOverride,
+      runtimeEnv,
       resetTimer,
       shouldSuppress,
       proactive,
@@ -536,7 +635,8 @@ export class ResponseEngine implements IMessageProcessor {
         undefined,
         effectiveSystemPrompt,
         this.sessionManager,
-        modelOverride
+        modelOverride,
+        runtimeEnv
       );
       agent.registerStream(streamKey, retryStream);
       return await this.processEventStream(
@@ -582,7 +682,8 @@ export class ResponseEngine implements IMessageProcessor {
       undefined,
       effectiveSystemPrompt,
       this.sessionManager,
-      modelOverride
+      modelOverride,
+      runtimeEnv
     );
     agent.registerStream(streamKey, retryStream);
     return await this.processEventStream(
@@ -617,6 +718,12 @@ export class ResponseEngine implements IMessageProcessor {
       : (session.metadata?.channelKey || message.channel);
   }
 
+  private isTrustedDaemonTrigger(message: Message): boolean {
+    return message.channel === 'daemon'
+      && message.source === 'trigger'
+      && !!message.triggerMeta?.triggerId;
+  }
+
   // 命令前缀列表（与 CommandHandler.quickCommandPrefixes 保持同步）
   private static readonly COMMAND_PREFIXES = [
     '/new', '/pwd', '/help', '/status', '/restart',
@@ -641,6 +748,9 @@ export class ResponseEngine implements IMessageProcessor {
     // 先解析会话，再优先用 session.metadata.channelKey 精确定位实例级 adapter
     // message.channel 现在存实例名（channelName），可直接用于精确路由
     const { session, absoluteProjectPath } = await this.resolveSession(message);
+    if (this.isTrustedDaemonTrigger(message)) {
+      session.identity = { role: 'owner', mode: 'interactive' };
+    }
 
     // ── 角色访问控制检查：读取该用户角色的 allowAccess 配置，false 则拦截并回复权限不足 ──
     const userRole = session.identity?.role || 'anonymous';
@@ -895,8 +1005,18 @@ export class ResponseEngine implements IMessageProcessor {
     })();
 
     // ─── 响应模式解析（插件化机制中枢）───
-    // trigger override 绝对优先（与响应模式正交）；否则由 Coordinator 解析（config > session.chatMode > 兜底）
-    const chatModeFallback = session.chatMode ?? 'interactive';
+    // trigger override 绝对优先；否则由 Coordinator 解析（response_modes > chatmode 配置兜底）。
+    const chatModeFallback = (() => {
+      const peerType = message.peerType ?? (session.metadata as any)?.peerType;
+      const key = chatType === 'group'
+        ? 'group'
+        : peerType && peerType !== 'human'
+          ? 'nothuman'
+          : 'private';
+      const configured = effectiveAgentConfig?.chatmode?.[key];
+      if (configured === 'interactive' || configured === 'proactive') return configured;
+      return key === 'private' ? 'interactive' : 'proactive';
+    })();
     const resolvedMode = message.triggerMeta?.chatModeOverride
       ? null  // trigger 强制覆盖，不走插件解析
       : this.responseCoordinator.resolveMode(
@@ -1032,7 +1152,7 @@ export class ResponseEngine implements IMessageProcessor {
       const peerId = session.metadata?.peerId ?? message.peerId ?? message.channelId;
       const peerShort = peerId ? peerId.split('.')[0].split(':')[0] : '?';
       const peerLabel = peerName && peerName !== peerShort ? `${peerShort}(${peerName})` : peerShort;
-      logger.info(`[ResponseEngine] session=${session.id} task=${taskId} peer=${peerLabel} chatType=${session.chatType} chatMode=${session.chatMode} baseagent=${session.baseagent} msgChatType=${message.chatType ?? 'n/a'}`);
+      logger.info(`[ResponseEngine] session=${session.id} task=${taskId} peer=${peerLabel} chatType=${session.chatType} chatMode=${effectiveChatMode} baseagent=${session.baseagent} msgChatType=${message.chatType ?? 'n/a'}`);
 
       // 记录开始处理
       const taskEncrypt = message.replyContext?.metadata?.encrypted != null ? !!(message.replyContext.metadata.encrypted) : undefined;
@@ -1196,6 +1316,11 @@ export class ResponseEngine implements IMessageProcessor {
       let usedFallback = false;
       let skipEvolclawModel = false;
       let agentModel: string | undefined;
+      let consumedHandoff: ConsumedHandoffContext | null = null;
+      let handoffPromptRendered = false;
+      let handoffConsumedRecorded = false;
+      let handoffChatDir: string | undefined;
+      let runtimeEnv: Record<string, string> | undefined;
 
       try {
         // 动态构建运行时上下文提示
@@ -1279,9 +1404,12 @@ export class ResponseEngine implements IMessageProcessor {
           if (triggerModelOverride) effectiveModel = triggerModelOverride;
         }
 
-        // permissionMode 始终随 per-call override 传入（与 model/effort 解耦：
-        // 即使跳过 evolclaw 作用域模型或模型解析失败，权限模式也必须生效）。
-        modelOverride = { ...(modelOverride || {}), permissionMode: effectivePermissionMode };
+        // permissionMode 随完整 agent/relation 作用域或 trigger override 传入；单 runner
+        // 嵌入/测试路径没有 self/peer 作用域时，避免制造无配置来源的 override。
+        const shouldPassPermissionMode = !!message.triggerMeta?.permissionModeOverride || !!selfAid;
+        if (shouldPassPermissionMode) {
+          modelOverride = { ...(modelOverride || {}), permissionMode: effectivePermissionMode };
+        }
 
         agentModel = (typeof (agent as any).getModel === 'function') ? (agent as any).getModel() as string : undefined;
 
@@ -1290,7 +1418,6 @@ export class ResponseEngine implements IMessageProcessor {
               selfAid,
               groupId: session.metadata?.groupId || message.channelId,
               channel: currentChannelType || message.channel,
-              config: effectiveAgentConfig?.group_venue_sync,
             })
           : {};
 
@@ -1336,8 +1463,8 @@ export class ResponseEngine implements IMessageProcessor {
             channel: currentChannelType || null,
             venueUid: undefined,
             // 群分发模式 / 客户端类型 / 权限模式
-            // 优先本地 session 覆盖（/dispatch 命令），fallback 到服务器 dispatch_mode 缓存
-            dispatch: (session.metadata?.dispatchModeOverride ?? session.metadata?.dispatchMode ?? message.dispatchMode) || undefined,
+            // 优先 agent/relation behavior 配置，fallback 到服务器 dispatch_mode 缓存。
+            dispatch: (effectiveAgentConfig?.dispatch ?? session.metadata?.dispatchMode ?? message.dispatchMode) || undefined,
             clientType: message.clientType || undefined,
             permissionMode: effectivePermissionMode,
             capabilities: capParts.length > 0 ? capParts.join('、') : undefined,
@@ -1413,7 +1540,7 @@ export class ResponseEngine implements IMessageProcessor {
         let renderResult: RenderMessageResult | undefined;
         const hasContent = message.content.trim() || (message.items && message.items.length > 0);
         if (hasContent) {
-          const peerItems: SubMessage[] = message.items && message.items.length > 0
+          const rawPeerItems: SubMessage[] = message.items && message.items.length > 0
             ? message.items
             : [{
                 peerId: message.peerId, peerName: peerName || undefined,
@@ -1425,6 +1552,52 @@ export class ResponseEngine implements IMessageProcessor {
                 images: message.images,
                 mentionAids: message.mentionAids,
               }];
+          const peerItems: SubMessage[] = (() => {
+            if (currentChannelType !== 'aun' || chatType !== 'private') return rawPeerItems;
+            const getChatDir = (this.sessionManager as unknown as { getChatDir?: (s: Session) => string }).getChatDir;
+            if (typeof getChatDir !== 'function') return rawPeerItems;
+            try {
+              handoffChatDir = getChatDir.call(this.sessionManager, session);
+            } catch (error) {
+              logger.warn(`[ResponseEngine] handoff chat dir unavailable, skipping handoff match: ${error instanceof Error ? error.message : String(error)}`);
+              return rawPeerItems;
+            }
+            const inboundRefMessageId = typeof message.replyContext?.metadata?.refMessageId === 'string'
+              ? message.replyContext.metadata.refMessageId
+              : null;
+            const match = selectConsumableHandoff(handoffChatDir, {
+              replyToMessageId: inboundRefMessageId,
+              inboundMessageId: message.messageId,
+              inboundTs: message.timestamp ?? Date.now(),
+            });
+            if (!match) return rawPeerItems;
+
+            const consumedBy = message.messageId || `${message.channel}-${message.channelId}-${message.timestamp ?? Date.now()}`;
+            const ctx = toConsumedHandoffContext(match, consumedBy);
+            if (!ctx) return rawPeerItems;
+            consumedHandoff = ctx;
+
+            const combinedContent = rawPeerItems.map(item => item.content).filter(Boolean).join('\n\n') || message.content;
+            const combinedImages = rawPeerItems.flatMap(item => item.images ?? []);
+            const base = rawPeerItems[rawPeerItems.length - 1] ?? {};
+            const originPeerId = ctx.origin.peerId;
+            const replyCommand = formatEcMsgSendCommand(selfAid, originPeerId, '<反馈内容>', ctx.origin.threadId);
+            const continueCommand = formatEcMsgSendCommand(selfAid, originPeerId, '<追问内容>', ctx.origin.threadId);
+            return [{
+              ...base,
+              kind: 'handoff',
+              content: combinedContent,
+              images: combinedImages.length > 0 ? combinedImages : undefined,
+              handoff: {
+                kind: ctx.kind,
+                origin: ctx.origin,
+                previousContent: ctx.sourceMessage.content,
+                previousMessageId: ctx.sourceMessage.msgId,
+                replyCommand,
+                continueCommand,
+              },
+            }];
+          })();
 
           // 观察者插话（v0.3）：消费 (对端, thread) 的待用提示，包成 owner-hint item 排在对端消息前。
           // 一次性语义：consumeOwnerHints 读取并删除（见 pending-hints.ts）。在 try 外消费，
@@ -1464,9 +1637,13 @@ export class ResponseEngine implements IMessageProcessor {
             }
             if (renderResult.body.trim()) effectivePrompt = wrapPrompt(renderResult.body);
             else effectivePrompt = wrapPrompt(composeHintFallback(hintItems, fallbackContent));
+            handoffPromptRendered = !!consumedHandoff && !!renderResult.body.trim();
           } catch (e) {
             logger.warn(`[ResponseEngine] renderMessageBody failed, using raw content: ${e instanceof Error ? e.message : String(e)}`);
             effectivePrompt = wrapPrompt(composeHintFallback(hintItems, fallbackContent));
+          }
+          if (consumedHandoff && !handoffPromptRendered) {
+            consumedHandoff = null;
           }
         }
 
@@ -1475,6 +1652,33 @@ export class ResponseEngine implements IMessageProcessor {
         if (!effectivePrompt.trim()) {
           logger.info(`[ResponseEngine] Skip agent call: empty prompt after render. session=${session.id} task=${taskId}`);
           return;
+        }
+
+        const taskRuntimeContext: TaskRuntimeContext = {
+          taskId,
+          sessionId: session.id,
+          messageId: message.messageId,
+          channel: currentChannelType,
+          chatType,
+          selfAid,
+          peerId: peerIdRaw || undefined,
+          peerName: peerName || undefined,
+          peerType: message.peerType || (session.metadata as any)?.peerType || undefined,
+          peerRole,
+          threadId: session.threadId || undefined,
+          consumedHandoff,
+        };
+        this.activeTaskRuntimeContexts.set(session.id, taskRuntimeContext);
+        runtimeEnv = buildTaskRuntimeEnv(taskRuntimeContext);
+
+        if (consumedHandoff && handoffPromptRendered && !handoffConsumedRecorded && handoffChatDir) {
+          appendHandoffConsumedEvent(
+            handoffChatDir,
+            consumedHandoff,
+            selfAid || session.selfAID || message.selfAID || 'self',
+            message.peerId || message.channelId,
+          );
+          handoffConsumedRecorded = true;
         }
 
         // 可重试错误（403/429/5xx/模型繁忙）按明确退避序列重试。
@@ -1510,7 +1714,8 @@ export class ResponseEngine implements IMessageProcessor {
               renderResult?.images.length ? renderResult.images : message.images,
               effectiveSystemPrompt,
               this.sessionManager,
-              modelOverride
+              modelOverride,
+              runtimeEnv
             );
             agent.registerStream(streamKey, stream);
             streamRegistered = true;
@@ -1607,6 +1812,7 @@ export class ResponseEngine implements IMessageProcessor {
               absoluteProjectPath,
               effectiveSystemPrompt,
               modelOverride,
+              runtimeEnv,
               resetTimer,
               shouldSuppress,
               proactive,
@@ -1633,6 +1839,7 @@ export class ResponseEngine implements IMessageProcessor {
             absoluteProjectPath,
             effectiveSystemPrompt,
             modelOverride,
+            runtimeEnv,
             resetTimer,
             shouldSuppress,
             proactive,
@@ -1795,6 +2002,7 @@ export class ResponseEngine implements IMessageProcessor {
       agent.cleanupStream(streamKey);
       logger.info(`[ResponseEngine] agent.cleanupStream ok: session=${session.id} task=${taskId}`);
       this.sessionManager.clearProcessing(session.id);
+      this.activeTaskRuntimeContexts.delete(session.id);
       logger.info(`[ResponseEngine] session ${session.id} processing cleared task=${taskId}`);
 
       // 降级模型回复末尾追加标记（代码层硬注入，不依赖模型输出）
@@ -1827,7 +2035,9 @@ export class ResponseEngine implements IMessageProcessor {
       if (streamResult.isError) {
         // Agent 流正常结束但任务结果失败（权限被拒、max turns、工具链失败等）
         const errorSummary = streamResult.errors?.join('; ') || '任务执行失败';
-        const userErrorSummary = getStreamErrorMessage(streamResult, false);
+        const userErrorSummary = streamHitContextLimit(streamResult)
+          ? getContextTooLongHint(agent)
+          : getStreamErrorMessage(streamResult, false);
         const rawSubtype = streamResult.subtype || 'agent_error';
         const errorType = prefixErrorType(ERROR_PREFIX.AGENT, rawSubtype);
         // 用户主动打断（新消息/​/stop/​撤回）会让 SDK 流在工具调用中途被掐断，
@@ -2092,6 +2302,7 @@ export class ResponseEngine implements IMessageProcessor {
       logger.info(`[ResponseEngine] agent.cleanupStream ok (on error): session=${session.id} task=${taskId}`);
       try {
         this.sessionManager.clearProcessing(session.id);
+        this.activeTaskRuntimeContexts.delete(session.id);
         logger.info(`[ResponseEngine] session ${session.id} processing cleared (on error) task=${taskId}`);
       } catch {}
       // 注意：不在此处清除 interruptedSessions，由下一条消息的 prompt 包装逻辑消费
@@ -2201,6 +2412,17 @@ export class ResponseEngine implements IMessageProcessor {
         await adapter.send({ ...envelope, replyContext: sendOpts }, errorPayload);
 
         // Proactive 可观测：catch 块的基础设施错误也透传为 thought，保证按 task_id 聚合完整
+        if (isProactive && adapter.capabilities?.thought) {
+          await adapter.send({ ...envelope, replyContext: sendOpts }, {
+            kind: 'activity.batch',
+            items: [{
+              kind: 'notice',
+              text: userMessage,
+              severity: 'warn',
+              subtype: 'task-error',
+            }],
+          }).catch(() => {});
+        }
       }
     }
 
@@ -2221,10 +2443,16 @@ export class ResponseEngine implements IMessageProcessor {
     envelope: OutboundEnvelope,
     suppressOutput = false,
   ): Promise<void> {
-    if (!session.agentSessionId || !canCompactAgent(agent)) return;
+    if (!session.agentSessionId || !canCompactAgent(agent)) {
+      logger.debug(`[ResponseEngine] Auto compact skipped: session=${session.id} agentSessionId=${session.agentSessionId || 'none'} canCompact=${canCompactAgent(agent)} agent=${agent.name}`);
+      return;
+    }
 
     const ctx = await this.readLastModelCallContextUsage(session.id, session.agentSessionId);
-    if (!ctx || ctx.totalTokens < ctx.autoCompactTokens) return;
+    if (!ctx || ctx.totalTokens < ctx.autoCompactTokens) {
+      logger.debug(`[ResponseEngine] Auto compact skipped: session=${session.id} ctx=${ctx ? `${ctx.totalTokens}/${ctx.autoCompactTokens}` : 'none'}`);
+      return;
+    }
 
     logger.info(`[ResponseEngine] Auto compact at task.start: session=${session.id} totalTokens=${ctx.totalTokens} autoCompactTokens=${ctx.autoCompactTokens}`);
     if (!suppressOutput) {
@@ -2247,11 +2475,14 @@ export class ResponseEngine implements IMessageProcessor {
 
   private async readLastModelCallContextUsage(sessionId: string, agentSessionId: string): Promise<{ totalTokens: number; autoCompactTokens: number } | undefined> {
     try {
-      const { openReadonlyDb, getDbPath } = await import('../../stats/db.js');
-      const rdb = openReadonlyDb(getDbPath(resolveRoot()));
-      if (!rdb) return undefined;
+      const { getDb, openReadonlyDb, getDbPath } = await import('../../stats/db.js');
+      const root = resolveRoot();
+      const writerDb = getDb(root);
+      const db = writerDb || openReadonlyDb(getDbPath(root));
+      if (!db) return undefined;
+      const shouldClose = !writerDb;
       try {
-        const row = rdb.prepare(
+        const row = db.prepare(
           `SELECT model, input_tokens, cache_creation_tokens, cache_read_tokens,
                   context_tokens, max_tokens, auto_compact_tokens
              FROM model_calls
@@ -2289,7 +2520,7 @@ export class ResponseEngine implements IMessageProcessor {
           : inferredAutoCompactTokens ?? autoCompactWindowForModel(model);
         return { totalTokens, autoCompactTokens };
       } finally {
-        rdb.close();
+        if (shouldClose) db.close();
       }
     } catch (err) {
       logger.debug(`[ResponseEngine] Failed to read last model call context usage: ${err}`);
@@ -2315,7 +2546,8 @@ export class ResponseEngine implements IMessageProcessor {
 
     const owningAgent = this.agentRegistry?.resolveByChannel(message.channel);
     const projectPath = owningAgent?.projectPath || process.cwd();
-    const resolvedBaseagent = message.baseagent || owningAgent?.baseagent;
+    const resolvedBaseagent = message.baseagent || owningAgent?.baseagent || (!this.agentRegistry ? this.inferPrimaryBaseagent() : undefined);
+    const resolvedIdentity = this.inferDirectSessionIdentity(message, owningAgent);
     if (!resolvedBaseagent) {
       throw new Error(`[ResponseEngine] resolveSession: baseagent could not be determined (message.baseagent=${message.baseagent}, owningAgent=${owningAgent?.name || 'none'})`);
     }
@@ -2327,6 +2559,7 @@ export class ResponseEngine implements IMessageProcessor {
     if (message.triggerMeta?.boundSessionId) {
       const bound = await this.sessionManager.getSessionById(message.triggerMeta.boundSessionId);
       if (bound) {
+        this.ensureSessionBaseagent(bound, resolvedBaseagent);
         if (bound.threadId) {
           const absoluteProjectPath = path.isAbsolute(bound.projectPath)
             ? bound.projectPath : path.resolve(process.cwd(), bound.projectPath);
@@ -2334,6 +2567,7 @@ export class ResponseEngine implements IMessageProcessor {
         }
         const switched = await this.sessionManager.switchToSession(bound.channel, bound.channelId, bound.id);
         if (switched) {
+          this.ensureSessionBaseagent(switched, resolvedBaseagent);
           const absoluteProjectPath = path.isAbsolute(switched.projectPath)
             ? switched.projectPath : path.resolve(process.cwd(), switched.projectPath);
           return { session: switched, absoluteProjectPath };
@@ -2356,15 +2590,10 @@ export class ResponseEngine implements IMessageProcessor {
       resolvedBaseagent,
       message.selfAID,
       message.channelType,
-      message.peerType
+      message.peerType,
+      resolvedIdentity
     );
-
-    // 兜底纠正1：群聊强制 proactive
-    if (message.chatType === 'group' && session.chatMode !== 'proactive') {
-      logger.info(`[ResponseEngine] group proactive upgrade: sessionId=${session.id} ${session.chatMode} -> proactive`);
-      session.chatMode = 'proactive';
-      await this.sessionManager.updateSession(session.id, { chatMode: 'proactive' });
-    }
+    this.ensureSessionBaseagent(session, resolvedBaseagent);
 
     // 群名解析：群会话首次取群显示名（group.get），缓存到 metadata，供信封渲染。
     // 渠道私有方法 getGroupName 自带进程缓存 + 容错；取不到不阻塞（groupName 保持空，模板回退 groupId）。
@@ -2386,8 +2615,7 @@ export class ResponseEngine implements IMessageProcessor {
       await this.sessionManager.updateSession(session.id, { metadata: session.metadata });
     }
 
-    // chatMode 策略由 SessionManager.resolveDefaultChatMode() 统一决定（创建时）
-    // 此处不再动态修改，保持单一真相源
+    // chatMode 策略由 agent/relation behavior 配置在处理阶段解析；此处不再写 session 级参数。
 
     // replyContext 不再写入 session.metadata（跟着 message 走，避免群聊多人覆盖）
 
@@ -2620,7 +2848,7 @@ export class ResponseEngine implements IMessageProcessor {
           const isRetryableRuntimeError = isRetryableError(new Error(event.error || ''));
           if (!isContextError && !isRetryableRuntimeError && !hasErrorResult && !shouldSuppress()) {
             hasErrorResult = true;
-            renderer.addNotice(getErrorMessage(new Error(event.error || '任务执行失败'), undefined, false), 'warn', 'runtime-error', true);
+            renderer.addNotice(getRuntimeErrorMessage(event.error || '任务执行失败', false), 'warn', 'runtime-error', true);
           }
         }
 

@@ -4,6 +4,7 @@ import path from 'path';
 import { getPackageRoot } from '../paths.js';
 import { loadAgent, loadEvolclawConfig, saveAgent, saveEvolclawConfig } from '../config-store.js';
 import { resolveEffective } from '../config/config-manager.js';
+import { setPrivateRoleAssignment } from '../config/role-assignments.js';
 import { readEvolclawVersion } from '../index.js';
 import type { BaseagentsBlock, AgentConfig, ChannelInstance } from '../types.js';
 
@@ -324,6 +325,7 @@ export class BindService {
       ? [ownerAid]
       : [ownerAid, ...current.filter(o => o !== ownerAid)];
     saveAgent({ ...agent, owners });
+    setPrivateRoleAssignment(task.targetAid, ownerAid, 'owner', { note: `bind:${task.ownerMode}` });
   }
 
   private cleanup(): void {

@@ -119,6 +119,10 @@ export interface MessageLogEntry {
   channelType?: string; selfAID?: string; peerName?: string | null; peerType?: string; groupName?: string | null;
 }
 
+export function isHandoffStateMessage(entry: Pick<MessageLogEntry, 'msgType'> | null | undefined): boolean {
+  return entry?.msgType === 'handoff_state';
+}
+
 export interface PeerInfo {
   peerId: string; peerName: string | null; inbound: number; outbound: number; lastAt: number;
 }
@@ -151,7 +155,7 @@ export function listPeers(aunDir: string, localAid: string): string[] {
 export function readMessages(aunDir: string, localAid: string, peerId: string): MessageLogEntry[] {
   return readAllJsonlLines<MessageLogEntry>(
     path.join(aunDir, encodeSegment(localAid), encodeSegment(peerId), 'messages.jsonl'),
-  );
+  ).filter(m => !isHandoffStateMessage(m));
 }
 
 function readPeerName(aunDir: string, localAid: string, peerId: string): string | null {

@@ -161,6 +161,9 @@ export class MessageBridge {
             const chatDir = chatDirPath(resolvePaths().sessionsDir, msg.channelType || effectiveChannelType, msg.channelId, msg.selfAID || '');
             const inboundEncrypt = msg.replyContext?.metadata?.encrypted != null ? !!(msg.replyContext.metadata.encrypted) : undefined;
             const inboundChatmode = msg.replyContext?.metadata?.chatmode as string | undefined;
+            const inboundReplyTo = typeof msg.replyContext?.metadata?.refMessageId === 'string'
+              ? msg.replyContext.metadata.refMessageId
+              : null;
             appendMessageLog(chatDir, buildInboundEntry({
               from: msg.peerId || 'unknown',
               to: msg.selfAID || 'self',
@@ -168,7 +171,7 @@ export class MessageBridge {
               groupId: msg.groupId ?? null,
               msgId: msg.messageId ?? null,
               content,
-              replyTo: msg.replyContext?.replyToMessageId ?? null,
+              replyTo: inboundReplyTo,
               permMode: null,
               timestamp: Date.now(),
               encrypt: inboundEncrypt,
@@ -262,6 +265,9 @@ export class MessageBridge {
           const chatDir = this.sessionManager.getChatDir(session);
           const inboundEncrypt = msg.replyContext?.metadata?.encrypted != null ? !!(msg.replyContext.metadata.encrypted) : undefined;
           const inboundChatmode = msg.replyContext?.metadata?.chatmode as string | undefined;
+          const inboundReplyTo = typeof msg.replyContext?.metadata?.refMessageId === 'string'
+            ? msg.replyContext.metadata.refMessageId
+            : null;
           appendMessageLog(chatDir, buildInboundEntry({
             from: msg.peerId || 'unknown',
             to: msg.selfAID || 'self',
@@ -269,7 +275,7 @@ export class MessageBridge {
             groupId: msg.groupId ?? null,
             msgId: msg.messageId ?? null,
             content,
-            replyTo: msg.replyContext?.replyToMessageId ?? null,
+            replyTo: inboundReplyTo,
             permMode: session.identity?.role ?? null,
             timestamp: fullMessage.timestamp,
             encrypt: inboundEncrypt,

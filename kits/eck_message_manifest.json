@@ -14,6 +14,28 @@
       "description": "观察者插话提示渲染（owner 信封头·default 模式）"
     },
     {
+      "id": "msg-handoff-request-to-target",
+      "type": "file",
+      "file": "$KITS_MESSAGE_FRAGMENTS/handoff-request-to-target.md",
+      "order": 6,
+      "needsInjection": true,
+      "modeType": "handoff",
+      "modeName": "request_to_target",
+      "when": { "and": [ { "var": "isHandoff", "eq": true }, { "var": "handoffKind", "eq": "request_to_target" } ] },
+      "description": "msg send 跨会话请求回复上下文渲染"
+    },
+    {
+      "id": "msg-handoff-response-to-origin",
+      "type": "file",
+      "file": "$KITS_MESSAGE_FRAGMENTS/handoff-response-to-origin.md",
+      "order": 7,
+      "needsInjection": true,
+      "modeType": "handoff",
+      "modeName": "response_to_origin",
+      "when": { "and": [ { "var": "isHandoff", "eq": true }, { "var": "handoffKind", "eq": "response_to_origin" } ] },
+      "description": "msg send 跨会话结果回流上下文渲染"
+    },
+    {
       "id": "msg-private-default",
       "type": "file",
       "file": "$KITS_MESSAGE_FRAGMENTS/item.md",
@@ -22,7 +44,7 @@
       "modeType": "private",
       "modeName": "default",
       "isDefault": true,
-      "when": { "and": [ { "var": "isOwnerHint", "neq": true }, { "var": "chatType", "neq": "group" }, { "var": "renderMode_private", "eq": "default" } ] },
+      "when": { "and": [ { "var": "isOwnerHint", "neq": true }, { "var": "isHandoff", "neq": true }, { "var": "chatType", "neq": "group" }, { "var": "renderMode_private", "eq": "default" } ] },
       "description": "对端私聊消息渲染（default 模式；chatType 非 group 的非插话消息，含 coding/null 兜底）"
     },
     {
@@ -34,7 +56,7 @@
       "modeType": "group",
       "modeName": "default",
       "isDefault": true,
-      "when": { "and": [ { "var": "isOwnerHint", "neq": true }, { "var": "chatType", "eq": "group" }, { "var": "renderMode_group", "eq": "default" } ] },
+      "when": { "and": [ { "var": "isOwnerHint", "neq": true }, { "var": "isHandoff", "neq": true }, { "var": "chatType", "eq": "group" }, { "var": "renderMode_group", "eq": "default" } ] },
       "description": "群聊消息渲染（default 模式）"
     }
   ]

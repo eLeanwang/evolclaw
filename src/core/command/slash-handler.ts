@@ -11,6 +11,13 @@ import fs from 'fs';
 import os from 'os';
 import { checkLatestVersion, getLocalVersion, isLinkedInstall, compareVersions } from '../../utils/npm-ops.js';
 import { loadEvolclawConfig } from '../../config-store.js';
+import {
+  read as cfgRead,
+  resolveEffective,
+  routeFieldPath,
+  write as cfgWrite,
+  type Selector,
+} from '../../config/config-manager.js';
 import { isProcessLevelOwner } from './menu-handler.js';
 import { execAgentAction } from '../message/command-handler-agent-control.js';
 import { authorizeCommand } from './command-permission.js';
@@ -33,6 +40,101 @@ const allEfforts = ['low', 'medium', 'high', 'xhigh', 'max'] as const;
 type Effort = typeof allEfforts[number];
 const PERMISSION_MODE_KEYS = ['auto', 'bypass', 'readonly', 'plan', 'edit', 'request', 'noask'] as const;
 const PERMISSION_MODE_USAGE = PERMISSION_MODE_KEYS.join('|');
+
+type SlashChatmodeField = 'private' | 'group' | 'nothuman';
+type SlashChatmodeValue = 'interactive' | 'proactive';
+type SlashDispatchValue = 'mention' | 'broadcast';
+
+interface SlashChatmodeTarget {
+  sel: Selector;
+  field: SlashChatmodeField;
+  fieldPath: `chatmode.${SlashChatmodeField}`;
+}
+
+interface SlashDispatchTarget {
+  sel: Selector;
+  fieldPath: 'dispatch';
+}
+
+function defaultSlashChatmode(field: SlashChatmodeField): SlashChatmodeValue {
+  return field === 'private' ? 'interactive' : 'proactive';
+}
+
+function slashChatmodeField(session: Session | null | undefined, chatType?: string): SlashChatmodeField {
+  if ((session?.chatType ?? chatType) === 'group') return 'group';
+  const peerType = (session?.metadata as any)?.peerType;
+  return peerType && peerType !== 'human' ? 'nothuman' : 'private';
+}
+
+function resolveSlashChatmodeTarget(this: any, params: {
+  session?: Session | null;
+  channel: string;
+  selfAID?: string;
+  role?: string;
+  chatType?: string;
+}): SlashChatmodeTarget | { error: string; code: string } {
+  const self = params.selfAID
+    ?? params.session?.selfAID
+    ?? this.getOwningAgent?.(params.channel)?.aid
+    ?? this.resolveSelfAID?.(params.channel);
+  if (!self) return { error: '找不到当前 agent，无法读写 chatmode', code: 'MISSING_AID' };
+  const field = slashChatmodeField(params.session, params.chatType);
+  return { sel: { self, role: params.role }, field, fieldPath: `chatmode.${field}` };
+}
+
+function readSlashChatmode(target: SlashChatmodeTarget): SlashChatmodeValue {
+  try {
+    const effective = resolveEffective(target.sel, { cache: true });
+    const mode = effective.chatmode?.[target.field];
+    return mode === 'interactive' || mode === 'proactive'
+      ? mode
+      : defaultSlashChatmode(target.field);
+  } catch {
+    return defaultSlashChatmode(target.field);
+  }
+}
+
+function writeSlashChatmode(target: SlashChatmodeTarget, value: SlashChatmodeValue): void {
+  const route = routeFieldPath(target.fieldPath, 'agent');
+  const cur = (cfgRead<Record<string, any>>(route.target, target.sel) as Record<string, any>) || {};
+  const block = cur.chatmode && typeof cur.chatmode === 'object' && !Array.isArray(cur.chatmode)
+    ? { ...cur.chatmode }
+    : {};
+  block[target.field] = value;
+  cur.chatmode = block;
+  cfgWrite(route.target, cur, target.sel);
+}
+
+function resolveSlashDispatchTarget(this: any, params: {
+  session?: Session | null;
+  channel: string;
+  selfAID?: string;
+  role?: string;
+}): SlashDispatchTarget | { error: string; code: string } {
+  const self = params.selfAID
+    ?? params.session?.selfAID
+    ?? this.getOwningAgent?.(params.channel)?.aid
+    ?? this.resolveSelfAID?.(params.channel);
+  if (!self) return { error: '找不到当前 agent，无法读写 dispatch', code: 'MISSING_AID' };
+  return { sel: { self, role: params.role }, fieldPath: 'dispatch' };
+}
+
+function readSlashDispatch(target: SlashDispatchTarget, fallback: SlashDispatchValue | null = null): SlashDispatchValue | null {
+  try {
+    const mode = resolveEffective(target.sel, { cache: true }).dispatch;
+    return mode === 'mention' || mode === 'broadcast' ? mode : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function writeSlashDispatch(target: SlashDispatchTarget, value: SlashDispatchValue | null): void {
+  const route = routeFieldPath(target.fieldPath, 'agent');
+  const cur = (cfgRead<Record<string, any>>(route.target, target.sel) as Record<string, any>) || {};
+  if (value === null) delete cur.dispatch;
+  else cur.dispatch = value;
+  cfgWrite(route.target, cur, target.sel);
+}
 
 function getAvailableEfforts(agent: any, model: string): readonly Effort[] {
   if (agent.name === 'claude') return allEfforts;
@@ -337,10 +439,22 @@ export async function handleSlashCommand(this: any,
   // 权限检查：区分用户级命令和管理级命令
   const isOwner = identity.role === 'owner';
   const isAdmin = identity.role === 'owner' || identity.role === 'admin';
-  const activeChatType = activeSession?.chatType || 'private';
+  const activeChatType = activeSession?.chatType || (chatType === 'group' ? 'group' : 'private');
   const getExistingSessionForCommand = async (): Promise<Session | undefined> => {
     if (threadId) return await this.sessionManager.getThreadSession(channel, channelId, threadId);
     return activeSession;
+  };
+  const getAgentChatmode = (session?: Session | null, fallbackChatType: string = activeChatType): SlashChatmodeValue => {
+    const target = resolveSlashChatmodeTarget.call(this, {
+      session,
+      channel,
+      selfAID,
+      role: session?.identity?.role || identity.role,
+      chatType: session?.chatType || fallbackChatType,
+    });
+    return 'error' in target
+      ? defaultSlashChatmode(slashChatmodeField(session, fallbackChatType))
+      : readSlashChatmode(target);
   };
 
   const threadGuard = guardThreadCommand(normalizedContent, threadId);
@@ -968,8 +1082,42 @@ export async function handleSlashCommand(this: any,
       return { kind: 'command.result' as const, text: `当前模型: ${modelDisplayLabel(modelAgent, currentModel)}${effortHint}` };
     }
 
-    // 切换模型写入 agent/baseagent 配置；没有活跃会话时也不应创建空会话。
     const modelSession = await getExistingSessionForCommand();
+    const modelChatType = (modelSession?.chatType as 'private' | 'group' | undefined)
+      ?? (chatType === 'private' || chatType === 'group' ? chatType : undefined);
+    const peerKeyId = modelChatType === 'group'
+      ? (modelSession?.metadata?.groupId || channelId)
+      : userId;
+    const channelType = this.resolveChannelType(channel);
+    const peerKey = channelType && peerKeyId ? formatPeerKey(channelType, peerKeyId) : undefined;
+    const earlyUseAuthDenied = await authorizeSlashIntent({
+      intent: {
+        operation: 'model.use',
+        scope: 'relation',
+        source: 'slash',
+        args: buildSlashRelationIntentArgs({
+          args: { model: args.split(/\s+/)[0] },
+          selfAid: selfAID ?? this.resolveSelfAID(channel),
+          peerKey,
+        }),
+      },
+      identity,
+      session: modelSession,
+      explicitChatType: modelChatType,
+      channel,
+      channelId,
+      userId,
+      selfAid: selfAID ?? this.resolveSelfAID(channel),
+      isDaemonOwner,
+    });
+    if (earlyUseAuthDenied) {
+      return {
+        kind: 'command.error' as const,
+        text: earlyUseAuthDenied.text.includes('无权限') ? earlyUseAuthDenied.text : `❌ 无权限：${earlyUseAuthDenied.text}`,
+      };
+    }
+
+    // 切换模型写入 agent/baseagent 配置；没有活跃会话时也不应创建空会话。
     const fallbackBaseagent = modelSession?.baseagent || this.agentRegistry?.resolveByChannel(channel)?.baseagent || this.parseDefaultBaseagent();
     const modelAgent = this.getAgent(channel, fallbackBaseagent);
     const modelState = resolveCommandModelResolution({
@@ -1260,15 +1408,21 @@ export async function handleSlashCommand(this: any,
   if (normalizedContent === '/reload' || normalizedContent.startsWith('/reload ')) {
     const aidArg = normalizedContent.slice('/reload'.length).trim() || undefined;
     const selfAid = this.agentRegistry?.resolveByChannel(channel)?.aid;
+    // agent channel 的 owner/admin 不能跨 agent reload；先返回领域内错误，避免落到
+    // 底层 daemon-owner 约束的英文 reason。
+    if (!isDaemonOwner && aidArg && aidArg !== selfAid) {
+      return { kind: 'command.error' as const, text: '❌ 无权限：跨 agent reload 仅限 daemon owner 使用' };
+    }
+    const reloadScope = 'agent';
     const authDenied = await authorizeSlashIntent({
       intent: {
         operation: 'agent.reload',
-        scope: aidArg ? 'control' : 'agent',
+        scope: reloadScope,
         source: 'slash',
         args: { ...(aidArg ? { aid: aidArg } : {}), ...(selfAid ? { self: selfAid } : {}) },
         dangerous: true,
       },
-      identity,
+      identity: isDaemonOwner ? { ...identity, role: 'owner' } : identity,
       session: activeSession,
       channel,
       channelId,
@@ -1281,10 +1435,6 @@ export async function handleSlashCommand(this: any,
     // 权限判断：daemon owner 或 agent channel 的 owner/admin
     if (!isDaemonOwner && !isAdmin) {
       return { kind: 'command.error' as const, text: '❌ 无权限：/reload 仅限 daemon owner 或 agent owner/admin 使用' };
-    }
-    // agent channel 的 owner/admin 不能跨 agent reload
-    if (!isDaemonOwner && aidArg && aidArg !== selfAid) {
-      return { kind: 'command.error' as const, text: '❌ 无权限：跨 agent reload 仅限 daemon owner 使用' };
     }
 
     const targetAid = aidArg ?? selfAid;
@@ -1322,7 +1472,7 @@ export async function handleSlashCommand(this: any,
     if (activityArg && !isAdmin) return { kind: 'command.error' as const, text: '❌ 无权限：此命令仅限管理员使用' };
 
     // proactive 模式下流式输出全部静默，activity 配置无意义
-    if (activeSession?.chatMode === 'proactive') {
+    if (getAgentChatmode(activeSession) === 'proactive') {
       return { kind: 'command.error' as const, text: '❌ 当前会话为 proactive 模式，不支持 activity 配置（流式输出已全部静默）' };
     }
 
@@ -1404,20 +1554,14 @@ export async function handleSlashCommand(this: any,
     return { kind: 'command.result' as const, text: `✅ 中间输出模式: ${activityArg}（${label}）` };
   }
 
-  // /chatmode 命令：查看/切换 session 会话模式（interactive | proactive）
+  // /chatmode 命令：查看/切换 agent 级会话模式（interactive | proactive）
   // - 查看：所有人可用
   // - 设置：单聊任何角色可设置；群聊仅管理员可设置
   if (normalizedContent === '/chatmode' || normalizedContent.startsWith('/chatmode ')) {
     const arg = normalizedContent.slice(9).trim();
     if (!arg) {
       const existingChatmodeSession = await getExistingSessionForCommand();
-      const fallbackMode = this.agentRegistry?.resolveByChannel(channel)?.config?.chatmode?.private;
-      const currentMode = existingChatmodeSession?.chatMode || fallbackMode || 'interactive';
-      const chatmodeChatType = existingChatmodeSession?.chatType || activeChatType;
-      const isGroup = chatmodeChatType === 'group';
-      if (isGroup) {
-        return { kind: 'command.result' as const, text: `📋 会话模式: proactive（群聊强制）` };
-      }
+      const currentMode = getAgentChatmode(existingChatmodeSession);
       // 尝试发送 CommandCard 卡片
       const modes = [
         { key: 'interactive', name: '交互模式', desc: '被动响应：收到消息时才回复，回复直接显示' },
@@ -1451,29 +1595,33 @@ export async function handleSlashCommand(this: any,
       return { kind: 'command.result' as const, text: `会话模式: ${currentMode}  用法: /chatmode <interactive|proactive>` };
     }
 
-    const chatmodeSession = await getExistingSessionForCommand();
-    if (!chatmodeSession) return { kind: 'command.error' as const, text: '❌ 当前没有活跃会话，无法切换会话模式' };
-
-    const currentMode = chatmodeSession.chatMode || 'interactive';
-    const chatmodeChatType = chatmodeSession.chatType || activeChatType;
-    const isGroup = chatmodeChatType === 'group';
-    const canSwitch = !isGroup;
-
     if (arg !== 'interactive' && arg !== 'proactive') {
       return { kind: 'command.error' as const, text: `❌ 无效模式: ${arg}\n可选: interactive / proactive` };
     }
 
-    // 群聊强制 proactive，不可切换
-    if ((chatmodeSession.chatType || activeChatType) === 'group') {
-      return { kind: 'command.error' as const, text: '❌ 群聊强制 proactive 模式，不可切换' };
+    if (activeChatType === 'group' && !isAdmin) {
+      return { kind: 'command.error' as const, text: '❌ 群聊中切换会话模式仅限管理员使用' };
     }
+
+    const chatmodeSession = await getExistingSessionForCommand();
+    const target = resolveSlashChatmodeTarget.call(this, {
+      session: chatmodeSession,
+      channel,
+      selfAID,
+      role: chatmodeSession?.identity?.role || identity.role,
+      chatType: chatmodeSession?.chatType || activeChatType,
+    });
+    if ('error' in target) {
+      return { kind: 'command.error' as const, text: `❌ ${target.error}` };
+    }
+    const currentMode = readSlashChatmode(target);
 
     if (arg === currentMode) {
       return { kind: 'command.result' as const, text: `📋 当前会话模式已是 ${arg}` };
     }
 
     // 仅在真正需要切换时才要求会话空闲
-    if (threadId) {
+    if (chatmodeSession && threadId) {
       const threadSession = await this.sessionManager.getThreadSession(channel, channelId, threadId);
       if (threadSession) {
         const threadAgent = this.getAgent(channel, threadSession.baseagent);
@@ -1481,12 +1629,11 @@ export async function handleSlashCommand(this: any,
           return { kind: 'command.error' as const, text: '⚠️ 当前正在处理消息，请稍后再试\n使用 /stop 中断当前任务后重试' };
         }
       }
-    } else if (getActiveAgent().hasActiveStream(chatmodeSession.id) || this.messageQueue?.isProcessing(chatmodeSession.id)) {
+    } else if (chatmodeSession && (getActiveAgent().hasActiveStream(chatmodeSession.id) || this.messageQueue?.isProcessing(chatmodeSession.id))) {
       return { kind: 'command.error' as const, text: '⚠️ 当前正在处理消息，请稍后再试\n使用 /stop 中断当前任务后重试' };
     }
 
-    await this.sessionManager.updateSession(chatmodeSession.id, { chatMode: arg });
-    this.eventBus.publish({ type: 'session:chat-mode-changed', sessionId: chatmodeSession.id, mode: arg, timestamp: Date.now() });
+    writeSlashChatmode(target, arg);
     if (this.shouldSuppressCardTriggerResult(source, channel)) return null;
     return { kind: 'command.result' as const, text: `✅ 会话模式已切换: ${arg}` };
   }
@@ -1503,7 +1650,19 @@ export async function handleSlashCommand(this: any,
     }
 
     const arg = normalizedContent.slice(9).trim();
-    const currentMode = dispatchSession.metadata?.dispatchModeOverride ?? dispatchSession.metadata?.dispatchMode ?? null;
+    const dispatchTarget = resolveSlashDispatchTarget.call(this, {
+      session: dispatchSession,
+      channel,
+      selfAID,
+      role: dispatchSession.identity?.role || identity.role,
+    });
+    if ('error' in dispatchTarget) {
+      return { kind: 'command.error' as const, text: `❌ ${dispatchTarget.error}` };
+    }
+    const dispatchFallback = dispatchSession.metadata?.dispatchMode === 'mention' || dispatchSession.metadata?.dispatchMode === 'broadcast'
+      ? dispatchSession.metadata.dispatchMode
+      : null;
+    const currentMode = readSlashDispatch(dispatchTarget, dispatchFallback);
 
     if (!arg) {
       const displayMode = currentMode ?? '未设置（跟随群设置）';
@@ -1554,12 +1713,7 @@ export async function handleSlashCommand(this: any,
     }
 
     if (arg === 'clear') {
-      if (!dispatchSession.metadata?.dispatchModeOverride) {
-        return { kind: 'command.result' as const, text: '当前无本地覆盖，已跟随群设置' };
-      }
-      const { dispatchModeOverride: _, ...rest } = dispatchSession.metadata;
-      await this.sessionManager.updateSession(dispatchSession.id, { metadata: rest });
-      this.eventBus.publish({ type: 'session:dispatch-mode-changed', sessionId: dispatchSession.id, mode: undefined, timestamp: Date.now() });
+      writeSlashDispatch(dispatchTarget, null);
       if (this.shouldSuppressCardTriggerResult(source, channel)) return null;
       return { kind: 'command.result' as const, text: '✅ 已清除本地覆盖，将跟随群设置' };
     }
@@ -1568,9 +1722,7 @@ export async function handleSlashCommand(this: any,
       return { kind: 'command.result' as const, text: `当前已是 ${arg}` };
     }
 
-    const metadata = { ...(dispatchSession.metadata || {}), dispatchModeOverride: arg };
-    await this.sessionManager.updateSession(dispatchSession.id, { metadata });
-    this.eventBus.publish({ type: 'session:dispatch-mode-changed', sessionId: dispatchSession.id, mode: arg, timestamp: Date.now() });
+    writeSlashDispatch(dispatchTarget, arg);
     if (this.shouldSuppressCardTriggerResult(source, channel)) return null;
     return { kind: 'command.result' as const, text: `✅ 分发模式已切换: ${currentMode ?? '未设置'} → ${arg}` };
   }
@@ -1705,8 +1857,19 @@ export async function handleSlashCommand(this: any,
     const gitInfo = await getGitWorkingDirInfo(session.projectPath);
 
     const lines: string[] = [];
-    const chatMode = session.chatMode || 'interactive';
-    const dispatchMode = session.metadata?.dispatchModeOverride ?? session.metadata?.dispatchMode ?? '未设置（跟随群设置）';
+    const chatMode = getAgentChatmode(session);
+    const dispatchTarget = resolveSlashDispatchTarget.call(this, {
+      session,
+      channel,
+      selfAID,
+      role: session.identity?.role || identity.role,
+    });
+    const dispatchFallback = session.metadata?.dispatchMode === 'mention' || session.metadata?.dispatchMode === 'broadcast'
+      ? session.metadata.dispatchMode
+      : null;
+    const dispatchMode = 'error' in dispatchTarget
+      ? (dispatchFallback ?? '未设置（跟随群设置）')
+      : (readSlashDispatch(dispatchTarget, dispatchFallback) ?? '未设置（跟随群设置）');
     const chatModeLine = `会话模式: ${chatMode}`;
     const dispatchModeLine = session.chatType === 'group' ? `分发模式: ${dispatchMode}` : null;
     if (isAdmin) {
@@ -2016,6 +2179,11 @@ export async function handleSlashCommand(this: any,
 
   // /restart 命令：重启服务（进程级，仅 daemon owner）
   if (normalizedContent === '/restart') {
+    // 进程级操作：必须是 daemon owner（evolclaw.json.owners），与 menu 协议 /system restart 一致。
+    // agent-channel 的 owner/admin 角色不足以重启整个 daemon。
+    if (!isDaemonOwner) {
+      return { kind: 'command.error' as const, text: '❌ 无权限：服务重启仅限 daemon owner 使用' };
+    }
     const restartSelfAid = this.agentRegistry?.resolveByChannel(channel)?.aid;
     const authDenied = await authorizeSlashIntent({
       intent: {
@@ -2025,7 +2193,7 @@ export async function handleSlashCommand(this: any,
         args: {},
         dangerous: true,
       },
-      identity,
+      identity: { ...identity, role: 'owner' },
       session: activeSession,
       channel,
       channelId,
@@ -2034,11 +2202,6 @@ export async function handleSlashCommand(this: any,
       isDaemonOwner,
     });
     if (authDenied) return authDenied;
-    // 进程级操作：必须是 daemon owner（evolclaw.json.owners），与 menu 协议 /system restart 一致。
-    // agent-channel 的 owner 角色不足以重启整个 daemon。
-    if (!isDaemonOwner) {
-      return { kind: 'command.error' as const, text: '❌ 无权限：服务重启仅限 daemon owner 使用' };
-    }
     const selfAid = this.agentRegistry?.resolveByChannel(channel)?.aid;
     // 排除当前会话（如果存在）。如果 activeSession 不存在，说明还没建立会话，
     // 此时检查所有任务；如果有其他会话在处理，仍然阻塞重启。
@@ -2077,7 +2240,9 @@ export async function handleSlashCommand(this: any,
         timestamp: Date.now(),
         ...(replyContext?.replyToMessageId ? { rootId: replyContext.replyToMessageId } : {}),
       };
-      fs.writeFileSync(path.join(resolvePaths().dataDir, 'restart-pending.json'), JSON.stringify(restartInfo));
+      const dataDir = resolvePaths().dataDir;
+      fs.mkdirSync(dataDir, { recursive: true });
+      fs.writeFileSync(path.join(dataDir, 'restart-pending.json'), JSON.stringify(restartInfo));
 
       const { spawn } = await import('child_process');
       spawn('node', [path.join(getPackageRoot(), 'dist', 'cli', 'index.js'), 'restart-monitor'], {
@@ -2122,7 +2287,9 @@ export async function handleSlashCommand(this: any,
     // 文本确认流程
     if (sessionsWithMessages.length > 0) {
       const restartKey = `${channel}-${channelId}`;
-      const restartConfirmFile = path.join(resolvePaths().dataDir, `restart-confirm-${restartKey}.json`);
+      const dataDir = resolvePaths().dataDir;
+      fs.mkdirSync(dataDir, { recursive: true });
+      const restartConfirmFile = path.join(dataDir, `restart-confirm-${restartKey}.json`);
 
       if (fs.existsSync(restartConfirmFile)) {
         const confirmInfo = JSON.parse(fs.readFileSync(restartConfirmFile, 'utf-8'));
@@ -2736,7 +2903,8 @@ export async function handleSlashCommand(this: any,
     const session = await getExistingSessionForCommand();
     if (!session) return { kind: 'command.error' as const, text: '❌ 当前没有活跃会话' };
 
-    const rewindAgent = this.getAgent(channel, session.baseagent);
+    const rewindBaseagent = session.baseagent ?? (session as any).agentId;
+    const rewindAgent = this.getAgent(channel, rewindBaseagent);
 
     if (!session.agentSessionId) {
       return { kind: 'command.error' as const, text: '❌ 当前会话无历史记录\n\n请先发送一条消息，然后再使用 /rewind' };

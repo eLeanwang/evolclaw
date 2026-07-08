@@ -23,23 +23,11 @@ groupId: {{groupId}}
 {{?venueKey}}
 venueKey: {{venueKey}} # 本地环境目录键，目录位于 $VENUES_DIR/{{venueKey}}/
 {{/}}
-{{?groupRulesRemotePath}}
-groupRulesRemotePath: {{groupRulesRemotePath}} # 群资源空间中的规则文件
+{{?groupRulesStatus}}
+groupRulesStatus: {{groupRulesStatus}} # synced/cached/missing/forbidden/invalid_metadata/file_mismatch/too_large/unreadable/error
 {{/}}
-{{?groupRulesSyncStatus}}
-groupRulesSyncStatus: {{groupRulesSyncStatus}} # synced/cached/stale/missing/error/disabled
-{{/}}
-{{?groupRulesUpdatedAt}}
-groupRulesUpdatedAt: {{groupRulesUpdatedAt}}
-{{/}}
-{{?groupResourceIndexCount}}
-groupResourceIndexCount: {{groupResourceIndexCount}}
-{{/}}
-{{?groupResourceIndexUpdatedAt}}
-groupResourceIndexUpdatedAt: {{groupResourceIndexUpdatedAt}}
-{{/}}
-{{?groupRulesSyncError}}
-groupRulesSyncError: {{groupRulesSyncError}} # 同步失败时使用本地已有缓存；不要臆造未索引资源
+{{?groupRulesError}}
+groupRulesError: {{groupRulesError}}
 {{/}}
 {{?sameDevice}}
 sameDevice: true # 对端与你运行在同一台设备上

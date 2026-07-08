@@ -126,8 +126,9 @@ export class BootstrapService {
     saveAgent(withLifecycleForWrite(cfg, lifecycle) as AgentConfig);
   }
 
-  private resolveConfiguredRecipient(config: AgentConfig, channelKey: string, _channelType?: string): string | undefined {
-    return getFirstRoleAssignment(config.aid, { scope: 'private', role: 'owner' })?.peerId;
+  private resolveConfiguredRecipient(config: AgentConfig, _channelKey: string, _channelType?: string): string | undefined {
+    return getFirstRoleAssignment(config.aid, { scope: 'private', role: 'owner' })?.peerId
+      || config.owners?.[0];
   }
 
   private defaultChannelIdForConnection(channelType: string | undefined, recipientId: string): string | undefined {

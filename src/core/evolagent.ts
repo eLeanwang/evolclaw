@@ -2,6 +2,7 @@ import path from 'path';
 import { logger } from '../utils/logger.js';
 import { formatChannelKey } from './channel-loader.js';
 import { agentPersonalDir } from '../paths.js';
+import { saveAgent } from '../config-store.js';
 import { fileCache } from './daemon-file-cache.js';
 import { ConfigTarget, read as cfgRead, write as cfgWrite, ensureFile as cfgEnsure, resolveEffective } from '../config/config-manager.js';
 import { withLifecycleForWrite } from '../config/lifecycle.js';
@@ -23,6 +24,13 @@ import type {
 // 这里不再做结构校验。
 
 type GlobalChatmode = ChatmodeBlock;
+
+function legacyList(value: unknown): string[] {
+  const values = Array.isArray(value) ? value : typeof value === 'string' ? [value] : [];
+  return values
+    .map(item => typeof item === 'string' ? item.trim() : '')
+    .filter(Boolean);
+}
 
 /**
  * EvolAgent —— 一个 self-agent 的运行时表示。
@@ -159,7 +167,12 @@ export class EvolAgent {
    * Uses the role-assignments system.
    */
   isOwner(_channelKey: string, userId: string): boolean {
-    if (this.merged.owners?.includes(userId)) return true;
+    if (this.isAunChannelKey(_channelKey)) {
+      if (this.legacyOwners().includes(userId)) return true;
+    } else {
+      const inst = this.findChannelInstance(_channelKey) as any;
+      if (legacyList(inst?.owners ?? inst?.owner).includes(userId)) return true;
+    }
     const assignments = listRoleAssignments(this.aid, { scope: 'private', role: 'owner', peerId: userId });
     return assignments.length > 0;
   }
@@ -170,6 +183,12 @@ export class EvolAgent {
    */
   isAdmin(_channelKey: string, userId: string): boolean {
     if (this.isOwner(_channelKey, userId)) return true;
+    if (this.isAunChannelKey(_channelKey)) {
+      if (this.legacyAdmins().includes(userId)) return true;
+    } else {
+      const inst = this.findChannelInstance(_channelKey) as any;
+      if (legacyList(inst?.admins ?? inst?.admin).includes(userId)) return true;
+    }
     const assignments = listRoleAssignments(this.aid, { scope: 'private', role: 'admin', peerId: userId });
     return assignments.length > 0;
   }
@@ -179,7 +198,14 @@ export class EvolAgent {
    * Returns the peerId of the first owner assignment.
    */
   getOwner(_channelKey: string): string | undefined {
-    if (this.merged.owners?.[0]) return this.merged.owners[0];
+    if (this.isAunChannelKey(_channelKey)) {
+      const legacy = this.legacyOwners()[0];
+      if (legacy) return legacy;
+    } else {
+      const inst = this.findChannelInstance(_channelKey) as any;
+      const owner = legacyList(inst?.owners ?? inst?.owner)[0];
+      if (owner) return owner;
+    }
     const owners = listRoleAssignments(this.aid, { scope: 'private', role: 'owner' });
     return owners[0]?.peerId;
   }
@@ -189,7 +215,28 @@ export class EvolAgent {
    * Creates a role assignment in the role-assignments system.
    */
   setOwner(_channelKey: string, userId: string): void {
+    if (this.isAunChannelKey(_channelKey)) {
+      const owners = this.legacyOwners();
+      if (!owners.includes(userId)) {
+        owners.push(userId);
+        (this.rawAgent as any).owners = owners;
+        (this.merged as any).owners = owners;
+        saveAgent(this.rawAgent);
+      }
+    }
     setPrivateRoleAssignment(this.aid, userId, 'owner');
+  }
+
+  private isAunChannelKey(channelKey: string): boolean {
+    return channelKey === this.effectiveChannelName('aun', 'main');
+  }
+
+  private legacyOwners(): string[] {
+    return legacyList((this.merged as any).owners ?? (this.rawAgent as any).owners);
+  }
+
+  private legacyAdmins(): string[] {
+    return legacyList((this.merged as any).admins ?? (this.rawAgent as any).admins);
   }
 
   // ── Baseagent 字段写入 ────────────────────────────

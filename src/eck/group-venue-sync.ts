@@ -1,196 +1,352 @@
 import fs from 'fs';
 import path from 'path';
-import crypto from 'crypto';
+import { createHash } from 'crypto';
+import { TextDecoder } from 'util';
 import type { AIDStore, AUNClient } from '@agentunion/fastaun';
 import { getAidStore, isValidAid, loadClient, SLOT } from '../aun/aid/index.js';
 import { agentVenuesDir } from '../paths.js';
-import { atomicReadJson, atomicWriteJson, atomicWriteText } from '../utils/atomic-write.js';
+import { atomicWriteBytes } from '../utils/atomic-write.js';
 import { logger } from '../utils/logger.js';
 import { invalidateKitCache } from './kit-renderer.js';
 
-export interface GroupVenueSyncConfig {
-  enabled?: boolean;
-  /** 群空间内的规则文件路径。默认 /announce/evolclaw/rules.md。 */
-  rulesPath?: string;
-  /** 群空间资源索引扫描根路径。默认 /。 */
-  indexPath?: string;
-  /** 资源索引最大条目数。默认 80。 */
-  maxIndexItems?: number;
-  /** 规则文件最大字节数。默认 65536。 */
-  maxRulesBytes?: number;
-  /** 两次远端 mtime 检查最小间隔。默认 60000ms。 */
-  refreshIntervalMs?: number;
-  /** false 时只读远端，同步到本地 venues 缓存；true 仅保留给显式管理命令使用。 */
-  allowRemoteWrite?: boolean;
-}
+export type GroupRulesStatus =
+  | 'synced'
+  | 'cached'
+  | 'missing'
+  | 'forbidden'
+  | 'invalid_metadata'
+  | 'file_mismatch'
+  | 'too_large'
+  | 'unreadable'
+  | 'error';
 
 export interface GroupVenueSyncVars {
   venueKey?: string;
   venueDir?: string;
   groupRulesPath?: string;
-  groupRulesRemotePath?: string;
-  groupRulesUpdatedAt?: string;
-  groupRulesSyncStatus?: string;
-  groupRulesSyncError?: string;
-  groupResourceIndexPath?: string;
-  groupResourceIndexUpdatedAt?: string;
-  groupResourceIndexCount?: number;
+  groupRulesStatus?: GroupRulesStatus;
+  groupRulesError?: string;
 }
 
-interface GroupVenueSyncState {
-  schemaVersion: 1;
-  groupId: string;
-  venueKey: string;
-  rulesRemotePath: string;
-  indexRemotePath: string;
-  remoteMtimeMs?: number;
-  remoteSize?: number;
-  remoteHash?: string;
-  localHash?: string;
-  lastCheckedAt?: string;
-  lastSyncedAt?: string;
-  lastIndexAt?: string;
-  lastError?: string;
+interface RulesFileMetadata {
+  path: '/rules.md';
+  size: number;
+  mtimeMs: number;
 }
 
-interface RemoteNode {
-  path?: string;
-  name?: string;
-  type?: string;
+interface RemoteRulesNode {
   size?: number;
   mtimeMs?: number;
-  contentType?: string;
 }
 
-const DEFAULT_RULES_PATH = '/announce/evolclaw/rules.md';
-const DEFAULT_INDEX_PATH = '/';
-const DEFAULT_MAX_INDEX_ITEMS = 80;
-const DEFAULT_MAX_RULES_BYTES = 64 * 1024;
-const DEFAULT_REFRESH_INTERVAL_MS = 60_000;
+interface GroupIndexResult {
+  group_aid?: string;
+  meta?: Record<string, unknown>;
+  settings?: Record<string, unknown>;
+}
+
+interface RulesContentResult {
+  groupAid: string;
+  content?: unknown;
+  pulled: boolean;
+}
+
+interface CheckGroupIndexResult {
+  local_found?: boolean;
+  needs_update?: boolean;
+  in_sync?: boolean;
+}
+
+const RULES_REMOTE_PATH = '/rules.md';
+const RULES_LOCAL_PATH = 'rules.md';
+// Keep group rules aligned with AUN agent.md: an entry document, not a knowledge base.
+const MAX_RULES_BYTES = 4 * 1024;
+const MTIME_TOLERANCE_MS = 1;
 
 export async function syncGroupVenueContext(opts: {
   selfAid?: string;
   groupId?: string;
   channel: string;
-  config?: GroupVenueSyncConfig;
 }): Promise<GroupVenueSyncVars> {
   const { selfAid, groupId, channel } = opts;
   if (!selfAid || !groupId || !isValidAid(selfAid)) return {};
 
-  const cfg = normalizeConfig(opts.config);
-  if (!cfg.enabled) return baseVars(selfAid, channel, groupId, 'disabled');
-
   const paths = venuePaths(selfAid, channel, groupId);
   fs.mkdirSync(paths.dir, { recursive: true });
 
-  let state = readState(paths.statePath, groupId, paths.venueKey, cfg);
-  const now = Date.now();
-  const lastCheckedAtMs = state.lastCheckedAt ? Date.parse(state.lastCheckedAt) : NaN;
-  const shouldRefresh = !Number.isFinite(lastCheckedAtMs)
-    || now - lastCheckedAtMs >= cfg.refreshIntervalMs;
-
-  if (!shouldRefresh) {
-    return varsFromState(paths, state, 'cached');
-  }
-
-  let client: AUNClient | undefined;
-  let store: AIDStore | undefined;
+  const group = lazyGroupClient(selfAid);
   try {
-    store = await getAidStore({ slotId: SLOT.daemon });
-    client = await loadClient(store, selfAid);
-    await client.connect({ connection_kind: 'short', short_ttl_ms: 30000, auto_reconnect: false });
-
-    const previousHash = state.localHash;
-    let wroteLocalContext = false;
-    state = {
-      ...state,
-      rulesRemotePath: cfg.rulesPath,
-      indexRemotePath: cfg.indexPath,
-      lastCheckedAt: new Date(now).toISOString(),
-      lastError: undefined,
+    const resolved = await resolveGroupRules(group.client, groupId, paths.localRulesPath);
+    if (resolved.changed) invalidateKitCache();
+    return {
+      venueKey: paths.venueKey,
+      venueDir: paths.dir,
+      groupRulesPath: resolved.usable ? paths.localRulesPath : undefined,
+      groupRulesStatus: resolved.status,
+      groupRulesError: resolved.error,
     };
-
-    const rulesNode = await statRemote(client, groupId, cfg.rulesPath);
-    if (!rulesNode) {
-      state.remoteMtimeMs = undefined;
-      state.remoteSize = undefined;
-      state.remoteHash = undefined;
-      state.lastError = `规则文件不存在或不可读: ${remoteRef(groupId, cfg.rulesPath)}`;
-      atomicWriteJson(paths.statePath, state);
-      return varsFromState(paths, state, 'missing', state.lastError);
-    }
-
-    state.remoteMtimeMs = rulesNode.mtimeMs;
-    state.remoteSize = rulesNode.size;
-    if ((rulesNode.size ?? 0) > cfg.maxRulesBytes) {
-      state.lastError = `规则文件过大: ${rulesNode.size} bytes > ${cfg.maxRulesBytes}`;
-      atomicWriteJson(paths.statePath, state);
-      return varsFromState(paths, state, 'too_large', state.lastError);
-    }
-
-    const previousRemoteMtimeMs = readState(paths.statePath, groupId, paths.venueKey, cfg).remoteMtimeMs;
-    const remoteNeedsRead = !fs.existsSync(paths.rulesPath)
-      || state.remoteMtimeMs === undefined
-      || state.remoteMtimeMs !== previousRemoteMtimeMs;
-    if (remoteNeedsRead) {
-      const text = await readRemoteText(client, groupId, cfg.rulesPath, cfg.maxRulesBytes);
-      const hash = sha256(text);
-      state.remoteHash = hash;
-      state.localHash = hash;
-      state.lastSyncedAt = new Date().toISOString();
-      atomicWriteText(paths.rulesPath, normalizeRulesText(text, groupId, cfg.rulesPath));
-      wroteLocalContext = true;
-    }
-
-    const index = await buildResourceIndex(client, groupId, cfg.indexPath, cfg.maxIndexItems);
-    state.lastIndexAt = new Date().toISOString();
-    atomicWriteText(paths.indexPath, renderResourceIndex(groupId, cfg.indexPath, index));
-    wroteLocalContext = true;
-    atomicWriteJson(paths.statePath, state);
-
-    if (wroteLocalContext || previousHash !== state.localHash) invalidateKitCache();
-    return varsFromState(paths, state, 'synced');
   } catch (e) {
+    const status = classifyError(e);
     const error = errorMessage(e);
-    state = {
-      ...state,
-      lastCheckedAt: new Date(now).toISOString(),
-      lastError: error,
+    logger.warn(`[GroupVenueSync] ${groupId} rules sync failed: ${error}`);
+    return {
+      venueKey: paths.venueKey,
+      venueDir: paths.dir,
+      groupRulesStatus: status,
+      groupRulesError: error,
     };
-    atomicWriteJson(paths.statePath, state);
-    logger.warn(`[GroupVenueSync] ${groupId} sync failed: ${error}`);
-    return varsFromState(paths, state, fs.existsSync(paths.rulesPath) ? 'stale' : 'error', error);
   } finally {
-    if (client) {
-      try { await client.close(); } catch { /* ignore */ }
-    }
-    if (store) {
-      try { store.close(); } catch { /* ignore */ }
-    }
+    await group.close();
   }
 }
 
-function normalizeConfig(config?: GroupVenueSyncConfig): Required<GroupVenueSyncConfig> {
+async function resolveGroupRules(
+  clientPromise: () => Promise<AUNClient>,
+  groupId: string,
+  localPath: string,
+): Promise<{ status: GroupRulesStatus; usable: boolean; changed: boolean; error?: string }> {
+  const client = await clientPromise();
+  const check = await safeCheckGroupIndex(client, groupId);
+  const shouldPull = check === null || check.needs_update === true || check.local_found !== true;
+  const rulesContent = await getRulesContent(client, groupId, shouldPull);
+
+  const rawContent = rulesContent.content;
+  if (rawContent === undefined || rawContent === null || rawContent === '') {
+    return { status: 'missing', usable: false, changed: false };
+  }
+
+  const metadata = parseRulesMetadata(rawContent);
+  if (metadata.size > MAX_RULES_BYTES) {
+    return { status: 'too_large', usable: false, changed: false, error: `群规则过大: ${metadata.size} bytes > ${MAX_RULES_BYTES}` };
+  }
+
+  const remoteRefValue = `${rulesContent.groupAid || groupId}:${RULES_REMOTE_PATH}`;
+  const remoteNode = normalizeRemoteRulesNode(await client.group.fs.stat(remoteRefValue));
+  if (!remoteNode.size || remoteNode.mtimeMs === undefined) {
+    return {
+      status: 'unreadable',
+      usable: false,
+      changed: false,
+      error: `远端规则文件缺少 size 或 mtimeMs: ${remoteRefValue}`,
+    };
+  }
+  if (!metadataMatchesNode(metadata, remoteNode)) {
+    return {
+      status: 'file_mismatch',
+      usable: false,
+      changed: false,
+      error: `远端 /rules.md 与 rules.content 不匹配: expected size=${metadata.size} mtimeMs=${metadata.mtimeMs}, actual size=${remoteNode.size} mtimeMs=${remoteNode.mtimeMs}`,
+    };
+  }
+
+  if (localMaterializationMatches(localPath, metadata)) {
+    return { status: rulesContent.pulled ? 'synced' : 'cached', usable: true, changed: false };
+  }
+
+  const bytes = await downloadGroupFileBytes(client, remoteRefValue);
+  if (bytes.byteLength > MAX_RULES_BYTES) {
+    return { status: 'too_large', usable: false, changed: false, error: `群规则过大: ${bytes.byteLength} bytes > ${MAX_RULES_BYTES}` };
+  }
+  if (bytes.byteLength !== metadata.size) {
+    return {
+      status: 'file_mismatch',
+      usable: false,
+      changed: false,
+      error: `下载后的 /rules.md 与 rules.content 大小不匹配: expected ${metadata.size}, actual ${bytes.byteLength}`,
+    };
+  }
+  try {
+    assertUtf8(bytes);
+  } catch (e) {
+    return {
+      status: 'unreadable',
+      usable: false,
+      changed: false,
+      error: `远端 /rules.md 不是有效 UTF-8: ${errorMessage(e)}`,
+    };
+  }
+
+  const previousMatches = localMaterializationMatches(localPath, metadata);
+  atomicWriteBytes(localPath, bytes);
+  const mtimeSeconds = metadata.mtimeMs / 1000;
+  fs.utimesSync(localPath, mtimeSeconds, mtimeSeconds);
+
+  if (!localMaterializationMatches(localPath, metadata)) {
+    return {
+      status: 'error',
+      usable: false,
+      changed: false,
+      error: `本地物化文件 stat 与 rules.content 不匹配: ${localPath}`,
+    };
+  }
+
+  return { status: 'synced', usable: true, changed: !previousMatches };
+}
+
+async function safeCheckGroupIndex(client: AUNClient, groupId: string): Promise<CheckGroupIndexResult | null> {
+  try {
+    return await client.group.checkGroupIndex({ group_id: groupId }) as CheckGroupIndexResult;
+  } catch (e) {
+    logger.debug(`[GroupVenueSync] checkGroupIndex ignored for ${groupId}: ${errorMessage(e)}`);
+    return null;
+  }
+}
+
+async function getGroupIndex(client: AUNClient, groupId: string): Promise<GroupIndexResult> {
+  const result = await client.group.getGroupIndex({ group_id: groupId }) as GroupIndexResult;
   return {
-    enabled: config?.enabled ?? true,
-    rulesPath: normalizeRemotePath(config?.rulesPath || DEFAULT_RULES_PATH),
-    indexPath: normalizeRemotePath(config?.indexPath || DEFAULT_INDEX_PATH),
-    maxIndexItems: positiveInt(config?.maxIndexItems, DEFAULT_MAX_INDEX_ITEMS),
-    maxRulesBytes: positiveInt(config?.maxRulesBytes, DEFAULT_MAX_RULES_BYTES),
-    refreshIntervalMs: positiveInt(config?.refreshIntervalMs, DEFAULT_REFRESH_INTERVAL_MS),
-    allowRemoteWrite: config?.allowRemoteWrite ?? false,
+    group_aid: typeof result.group_aid === 'string' ? result.group_aid : groupId,
+    meta: isRecord(result.meta) ? result.meta : undefined,
+    settings: isRecord(result.settings) ? result.settings : {},
   };
 }
 
-function positiveInt(value: unknown, fallback: number): number {
-  return Number.isInteger(value) && Number(value) > 0 ? Number(value) : fallback;
+async function getRulesContent(client: AUNClient, groupId: string, forcePull: boolean): Promise<RulesContentResult> {
+  if (forcePull) {
+    const index = await getGroupIndex(client, groupId);
+    return {
+      groupAid: index.group_aid || groupId,
+      content: index.settings?.['rules.content'],
+      pulled: true,
+    };
+  }
+
+  try {
+    const result = await client.group.getRules({ group_id: groupId }) as Record<string, unknown>;
+    const rules = isRecord(result.rules) ? result.rules : {};
+    return {
+      groupAid: typeof result.group_id === 'string' ? result.group_id : groupId,
+      content: rules.content,
+      pulled: false,
+    };
+  } catch (e) {
+    logger.debug(`[GroupVenueSync] getRules fallback to getGroupIndex for ${groupId}: ${errorMessage(e)}`);
+    const index = await getGroupIndex(client, groupId);
+    return {
+      groupAid: index.group_aid || groupId,
+      content: index.settings?.['rules.content'],
+      pulled: true,
+    };
+  }
 }
 
-function normalizeRemotePath(value: string): string {
-  const trimmed = value.trim();
-  if (!trimmed || trimmed === ':') return '/';
-  const withoutAid = trimmed.includes(':/') ? trimmed.slice(trimmed.indexOf(':/') + 1) : trimmed;
-  return path.posix.normalize(withoutAid.startsWith('/') ? withoutAid : `/${withoutAid}`);
+function parseRulesMetadata(value: unknown): RulesFileMetadata {
+  let parsed: unknown;
+  if (typeof value === 'string') {
+    try {
+      parsed = JSON.parse(value);
+    } catch {
+      throw statusError('invalid_metadata', 'rules.content 不是合法 JSON');
+    }
+  } else {
+    parsed = value;
+  }
+
+  if (!isRecord(parsed)) {
+    throw statusError('invalid_metadata', 'rules.content 必须是对象');
+  }
+  if (parsed.path !== RULES_REMOTE_PATH) {
+    throw statusError('invalid_metadata', `rules.content.path 必须是 ${RULES_REMOTE_PATH}`);
+  }
+  const size = numberField(parsed, ['size']);
+  const mtimeMs = mtimeMsField(parsed);
+  if (size === undefined || !Number.isInteger(size) || size <= 0) {
+    throw statusError('invalid_metadata', 'rules.content.size 必须是正整数');
+  }
+  if (mtimeMs === undefined || !Number.isFinite(mtimeMs) || mtimeMs <= 0) {
+    throw statusError('invalid_metadata', 'rules.content.mtimeMs 必须是有效毫秒时间戳');
+  }
+  return { path: RULES_REMOTE_PATH, size, mtimeMs };
+}
+
+function normalizeRemoteRulesNode(value: unknown): RemoteRulesNode {
+  if (!isRecord(value)) return {};
+  return {
+    size: numberField(value, ['size', 'sizeBytes', 'size_bytes', 'bytes']),
+    mtimeMs: mtimeMsField(value),
+  };
+}
+
+function metadataMatchesNode(metadata: RulesFileMetadata, node: RemoteRulesNode): boolean {
+  return node.size === metadata.size
+    && node.mtimeMs !== undefined
+    && Math.abs(node.mtimeMs - metadata.mtimeMs) <= MTIME_TOLERANCE_MS;
+}
+
+function localMaterializationMatches(localPath: string, metadata: RulesFileMetadata): boolean {
+  try {
+    const st = fs.statSync(localPath);
+    return st.isFile()
+      && st.size === metadata.size
+      && Math.abs(st.mtimeMs - metadata.mtimeMs) <= MTIME_TOLERANCE_MS;
+  } catch {
+    return false;
+  }
+}
+
+function lazyGroupClient(selfAid: string): { client: () => Promise<AUNClient>; close: () => Promise<void> } {
+  let client: AUNClient | undefined;
+  let store: AIDStore | undefined;
+
+  return {
+    client: async () => {
+      if (client) return client;
+      store = await getAidStore({ slotId: SLOT.daemon });
+      client = await loadClient(store, selfAid);
+      await client.connect({ connection_kind: 'short', short_ttl_ms: 30000, auto_reconnect: false });
+      return client;
+    },
+    close: async () => {
+      if (client) {
+        try { await client.close(); } catch { /* ignore */ }
+      }
+      if (store) {
+        try { store.close(); } catch { /* ignore */ }
+      }
+    },
+  };
+}
+
+async function downloadGroupFileBytes(client: AUNClient, remoteRef: string): Promise<Uint8Array> {
+  const ticket = await (client as any).call('group.fs.create_download_ticket', { path: remoteRef });
+  if (!isRecord(ticket)) {
+    throw statusError('unreadable', 'group.fs.create_download_ticket returned invalid response');
+  }
+  const downloadUrl = stringField(ticket, ['download_url', 'url']);
+  if (!downloadUrl) {
+    throw statusError('unreadable', 'group.fs.create_download_ticket did not return download_url');
+  }
+  const bytes = await client.group.fs.lowlevel.httpGet(downloadUrl, bearerHeaders(client));
+  const expectedSha = stringField(ticket, ['sha256']);
+  if (expectedSha && sha256Hex(bytes).toLowerCase() !== expectedSha.toLowerCase()) {
+    throw statusError('unreadable', 'download hash verification failed');
+  }
+  return bytes;
+}
+
+function sha256Hex(bytes: Uint8Array): string {
+  return createHash('sha256').update(bytes).digest('hex');
+}
+
+function bearerHeaders(client: AUNClient): Record<string, string> | undefined {
+  const token = accessTokenFromClient(client);
+  return token ? { Authorization: `Bearer ${token}` } : undefined;
+}
+
+function accessTokenFromClient(client: AUNClient): string {
+  const anyClient = client as any;
+  if (typeof anyClient.getAccessToken === 'function') {
+    const token = stringValue(anyClient.getAccessToken());
+    if (token) return token;
+  }
+  return stringValue(anyClient.accessToken)
+    || stringValue(anyClient.access_token)
+    || stringValue(anyClient._identity?.access_token)
+    || stringValue(anyClient._sessionParams?.access_token);
+}
+
+function assertUtf8(bytes: Uint8Array): void {
+  new TextDecoder('utf-8', { fatal: true }).decode(bytes);
 }
 
 function venuePaths(selfAid: string, channel: string, groupId: string) {
@@ -199,153 +355,47 @@ function venuePaths(selfAid: string, channel: string, groupId: string) {
   return {
     venueKey,
     dir,
-    rulesPath: path.join(dir, 'rules.md'),
-    indexPath: path.join(dir, 'resource-index.md'),
-    statePath: path.join(dir, 'group-sync.json'),
+    localRulesPath: path.join(dir, RULES_LOCAL_PATH),
   };
 }
 
-function baseVars(selfAid: string, channel: string, groupId: string, status: string): GroupVenueSyncVars {
-  const paths = venuePaths(selfAid, channel, groupId);
-  return { venueKey: paths.venueKey, venueDir: paths.dir, groupRulesSyncStatus: status };
+function statusError(status: GroupRulesStatus, message: string): Error & { groupRulesStatus?: GroupRulesStatus } {
+  const error = new Error(message) as Error & { groupRulesStatus?: GroupRulesStatus };
+  error.groupRulesStatus = status;
+  return error;
 }
 
-function varsFromState(
-  paths: ReturnType<typeof venuePaths>,
-  state: GroupVenueSyncState,
-  status: string,
-  error?: string,
-): GroupVenueSyncVars {
-  const rulesExists = fs.existsSync(paths.rulesPath);
-  const indexExists = fs.existsSync(paths.indexPath);
-  const indexCount = indexExists ? countIndexItems(paths.indexPath) : 0;
-  return {
-    venueKey: paths.venueKey,
-    venueDir: paths.dir,
-    groupRulesPath: rulesExists ? paths.rulesPath : undefined,
-    groupRulesRemotePath: remoteRef(state.groupId, state.rulesRemotePath),
-    groupRulesUpdatedAt: state.lastSyncedAt,
-    groupRulesSyncStatus: status,
-    groupRulesSyncError: error || state.lastError,
-    groupResourceIndexPath: indexExists ? paths.indexPath : undefined,
-    groupResourceIndexUpdatedAt: state.lastIndexAt,
-    groupResourceIndexCount: indexCount || undefined,
-  };
-}
-
-function readState(
-  statePath: string,
-  groupId: string,
-  venueKey: string,
-  cfg: Required<GroupVenueSyncConfig>,
-): GroupVenueSyncState {
-  try {
-    const parsed = atomicReadJson<GroupVenueSyncState>(statePath);
-    if (parsed?.schemaVersion === 1 && parsed.groupId === groupId) return parsed;
-  } catch (e) {
-    logger.warn(`[GroupVenueSync] ignored invalid state file ${statePath}: ${errorMessage(e)}`);
+function classifyError(error: unknown): GroupRulesStatus {
+  if (isRecord(error) && typeof error.groupRulesStatus === 'string') {
+    const status = error.groupRulesStatus;
+    if (isGroupRulesStatus(status)) return status;
   }
-  return {
-    schemaVersion: 1,
-    groupId,
-    venueKey,
-    rulesRemotePath: cfg.rulesPath,
-    indexRemotePath: cfg.indexPath,
-  };
-}
-
-async function statRemote(client: AUNClient, groupId: string, remotePath: string): Promise<RemoteNode | null> {
-  try {
-    return normalizeNode(await client.group.fs.stat(remoteRef(groupId, remotePath)));
-  } catch {
-    return null;
+  const haystack = errorHaystack(error);
+  if (/(forbidden|unauthorized|permission|denied|no_permission|permission_denied|无权限|权限|拒绝|\b401\b|\b403\b)/i.test(haystack)) {
+    return 'forbidden';
   }
-}
-
-async function readRemoteText(
-  client: AUNClient,
-  groupId: string,
-  remotePath: string,
-  maxBytes: number,
-): Promise<string> {
-  const downloaded = await client.group.fs.cp(remoteRef(groupId, remotePath), { kind: 'blob' } as any, {
-    verifyHash: true,
-  });
-  const data = (downloaded as any)?.data;
-  const bytes = data instanceof Uint8Array
-    ? data
-    : data instanceof ArrayBuffer
-      ? new Uint8Array(data)
-      : undefined;
-  if (!bytes) throw new Error('group.fs.cp did not return bytes');
-  if (bytes.byteLength > maxBytes) throw new Error(`rules file exceeds max bytes after download: ${bytes.byteLength}`);
-  return Buffer.from(bytes).toString('utf-8');
-}
-
-async function buildResourceIndex(
-  client: AUNClient,
-  groupId: string,
-  remotePath: string,
-  maxItems: number,
-): Promise<RemoteNode[]> {
-  try {
-    const result = await client.group.fs.find(remoteRef(groupId, remotePath), {
-      page_size: maxItems,
-      pageSize: maxItems,
-    });
-    return extractNodes(result).slice(0, maxItems);
-  } catch (e) {
-    logger.debug(`[GroupVenueSync] find failed for ${remoteRef(groupId, remotePath)}: ${errorMessage(e)}`);
-    try {
-      const result = await client.group.fs.ls(remoteRef(groupId, remotePath));
-      return extractNodes(result).slice(0, maxItems);
-    } catch (inner) {
-      logger.debug(`[GroupVenueSync] ls failed for ${remoteRef(groupId, remotePath)}: ${errorMessage(inner)}`);
-      return [];
-    }
+  if (/(not[_ -]?found|notfound|no such|enoent|missing|不存在|\b404\b|rules not found)/i.test(haystack)) {
+    return 'missing';
   }
-}
-
-function extractNodes(value: unknown): RemoteNode[] {
-  if (Array.isArray(value)) return value.map(normalizeNode).filter(Boolean) as RemoteNode[];
-  if (!isRecord(value)) return [];
-  const candidates = [
-    value.items,
-    value.entries,
-    value.nodes,
-    value.results,
-    value.files,
-    value.children,
-    isRecord(value.result) ? value.result.items : undefined,
-    isRecord(value.raw) ? value.raw.items : undefined,
-  ];
-  for (const candidate of candidates) {
-    if (Array.isArray(candidate)) return candidate.map(normalizeNode).filter(Boolean) as RemoteNode[];
+  if (/(signature|verify|verification|signed_by|body_hash|invalid signature|验签|签名)/i.test(haystack)) {
+    return 'invalid_metadata';
   }
-  return [];
-}
-
-function normalizeNode(value: unknown): RemoteNode | null {
-  if (!isRecord(value)) return null;
-  const rawPath = stringField(value, ['path', 'full_path', 'key', 'object_key', 'mountPath']);
-  const name = stringField(value, ['name', 'filename', 'file_name']) || (rawPath ? path.posix.basename(rawPath) : undefined);
-  const type = stringField(value, ['type', 'node_type', 'kind']);
-  return {
-    path: rawPath,
-    name,
-    type,
-    size: numberField(value, ['size', 'sizeBytes', 'size_bytes', 'bytes']),
-    mtimeMs: mtimeMsField(value),
-    contentType: stringField(value, ['contentType', 'content_type', 'mime']),
-  };
-}
-
-function stringField(obj: Record<string, unknown>, keys: string[]): string | undefined {
-  for (const key of keys) {
-    const value = obj[key];
-    if (typeof value === 'string' && value.trim()) return value;
+  if (/(timeout|temporar|unavailable|econn|network|socket|reset|下载|读取)/i.test(haystack)) {
+    return 'unreadable';
   }
-  return undefined;
+  return 'error';
+}
+
+function isGroupRulesStatus(value: string): value is GroupRulesStatus {
+  return value === 'synced'
+    || value === 'cached'
+    || value === 'missing'
+    || value === 'forbidden'
+    || value === 'invalid_metadata'
+    || value === 'file_mismatch'
+    || value === 'too_large'
+    || value === 'unreadable'
+    || value === 'error';
 }
 
 function numberField(obj: Record<string, unknown>, keys: string[]): number | undefined {
@@ -357,10 +407,22 @@ function numberField(obj: Record<string, unknown>, keys: string[]): number | und
   return undefined;
 }
 
+function stringField(obj: Record<string, unknown>, keys: string[]): string | undefined {
+  for (const key of keys) {
+    const value = obj[key];
+    if (typeof value === 'string' && value.trim()) return value;
+  }
+  return undefined;
+}
+
+function stringValue(value: unknown): string {
+  return value === undefined || value === null ? '' : String(value).trim();
+}
+
 function mtimeMsField(obj: Record<string, unknown>): number | undefined {
   const direct = numberField(obj, ['mtimeMs', 'mtime_ms', 'updatedAtMs', 'updated_at_ms']);
   if (direct !== undefined) return direct;
-  const seconds = numberField(obj, ['mtime', 'updated_at', 'updatedAt', 'last_modified']);
+  const seconds = numberField(obj, ['mtime', 'updated_at', 'updatedAt', 'last_modified', 'modified_at']);
   if (seconds !== undefined) return seconds > 10_000_000_000 ? seconds : seconds * 1000;
   for (const key of ['modifiedAt', 'modified_at', 'mtime_iso']) {
     const value = obj[key];
@@ -372,63 +434,20 @@ function mtimeMsField(obj: Record<string, unknown>): number | undefined {
   return undefined;
 }
 
-function renderResourceIndex(groupId: string, rootPath: string, nodes: RemoteNode[]): string {
-  const lines = [
-    `# 群资源索引`,
-    ``,
-    `- group: ${groupId}`,
-    `- root: ${remoteRef(groupId, rootPath)}`,
-    `- indexedAt: ${new Date().toISOString()}`,
-    `- count: ${nodes.length}`,
-    ``,
-  ];
-  if (nodes.length === 0) {
-    lines.push(`暂无可见资源，或当前 agent 对该群空间无读取权限。`);
-  } else {
-    for (const node of nodes) {
-      const bits = [
-        node.type || 'node',
-        node.size !== undefined ? `${node.size} bytes` : '',
-        node.mtimeMs ? new Date(node.mtimeMs).toISOString() : '',
-        node.contentType || '',
-      ].filter(Boolean).join(', ');
-      lines.push(`- ${node.path || node.name || '(unknown)'}${bits ? ` (${bits})` : ''}`);
-    }
-  }
-  return lines.join('\n') + '\n';
-}
-
-function normalizeRulesText(text: string, groupId: string, remotePath: string): string {
-  const body = text.replace(/\r\n/g, '\n').trim();
-  return [
-    `# 群规则`,
-    ``,
-    `> 来源：${remoteRef(groupId, remotePath)}`,
-    `> 同步时间：${new Date().toISOString()}`,
-    ``,
-    body,
-    ``,
-  ].join('\n');
-}
-
-function remoteRef(groupId: string, remotePath: string): string {
-  return `${groupId}:${normalizeRemotePath(remotePath)}`;
-}
-
-function countIndexItems(indexPath: string): number {
-  try {
-    return fs.readFileSync(indexPath, 'utf-8').split('\n').filter(line => /^- (?:[^:\s]+:)?\//.test(line)).length;
-  } catch {
-    return 0;
-  }
-}
-
-function sha256(text: string): string {
-  return `sha256:${crypto.createHash('sha256').update(text, 'utf-8').digest('hex')}`;
-}
-
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function errorHaystack(error: unknown): string {
+  if (!isRecord(error)) return errorMessage(error);
+  return [
+    error.name,
+    error.message,
+    error.code,
+    error.status,
+    error.statusCode,
+    error.error,
+  ].map(value => value === undefined ? '' : String(value)).join(' ');
 }
 
 function errorMessage(error: unknown): string {

@@ -23,10 +23,11 @@ import type { AIDStore } from '@agentunion/fastaun';
 import type { AidStatsCollector } from '../utils/stats.js';
 import { loadAgent, saveAgent } from '../config-store.js';
 import { activeBaseagent } from '../core/model/config-scope.js';
+import { resolveEffective } from '../config/config-manager.js';
 import { getProcessStartTime } from '../utils/process-introspect.js';
 import * as outbox from '../aun/outbox.js';
 import { guessMime, formatSize } from '../utils/media-cache.js';
-import { PeerIdentityCache } from '../core/relation/peer-identity.js';
+import { formatPeerKey, PeerIdentityCache } from '../core/relation/peer-identity.js';
 import { getFirstRoleAssignment } from '../config/role-assignments.js';
 
 /**
@@ -121,6 +122,46 @@ type DurablePayloadSendResult = {
   result?: any;
   encrypt?: boolean;
 };
+
+export interface AunDaemonMsgSendArgs {
+  to: string;
+  payload: Record<string, any>;
+  encrypt?: boolean;
+  log?: {
+    content: string;
+    source?: 'daemon' | 'cli' | 'msg' | 'ctl' | 'owner-inject';
+    handoff?: {
+      kind?: 'request_to_target' | 'response_to_origin';
+      event?: 'consumed';
+      origin?: {
+        session_id?: string;
+        message_id?: string;
+        channel?: string;
+        peerId?: string;
+        threadId?: string;
+        peerName?: string;
+        peerType?: string;
+        role?: string;
+      };
+      consumed_by_msg_id?: string;
+      match?: 'ref' | 'inferred';
+    };
+  };
+}
+
+export interface AunDaemonMsgSendResult {
+  ok: boolean;
+  message_id?: string;
+  seq?: number;
+  timestamp?: number;
+  status?: string;
+  delivery_mode?: string;
+  encrypt?: boolean;
+  chatmode?: string;
+  log_written?: boolean;
+  error?: string;
+  code?: string | number;
+}
 
 function setIfDefined(target: Record<string, any>, key: string, value: unknown): void {
   if (value !== undefined) target[key] = value;
@@ -1321,6 +1362,9 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     const payload = msg.payload ?? '';
     const text = this.extractTextPayload(payload, fromAid, fromAid);
     const threadId = typeof payload === 'object' && payload !== null ? (payload as any).thread_id : undefined;
+    const refMessageId = typeof payload === 'object' && payload !== null && typeof (payload as any).ref_message_id === 'string'
+      ? (payload as any).ref_message_id
+      : undefined;
 
     // Extract and validate topicName from untrusted payload
     const topicName = (typeof payload === 'object' && payload !== null)
@@ -1422,7 +1466,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     appendAidEvent({ ts: Date.now(), iso: new Date().toISOString(), event: 'message_in', aid: this.config.aid, from: fromAid, msgId: messageId, kind: 'text', len: finalText.length });
     const isSystemP2P = p2pPayloadType === 'event';
     this.aidStatsCollector?.recordInbound(this.config.aid, fromAid, Buffer.byteLength(finalText, 'utf-8'), finalText, isSystemP2P, msgEncrypted, msgChatmode, isSystemP2P ? 'notify' : 'send');
-    const replyContext: ReplyContext = { metadata: { encrypted: msgEncrypted, chatmode: msgChatmode } };
+    const replyContext: ReplyContext = { metadata: { encrypted: msgEncrypted, chatmode: msgChatmode, refMessageId } };
     if (threadId) replyContext.threadId = threadId;
     replyContext.peerId = fromAid;
     if (messageId) replyContext.replyToMessageId = messageId;
@@ -2416,6 +2460,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
   private applyReplyContextToPayload(payload: Record<string, any>, context?: ReplyContext): Record<string, any> {
     const finalPayload: Record<string, any> = this.stripUndefinedDeep({ ...payload });
     if (context?.threadId && !finalPayload.thread_id) finalPayload.thread_id = context.threadId;
+    if (context?.replyToMessageId && !finalPayload.ref_message_id) finalPayload.ref_message_id = context.replyToMessageId;
     if (context?.metadata?.taskId && !finalPayload.task_id) finalPayload.task_id = context.metadata.taskId;
     if (context?.metadata?.chatmode && !finalPayload.chatmode) finalPayload.chatmode = context.metadata.chatmode;
     return finalPayload;
@@ -2751,6 +2796,86 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     }
   }
 
+  /** Daemon-side transport for `ec msg send` running inside an agent task. */
+  async sendDaemonMsg(args: AunDaemonMsgSendArgs): Promise<AunDaemonMsgSendResult> {
+    if (!this.connected || !this.client) {
+      return { ok: false, error: 'AUN channel is not connected', code: 'AUN_NOT_CONNECTED' };
+    }
+    if (!args.to || this.isGroupId(args.to)) {
+      return { ok: false, error: 'aun-msg-send only supports private AID targets', code: 'UNSUPPORTED_TARGET' };
+    }
+    if (!args.payload || typeof args.payload !== 'object' || Array.isArray(args.payload)) {
+      return { ok: false, error: 'payload must be an object', code: 'INVALID_PAYLOAD' };
+    }
+
+    const finalPayload = this.stripUndefinedDeep({ ...args.payload });
+    const info = await this.fetchPeerInfo(args.to);
+    const chatmode = info.type === 'human' ? 'interactive' : 'proactive';
+    if (!finalPayload.chatmode) finalPayload.chatmode = chatmode;
+
+    const encrypt = args.encrypt === true;
+    const sendParams: Record<string, any> = {
+      to: args.to,
+      payload: this.truncatePayloadIfNeeded(finalPayload, 'msg-send-ipc'),
+      encrypt,
+    };
+
+    try {
+      const result = await this.callAndTrace<any>('message.send', sendParams);
+      const messageId = this.messageIdFromSendResult(result);
+      if (!messageId) {
+        return { ok: false, error: `message.send returned no message_id: ${JSON.stringify(result)}`, code: 'MISSING_MESSAGE_ID' };
+      }
+      logger.info(`${this.logPrefix()} daemon msg.send ok: to=${this.peerLabel(args.to)} mid=${messageId} encrypt=${encrypt} chatmode=${chatmode}`);
+      this.forwardOutbound(result);
+      let logWritten = false;
+      if (args.log?.content !== undefined) {
+        const chatDir = chatDirPath(resolvePaths().sessionsDir, 'aun', args.to, this.config.aid);
+        fs.mkdirSync(chatDir, { recursive: true });
+        appendMessageLog(chatDir, buildOutboundEntry({
+          from: this.config.aid,
+          to: args.to,
+          chatType: 'private',
+          msgId: messageId,
+          content: args.log.content,
+          encrypt,
+          chatmode,
+          msgType: 'text',
+          source: args.log.source ?? 'msg',
+          handoff: args.log.handoff,
+        }));
+        this.aidStatsCollector?.recordOutbound(
+          this.config.aid,
+          args.to,
+          Buffer.byteLength(args.log.content, 'utf-8'),
+          args.log.content,
+          false,
+          encrypt,
+          chatmode,
+          'send',
+        );
+        logWritten = true;
+      }
+      return {
+        ok: true,
+        message_id: messageId,
+        seq: result?.seq,
+        timestamp: result?.timestamp,
+        status: result?.status,
+        delivery_mode: result?.delivery_mode,
+        encrypt,
+        chatmode,
+        log_written: logWritten,
+      };
+    } catch (e: any) {
+      return {
+        ok: false,
+        error: e?.message || String(e),
+        code: e?.code,
+      };
+    }
+  }
+
   private async flushPendingEcho(channelId: string): Promise<void> {
     // 查找该 channelId 是否有 pending echo（长 echo 等待 agent 首次回复）
     for (const [key, echo] of this.pendingEchoMessages) {
@@ -2809,6 +2934,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       if (extracted.length > 0) payload.mentions = extracted;
     }
     if (context?.threadId) payload.thread_id = context.threadId;
+    if (context?.replyToMessageId) payload.ref_message_id = context.replyToMessageId;
     if (context?.metadata?.taskId) payload.task_id = context.metadata.taskId;
     if (context?.metadata?.chatmode) payload.chatmode = context.metadata.chatmode;
 
@@ -3067,6 +3193,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
 
     const finalPayload: Record<string, any> = this.stripUndefinedDeep({ ...payload });
     if (context?.threadId && !finalPayload.thread_id) finalPayload.thread_id = context.threadId;
+    if (context?.replyToMessageId && !finalPayload.ref_message_id) finalPayload.ref_message_id = context.replyToMessageId;
 
     const params: Record<string, any> = { payload: finalPayload, encrypt };
     try {
@@ -3191,6 +3318,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
         attachments: [attachment],
       };
       if (context?.threadId) filePayload.thread_id = context.threadId;
+      if (context?.replyToMessageId) filePayload.ref_message_id = context.replyToMessageId;
       if (context?.metadata?.taskId) filePayload.task_id = context.metadata.taskId;
       if (context?.metadata?.chatmode) filePayload.chatmode = context.metadata.chatmode;
       // file-link-cache: 回带点击请求的 correlationId，客户端用它把异步到达的文件消息对回这次 fetch 点击
@@ -3896,8 +4024,11 @@ export class AUNChannelPlugin implements ChannelPlugin {
 
         if (typeof channel.setDispatchModeResolver === 'function') {
           channel.setDispatchModeResolver(async (channelId: string) => {
-            const session = await hookCtx.sessionManager.getActiveSession(adapter.channelName, channelId);
-            return session?.metadata?.dispatchModeOverride;
+            const mode = resolveEffective({
+              self: aid,
+              peerKey: formatPeerKey('aun', channelId),
+            }, { cache: true }).dispatch;
+            return mode === 'mention' || mode === 'broadcast' ? mode : undefined;
           });
         }
       },

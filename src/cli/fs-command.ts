@@ -1,8 +1,10 @@
 import fs from 'fs';
+import path from 'path';
 import { TextDecoder } from 'util';
 import type { AIDStore, AUNClient } from '@agentunion/fastaun';
 import { getArgValue, isHelpFlag, wantsHelp } from './help.js';
 import { agentmdGet, getAidStore, isValidAid, loadClient, SLOT } from '../aun/aid/index.js';
+import { logger } from '../utils/logger.js';
 
 type FsBackend = 'personal' | 'group';
 
@@ -28,7 +30,7 @@ interface CommonOptions {
 interface RouteInfo {
   backend: FsBackend;
   aidType?: string;
-  source: 'agentmd' | 'default';
+  source: 'agentmd' | 'group.get_info' | 'default';
   warning?: string;
 }
 
@@ -145,6 +147,8 @@ const VALUE_FLAGS = new Set([
   '--mount-id',
   '--request-id',
 ]);
+
+let routeProbeClient: AUNClient | undefined;
 
 const SHORT_VALUE_FLAGS = new Set(['-m', '-x']);
 
@@ -284,7 +288,13 @@ async function withClient<T>(
   try {
     client = await loadClient(store, actorAid);
     await client.connect({ connection_kind: 'short', short_ttl_ms: 30000, auto_reconnect: false });
-    return await fn({ client, store, actorAid });
+    const previousRouteProbeClient = routeProbeClient;
+    routeProbeClient = client;
+    try {
+      return await fn({ client, store, actorAid });
+    } finally {
+      routeProbeClient = previousRouteProbeClient;
+    }
   } catch (e: any) {
     if (e instanceof FsCliError) throw e;
     throw mapBackendError(e);
@@ -481,7 +491,7 @@ async function fsCp(args: string[], opts: CommonOptions): Promise<void> {
     throw new FsCliError('INVALID_ARGUMENT', 'cp 需要至少一端是远程路径', '远程路径格式为 <AID>:<absolute-path>。');
   }
 
-  await withClient(opts, async ({ client, store }) => {
+  await withClient(opts, async ({ client, store, actorAid }) => {
     if (srcRemote && dstRemote) {
       const srcRoute = await resolveRoute(srcRemote.aid, store);
       const dstRoute = await resolveRoute(dstRemote.aid, store);
@@ -495,6 +505,7 @@ async function fsCp(args: string[], opts: CommonOptions): Promise<void> {
           recursive: hasShortFlag(args, 'r') || args.includes('--recursive'),
           followSymlinks: args.includes('--follow-symlinks'),
         });
+        const publishHint = groupRulesPublishHint(dstRemote, actorAid);
         outputSuccess(opts, {
           command: 'cp',
           direction: 'remote-to-remote',
@@ -503,7 +514,11 @@ async function fsCp(args: string[], opts: CommonOptions): Promise<void> {
           src: remoteRef(srcRemote),
           dst: remoteRef(dstRemote),
           result,
-        }, () => console.log(`✓ 已复制: ${remoteRef(srcRemote)} -> ${remoteRef(dstRemote)}`));
+          ...(publishHint ? { rulesPublishRequired: publishHint } : {}),
+        }, () => {
+          console.log(`✓ 已复制: ${remoteRef(srcRemote)} -> ${remoteRef(dstRemote)}`);
+          printRulesPublishHint(publishHint);
+        });
         return;
       }
       const node = await client.storage.copy(srcRemote.path, dstRemote.path, {
@@ -536,6 +551,7 @@ async function fsCp(args: string[], opts: CommonOptions): Promise<void> {
           contentType: opts.contentType,
           parents: true,
         });
+        const publishHint = groupRulesPublishHint(dstRemote, actorAid);
         outputSuccess(opts, {
           command: 'cp',
           direction: 'upload',
@@ -544,7 +560,11 @@ async function fsCp(args: string[], opts: CommonOptions): Promise<void> {
           localPath,
           path: remoteRef(dstRemote),
           result,
-        }, () => console.log(`✓ 已上传: ${localPath} -> ${remoteRef(dstRemote)}`));
+          ...(publishHint ? { rulesPublishRequired: publishHint } : {}),
+        }, () => {
+          console.log(`✓ 已上传: ${localPath} -> ${remoteRef(dstRemote)}`);
+          printRulesPublishHint(publishHint);
+        });
       } else {
         const node = await client.storage.uploadFile(localPath, dstRemote.path, {
           owner: dstRemote.aid,
@@ -611,7 +631,7 @@ async function fsMv(args: string[], opts: CommonOptions): Promise<void> {
   const dst = parseRemoteRequired(positional[1], { command: 'mv' });
   const expectedVersion = parseOptionalPositiveInt(getArgValue(args, '--expected-version'), '--expected-version');
 
-  await withClient(opts, async ({ client, store }) => {
+  await withClient(opts, async ({ client, store, actorAid }) => {
     const srcRoute = await resolveRoute(src.aid, store);
     const dstRoute = await resolveRoute(dst.aid, store);
     if (srcRoute.backend !== dstRoute.backend) {
@@ -623,6 +643,7 @@ async function fsMv(args: string[], opts: CommonOptions): Promise<void> {
         force: opts.overwrite,
         overwrite: opts.overwrite,
       });
+      const publishHint = groupRulesPublishHint(dst, actorAid);
       outputSuccess(opts, {
         command: 'mv',
         backend: srcRoute.backend,
@@ -630,7 +651,11 @@ async function fsMv(args: string[], opts: CommonOptions): Promise<void> {
         src: remoteRef(src),
         dst: remoteRef(dst),
         result,
-      }, () => console.log(`✓ 已移动: ${remoteRef(src)} -> ${remoteRef(dst)}`));
+        ...(publishHint ? { rulesPublishRequired: publishHint } : {}),
+      }, () => {
+        console.log(`✓ 已移动: ${remoteRef(src)} -> ${remoteRef(dst)}`);
+        printRulesPublishHint(publishHint);
+      });
       return;
     }
 
@@ -1074,11 +1099,28 @@ async function resolveRoute(aid: string, store: AIDStore): Promise<RouteInfo> {
       source: 'agentmd',
     };
   } catch (e: any) {
+    if (routeProbeClient && await canReadGroupInfo(routeProbeClient, aid)) {
+      return {
+        backend: 'group',
+        source: 'group.get_info',
+      };
+    }
     return {
       backend: 'personal',
       source: 'default',
       warning: `无法读取 ${aid} 的 agent.md，已按 personal storage 尝试: ${String(e?.message || e).slice(0, 120)}`,
     };
+  }
+}
+
+async function canReadGroupInfo(client: AUNClient, groupId: string): Promise<boolean> {
+  try {
+    const result = typeof (client.group as any).getInfo === 'function'
+      ? await (client.group as any).getInfo({ group_id: groupId })
+      : await (client as any).call('group.get_info', { group_id: groupId });
+    return !!result;
+  } catch {
+    return false;
   }
 }
 
@@ -1138,6 +1180,34 @@ function parseRemoteMaybe(value: string, allowEmptyPath = false): RemotePath | n
 
 function remoteRef(p: RemotePath): string {
   return `${p.aid}:${p.path}`;
+}
+
+const GROUP_RULES_PATH = '/rules.md';
+
+function normalizeRemoteFsPath(value: string): string {
+  const normalized = path.posix.normalize(value.startsWith('/') ? value : `/${value}`);
+  return normalized === '/' ? '/' : normalized;
+}
+
+function isGroupRulesPath(value: string): boolean {
+  return normalizeRemoteFsPath(value) === GROUP_RULES_PATH;
+}
+
+function groupRulesPublishHint(
+  target: RemotePath,
+  actorAid: string,
+): { groupId: string; path: string; suggestedCommand: string } | undefined {
+  if (!isGroupRulesPath(target.path)) return undefined;
+  return {
+    groupId: target.aid,
+    path: GROUP_RULES_PATH,
+    suggestedCommand: `evolclaw group rules ${actorAid} ${target.aid} publish`,
+  };
+}
+
+function printRulesPublishHint(hint: { groupId: string; path: string; suggestedCommand: string } | undefined): void {
+  if (!hint) return;
+  console.error(`⚠ 已写入 ${hint.groupId}:${hint.path}，但尚未发布为有效群规则；请执行: ${hint.suggestedCommand}`);
 }
 
 function linkTargetValue(target: string, linkOwner: string): string {

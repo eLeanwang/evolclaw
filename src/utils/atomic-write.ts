@@ -98,3 +98,10 @@ export function atomicWriteText(filePath: string, content: string): void {
   fs.writeFileSync(tmp, content, 'utf-8');
   fs.renameSync(tmp, filePath);
 }
+
+export function atomicWriteBytes(filePath: string, content: Uint8Array): void {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  const tmp = filePath + '.tmp.' + process.pid;
+  fs.writeFileSync(tmp, content);
+  fs.renameSync(tmp, filePath);
+}

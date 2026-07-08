@@ -34,11 +34,13 @@ import type {
   ChatmodeBlock,
   ShowActivitiesMode,
   DebugBlock,
+  RoleAssignmentsConfig,
 } from './types.js';
 import { CONFIG_SCHEMA_VERSION } from './types.js';
 import { ConfigTarget, read as cfgRead, write as cfgWrite, resolveAgentConfig, resolveEffective } from './config/config-manager.js';
 import { expandVars, buildEnvResolver } from './config/merge.js';
 import { normalizeAgentLifecycle } from './config/lifecycle.js';
+import { privateAssignmentKey, readRoleAssignments, writeRoleAssignments } from './config/role-assignments.js';
 import { logger } from './utils/logger.js';
 
 // ── 进程级配置（{root}/evolclaw.json）─────────────────────────────────────
@@ -483,6 +485,92 @@ export function migrateIdentitiesIfNeeded(): void {
     if (fs.existsSync(oldDir) && !fs.existsSync(newDir)) {
       fs.renameSync(oldDir, newDir);
       logger.info(`[migrate] Renamed agents/${entry.name}/identities/ → relations/`);
+    }
+  }
+}
+
+function legacyPeerList(value: unknown): string[] {
+  const values = Array.isArray(value) ? value : typeof value === 'string' ? [value] : [];
+  return [...new Set(values
+    .map(item => typeof item === 'string' ? item.trim() : '')
+    .filter(Boolean))];
+}
+
+function addLegacyPrivateAssignment(
+  config: RoleAssignmentsConfig,
+  peerId: string,
+  role: 'owner' | 'admin',
+  note: string,
+): boolean {
+  const key = privateAssignmentKey(peerId);
+  if (config.assignments[key]) return false;
+  const now = Date.now();
+  config.assignments[key] = {
+    scope: 'private',
+    peerId,
+    role,
+    note,
+    createdAt: now,
+    updatedAt: now,
+  };
+  return true;
+}
+
+/**
+ * 兼容 role-assignments 迁移前的配置：
+ * - agents/{aid}/config.json owners/admins
+ * - channels[].owners/admins，以及历史 singular owner/admin
+ *
+ * 新 role-assignments 是当前身份解析的事实源。本迁移只补缺，不覆盖新表里已有的显式角色。
+ */
+export function migrateLegacyRoleAssignmentsIfNeeded(): void {
+  const agentsDir = resolvePaths().agentsDir;
+  if (!fs.existsSync(agentsDir)) return;
+
+  for (const entry of fs.readdirSync(agentsDir, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const aid = entry.name;
+    const cfgPath = path.join(agentsDir, aid, 'config.json');
+    if (!fs.existsSync(cfgPath)) continue;
+
+    let raw: any;
+    try {
+      raw = atomicReadJson<any>(cfgPath);
+    } catch (err) {
+      logger.warn(`[migrate] skip legacy role assignments for ${aid}: ${err}`);
+      continue;
+    }
+    if (!raw || raw.aid !== aid) continue;
+
+    const assignments = readRoleAssignments(aid);
+    assignments.assignments = assignments.assignments || {};
+    let changed = 0;
+
+    for (const peerId of legacyPeerList(raw.owners)) {
+      if (addLegacyPrivateAssignment(assignments, peerId, 'owner', 'migrated from agents config owners')) changed++;
+    }
+    for (const peerId of legacyPeerList(raw.admins)) {
+      if (addLegacyPrivateAssignment(assignments, peerId, 'admin', 'migrated from agents config admins')) changed++;
+    }
+
+    for (const channel of Array.isArray(raw.channels) ? raw.channels : []) {
+      if (!channel || typeof channel !== 'object') continue;
+      const label = [channel.type, channel.name].filter(Boolean).join('/') || 'channel';
+      for (const peerId of legacyPeerList(channel.owners ?? channel.owner)) {
+        if (addLegacyPrivateAssignment(assignments, peerId, 'owner', `migrated from ${label} owners`)) changed++;
+      }
+      for (const peerId of legacyPeerList(channel.admins ?? channel.admin)) {
+        if (addLegacyPrivateAssignment(assignments, peerId, 'admin', `migrated from ${label} admins`)) changed++;
+      }
+    }
+
+    if (changed > 0) {
+      try {
+        writeRoleAssignments(aid, assignments);
+        logger.info(`[migrate] agents/${aid}/config.json legacy owners/admins -> role-assignments.json: +${changed}`);
+      } catch (err) {
+        logger.warn(`[migrate] failed legacy role assignment migration for ${aid}: ${err}`);
+      }
     }
   }
 }

@@ -3,6 +3,7 @@ import path from 'path';
 import os from 'os';
 import { resolvePaths, getPackageRoot } from '../paths.js';
 import { decodeDirSegment, readAllJsonlLines } from '../core/session/session-fs-store.js';
+import { isHandoffStateMessage } from '../core/message/message-log.js';
 
 // ==================== Types ====================
 
@@ -210,7 +211,7 @@ export function listPeers(aunDir: string, localAid: string): string[] {
 
 export function readMessages(aunDir: string, localAid: string, peerId: string): MessageLogEntry[] {
   const msgPath = path.join(aunDir, encodeSegment(localAid), encodeSegment(peerId), 'messages.jsonl');
-  return readAllJsonlLines<MessageLogEntry>(msgPath);
+  return readAllJsonlLines<MessageLogEntry>(msgPath).filter(m => !isHandoffStateMessage(m as any));
 }
 
 function readPeerName(aunDir: string, localAid: string, peerId: string): string | null {

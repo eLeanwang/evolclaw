@@ -1,7 +1,7 @@
 import { type Session } from '../../types.js';
-import { resolvePermissionMode } from '../model/config-scope.js';
+import { normalizePeer, resolveEffectiveModel, resolvePermissionMode, writeScope } from '../model/config-scope.js';
 import { formatPeerKey } from '../relation/peer-identity.js';
-import { modelMatches, resolveCommandModelResolution } from './model-resolve.js';
+import { modelMatches } from './model-resolve.js';
 import { filterModelsForRole, validateModelSelectionForRole } from '../model/model-permission.js';
 import { type AgentRunnerFull, hasModelSwitcher, hasPermissionController } from '../../agents/runner-types.js';
 import { getCodexEfforts } from '../../agents/codex-runner.js';
@@ -17,7 +17,13 @@ import type { ParsedTriggerSet } from '../../trigger/parser.js';
 import { checkLatestVersion, getLocalVersion, isLinkedInstall, compareVersions, resolveGlobalPkg } from '../../utils/npm-ops.js';
 import { commandExists } from '../../utils/cross-platform.js';
 import { loadDefaults, loadEvolclawConfig } from '../../config-store.js';
-import { resolveEffective } from '../../config/config-manager.js';
+import {
+  read as cfgRead,
+  resolveEffective,
+  routeFieldPath,
+  write as cfgWrite,
+  type Selector,
+} from '../../config/config-manager.js';
 import { execAgentAction, execAgentQuery, execAgentOptions, resolveProjectPath } from '../message/command-handler-agent-control.js';
 import { gatewayList, gatewayUpdate, gatewayDelete, gatewayTest, gatewayModels, gatewaySetPrice, gatewaySyncEnv } from '../../config/gateway-config.js';
 import { displaySessionTitle } from '../session/session-title.js';
@@ -407,9 +413,375 @@ function menuStringArg(args: Record<string, any> | undefined, key: string): stri
   return trimmed || undefined;
 }
 
-function menuSessionForBaseagent(session: Session | null | undefined, baseagent: string | undefined): Session | null | undefined {
-  if (!session || !baseagent || session.baseagent === baseagent) return session;
-  return { ...session, baseagent };
+type MenuChatmodeScope = 'agent' | 'relation';
+type MenuChatmodeField = 'private' | 'group' | 'nothuman';
+type MenuChatmodeValue = 'interactive' | 'proactive';
+type MenuDispatchScope = 'agent' | 'relation';
+type MenuDispatchValue = 'mention' | 'broadcast';
+type MenuPermissionScope = 'agent' | 'relation';
+type MenuPermissionValue = typeof PERMISSION_MODE_KEYS[number];
+type MenuModelScope = 'agent' | 'relation';
+type MenuModelField = 'model' | 'effort';
+
+interface MenuChatmodeTarget {
+  scope: MenuChatmodeScope;
+  sel: Selector;
+  field: MenuChatmodeField;
+  fieldPath: `chatmode.${MenuChatmodeField}`;
+}
+
+interface MenuDispatchTarget {
+  scope: MenuDispatchScope;
+  sel: Selector;
+  fieldPath: 'dispatch';
+}
+
+interface MenuPermissionTarget {
+  scope: MenuPermissionScope;
+  sel: Selector;
+  fieldPath: 'permissionMode';
+}
+
+interface MenuModelTarget {
+  scope: MenuModelScope;
+  sel: Selector;
+  baseagent: string;
+  field: MenuModelField;
+  fieldPath: `baseagents.${string}.${MenuModelField}`;
+}
+
+function menuChatmodeScope(args?: Record<string, any>): MenuChatmodeScope | { error: string; code: string } {
+  const raw = menuStringArg(args, 'scope') ?? 'agent';
+  if (raw === 'agent' || raw === 'relation') return raw;
+  return { error: `无效 scope: ${raw}，可选: agent / relation`, code: 'INVALID_SCOPE' };
+}
+
+function menuChatmodeField(args: Record<string, any> | undefined, session: Session | null | undefined, explicitChatType?: MenuChatType): MenuChatmodeField | { error: string; code: string } {
+  const raw = menuStringArg(args, 'field')
+    ?? menuStringArg(args, 'key')
+    ?? menuStringArg(args, 'chatType');
+  if (raw) {
+    const key = raw.startsWith('chatmode.') ? raw.slice('chatmode.'.length) : raw;
+    if (key === 'private' || key === 'group' || key === 'nothuman') return key;
+    return { error: `无效 chatmode 字段: ${raw}，可选: private / group / nothuman`, code: 'INVALID_FIELD' };
+  }
+  return ((session?.chatType ?? explicitChatType) === 'group') ? 'group' : 'private';
+}
+
+function defaultChatmodeForField(field: MenuChatmodeField): MenuChatmodeValue {
+  return field === 'private' ? 'interactive' : 'proactive';
+}
+
+function normalizeMenuPeer(input: string): string | { error: string; code: string } {
+  try {
+    return normalizePeer(input);
+  } catch (e: any) {
+    return { error: e?.message || String(e), code: e?.code || 'INVALID_PEER' };
+  }
+}
+
+function resolveMenuChatmodeTarget(this: any, params: {
+  args?: Record<string, any>;
+  session?: Session | null;
+  channel: string;
+  channelId: string;
+  userId?: string;
+  role?: string;
+  explicitChatType?: MenuChatType;
+  fromControlChannel?: boolean;
+}): MenuChatmodeTarget | { error: string; code: string } {
+  const scope = menuChatmodeScope(params.args);
+  if (typeof scope !== 'string') return scope;
+
+  const field = menuChatmodeField(params.args, params.session, params.explicitChatType);
+  if (typeof field !== 'string') return field;
+
+  const explicitSelf = menuStringArg(params.args, 'self')
+    ?? menuStringArg(params.args, 'aid');
+  const currentSelf = this.getOwningAgent?.(params.channel)?.aid
+    ?? params.session?.selfAID
+    ?? undefined;
+  const self = explicitSelf ?? currentSelf;
+  if (!self) return { error: '缺少 self/aid 参数', code: 'MISSING_AID' };
+  if (!params.fromControlChannel && explicitSelf && currentSelf && explicitSelf !== currentSelf) {
+    return { error: '只能设置当前 agent 的 chatmode', code: 'FORBIDDEN' };
+  }
+
+  const sel: Selector = { self, role: params.role };
+  if (scope === 'agent') {
+    return { scope, sel, field, fieldPath: `chatmode.${field}` };
+  }
+
+  const explicitPeer = menuStringArg(params.args, 'peer') ?? menuStringArg(params.args, 'peerKey');
+  let peerKey: string | undefined;
+  if (explicitPeer) {
+    const normalized = normalizeMenuPeer(explicitPeer);
+    if (typeof normalized !== 'string') return normalized;
+    peerKey = normalized;
+  } else {
+    const chatType = params.session?.chatType ?? params.explicitChatType ?? 'private';
+    const channelType = this.resolveChannelType?.(params.channel) ?? params.session?.channelType;
+    const peerKeyId = chatType === 'group'
+      ? (params.session?.metadata?.groupId || params.channelId)
+      : (params.userId || params.session?.metadata?.peerId || params.channelId);
+    if (channelType && peerKeyId) peerKey = formatPeerKey(channelType, peerKeyId);
+  }
+  if (!peerKey) return { error: 'relation scope 需要 peer/peerKey，或可推导的当前对端', code: 'MISSING_PEER' };
+
+  return { scope, sel: { ...sel, peerKey }, field, fieldPath: `chatmode.${field}` };
+}
+
+function readMenuChatmode(target: MenuChatmodeTarget): MenuChatmodeValue {
+  try {
+    const effective = resolveEffective(target.sel, { cache: true });
+    const mode = effective.chatmode?.[target.field];
+    return mode === 'interactive' || mode === 'proactive'
+      ? mode
+      : defaultChatmodeForField(target.field);
+  } catch {
+    return defaultChatmodeForField(target.field);
+  }
+}
+
+function writeMenuChatmode(target: MenuChatmodeTarget, value: MenuChatmodeValue): void {
+  const route = routeFieldPath(target.fieldPath, target.scope);
+  const cur = (cfgRead<Record<string, any>>(route.target, target.sel) as Record<string, any>) || {};
+  const block = cur.chatmode && typeof cur.chatmode === 'object' && !Array.isArray(cur.chatmode)
+    ? { ...cur.chatmode }
+    : {};
+  block[target.field] = value;
+  cur.chatmode = block;
+  cfgWrite(route.target, cur, target.sel);
+}
+
+function menuDispatchScope(args?: Record<string, any>): MenuDispatchScope | { error: string; code: string } {
+  const raw = menuStringArg(args, 'scope') ?? 'agent';
+  if (raw === 'agent' || raw === 'relation') return raw;
+  return { error: `无效 scope: ${raw}，可选: agent / relation`, code: 'INVALID_SCOPE' };
+}
+
+function resolveMenuDispatchTarget(this: any, params: {
+  args?: Record<string, any>;
+  session?: Session | null;
+  channel: string;
+  channelId: string;
+  userId?: string;
+  role?: string;
+  explicitChatType?: MenuChatType;
+  fromControlChannel?: boolean;
+}): MenuDispatchTarget | { error: string; code: string } {
+  const scope = menuDispatchScope(params.args);
+  if (typeof scope !== 'string') return scope;
+
+  const explicitSelf = menuStringArg(params.args, 'self')
+    ?? menuStringArg(params.args, 'aid');
+  const currentSelf = this.getOwningAgent?.(params.channel)?.aid
+    ?? params.session?.selfAID
+    ?? undefined;
+  const self = explicitSelf ?? currentSelf;
+  if (!self) return { error: '缺少 self/aid 参数', code: 'MISSING_AID' };
+  if (!params.fromControlChannel && explicitSelf && currentSelf && explicitSelf !== currentSelf) {
+    return { error: '只能设置当前 agent 的 dispatch', code: 'FORBIDDEN' };
+  }
+
+  const sel: Selector = { self, role: params.role };
+  if (scope === 'agent') return { scope, sel, fieldPath: 'dispatch' };
+
+  const explicitPeer = menuStringArg(params.args, 'peer') ?? menuStringArg(params.args, 'peerKey');
+  let peerKey: string | undefined;
+  if (explicitPeer) {
+    const normalized = normalizeMenuPeer(explicitPeer);
+    if (typeof normalized !== 'string') return normalized;
+    peerKey = normalized;
+  } else {
+    const chatType = params.session?.chatType ?? params.explicitChatType ?? 'private';
+    const channelType = this.resolveChannelType?.(params.channel) ?? params.session?.channelType;
+    const peerKeyId = chatType === 'group'
+      ? (params.session?.metadata?.groupId || params.channelId)
+      : (params.userId || params.session?.metadata?.peerId || params.channelId);
+    if (channelType && peerKeyId) peerKey = formatPeerKey(channelType, peerKeyId);
+  }
+  if (!peerKey) return { error: 'relation scope 需要 peer/peerKey，或可推导的当前对端', code: 'MISSING_PEER' };
+
+  return { scope, sel: { ...sel, peerKey }, fieldPath: 'dispatch' };
+}
+
+function readMenuDispatch(target: MenuDispatchTarget, fallback: MenuDispatchValue | null = null): MenuDispatchValue | null {
+  try {
+    const mode = resolveEffective(target.sel, { cache: true }).dispatch;
+    return mode === 'mention' || mode === 'broadcast' ? mode : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function writeMenuDispatch(target: MenuDispatchTarget, value: MenuDispatchValue | null): void {
+  const route = routeFieldPath(target.fieldPath, target.scope);
+  const cur = (cfgRead<Record<string, any>>(route.target, target.sel) as Record<string, any>) || {};
+  if (value === null) delete cur.dispatch;
+  else cur.dispatch = value;
+  cfgWrite(route.target, cur, target.sel);
+}
+
+function menuPermissionScope(args?: Record<string, any>): MenuPermissionScope | { error: string; code: string } {
+  const raw = menuStringArg(args, 'scope') ?? 'agent';
+  if (raw === 'agent' || raw === 'relation') return raw;
+  return { error: `无效 scope: ${raw}，可选: agent / relation`, code: 'INVALID_SCOPE' };
+}
+
+function resolveMenuPermissionTarget(this: any, params: {
+  args?: Record<string, any>;
+  session?: Session | null;
+  channel: string;
+  channelId: string;
+  userId?: string;
+  role?: string;
+  explicitChatType?: MenuChatType;
+  fromControlChannel?: boolean;
+}): MenuPermissionTarget | { error: string; code: string } {
+  const scope = menuPermissionScope(params.args);
+  if (typeof scope !== 'string') return scope;
+
+  const explicitSelf = menuStringArg(params.args, 'self')
+    ?? menuStringArg(params.args, 'aid');
+  const currentSelf = this.getOwningAgent?.(params.channel)?.aid
+    ?? params.session?.selfAID
+    ?? undefined;
+  const self = explicitSelf ?? currentSelf;
+  if (!self) return { error: '缺少 self/aid 参数', code: 'MISSING_AID' };
+  if (!params.fromControlChannel && explicitSelf && currentSelf && explicitSelf !== currentSelf) {
+    return { error: '只能设置当前 agent 的 permission', code: 'FORBIDDEN' };
+  }
+
+  const sel: Selector = { self, role: params.role };
+  if (scope === 'agent') return { scope, sel, fieldPath: 'permissionMode' };
+
+  const explicitPeer = menuStringArg(params.args, 'peer') ?? menuStringArg(params.args, 'peerKey');
+  let peerKey: string | undefined;
+  if (explicitPeer) {
+    const normalized = normalizeMenuPeer(explicitPeer);
+    if (typeof normalized !== 'string') return normalized;
+    peerKey = normalized;
+  } else {
+    const chatType = params.session?.chatType ?? params.explicitChatType ?? 'private';
+    const channelType = this.resolveChannelType?.(params.channel) ?? params.session?.channelType;
+    const peerKeyId = chatType === 'group'
+      ? (params.session?.metadata?.groupId || params.channelId)
+      : (params.userId || params.session?.metadata?.peerId || params.channelId);
+    if (channelType && peerKeyId) peerKey = formatPeerKey(channelType, peerKeyId);
+  }
+  if (!peerKey) return { error: 'relation scope 需要 peer/peerKey，或可推导的当前对端', code: 'MISSING_PEER' };
+
+  return { scope, sel: { ...sel, peerKey }, fieldPath: 'permissionMode' };
+}
+
+function isMenuPermissionValue(value: string | undefined): value is MenuPermissionValue {
+  return !!value && (PERMISSION_MODE_KEYS as readonly string[]).includes(value);
+}
+
+function readMenuPermission(target: MenuPermissionTarget): MenuPermissionValue {
+  try {
+    const mode = resolveEffective(target.sel, { cache: true }).permissionMode;
+    if (isMenuPermissionValue(mode)) return mode;
+  } catch {}
+  const fallback = resolvePermissionMode(target.sel);
+  return isMenuPermissionValue(fallback) ? fallback : 'auto';
+}
+
+function writeMenuPermission(target: MenuPermissionTarget, value: MenuPermissionValue): void {
+  const route = routeFieldPath(target.fieldPath, target.scope);
+  const cur = (cfgRead<Record<string, any>>(route.target, target.sel) as Record<string, any>) || {};
+  cur.permissionMode = value;
+  cfgWrite(route.target, cur, target.sel);
+}
+
+function menuModelScope(args?: Record<string, any>): MenuModelScope | { error: string; code: string } {
+  const raw = menuStringArg(args, 'scope') ?? 'agent';
+  if (raw === 'agent' || raw === 'relation') return raw;
+  return { error: `无效 scope: ${raw}，可选: agent / relation`, code: 'INVALID_SCOPE' };
+}
+
+function resolveMenuModelTarget(this: any, params: {
+  args?: Record<string, any>;
+  session?: Session | null;
+  channel: string;
+  channelId: string;
+  userId?: string;
+  role?: string;
+  explicitChatType?: MenuChatType;
+  fromControlChannel?: boolean;
+  field: MenuModelField;
+}): MenuModelTarget | { error: string; code: string } {
+  const scope = menuModelScope(params.args);
+  if (typeof scope !== 'string') return scope;
+
+  const explicitSelf = menuStringArg(params.args, 'self')
+    ?? menuStringArg(params.args, 'aid');
+  const currentAgent = this.getOwningAgent?.(params.channel) ?? null;
+  const requestedAgent = explicitSelf
+    ? (this.agentRegistry?.get?.(explicitSelf) ?? null)
+    : null;
+  const currentSelf = currentAgent?.aid
+    ?? params.session?.selfAID
+    ?? undefined;
+  const self = explicitSelf ?? currentSelf;
+  if (!self) return { error: '缺少 self/aid 参数', code: 'MISSING_AID' };
+  if (!params.fromControlChannel && explicitSelf && currentSelf && explicitSelf !== currentSelf) {
+    return { error: '只能设置当前 agent 的 model/effort', code: 'FORBIDDEN' };
+  }
+
+  const baseagent = menuStringArg(params.args, 'baseagent')
+    ?? params.session?.baseagent
+    ?? (params.session as any)?.agentId
+    ?? requestedAgent?.baseagent
+    ?? currentAgent?.baseagent
+    ?? this.parseDefaultBaseagent?.();
+  if (!baseagent) return { error: '缺少 baseagent 参数', code: 'MISSING_BASEAGENT' };
+
+  const sel: Selector = { self, role: params.role };
+  if (scope === 'agent') {
+    return { scope, sel, baseagent, field: params.field, fieldPath: `baseagents.${baseagent}.${params.field}` };
+  }
+
+  const explicitPeer = menuStringArg(params.args, 'peer') ?? menuStringArg(params.args, 'peerKey');
+  let peerKey: string | undefined;
+  if (explicitPeer) {
+    const normalized = normalizeMenuPeer(explicitPeer);
+    if (typeof normalized !== 'string') return normalized;
+    peerKey = normalized;
+  } else {
+    const chatType = params.session?.chatType ?? params.explicitChatType ?? 'private';
+    const channelType = this.resolveChannelType?.(params.channel) ?? params.session?.channelType;
+    const peerKeyId = chatType === 'group'
+      ? (params.session?.metadata?.groupId || params.channelId)
+      : (params.userId || params.session?.metadata?.peerId || params.channelId);
+    if (channelType && peerKeyId) peerKey = formatPeerKey(channelType, peerKeyId);
+  }
+  if (!peerKey) return { error: 'relation scope 需要 peer/peerKey，或可推导的当前对端', code: 'MISSING_PEER' };
+
+  return { scope, sel: { ...sel, peerKey }, baseagent, field: params.field, fieldPath: `baseagents.${baseagent}.${params.field}` };
+}
+
+function readMenuModel(target: MenuModelTarget, agent: any): { value: string | null; source: string | null } {
+  try {
+    const resolved = resolveEffectiveModel(target.sel, target.baseagent);
+    const value = target.field === 'model' ? resolved.model : resolved.effort;
+    const source = target.field === 'model' ? resolved.source : resolved.effortSource;
+    if (value && source) return { value, source };
+  } catch {}
+
+  const fallback = target.field === 'model'
+    ? (typeof agent?.getModel === 'function' ? agent.getModel() : agent?.name)
+    : (typeof agent?.getEffort === 'function' ? agent.getEffort() : undefined);
+  return { value: fallback ?? null, source: null };
+}
+
+function writeMenuModel(target: MenuModelTarget, value: string | null): void {
+  if (target.field === 'model') {
+    writeScope(target.scope, target.sel, target.baseagent, { model: value });
+  } else {
+    writeScope(target.scope, target.sel, target.baseagent, { effort: value });
+  }
 }
 
 export function isProcessLevelOwner(peerId: string | undefined, owners: string[] | undefined): boolean {
@@ -472,10 +844,11 @@ function buildMenuIntent(
     source: 'menu',
     args: { ...payload, ...(extra ?? {}) },
   });
+  const modelScope = args?.scope === 'relation' ? 'relation' : 'agent';
 
   if (verb === 'query') {
-    if (cmdBase === '/model') return intent('model.current');
-    if (cmdBase === '/effort') return intent('model.current');
+    if (cmdBase === '/model') return intent('model.current', modelScope);
+    if (cmdBase === '/effort') return intent('model.current', modelScope);
     if (cmdBase === '/gateway') return intent('gateway.read', 'process');
     if (cmdBase === '/config') return intent('config.read', 'process');
     if (cmdBase === '/system') return intent('system.status', 'process');
@@ -485,8 +858,8 @@ function buildMenuIntent(
   }
 
   if (verb === 'update') {
-    if (cmdBase === '/model') return intent('model.use', 'relation', { model: value });
-    if (cmdBase === '/effort') return intent('model.effort', 'relation', { effort: value });
+    if (cmdBase === '/model') return intent('model.use', modelScope, { model: value });
+    if (cmdBase === '/effort') return intent('model.effort', modelScope, { effort: value });
     if (cmdBase === '/gateway') return intent('gateway.write', 'process');
     if (cmdBase === '/config') return intent('config.write', 'process');
   }
@@ -669,18 +1042,21 @@ function parseScheduleDurationMs(value: string): number {
 }
 
 export function validateScheduleParams(scheduleType: string, scheduleValue: string): string | null {
-  if (!['delay', 'at', 'cron', 'interval'].includes(scheduleType)) {
-    return `无效 scheduleType: ${scheduleType}（可选: delay / at / cron / interval）`;
+  if (!['once', 'delay', 'at', 'cron', 'interval', 'event'].includes(scheduleType)) {
+    return `无效 scheduleType: ${scheduleType}（可选: once / delay / at / cron / interval / event）`;
   }
+  if (scheduleType === 'once') return null;
   if (scheduleType === 'delay' || scheduleType === 'interval') {
     const ms = parseScheduleDurationMs(scheduleValue);
     if (!Number.isFinite(ms) || ms <= 0) return `${scheduleType} 的 scheduleValue 需为正数时长（如 30s / 15m / 2h / 1d）: ${scheduleValue}`;
   } else if (scheduleType === 'at') {
     const ts = new Date(scheduleValue).getTime();
     if (!Number.isFinite(ts)) return `at 的 scheduleValue 需为合法时间: ${scheduleValue}`;
-  } else {
+  } else if (scheduleType === 'cron') {
     try { CronExpressionParser.parse(scheduleValue); }
     catch { return `无效 cron 表达式: ${scheduleValue}`; }
+  } else if (!scheduleValue) {
+    return 'event 的 scheduleValue 不能为空';
   }
   return null;
 }
@@ -929,15 +1305,25 @@ export async function getSubMenuItems(this: any, cmd: string, channel: string, c
   }
 
   if (cmd === '/model') {
-    const requestedBaseagent = menuStringArg(args, 'baseagent') ?? session?.baseagent;
-    const agent = this.getAgent(channel, requestedBaseagent);
-    const modelSession = menuSessionForBaseagent(session, requestedBaseagent);
+    const identity = overrideIdentity ?? this.sessionManager.resolveIdentity(channel, userId);
+    const target = resolveMenuModelTarget.call(this, {
+      args,
+      session,
+      channel,
+      channelId,
+      userId,
+      role: identity.role,
+      explicitChatType,
+      fromControlChannel,
+      field: 'model',
+    });
+    if ('error' in target) throw { code: target.code, message: target.error };
+    const agent = this.getAgent(channel, target.baseagent);
     if (hasModelSwitcher(agent) && agent.listModels) {
-      const identity = overrideIdentity ?? this.sessionManager.resolveIdentity(channel, userId);
       const role = identity.role;
       const authIntent: CommandIntent = {
         operation: 'model.list',
-        scope: 'relation',
+        scope: target.scope,
         source: 'menu',
         args: {},
       };
@@ -952,23 +1338,16 @@ export async function getSubMenuItems(this: any, cmd: string, channel: string, c
         source: 'menu',
         fromControlChannel,
       });
-      authIntent.args = buildRelationIntentArgs({ args, selfAid: authCtx.selfAid, peerKey: authCtx.peerKey });
+      authIntent.args = target.scope === 'relation'
+        ? buildRelationIntentArgs({ args, selfAid: target.sel.self, peerKey: target.sel.peerKey })
+        : { ...(args ?? {}), self: target.sel.self };
       const decision = authorizeMenuContext(authCtx);
       if (!decision.allow) throw { code: decision.code, message: decision.reason };
 
       const rawModels = await agent.listModels() ?? [];
-      const models = filterModelsForRole(role, session?.baseagent || (agent as any).name, rawModels, (agent as any).resolveModelId?.bind(agent));
-      const state = resolveCommandModelResolution({
-        agent,
-        session: modelSession,
-        selfAid: this.getOwningAgent?.(channel)?.aid,
-        channelType: this.resolveChannelType?.(channel),
-        channelId,
-        userId,
-        role,
-      });
+      const models = filterModelsForRole(role, target.baseagent, rawModels, (agent as any).resolveModelId?.bind(agent));
       const requestedModel = menuStringArg(args, 'model') ?? menuStringArg(args, 'current');
-      const currentModel = requestedModel || state.model || agent.getModel();
+      const currentModel = requestedModel || readMenuModel(target, agent).value || agent.getModel();
       if (models.length > 0) return models.map((m: string) => ({ value: m, label: modelDisplayLabel(agent, m), selected: modelMatches(agent, m, currentModel) }));
     }
     return null;
@@ -996,35 +1375,42 @@ export async function getSubMenuItems(this: any, cmd: string, channel: string, c
   }
 
   if (cmd === '/effort') {
-    const requestedBaseagent = menuStringArg(args, 'baseagent') ?? session?.baseagent;
-    const agent = this.getAgent(channel, requestedBaseagent);
-    const effortSession = menuSessionForBaseagent(session, requestedBaseagent);
-    const state = resolveCommandModelResolution({
-      agent,
-      session: effortSession,
-      selfAid: this.getOwningAgent?.(channel)?.aid,
-      channelType: this.resolveChannelType?.(channel),
+    const identity = overrideIdentity ?? this.sessionManager.resolveIdentity(channel, userId);
+    const target = resolveMenuModelTarget.call(this, {
+      args,
+      session,
+      channel,
       channelId,
       userId,
-      role: (overrideIdentity ?? this.sessionManager.resolveIdentity(channel, userId)).role,
+      role: identity.role,
+      explicitChatType,
+      fromControlChannel,
+      field: 'effort',
     });
+    if ('error' in target) throw { code: target.code, message: target.error };
+    const agent = this.getAgent(channel, target.baseagent);
     const requestedModel = menuStringArg(args, 'model') ?? menuStringArg(args, 'currentModel');
-    const currentModel = requestedModel || (hasModelSwitcher(agent) ? (state.model || agent.getModel()) : agent.name);
+    const modelTarget: MenuModelTarget = { ...target, field: 'model', fieldPath: `baseagents.${target.baseagent}.model` };
+    const currentModel = requestedModel || (hasModelSwitcher(agent) ? (readMenuModel(modelTarget, agent).value || agent.getModel()) : agent.name);
     const efforts = getAvailableEfforts(agent, currentModel);
-    const currentEffort = menuStringArg(args, 'effort') ?? menuStringArg(args, 'current') ?? state.effort ?? 'auto';
+    const currentEffort = menuStringArg(args, 'effort') ?? menuStringArg(args, 'current') ?? readMenuModel(target, agent).value ?? 'auto';
     const allItems = [...efforts, 'auto'] as string[];
     return allItems.map(e => ({ value: e, label: e === 'auto' ? 'auto (SDK默认)' : e, selected: e === currentEffort }));
   }
 
   if (cmd === '/chatmode') {
-    // 无活跃会话时，selected 跟随 evolagent.config.chatmode.private 默认值
-    let currentMode: string;
-    if (session?.chatMode) {
-      currentMode = session.chatMode;
-    } else {
-      const evolagent = this.agentRegistry?.resolveByChannel(channel);
-      currentMode = evolagent?.config?.chatmode?.private || 'interactive';
-    }
+    const target = resolveMenuChatmodeTarget.call(this, {
+      args,
+      session,
+      channel,
+      channelId,
+      userId,
+      role: (overrideIdentity ?? this.sessionManager.resolveIdentity(channel, userId)).role,
+      explicitChatType,
+      fromControlChannel,
+    });
+    if ('error' in target) throw { code: target.code, message: target.error };
+    const currentMode = readMenuChatmode(target);
     return [
       { value: 'interactive', label: '交互模式', selected: currentMode === 'interactive' },
       { value: 'proactive', label: '主动模式', selected: currentMode === 'proactive' },
@@ -1032,7 +1418,21 @@ export async function getSubMenuItems(this: any, cmd: string, channel: string, c
   }
 
   if (cmd === '/dispatch') {
-    const currentMode = session?.metadata?.dispatchModeOverride ?? session?.metadata?.dispatchMode ?? null;
+    const target = resolveMenuDispatchTarget.call(this, {
+      args,
+      session,
+      channel,
+      channelId,
+      userId,
+      role: (overrideIdentity ?? this.sessionManager.resolveIdentity(channel, userId)).role,
+      explicitChatType,
+      fromControlChannel,
+    });
+    if ('error' in target) throw { code: target.code, message: target.error };
+    const fallback = session?.metadata?.dispatchMode === 'mention' || session?.metadata?.dispatchMode === 'broadcast'
+      ? session.metadata.dispatchMode
+      : null;
+    const currentMode = readMenuDispatch(target, fallback);
     return [
       { value: 'mention', label: '@提及时响应', selected: currentMode === 'mention' },
       { value: 'broadcast', label: '所有消息响应', selected: currentMode === 'broadcast' },
@@ -1040,16 +1440,18 @@ export async function getSubMenuItems(this: any, cmd: string, channel: string, c
   }
 
   if (cmd === '/perm') {
-    const permSelfAid = this.getOwningAgent?.(channel)?.aid;
-    const permChannelType = this.resolveChannelType?.(channel);
-    const permPeerKeyId = session?.chatType === 'group'
-      ? (session.metadata?.groupId || channelId)
-      : (userId || session?.metadata?.peerId);
-    const permPeerKey = (permChannelType && permPeerKeyId)
-      ? formatPeerKey(permChannelType, permPeerKeyId)
-      : undefined;
-    const permRole = (overrideIdentity ?? this.sessionManager.resolveIdentity(channel, userId)).role;
-    const currentMode = resolvePermissionMode({ self: permSelfAid || undefined, peerKey: permPeerKey, role: permRole });
+    const target = resolveMenuPermissionTarget.call(this, {
+      args,
+      session,
+      channel,
+      channelId,
+      userId,
+      role: (overrideIdentity ?? this.sessionManager.resolveIdentity(channel, userId)).role,
+      explicitChatType,
+      fromControlChannel,
+    });
+    if ('error' in target) throw { code: target.code, message: target.error };
+    const currentMode = readMenuPermission(target);
     const permAgent = this.getAgent(channel, session?.baseagent);
     const validModes = hasPermissionController(permAgent)
       ? permAgent.listModes().filter(m => m.available).map(m => m.key)
@@ -1276,60 +1678,112 @@ export async function execMenuQuery(this: any,
   }
 
   if (cmdBase === '/model') {
-    if (session) {
-      const agent = this.getAgent(channel, session.baseagent);
-      if (hasModelSwitcher(agent)) {
-        const state = resolveCommandModelResolution({
-          agent,
-          session,
-          selfAid: this.getOwningAgent?.(channel)?.aid,
-          channelType: this.resolveChannelType?.(channel),
-          channelId,
-          userId,
-          role: identity.role,
-        });
-        return { data: { model: state.model ?? null, baseagent: state.baseagent, source: state.resolved?.source ?? null } };
-      }
-    }
-    const ba = evolagent?.config?.active_baseagent;
-    const block = ba && evolagent ? (evolagent.config.baseagents as any)?.[ba] : undefined;
-    return { data: { model: block?.model ?? null } };
+    const target = resolveMenuModelTarget.call(this, {
+      args,
+      session,
+      channel,
+      channelId,
+      userId,
+      role: identity.role,
+      explicitChatType,
+      fromControlChannel,
+      field: 'model',
+    });
+    if ('error' in target) return target;
+    const agent = this.getAgent(channel, target.baseagent);
+    const current = readMenuModel(target, agent);
+    return {
+      data: {
+        model: current.value,
+        baseagent: target.baseagent,
+        source: current.source,
+        scope: target.scope,
+        field: target.fieldPath,
+        self: target.sel.self,
+        ...(target.sel.peerKey ? { peerKey: target.sel.peerKey } : {}),
+      },
+    };
   }
 
   if (cmdBase === '/effort') {
-    if (session) {
-      const agent = this.getAgent(channel, session.baseagent);
-      const state = resolveCommandModelResolution({
-        agent,
-        session,
-        selfAid: this.getOwningAgent?.(channel)?.aid,
-        channelType: this.resolveChannelType?.(channel),
-        channelId,
-        userId,
-        role: identity.role,
-      });
-      if (state.effort !== undefined) return { data: { effort: state.effort, baseagent: state.baseagent, source: state.resolved?.effortSource ?? null } };
-    }
-    const ba = evolagent?.config?.active_baseagent;
-    const block = ba && evolagent ? (evolagent.config.baseagents as any)?.[ba] : undefined;
-    const fallbackField = ba === 'codex' ? (block?.effort ?? block?.reasoning) : block?.effort;
-    return { data: { effort: fallbackField ?? null } };
+    const target = resolveMenuModelTarget.call(this, {
+      args,
+      session,
+      channel,
+      channelId,
+      userId,
+      role: identity.role,
+      explicitChatType,
+      fromControlChannel,
+      field: 'effort',
+    });
+    if ('error' in target) return target;
+    const agent = this.getAgent(channel, target.baseagent);
+    const current = readMenuModel(target, agent);
+    return {
+      data: {
+        effort: current.value,
+        baseagent: target.baseagent,
+        source: current.source,
+        scope: target.scope,
+        field: target.fieldPath,
+        self: target.sel.self,
+        ...(target.sel.peerKey ? { peerKey: target.sel.peerKey } : {}),
+      },
+    };
   }
 
   if (cmdBase === '/chatmode') {
-    const chatMode = session?.chatMode;
-    const fallback = evolagent?.config?.chatmode?.private;
-    return { data: { mode: chatMode || fallback || 'interactive' } };
+    const target = resolveMenuChatmodeTarget.call(this, {
+      args,
+      session,
+      channel,
+      channelId,
+      userId,
+      role: identity.role,
+      explicitChatType,
+      fromControlChannel,
+    });
+    if ('error' in target) return target;
+    return {
+      data: {
+        mode: readMenuChatmode(target),
+        scope: target.scope,
+        field: target.fieldPath,
+        self: target.sel.self,
+        ...(target.sel.peerKey ? { peerKey: target.sel.peerKey } : {}),
+      },
+    };
   }
 
   if (cmdBase === '/dispatch') {
-    const chatType = session?.chatType || 'private';
+    const chatType = session?.chatType ?? explicitChatType ?? 'private';
     if (chatType !== 'group') {
       return { error: 'dispatch 仅在群聊会话中有效', code: 'NOT_APPLICABLE' };
     }
-    const chatMode = session?.metadata?.dispatchModeOverride ?? session?.metadata?.dispatchMode;
-    const fallback = evolagent?.config?.dispatch;
-    return { data: { mode: chatMode ?? fallback ?? null } };
+    const target = resolveMenuDispatchTarget.call(this, {
+      args,
+      session,
+      channel,
+      channelId,
+      userId,
+      role: identity.role,
+      explicitChatType,
+      fromControlChannel,
+    });
+    if ('error' in target) return target;
+    const fallback = session?.metadata?.dispatchMode === 'mention' || session?.metadata?.dispatchMode === 'broadcast'
+      ? session.metadata.dispatchMode
+      : (evolagent?.config?.dispatch === 'mention' || evolagent?.config?.dispatch === 'broadcast' ? evolagent.config.dispatch : null);
+    return {
+      data: {
+        mode: readMenuDispatch(target, fallback),
+        scope: target.scope,
+        field: target.fieldPath,
+        self: target.sel.self,
+        ...(target.sel.peerKey ? { peerKey: target.sel.peerKey } : {}),
+      },
+    };
   }
 
   if (cmdBase === '/observable') {
@@ -1337,19 +1791,26 @@ export async function execMenuQuery(this: any,
   }
 
   if (cmdBase === '/perm') {
-    const need = this.requireSession(session);
-    if (need) return need;
-    const pmSelfAid = this.getOwningAgent?.(channel)?.aid;
-    const pmChannelType = this.resolveChannelType?.(channel);
-    const pmPeerKeyId = session!.chatType === 'group'
-      ? (session!.metadata?.groupId || channelId)
-      : (userId || session!.metadata?.peerId);
-    const pmPeerKey = (pmChannelType && pmPeerKeyId)
-      ? formatPeerKey(pmChannelType, pmPeerKeyId)
-      : undefined;
-    const pmRole = identity.role;
-    const currentMode = resolvePermissionMode({ self: pmSelfAid || undefined, peerKey: pmPeerKey, role: pmRole });
-    return { data: { mode: currentMode } };
+    const target = resolveMenuPermissionTarget.call(this, {
+      args,
+      session,
+      channel,
+      channelId,
+      userId,
+      role: identity.role,
+      explicitChatType,
+      fromControlChannel,
+    });
+    if ('error' in target) return target;
+    return {
+      data: {
+        mode: readMenuPermission(target),
+        scope: target.scope,
+        field: target.fieldPath,
+        self: target.sel.self,
+        ...(target.sel.peerKey ? { peerKey: target.sel.peerKey } : {}),
+      },
+    };
   }
 
   if (cmdBase === '/activity') {
@@ -1442,7 +1903,7 @@ export async function execMenuUpdate(this: any,
 ): Promise<{ data: any } | { error: string; code?: string }> {
   const cmdBase = cmd.trim().split(' ')[0];
   if (!cmdBase) return { error: '缺少命令', code: 'MISSING_CMD' };
-  const gated = gateControlScope.call(this, { cmdBase, channel, fromControlChannel });
+  const gated = gateControlScope.call(this, { cmdBase, args, channel, fromControlChannel });
   if (gated) return gated;
   const arg = value.trim();
   if (!arg) return { error: '缺少 value 参数', code: 'MISSING_VALUE' };
@@ -1543,13 +2004,24 @@ export async function execMenuUpdate(this: any,
   }
 
   if (cmdBase === '/model') {
-    const agent = this.getAgent(channel, session?.baseagent);
+    const target = resolveMenuModelTarget.call(this, {
+      args,
+      session,
+      channel,
+      channelId,
+      userId,
+      role: identity.role,
+      fromControlChannel,
+      field: 'model',
+    });
+    if ('error' in target) return target;
+    const agent = this.getAgent(channel, target.baseagent);
     let targetModel = arg;
     if (hasModelSwitcher(agent)) {
       const models = (await agent.listModels?.()) ?? [];
       const decision = validateModelSelectionForRole({
         role: identity.role,
-        baseagent: session?.baseagent || (agent as any).name,
+        baseagent: target.baseagent,
         requestedModel: arg,
         models,
         resolveModelId: (agent as any).resolveModelId?.bind(agent),
@@ -1559,51 +2031,76 @@ export async function execMenuUpdate(this: any,
       if (models.length && !models.includes(targetModel)) {
         return { error: `无效模型: ${arg}`, code: 'INVALID_VALUE' };
       }
-      agent.setModel(targetModel);
     }
-    if (evolagent) evolagent.setBaseagentModel(targetModel, session?.baseagent || agent.name);
+    try {
+      writeMenuModel(target, targetModel);
+    } catch (e: any) {
+      return { error: e?.message || String(e), code: e?.code || 'CONFIG_WRITE_FAILED' };
+    }
     this.eventBus.publish({
       type: 'runner:model-changed',
       sessionId: session?.id,
       agentName: evolagent?.name,
-      baseagent: session?.baseagent || agent.name,
+      baseagent: target.baseagent,
       model: targetModel,
       timestamp: Date.now(),
     });
-    return { data: { model: targetModel } };
+    return {
+      data: {
+        model: targetModel,
+        baseagent: target.baseagent,
+        scope: target.scope,
+        field: target.fieldPath,
+        self: target.sel.self,
+        ...(target.sel.peerKey ? { peerKey: target.sel.peerKey } : {}),
+      },
+    };
   }
 
   if (cmdBase === '/effort') {
     if (!isAdmin) return { error: '无权限', code: 'NO_PERMISSION' };
-    const agent = this.getAgent(channel, session?.baseagent);
-    const state = resolveCommandModelResolution({
-      agent,
+    const target = resolveMenuModelTarget.call(this, {
+      args,
       session,
-      selfAid: this.getOwningAgent?.(channel)?.aid,
-      channelType: this.resolveChannelType?.(channel),
+      channel,
       channelId,
       userId,
       role: identity.role,
+      fromControlChannel,
+      field: 'effort',
     });
-    const currentModel = hasModelSwitcher(agent) ? (state.model || agent.getModel()) : agent.name;
+    if ('error' in target) return target;
+    const agent = this.getAgent(channel, target.baseagent);
+    const modelTarget: MenuModelTarget = { ...target, field: 'model', fieldPath: `baseagents.${target.baseagent}.model` };
+    const currentModel = hasModelSwitcher(agent) ? (readMenuModel(modelTarget, agent).value || agent.getModel()) : agent.name;
     const validEfforts = getAvailableEfforts(agent, currentModel);
     const allValid: string[] = [...validEfforts, 'auto'];
     if (!allValid.includes(arg)) {
       return { error: `无效推理强度: ${arg}，可选: ${allValid.join(' / ')}`, code: 'INVALID_VALUE' };
     }
-    if (typeof (agent as any).setEffort === 'function') {
-      (agent as any).setEffort(arg === 'auto' ? undefined : arg);
+    try {
+      writeMenuModel(target, arg === 'auto' ? null : arg);
+    } catch (e: any) {
+      return { error: e?.message || String(e), code: e?.code || 'CONFIG_WRITE_FAILED' };
     }
-    if (evolagent) evolagent.setBaseagentEffort(arg === 'auto' ? undefined : arg, session?.baseagent || agent.name);
     this.eventBus.publish({
       type: 'runner:model-changed',
       sessionId: session?.id,
       agentName: evolagent?.name,
-      baseagent: session?.baseagent || agent.name,
+      baseagent: target.baseagent,
       effort: arg,
       timestamp: Date.now(),
     });
-    return { data: { effort: arg } };
+    return {
+      data: {
+        effort: arg,
+        baseagent: target.baseagent,
+        scope: target.scope,
+        field: target.fieldPath,
+        self: target.sel.self,
+        ...(target.sel.peerKey ? { peerKey: target.sel.peerKey } : {}),
+      },
+    };
   }
 
   if (cmdBase === '/chatmode') {
@@ -1611,13 +2108,30 @@ export async function execMenuUpdate(this: any,
     if (arg !== 'interactive' && arg !== 'proactive') {
       return { error: `无效模式: ${arg}`, code: 'INVALID_VALUE' };
     }
-    if (session) {
-      await this.sessionManager.updateSession(session.id, { chatMode: arg });
-      this.eventBus.publish({ type: 'session:chat-mode-changed', sessionId: session.id, mode: arg, timestamp: Date.now() });
-    } else {
-      if (evolagent) evolagent.setChatmodePrivate(arg);
+    const target = resolveMenuChatmodeTarget.call(this, {
+      args,
+      session,
+      channel,
+      channelId,
+      userId,
+      role: identity.role,
+      fromControlChannel,
+    });
+    if ('error' in target) return target;
+    try {
+      writeMenuChatmode(target, arg);
+    } catch (e: any) {
+      return { error: e?.message || String(e), code: e?.code || 'CONFIG_WRITE_FAILED' };
     }
-    return { data: { mode: arg } };
+    return {
+      data: {
+        mode: arg,
+        scope: target.scope,
+        field: target.fieldPath,
+        self: target.sel.self,
+        ...(target.sel.peerKey ? { peerKey: target.sel.peerKey } : {}),
+      },
+    };
   }
 
   if (cmdBase === '/dispatch') {
@@ -1629,41 +2143,63 @@ export async function execMenuUpdate(this: any,
     if (!session || chatType !== 'group') {
       return { error: 'dispatch 仅在群聊会话中有效', code: 'NOT_APPLICABLE' };
     }
-    if (arg === 'clear') {
-      const { dispatchModeOverride: _, ...rest } = session.metadata || {};
-      await this.sessionManager.updateSession(session.id, { metadata: rest });
-      this.eventBus.publish({ type: 'session:dispatch-mode-changed', sessionId: session.id, mode: undefined, timestamp: Date.now() });
-      return { data: { mode: null } };
+    const target = resolveMenuDispatchTarget.call(this, {
+      args,
+      session,
+      channel,
+      channelId,
+      userId,
+      role: identity.role,
+      fromControlChannel,
+    });
+    if ('error' in target) return target;
+    try {
+      writeMenuDispatch(target, arg === 'clear' ? null : arg);
+    } catch (e: any) {
+      return { error: e?.message || String(e), code: e?.code || 'CONFIG_WRITE_FAILED' };
     }
-    const metadata = { ...(session.metadata || {}), dispatchModeOverride: arg };
-    await this.sessionManager.updateSession(session.id, { metadata });
-    this.eventBus.publish({ type: 'session:dispatch-mode-changed', sessionId: session.id, mode: arg, timestamp: Date.now() });
-    return { data: { mode: arg } };
+    return {
+      data: {
+        mode: arg === 'clear' ? null : arg,
+        scope: target.scope,
+        field: target.fieldPath,
+        self: target.sel.self,
+        ...(target.sel.peerKey ? { peerKey: target.sel.peerKey } : {}),
+      },
+    };
   }
 
   if (cmdBase === '/perm') {
-    const need = this.requireSession(session);
-    if (need) return need;
     if (!isAdmin) return { error: '无权限', code: 'NO_PERMISSION' };
-    const permAgent = this.getAgent(channel, session!.baseagent);
+    const permAgent = this.getAgent(channel, session?.baseagent);
     const validModes = hasPermissionController(permAgent)
       ? permAgent.listModes().filter(m => m.available).map(m => m.key)
       : [...PERMISSION_MODE_KEYS];
     if (!validModes.includes(arg)) return { error: `无效模式: ${arg}`, code: 'INVALID_VALUE' };
-    // 写关系级 config.json（运行时 per-message 解析，不再写 session.metadata）
-    const permSelfAid = this.getOwningAgent?.(channel)?.aid;
-    const permChannelType = this.resolveChannelType?.(channel);
-    const permPeerKeyId = session!.chatType === 'group'
-      ? (session!.metadata?.groupId || channelId)
-      : (userId || session!.metadata?.peerId);
-    const permPeerKey = (permChannelType && permPeerKeyId)
-      ? formatPeerKey(permChannelType, permPeerKeyId)
-      : undefined;
-    if (permSelfAid && permPeerKey) {
-      const { writeRelationPermissionMode } = await import('../model/config-scope.js');
-      writeRelationPermissionMode(permSelfAid, permPeerKey, arg);
+    const target = resolveMenuPermissionTarget.call(this, {
+      args,
+      session,
+      channel,
+      channelId,
+      userId,
+      role: identity.role,
+      fromControlChannel,
+    });
+    if ('error' in target) return target;
+    try {
+      writeMenuPermission(target, arg as MenuPermissionValue);
+    } catch (e: any) {
+      return { error: e?.message || String(e), code: e?.code || 'CONFIG_WRITE_FAILED' };
     }
-    return { data: { mode: arg } };
+    return {
+      data: {
+        mode: arg,
+        scope: target.scope,
+        field: target.fieldPath,
+        self: target.sel.self,
+        ...(target.sel.peerKey ? { peerKey: target.sel.peerKey } : {}),
+      },
+    };
   }
 
   if (cmdBase === '/activity') {
@@ -1700,6 +2236,9 @@ export async function execMenuAction(this: any,
   if (!action) return { error: '缺少 action', code: 'MISSING_VALUE' };
   const gated = gateControlScope.call(this, { cmdBase, action, args, channel, fromControlChannel });
   if (gated) return gated;
+  if (cmdBase === '/system' && fromControlChannel && !isProcessLevelOwner(userId, loadEvolclawConfig().owners)) {
+    return { error: '操作需要 owner 权限', code: 'FORBIDDEN' };
+  }
   const { session: authSession } = await this.loadMenuContext(channel, channelId);
   const authIdentity = overrideIdentity ?? this.sessionManager.resolveIdentity(channel, userId);
   if (cmdBase === '/agent' && !fromControlChannel && !args?.aid) {
@@ -1824,26 +2363,28 @@ export async function execMenuAction(this: any,
 
     if (action === 'set') {
       // args 结构化 → 直接组装 ParsedTriggerSet（绕过 parseTriggerSet 文本解析，无注入风险）
-      if (!args?.scheduleType || !args?.scheduleValue || !args?.prompt) {
+      if (!args?.scheduleType || (args.scheduleType !== 'once' && !args?.scheduleValue) || !args?.prompt) {
         return { error: '缺少必填参数：scheduleType / scheduleValue / prompt', code: 'INVALID_ARGS' };
       }
       // menu 路径绕过了 parseTriggerSet 的校验，必须自行校验枚举/数值，
       // 避免非法调度参数进入 scheduler。
-      const schedErr = validateScheduleParams(args.scheduleType, String(args.scheduleValue));
+      const schedErr = validateScheduleParams(args.scheduleType, String(args.scheduleValue ?? ''));
       if (schedErr) return { error: schedErr, code: 'INVALID_ARGS' };
-      const strategy = args.targetSessionStrategy ?? 'latest';
-      if (!['latest', 'thread'].includes(strategy)) {
-        return { error: `无效 targetSessionStrategy: ${strategy}`, code: 'INVALID_ARGS' };
+      const targetSession = args.targetSession ?? args.targetSessionStrategy ?? 'main';
+      if (!['main', 'thread'].includes(targetSession)) {
+        return { error: `无效 targetSession: ${targetSession}`, code: 'INVALID_ARGS' };
       }
       const parsed: ParsedTriggerSet = {
         scheduleType: args.scheduleType,
-        scheduleValue: String(args.scheduleValue),
+        scheduleValue: String(args.scheduleValue ?? ''),
+        executionType: args.executionType ?? 'target_session',
+        feedbackStrategy: args.feedbackStrategy ?? (args.targetChannel ? 'target' : 'origin'),
+        targetSession,
         prompt: String(args.prompt),
         name: args.name,
         targetChannel: args.targetChannel,
         targetChannelId: args.targetChannelId,
         targetThreadId: args.targetThreadId,
-        targetSessionStrategy: strategy,
         agentId: args.agentId,
         model: args.model,
         effort: args.effort,
@@ -2062,7 +2603,9 @@ export async function execMenuAction(this: any,
     }
     if (action === 'restart') {
       const restartInfo: Record<string, any> = { channel, channelId, timestamp: Date.now() };
-      fs.writeFileSync(path.join(resolvePaths().dataDir, 'restart-pending.json'), JSON.stringify(restartInfo));
+      const dataDir = resolvePaths().dataDir;
+      fs.mkdirSync(dataDir, { recursive: true });
+      fs.writeFileSync(path.join(dataDir, 'restart-pending.json'), JSON.stringify(restartInfo));
       const { spawn } = await import('child_process');
       spawn('node', [path.join(getPackageRoot(), 'dist', 'cli', 'index.js'), 'restart-monitor'], {
         detached: true,

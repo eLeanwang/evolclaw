@@ -36,6 +36,7 @@ Commands:
   disable <aid>           停用 agent
   get <aid> <key>         读取单个配置字段（支持点路径）
   set <aid> <key> <val>   修改单个配置字段（支持点路径）
+  rename <aid> <name>     修改 agent.md 中的显示名称
   ready <aid>              标记 bootstrap 完成，进入 active 状态
   reload [aid]            热重载配置（无参数=全量 resync）
   delete <aid> [--purge]  删除 agent
@@ -51,6 +52,7 @@ Options:
   evolclaw agent enable mybot.agentid.pub
   evolclaw agent get mybot.agentid.pub active_baseagent
   evolclaw agent set mybot.agentid.pub active_baseagent codex
+  evolclaw agent rename mybot.agentid.pub "New Name"
   evolclaw agent ready mybot.agentid.pub
   evolclaw agent delete mybot.agentid.pub --purge`);
     return;
@@ -59,7 +61,7 @@ Options:
   const {
     agentList, agentShow, agentCreateInteractive, agentCreateNonInteractive,
     agentReload, agentEnable, agentDisable,
-    agentGet, agentSet, agentDelete, agentReady,
+    agentGet, agentSet, agentRename, agentDelete, agentReady,
   } = await import('./agent.js');
 
   // --- list ---
@@ -447,11 +449,26 @@ Options:
     return;
   }
 
+  // --- rename ---
   if (sub === 'rename') {
-    const result = { ok: false, error: 'ec agent rename 已取消；如需更新 agent.md，请编辑本地 agent.md 后使用 ec aid agentmd put <aid> 发布。' };
-    if (formatJson) { console.log(JSON.stringify(result)); }
-    else { console.error(result.error); }
-    process.exit(1);
+    if (wantsHelp(args)) {
+      console.log(`用法: evolclaw agent rename <aid> <name> [--format json]
+
+修改本地 AIDs/<aid>/agent.md 中的 name 字段。`);
+      return;
+    }
+    const aid = args[1];
+    const name = args[2];
+    if (!aid || !name) { console.error('用法: evolclaw agent rename <aid> <name>'); process.exit(1); }
+    const result = await agentRename(aid, name);
+    if (!result.ok) {
+      if (formatJson) { console.log(JSON.stringify(result)); }
+      else { console.error(result.error); }
+      process.exit(1);
+    }
+    if (formatJson) { console.log(JSON.stringify(result, null, 2)); }
+    else { console.log(`✓ ${aid} renamed to ${result.name}`); }
+    return;
   }
 
   // --- default: `evolclaw agent <aid>` (shorthand for show) ---

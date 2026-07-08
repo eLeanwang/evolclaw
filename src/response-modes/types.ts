@@ -372,6 +372,11 @@ export interface MessageQueueInterface {
   peek(): Promise<InboundMessage | undefined>;
 
   /**
+   * 查看队首消息（同步版本，不出队）
+   */
+  peekSync?(): InboundMessage | undefined;
+
+  /**
    * 队列长度
    */
   size(): number;

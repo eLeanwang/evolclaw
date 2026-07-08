@@ -1,11 +1,15 @@
+import fs from 'fs';
 import path from 'path';
 import type { ShortConnectionOpts } from '../rpc/index.js';
 import { createShortConnection } from '../rpc/index.js';
 import { getAidStore, SLOT } from '../aid/store.js';
 import { uploadFileAndBuildPayload, type UploadProgress } from './upload.js';
 import { appendMessageLog, buildOutboundEntry } from '../../core/message/message-log.js';
+import { readBestTaskRuntimeContext, resolveMsgSendHandoff, runtimeRefMessageIdForMsgSend } from '../../core/message/handoff.js';
+import type { TaskRuntimeContext } from '../../core/message/handoff.js';
 import { chatDirPath } from '../../core/session/session-fs-store.js';
 import { resolvePaths } from '../../paths.js';
+import { ipcQuery, type IpcAunMsgSendResponse } from '../../ipc.js';
 
 // ==================== Types ====================
 
@@ -92,9 +96,156 @@ export interface MsgSendArgs extends MsgCommonOpts {
   onUploadProgress?: (info: UploadProgress) => void;
 }
 
-export async function msgSend(args: MsgSendArgs): Promise<MsgSendResult | MsgError> {
-  const conn = await createShortConnection(args.from, { aunPath: args.aunPath, slotId: args.slotId });
+function buildSimplePayload(body: Exclude<MsgSendBody, { mode: 'file' }>): Record<string, unknown> {
+  switch (body.mode) {
+    case 'text':
+      return { type: 'text', text: body.text };
+    case 'payload':
+      return { ...body.payload };
+    case 'link': {
+      const payload: Record<string, unknown> = { type: 'link', url: body.url };
+      if (body.title) payload.title = body.title;
+      if (body.description) payload.description = body.description;
+      return payload;
+    }
+  }
+}
+
+function messageLogContent(body: MsgSendBody): string {
+  return body.mode === 'text' ? body.text
+    : body.mode === 'link' ? `[link] ${body.url}`
+    : body.mode === 'file' ? `[file] ${body.filePath}`
+    : `[payload]`;
+}
+
+function applyRoutingPayloadFields(
+  payload: Record<string, unknown>,
+  args: Pick<MsgSendArgs, 'from' | 'thread'>,
+  runtimeContext?: TaskRuntimeContext | null,
+): void {
+  if (args.thread) payload.thread_id = args.thread;
+  const refMessageId = runtimeRefMessageIdForMsgSend({ from: args.from, runtime: runtimeContext });
+  if (refMessageId && !payload.ref_message_id) payload.ref_message_id = refMessageId;
+}
+
+function msgSendLogMetadata(args: MsgSendArgs, runtimeContext?: TaskRuntimeContext | null): {
+  content: string;
+  source: 'cli' | 'msg';
+  handoff?: ReturnType<typeof resolveMsgSendHandoff>;
+} {
+  const isInSession = !!process.env.EVOLCLAW_SESSION_ID || !!runtimeContext;
+  const source = isInSession ? 'msg' : 'cli';
+  return {
+    content: messageLogContent(args.body),
+    source,
+    handoff: resolveMsgSendHandoff({
+      from: args.from,
+      to: args.to,
+      runtime: runtimeContext,
+    }),
+  };
+}
+
+async function tryDaemonMsgSend(args: MsgSendArgs, payload: Record<string, unknown>, runtimeContext?: TaskRuntimeContext | null): Promise<IpcAunMsgSendResponse | null> {
+  if (!runtimeContext) return null;
+  if (runtimeContext.channel !== 'aun' || runtimeContext.chatType !== 'private') return null;
+  if (!runtimeContext.selfAid || runtimeContext.selfAid !== args.from) return null;
+  if (args.body.mode === 'file') return null;
+  if (args.slotId || args.aunPath) return null;
+
+  const response = await ipcQuery<IpcAunMsgSendResponse>(
+    resolvePaths().socket,
+    {
+      type: 'aun-msg-send',
+      aid: args.from,
+      to: args.to,
+      payload,
+      encrypt: args.encrypt === true,
+      log: msgSendLogMetadata(args, runtimeContext),
+    },
+    5000,
+  );
+  return response;
+}
+
+async function appendMsgSendOutboundLog(args: MsgSendArgs, result: MsgSendResult, opts: {
+  runtimeContext?: TaskRuntimeContext | null;
+  chatmode?: string;
+  encrypt?: boolean;
+}): Promise<void> {
+  const sessionsDir = resolvePaths().sessionsDir;
+  const chatDir = chatDirPath(sessionsDir, 'aun', args.to, args.from);
+  const log = msgSendLogMetadata(args, opts.runtimeContext);
+
+  fs.mkdirSync(chatDir, { recursive: true });
+  appendMessageLog(chatDir, buildOutboundEntry({
+    from: args.from,
+    to: args.to,
+    chatType: 'private',
+    msgId: result.message_id,
+    content: log.content,
+    encrypt: opts.encrypt === true,
+    chatmode: opts.chatmode,
+    msgType: 'text',
+    source: log.source,
+    handoff: log.handoff,
+  }));
+
+  // 通知 daemon 更新 stats（如果 daemon 在运行）
   try {
+    await ipcQuery(resolvePaths().socket, {
+      type: 'aun-aid-stats-record-outbound',
+      aid: args.from,
+      toPeer: args.to,
+      text: log.content,
+      encrypt: opts.encrypt === true,
+      chatmode: opts.chatmode,
+    }, 1000);
+  } catch { /* daemon 不在或 IPC 失败都忽略 */ }
+}
+
+export async function msgSend(args: MsgSendArgs): Promise<MsgSendResult | MsgError> {
+  const runtimeContext = await readBestTaskRuntimeContext();
+  let conn;
+  try {
+    let payload: Record<string, unknown> | undefined;
+    if (args.body.mode !== 'file') {
+      payload = buildSimplePayload(args.body);
+      applyRoutingPayloadFields(payload, args, runtimeContext);
+
+      const daemonResult = await tryDaemonMsgSend(args, payload, runtimeContext);
+      if (daemonResult) {
+        if (!daemonResult.ok) {
+          return {
+            ok: false,
+            error: daemonResult.error || 'daemon AUN message send failed',
+            code: typeof daemonResult.code === 'number' ? daemonResult.code : undefined,
+          };
+        }
+        if (!daemonResult.message_id) {
+          return { ok: false, error: 'daemon AUN message send returned no message_id' };
+        }
+        const sent: MsgSendResult = {
+          ok: true,
+          message_id: daemonResult.message_id,
+          seq: daemonResult.seq,
+          timestamp: daemonResult.timestamp,
+          status: daemonResult.status,
+          delivery_mode: daemonResult.delivery_mode,
+        };
+        if (!daemonResult.log_written) {
+          await appendMsgSendOutboundLog(args, sent, {
+            runtimeContext,
+            chatmode: daemonResult.chatmode,
+            encrypt: daemonResult.encrypt ?? args.encrypt === true,
+          });
+        }
+        return sent;
+      }
+    }
+
+    conn = await createShortConnection(args.from, { aunPath: args.aunPath, slotId: args.slotId });
+
     // 1. 解析对端身份（30天缓存）。身份解析走 HTTP+PKI（store），与发消息的短连接无关。
     const { agentsDir } = resolvePaths();
     const selfAgentDir = path.join(agentsDir, args.from);
@@ -112,21 +263,8 @@ export async function msgSend(args: MsgSendArgs): Promise<MsgSendResult | MsgErr
     const chatmode = peerIdentity.isAgent ? 'proactive' : 'interactive';
 
     // 3. 构建 payload
-    let payload: Record<string, unknown>;
-
-    switch (args.body.mode) {
-      case 'text':
-        payload = { type: 'text', text: args.body.text };
-        break;
-      case 'payload':
-        payload = args.body.payload;
-        break;
-      case 'link':
-        payload = { type: 'link', url: args.body.url };
-        if (args.body.title) payload.title = args.body.title;
-        if (args.body.description) payload.description = args.body.description;
-        break;
-      case 'file': {
+    if (!payload) {
+      if (args.body.mode === 'file') {
         const built = await uploadFileAndBuildPayload(conn, args.from, args.body.filePath, {
           as: args.body.as,
           contentType: args.body.contentType,
@@ -135,17 +273,16 @@ export async function msgSend(args: MsgSendArgs): Promise<MsgSendResult | MsgErr
           onProgress: args.onUploadProgress,
         });
         payload = built.payload;
-        break;
+      } else {
+        payload = buildSimplePayload(args.body);
       }
     }
 
     // 4. 写入 payload.chatmode
     payload.chatmode = chatmode;
 
-    // 5. 写入 payload.thread_id（如果指定）
-    if (args.thread) {
-      payload.thread_id = args.thread;
-    }
+    // 5. 写入 payload.thread_id/ref_message_id（如果指定）
+    applyRoutingPayloadFields(payload, args, runtimeContext);
 
     const sendParams: Record<string, unknown> = { to: args.to, payload };
     // Default: plaintext. Set encrypt: true to enable E2EE.
@@ -158,43 +295,11 @@ export async function msgSend(args: MsgSendArgs): Promise<MsgSendResult | MsgErr
     // - 'msg': agent 在会话中调用 ec msg send
     if (result?.message_id) {
       try {
-        const sessionsDir = resolvePaths().sessionsDir;
-        const chatDir = chatDirPath(sessionsDir, 'aun', args.to, args.from);
-        const textContent = args.body.mode === 'text' ? args.body.text
-          : args.body.mode === 'link' ? `[link] ${args.body.url}`
-          : args.body.mode === 'file' ? `[file] ${args.body.filePath}`
-          : `[payload]`;
-
-        // 判断是 agent 调用还是用户手动调用
-        // 优先通过 --thread 参数判断（有 thread → msg，无 → cli）
-        // 兜底通过环境变量判断（向后兼容）
-        const isInSession = !!process.env.EVOLCLAW_SESSION_ID;
-        const source = args.thread ? 'msg' : (isInSession ? 'msg' : 'cli');
-
-        appendMessageLog(chatDir, buildOutboundEntry({
-          from: args.from,
-          to: args.to,
-          chatType: 'private',
-          msgId: result.message_id,
-          content: textContent,
+        await appendMsgSendOutboundLog(args, { ok: true, message_id: result.message_id }, {
+          runtimeContext,
+          chatmode,
           encrypt: args.encrypt === true,
-          chatmode,  // 使用解析出的 chatmode
-          msgType: 'text',
-          source,
-        }));
-
-        // 通知 daemon 更新 stats（如果 daemon 在运行）
-        try {
-          const { ipcQuery } = await import('../../ipc.js');
-          await ipcQuery(resolvePaths().socket, {
-            type: 'aun-aid-stats-record-outbound',
-            aid: args.from,
-            toPeer: args.to,
-            text: textContent,
-            encrypt: args.encrypt === true,
-            chatmode,
-          }, 1000);
-        } catch { /* daemon 不在或 IPC 失败都忽略 */ }
+        });
       } catch {}
     }
 
@@ -209,7 +314,7 @@ export async function msgSend(args: MsgSendArgs): Promise<MsgSendResult | MsgErr
   } catch (e: any) {
     return formatRpcError(e);
   } finally {
-    await conn.close();
+    if (conn) await conn.close();
   }
 }
 

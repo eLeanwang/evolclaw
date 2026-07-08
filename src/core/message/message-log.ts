@@ -11,7 +11,7 @@ export interface MessageLogEntry {
   chatType: 'private' | 'group';
   groupId: string | null;
   msgId: string | null;
-  msgType: 'text' | 'image' | 'file' | 'command' | 'thought';
+  msgType: 'text' | 'image' | 'file' | 'command' | 'thought' | 'handoff_state';
   content: string;
   replyTo: string | null;
   agent: string | null;
@@ -26,6 +26,22 @@ export interface MessageLogEntry {
   peerName?: string;
   peerType?: string;
   source?: 'daemon' | 'cli' | 'msg' | 'ctl' | 'owner-inject';
+  handoff?: {
+    kind?: 'request_to_target' | 'response_to_origin';
+    event?: 'consumed';
+    origin?: {
+      session_id?: string;
+      message_id?: string;
+      channel?: string;
+      peerId?: string;
+      threadId?: string;
+      peerName?: string;
+      peerType?: string;
+      role?: string;
+    };
+    consumed_by_msg_id?: string;
+    match?: 'ref' | 'inferred';
+  };
 }
 
 const MESSAGE_LOG_FILE = 'messages.jsonl';
@@ -137,8 +153,9 @@ export function buildOutboundEntry(opts: {
   encrypt?: boolean;
   chatmode?: string;
   peerType?: string;
-  msgType?: 'text' | 'image' | 'file' | 'thought';
+  msgType?: 'text' | 'image' | 'file' | 'thought' | 'handoff_state';
   source?: 'daemon' | 'cli' | 'msg' | 'ctl' | 'owner-inject';
+  handoff?: MessageLogEntry['handoff'];
 }): MessageLogEntry {
   const ts = opts.timestamp || Date.now();
   return {
@@ -164,5 +181,10 @@ export function buildOutboundEntry(opts: {
     chatmode: opts.chatmode,
     peerType: opts.peerType,
     source: opts.source ?? 'daemon',
+    handoff: opts.handoff,
   };
+}
+
+export function isHandoffStateMessage(entry: Pick<MessageLogEntry, 'msgType'> | null | undefined): boolean {
+  return entry?.msgType === 'handoff_state';
 }

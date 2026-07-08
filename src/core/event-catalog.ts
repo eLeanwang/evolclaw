@@ -173,28 +173,6 @@ const CATALOG: EventCatalogEntry[] = [
     ],
   },
   {
-    type: 'session:chat-mode-changed',
-    namespace: 'session',
-    name: 'chat-mode-changed',
-    description: 'chat mode 修改',
-    fields: [
-      { path: 'sessionId', type: 'string' },
-      { path: 'mode', type: 'string' },
-      { path: 'timestamp', type: 'number', optional: true },
-    ],
-  },
-  {
-    type: 'session:dispatch-mode-changed',
-    namespace: 'session',
-    name: 'dispatch-mode-changed',
-    description: 'dispatch mode 修改',
-    fields: [
-      { path: 'sessionId', type: 'string' },
-      { path: 'mode', type: 'string' },
-      { path: 'timestamp', type: 'number', optional: true },
-    ],
-  },
-  {
     type: 'message:received',
     namespace: 'message',
     name: 'received',

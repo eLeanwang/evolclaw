@@ -29,7 +29,8 @@ export type DangerousCommandKind =
   | 'windows-del'
   | 'reg-delete'
   | 'net-stop'
-  | 'process-kill';
+  | 'process-kill'
+  | 'git-destructive';
 
 // 危险操作（需要用户审批才能执行）
 // 这些操作有合理使用场景，但需要用户明确授权
@@ -48,6 +49,11 @@ const DANGEROUS_PATTERNS: Array<{
   { kind: 'net-stop', pattern: /\bnet\s+stop/i, reason: '停止系统服务（可能影响系统稳定性）' },
   { kind: 'process-kill', pattern: /\bpkill\b/, reason: '批量终止进程（可能影响系统稳定性）' },
   { kind: 'process-kill', pattern: /\bkillall\b/, reason: '批量终止进程（可能影响系统稳定性）' },
+  { kind: 'git-destructive', pattern: /\bgit\s+reset\s+--hard\b/, reason: 'Git 破坏性操作：重置工作区和暂存区，可能丢失未提交修改' },
+  { kind: 'git-destructive', pattern: /\bgit\s+push\b[\s\S]*(?:--force|-f)\b/, reason: 'Git 破坏性操作：强制推送可能覆盖远端历史' },
+  { kind: 'git-destructive', pattern: /\bgit\s+clean\b[\s\S]*-[^\s]*f[^\s]*/, reason: 'Git 破坏性操作：清理未跟踪文件，操作不可逆' },
+  { kind: 'git-destructive', pattern: /\bgit\s+checkout\s+--\s+\./, reason: 'Git 破坏性操作：覆盖工作区文件，可能丢失未提交修改' },
+  { kind: 'git-destructive', pattern: /\bgit\s+branch\s+-D\b/, reason: 'Git 破坏性操作：强制删除分支' },
 ];
 
 // 只读模式写入命令黑名单
