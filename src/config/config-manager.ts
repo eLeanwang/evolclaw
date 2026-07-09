@@ -652,6 +652,13 @@ function normalizeEffectiveCompatibility<T extends EffectiveAgentConfig>(effecti
   if ((effective as any).dispatch === 'all' || (effective as any).dispatch === 'none') {
     (effective as any).dispatch = 'broadcast';
   }
+  const behavior: Record<string, unknown> = {};
+  for (const field of EFFECTIVE_BEHAVIOR_FIELDS) {
+    if ((effective as any)[field] !== undefined) behavior[field] = (effective as any)[field];
+  }
+  if (Object.keys(behavior).length > 0) {
+    (effective as any).behavior = behavior;
+  }
   return effective;
 }
 
@@ -676,11 +683,25 @@ const BEHAVIOR_TOP_FIELDS = new Set([
   'dispatch',
   'show_activities',
   'proactive',
-  'group_venue_sync',
   'render',
   'enable_rich_content',
   'permissionMode',
 ]);
+
+const EFFECTIVE_BEHAVIOR_FIELDS = [
+  'active_baseagent',
+  'baseagents',
+  'chatmode',
+  'flush_delay',
+  'debounce',
+  'dispatch',
+  'show_activities',
+  'proactive',
+  'render',
+  'enable_rich_content',
+  'permissionMode',
+  'roles',
+];
 
 const BASEAGENT_BEHAVIOR_FIELDS = new Set([
   'model',
@@ -715,7 +736,12 @@ export function routeFieldPath(
 ): FieldRoute {
   const topField = fieldPath.split('.')[0];
   if (scope === 'process') return routeIn('evolclaw', ConfigTarget.Process, topField);
-  if (scope === 'defaults') return routeIn('defaults', ConfigTarget.Defaults, topField);
+  if (scope === 'defaults') {
+    if (isBehaviorFieldPath(fieldPath)) {
+      throw new ConfigError('DEFAULT_BEHAVIOR_REJECT', `--default 不支持行为字段: ${fieldPath}`);
+    }
+    return routeIn('defaults', ConfigTarget.Defaults, topField);
+  }
 
   if (isBehaviorFieldPath(fieldPath)) {
     // v3 璁捐锛氳涓哄瓧娈垫寜浣滅敤鍩熻矾鐢卞埌瀵瑰簲鐨?schema

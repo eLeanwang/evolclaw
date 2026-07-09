@@ -64,7 +64,7 @@ describe('menu /trigger set (action, direct call)', () => {
     const { cmdHandler, triggerManager } = await setupEnv(tmpDir);
     const r = await cmdHandler.execMenuAction(
       '/trigger', 'set',
-      { scheduleType: 'delay', scheduleValue: '60000', prompt: 'do it', name: 'menu-t1', targetSessionStrategy: 'latest' },
+      { scheduleType: 'delay', scheduleValue: '60000', prompt: 'do it', name: 'menu-t1', targetSessionStrategy: 'main' },
       'feishu-main', 'oc_test', 'owner-user',
     ) as any;
     expect(r.data.name).toBe('menu-t1');
@@ -91,7 +91,7 @@ describe('menu /trigger set (action, direct call)', () => {
     const t = triggerManager.getByName('menu-inj')!;
     // prompt 原样保存，未被当作 flag 解析
     expect(t.prompt).toBe('--session current --channel evil');
-    expect(t.targetSessionStrategy).toBe('latest');
+    expect(t.targetSessionStrategy).toBe('main');
   });
 
   it('rejects non-numeric delay scheduleValue (no NaN nextFireAt)', async () => {
@@ -105,14 +105,14 @@ describe('menu /trigger set (action, direct call)', () => {
     expect(triggerManager.getByName('bad-delay')).toBeFalsy();
   });
 
-  it('rejects unknown scheduleType', async () => {
+  it('accepts interval scheduleType', async () => {
     const { cmdHandler } = await setupEnv(tmpDir);
     const r = await cmdHandler.execMenuAction(
       '/trigger', 'set',
-      { scheduleType: 'interval', scheduleValue: '5', prompt: 'p', name: 'bad-type' },
+      { scheduleType: 'interval', scheduleValue: '5', prompt: 'p', name: 'interval-ok' },
       'feishu-main', 'oc_test', 'owner-user',
     ) as any;
-    expect(r.code).toBe('INVALID_ARGS');
+    expect(r.data.name).toBe('interval-ok');
   });
 
   it('rejects invalid targetSessionStrategy', async () => {

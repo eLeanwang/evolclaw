@@ -69,7 +69,7 @@ import { TriggerFeedbackDispatcher } from './trigger/feedback.js';
 import { TriggerRuntimeScheduler } from './trigger/scheduler.js';
 import { DaemonChannel } from './channels/daemon.js';
 import { normalizeTriggerDefinition } from './trigger/validation.js';
-import type { FeedbackDisposition, TriggerDefinition } from './trigger/types.js';
+import type { TriggerDefinition } from './trigger/types.js';
 import { atomicWriteJson } from './core/session/session-fs-store.js';
 import { appendMessageLog, buildOutboundEntry } from './core/message/message-log.js';
 import fs from 'fs';
@@ -170,15 +170,18 @@ function daemonConversationWatchdogMs(settings: { idleMonitor?: { timeout?: numb
 function hasOriginIdentity(origin: unknown): boolean {
   if (!origin || typeof origin !== 'object' || Array.isArray(origin)) return false;
   const raw = origin as Record<string, unknown>;
-  return typeof raw.channel === 'string' && raw.channel.length > 0
-    && typeof raw.peerId === 'string' && raw.peerId.length > 0;
+  return typeof raw.channelKey === 'string' && raw.channelKey.length > 0
+    && typeof raw.channelId === 'string' && raw.channelId.length > 0;
 }
 
 function originFromActorSession(session: Session): TriggerDefinition['origin'] | undefined {
   const peerId = session.metadata?.peerId;
   if (!peerId) return undefined;
   return {
-    channel: session.metadata?.channelKey || session.channel,
+    channelKey: session.metadata?.channelKey || session.channel,
+    channelId: session.channelId,
+    session: session.threadId ? 'thread' : 'main',
+    threadId: session.threadId || undefined,
     peerId,
     sessionKey: session.sessionKey,
   };
@@ -188,7 +191,7 @@ function seedUpgradeCheckTrigger(manager: TriggerDefinitionManager, owner: { aid
   const now = Date.now();
   const scriptName = 'upgrade-check.sh';
   const definition = normalizeTriggerDefinition({
-    $schema_version: 3,
+    $schema_version: 4,
     id: '__upgrade-check',
     agentAid: owner.aid,
     enabled: true,
@@ -197,7 +200,9 @@ function seedUpgradeCheckTrigger(manager: TriggerDefinitionManager, owner: { aid
     createdAt: now,
     updatedAt: now,
     origin: {
-      channel: 'daemon',
+      channelKey: 'daemon',
+      channelId: owner.originPeerId || owner.aid,
+      session: 'main',
       peerId: owner.originPeerId || owner.aid,
       sessionKey: `daemon#${owner.originPeerId || owner.aid}#__system__`,
     },
@@ -207,24 +212,18 @@ function seedUpgradeCheckTrigger(manager: TriggerDefinitionManager, owner: { aid
       timezone: 'Asia/Shanghai',
     },
     execution: {
-      mode: 'script',
+      type: 'script',
       script: {
         path: scriptName,
         runtime: 'bash',
         timeoutMs: 60_000,
-      },
-      session: {
-        strategy: 'isolated',
-        name: '__upgrade-check',
       },
       permissionMode: 'bypass',
       onError: 'fail',
       noopSentinel: '[[NOOP]]',
     },
     feedback: {
-      onReply: { kind: 'silent' },
-      onNoop: { kind: 'silent' },
-      onFailure: { kind: 'silent' },
+      strategy: 'silent',
     },
     reliability: {
       concurrency: 'forbid',
@@ -309,10 +308,16 @@ function seedUpgradeCheckTrigger(manager: TriggerDefinitionManager, owner: { aid
 }
 
 function removeLegacyAgentUpgradeCheck(manager: TriggerDefinitionManager): void {
-  const existing = manager.get('__upgrade-check');
+  let existing: TriggerDefinition | undefined;
+  try {
+    existing = manager.get('__upgrade-check');
+  } catch {
+    fs.rmSync(manager.triggerDir('__upgrade-check'), { recursive: true, force: true });
+    return;
+  }
   if (!existing) return;
-  const isLegacySystemOrigin = existing.origin?.channel === '__system__' || existing.origin?.channel === 'daemon';
-  const isUpgradeScript = existing.execution.mode === 'script'
+  const isLegacySystemOrigin = existing.origin?.channelKey === '__system__' || existing.origin?.channelKey === 'daemon';
+  const isUpgradeScript = existing.execution.type === 'script'
     && existing.execution.script?.path === 'upgrade-check.sh';
   if (!isLegacySystemOrigin || !isUpgradeScript) return;
   fs.rmSync(manager.triggerDir('__upgrade-check'), { recursive: true, force: true });
@@ -912,7 +917,7 @@ async function main() {
   // 创建消息处理器
   // 默认使用 ResponseEngine（插件化引擎）。
   // MessageProcessor（旧引擎）保留为参考真相，不删除但不再使用。
-  const processor = new ResponseEngine(
+  const responseEngine = new ResponseEngine(
     agentMap,
     sessionManager,
     globalSettings,
@@ -932,7 +937,8 @@ async function main() {
       return cmdHandler.handle(content, channel, channelId, sendFn, userId, threadId);
     },
     primaryRunnerKey
-  ) as unknown as IMessageProcessor;
+  );
+  const processor: IMessageProcessor = responseEngine;
 
   // 回填 processor 和 messageQueue 的引用
   cmdHandler.setProcessor(processor);
@@ -1025,18 +1031,12 @@ async function main() {
     };
   };
   const validateTriggerFeedbackChannels = (definition: TriggerDefinition) => {
-    const dispositions: FeedbackDisposition[] = [
-      definition.feedback.onReply,
-      definition.feedback.onNoop,
-      definition.feedback.onFailure,
-    ];
-    for (const disposition of dispositions) {
-      if (disposition.kind !== 'forward') continue;
-      for (const target of disposition.targets) {
-        if (!getTriggerChannel(definition.agentAid, target.channelKey)) {
-          throw new Error(`agent ${definition.agentAid} has no configured channel ${target.channelKey}`);
-        }
-      }
+    if (definition.feedback.strategy === 'silent') return;
+    const target = definition.feedback.strategy === 'target'
+      ? definition.feedback.target
+      : definition.origin;
+    if (target && !getTriggerChannel(definition.agentAid, target.channelKey)) {
+      throw new Error(`agent ${definition.agentAid} has no configured channel ${target.channelKey}`);
     }
   };
   const definitionWithActorOrigin = async (rawDefinition: unknown, actorSessionId: unknown): Promise<unknown> => {
@@ -1064,6 +1064,7 @@ async function main() {
       getChannel: getTriggerChannel,
       sessionManager,
       messageQueue,
+      eventBus,
     });
     const scheduler = new TriggerRuntimeScheduler(
       manager,
@@ -1866,6 +1867,29 @@ async function main() {
       params.chatmode,
       'send',
     );
+  });
+  ipcServer.setTaskRuntimeContextProvider(({ sessionId }) => responseEngine.getTaskRuntimeContext(sessionId));
+  ipcServer.setAunMsgSender(async (params) => {
+    const inst = channelInstances.find((candidate) => {
+      if (candidate.channelType !== 'aun') return false;
+      const ch = candidate.channel as any;
+      try {
+        const aidState = typeof ch?.getAidState === 'function' ? ch.getAidState() : null;
+        if (aidState?.aid === params.aid) return true;
+        if (typeof ch?.getAid === 'function' && ch.getAid() === params.aid) return true;
+      } catch { /* ignore */ }
+      return false;
+    });
+    const ch = inst?.channel as any;
+    if (!ch || typeof ch.sendDaemonMsg !== 'function') {
+      return { ok: false, error: `AUN channel not found for ${params.aid}`, code: 'AUN_CHANNEL_NOT_FOUND' };
+    }
+    return await ch.sendDaemonMsg({
+      to: params.to,
+      payload: params.payload,
+      encrypt: params.encrypt,
+      log: params.log,
+    });
   });
 
   // ── Reload hooks: enable agentRegistry.reload() to drain/disconnect/restart channels ──

@@ -1,8 +1,13 @@
+import fs from 'fs';
+import { createHash } from 'crypto';
+import { TextDecoder } from 'util';
+import type { AUNClient } from '@agentunion/fastaun';
 import type { ShortConnectionOpts } from '../rpc/index.js';
 import { createShortConnection } from '../rpc/index.js';
 import { getAidStore, loadClient, SLOT } from '../aid/store.js';
 import { uploadFileAndBuildPayload, type UploadProgress } from './upload.js';
 import type { MsgError } from './p2p.js';
+import { checkGroupIndex, getGroupIndex } from './group-index.js';
 
 // ==================== Types ====================
 
@@ -114,6 +119,43 @@ export interface GroupRulesResult {
   ok: true;
   group_id: string;
   rules: Record<string, unknown>;
+}
+
+export interface GroupRulesFileMetadata {
+  path: '/rules.md';
+  size: number;
+  mtimeMs: number;
+}
+
+export interface GroupRulesFileNotice {
+  ok: boolean;
+  message_id?: string;
+  error?: string;
+}
+
+export type GroupRulesFileStatus =
+  | 'ok'
+  | 'missing'
+  | 'forbidden'
+  | 'invalid_metadata'
+  | 'file_mismatch'
+  | 'too_large'
+  | 'unreadable'
+  | 'error';
+
+export interface GroupRulesFileResult {
+  ok: true;
+  group_id: string;
+  status: GroupRulesFileStatus;
+  path: '/rules.md';
+  metadata?: GroupRulesFileMetadata;
+  remote?: Partial<GroupRulesFileMetadata>;
+  content?: string;
+  upload?: unknown;
+  publish?: unknown;
+  group_index_etag?: string;
+  notice?: GroupRulesFileNotice;
+  error?: string;
 }
 
 export interface GroupSimpleResult {
@@ -287,7 +329,7 @@ export async function groupCreate(args: GroupCreateArgs): Promise<GroupCreateRes
     if (args.joinMode) params.join_mode = args.joinMode;
 
     const result = await (conn as any).createGroup(params);
-    return { ok: true, group: result?.group };
+    return { ok: true, group: result?.group ?? result };
   } catch (e: any) {
     return formatRpcError(e);
   } finally {
@@ -304,7 +346,7 @@ export interface GroupInfoArgs extends GroupCommonOpts {
 export async function groupInfo(args: GroupInfoArgs): Promise<GroupGetResult | MsgError> {
   const conn = await createShortConnection(args.from, { aunPath: args.aunPath, slotId: args.slotId });
   try {
-    const result = await conn.call('group.get', { group_id: args.groupId });
+    const result = await conn.call('group.get_info', { group_id: args.groupId });
     return { ok: true, group: result?.group };
   } catch (e: any) {
     return formatRpcError(e);
@@ -739,6 +781,22 @@ export interface GroupUpdateRulesArgs extends GroupCommonOpts {
   maxPending?: number;
 }
 
+export interface GroupRulesFileGetArgs extends GroupCommonOpts {
+  from: string;
+  groupId: string;
+}
+
+export interface GroupRulesFileSetArgs extends GroupCommonOpts {
+  from: string;
+  groupId: string;
+  filePath: string;
+}
+
+export interface GroupRulesFilePublishArgs extends GroupCommonOpts {
+  from: string;
+  groupId: string;
+}
+
 export async function groupUpdateRules(args: GroupUpdateRulesArgs): Promise<GroupRulesResult | MsgError> {
   const conn = await createShortConnection(args.from, { aunPath: args.aunPath, slotId: args.slotId });
   try {
@@ -760,7 +818,549 @@ export async function groupUpdateRules(args: GroupUpdateRulesArgs): Promise<Grou
   }
 }
 
+const GROUP_RULES_FILE_PATH = '/rules.md' as const;
+const MAX_GROUP_RULES_BYTES = 4 * 1024;
+const MTIME_TOLERANCE_MS = 1;
+
+export async function groupRulesFileGet(args: GroupRulesFileGetArgs): Promise<GroupRulesFileResult | MsgError> {
+  return withAunClient(args.from, args, async (client) => {
+    const resolved = await resolvePublishedRulesFile(client, args.groupId, true);
+    if (resolved.status !== 'ok') {
+      return {
+        ok: true,
+        group_id: args.groupId,
+        status: resolved.status,
+        path: GROUP_RULES_FILE_PATH,
+        metadata: resolved.metadata,
+        remote: resolved.remote,
+        error: resolved.error,
+      };
+    }
+
+    let bytes: Uint8Array;
+    try {
+      bytes = await readGroupRulesBytes(client, args.groupId);
+    } catch (e) {
+      return {
+        ok: true,
+        group_id: args.groupId,
+        status: rulesFileStatusFromError(e),
+        path: GROUP_RULES_FILE_PATH,
+        metadata: resolved.metadata,
+        remote: resolved.remote,
+        error: errorMessage(e),
+      };
+    }
+    if (bytes.byteLength > MAX_GROUP_RULES_BYTES) {
+      return {
+        ok: true,
+        group_id: args.groupId,
+        status: 'too_large',
+        path: GROUP_RULES_FILE_PATH,
+        metadata: resolved.metadata,
+      };
+    }
+
+    let content: string;
+    try {
+      content = decodeRulesText(bytes);
+    } catch (e) {
+      return {
+        ok: true,
+        group_id: args.groupId,
+        status: 'unreadable',
+        path: GROUP_RULES_FILE_PATH,
+        metadata: resolved.metadata,
+        remote: resolved.remote,
+        error: `规则文件不是有效 UTF-8: ${errorMessage(e)}`,
+      };
+    }
+
+    return {
+      ok: true,
+      group_id: args.groupId,
+      status: 'ok',
+      path: GROUP_RULES_FILE_PATH,
+      metadata: resolved.metadata,
+      content,
+    };
+  });
+}
+
+export async function groupRulesFileSet(args: GroupRulesFileSetArgs): Promise<GroupRulesFileResult | MsgError> {
+  return withAunClient(args.from, args, async (client) => {
+    assertLocalRulesFile(args.filePath);
+    const upload = await client.group.fs.cp(args.filePath, `${args.groupId}:${GROUP_RULES_FILE_PATH}`, {
+      force: true,
+      overwrite: true,
+      parents: true,
+      contentType: 'text/markdown; charset=utf-8',
+    });
+    const published = await publishCurrentRulesFile(client, args.groupId, args.from);
+    return { ...published, upload };
+  });
+}
+
+export async function groupRulesFilePublish(args: GroupRulesFilePublishArgs): Promise<GroupRulesFileResult | MsgError> {
+  return withAunClient(args.from, args, async (client) => {
+    return publishCurrentRulesFile(client, args.groupId, args.from);
+  });
+}
+
 // ==================== Internal ====================
+
+async function withAunClient<T>(
+  from: string,
+  opts: GroupCommonOpts,
+  fn: (client: AUNClient) => Promise<T>,
+): Promise<T | MsgError> {
+  const store = await getAidStore({ slotId: opts.slotId ?? SLOT.cli, aunPath: opts.aunPath });
+  let client: AUNClient | undefined;
+  try {
+    client = await loadClient(store, from);
+    await client.connect({ connection_kind: 'short', short_ttl_ms: 30000, auto_reconnect: false });
+    return await fn(client);
+  } catch (e: any) {
+    return formatRpcError(e);
+  } finally {
+    if (client) {
+      try { await client.close(); } catch { /* ignore */ }
+    }
+    try { store.close(); } catch { /* ignore */ }
+  }
+}
+
+async function resolvePublishedRulesFile(
+  client: AUNClient,
+  groupId: string,
+  forcePull: boolean,
+): Promise<{
+  status: GroupRulesFileStatus;
+  metadata?: GroupRulesFileMetadata;
+  remote?: Partial<GroupRulesFileMetadata>;
+  error?: string;
+}> {
+  let content: unknown;
+  if (forcePull) {
+    try {
+      const index = await getGroupIndex(client, groupId);
+      const settings = isRecord(index.settings) ? index.settings : {};
+      content = settings['rules.content'];
+    } catch (e) {
+      return {
+        status: rulesFileStatusFromError(e),
+        error: errorMessage(e),
+      };
+    }
+  } else {
+    try {
+      const result = await client.group.getRules({ group_id: groupId }) as Record<string, unknown>;
+      const rules = isRecord(result.rules) ? result.rules : {};
+      content = rules.content;
+    } catch (e) {
+      return {
+        status: rulesFileStatusFromError(e),
+        error: errorMessage(e),
+      };
+    }
+  }
+  if (content === undefined || content === null || content === '') {
+    return { status: 'missing' };
+  }
+
+  let metadata: GroupRulesFileMetadata;
+  try {
+    metadata = parseRulesFileMetadata(content);
+  } catch (e) {
+    return {
+      status: statusFromTaggedError(e) ?? 'invalid_metadata',
+      error: errorMessage(e),
+    };
+  }
+  if (metadata.size > MAX_GROUP_RULES_BYTES) {
+    return { status: 'too_large', metadata };
+  }
+
+  let remote: Partial<GroupRulesFileMetadata>;
+  try {
+    remote = metadataFromRulesStat(await client.group.fs.stat(`${groupId}:${GROUP_RULES_FILE_PATH}`));
+  } catch (e) {
+    return {
+      status: rulesFileStatusFromError(e),
+      metadata,
+      error: errorMessage(e),
+    };
+  }
+  if (!remote.size || remote.mtimeMs === undefined) {
+    return {
+      status: 'unreadable',
+      metadata,
+      remote,
+      error: `远端 ${GROUP_RULES_FILE_PATH} 缺少 size 或 mtimeMs`,
+    };
+  }
+  if (!metadataMatches(metadata, remote)) {
+    return { status: 'file_mismatch', metadata, remote };
+  }
+  return { status: 'ok', metadata, remote };
+}
+
+async function publishCurrentRulesFile(
+  client: AUNClient,
+  groupId: string,
+  actorAid: string,
+): Promise<GroupRulesFileResult> {
+  let metadata: Partial<GroupRulesFileMetadata>;
+  try {
+    metadata = metadataFromRulesStat(await client.group.fs.stat(`${groupId}:${GROUP_RULES_FILE_PATH}`));
+  } catch (e) {
+    return {
+      ok: true,
+      group_id: groupId,
+      status: rulesFileStatusFromError(e),
+      path: GROUP_RULES_FILE_PATH,
+      error: errorMessage(e),
+    };
+  }
+  if (!metadata.size || metadata.mtimeMs === undefined) {
+    return {
+      ok: true,
+      group_id: groupId,
+      status: 'unreadable',
+      path: GROUP_RULES_FILE_PATH,
+      remote: metadata,
+      error: `远端 ${GROUP_RULES_FILE_PATH} 缺少 size 或 mtimeMs`,
+    };
+  }
+  const rulesMetadata: GroupRulesFileMetadata = {
+    path: GROUP_RULES_FILE_PATH,
+    size: metadata.size,
+    mtimeMs: metadata.mtimeMs,
+  };
+  if (rulesMetadata.size > MAX_GROUP_RULES_BYTES) {
+    return {
+      ok: true,
+      group_id: groupId,
+      status: 'too_large',
+      path: GROUP_RULES_FILE_PATH,
+      metadata: rulesMetadata,
+    };
+  }
+
+  const publish = await client.group.updateRules({
+    group_id: groupId,
+    content: JSON.stringify(rulesMetadata),
+    attachments: [],
+  }) as Record<string, unknown>;
+
+  let after: Partial<GroupRulesFileMetadata>;
+  try {
+    after = metadataFromRulesStat(await client.group.fs.stat(`${groupId}:${GROUP_RULES_FILE_PATH}`));
+  } catch (e) {
+    return {
+      ok: true,
+      group_id: groupId,
+      status: rulesFileStatusFromError(e),
+      path: GROUP_RULES_FILE_PATH,
+      metadata: rulesMetadata,
+      publish,
+      error: errorMessage(e),
+    };
+  }
+  if (!metadataMatches(rulesMetadata, after)) {
+    return {
+      ok: true,
+      group_id: groupId,
+      status: 'file_mismatch',
+      path: GROUP_RULES_FILE_PATH,
+      metadata: rulesMetadata,
+      remote: after,
+      publish,
+    };
+  }
+
+  const groupIndexEtag = groupIndexEtagFromUpdate(publish, groupId) ?? await currentGroupIndexEtag(client, groupId);
+  const notice = await sendGroupRulesUpdatedNotice(client, {
+    groupId,
+    actorAid,
+    metadata: rulesMetadata,
+    groupIndexEtag,
+  });
+
+  return {
+    ok: true,
+    group_id: groupId,
+    status: 'ok',
+    path: GROUP_RULES_FILE_PATH,
+    metadata: rulesMetadata,
+    publish,
+    group_index_etag: groupIndexEtag,
+    notice,
+  };
+}
+
+async function sendGroupRulesUpdatedNotice(
+  client: AUNClient,
+  args: {
+    groupId: string;
+    actorAid: string;
+    metadata: GroupRulesFileMetadata;
+    groupIndexEtag?: string;
+  },
+): Promise<GroupRulesFileNotice> {
+  const payload = {
+    type: 'notice',
+    subtype: 'group.rules.updated',
+    text: `群规则已发布：${args.groupId}:${GROUP_RULES_FILE_PATH}\n操作者：${args.actorAid}`,
+    actor_aid: args.actorAid,
+    group_id: args.groupId,
+    path: GROUP_RULES_FILE_PATH,
+    group_index_etag: args.groupIndexEtag,
+    size: args.metadata.size,
+    mtimeMs: args.metadata.mtimeMs,
+  };
+
+  try {
+    const result = await client.group.send({
+      group_id: args.groupId,
+      payload,
+      encrypt: false,
+    }) as Record<string, unknown>;
+    const message = isRecord(result.message) ? result.message : {};
+    const messageId = typeof result.message_id === 'string'
+      ? result.message_id
+      : typeof message.message_id === 'string'
+        ? message.message_id
+        : undefined;
+    return { ok: true, message_id: messageId };
+  } catch (e: any) {
+    return { ok: false, error: String(e?.message || e) };
+  }
+}
+
+function assertLocalRulesFile(filePath: string): void {
+  const st = fs.statSync(filePath);
+  if (!st.isFile()) {
+    throw new Error(`规则文件不是普通文件: ${filePath}`);
+  }
+  if (st.size > MAX_GROUP_RULES_BYTES) {
+    throw new Error(`规则文件过大: ${st.size} bytes > ${MAX_GROUP_RULES_BYTES}`);
+  }
+  const bytes = fs.readFileSync(filePath);
+  try {
+    decodeRulesText(bytes);
+  } catch (e) {
+    throw new Error(`规则文件不是有效 UTF-8: ${errorMessage(e)}`);
+  }
+}
+
+async function readGroupRulesBytes(client: AUNClient, groupId: string): Promise<Uint8Array> {
+  const remoteRef = `${groupId}:${GROUP_RULES_FILE_PATH}`;
+  const ticket = await (client as any).call('group.fs.create_download_ticket', { path: remoteRef });
+  if (!isRecord(ticket)) {
+    throw new Error('group.fs.create_download_ticket returned invalid response');
+  }
+  const downloadUrl = stringField(ticket, ['download_url', 'url']);
+  if (!downloadUrl) {
+    throw new Error('group.fs.create_download_ticket did not return download_url');
+  }
+  const bytes = await client.group.fs.lowlevel.httpGet(downloadUrl, bearerHeaders(client));
+  const expectedSha = stringField(ticket, ['sha256']);
+  if (expectedSha && sha256Hex(bytes).toLowerCase() !== expectedSha.toLowerCase()) {
+    throw new Error('download hash verification failed');
+  }
+  return bytes;
+}
+
+function decodeRulesText(bytes: Uint8Array): string {
+  return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+}
+
+function parseRulesFileMetadata(value: unknown): GroupRulesFileMetadata {
+  let parsed: unknown;
+  if (typeof value === 'string') {
+    parsed = JSON.parse(value);
+  } else {
+    parsed = value;
+  }
+  if (!isRecord(parsed)) {
+    throw statusError('invalid_metadata', 'rules.content metadata must be an object');
+  }
+  if (parsed.path !== GROUP_RULES_FILE_PATH) {
+    throw statusError('invalid_metadata', `rules.content.path must be ${GROUP_RULES_FILE_PATH}`);
+  }
+  const size = numberField(parsed, ['size']);
+  const mtimeMs = mtimeMsField(parsed);
+  if (size === undefined || !Number.isInteger(size) || size <= 0) {
+    throw statusError('invalid_metadata', 'rules.content.size must be a positive integer');
+  }
+  if (mtimeMs === undefined || !Number.isFinite(mtimeMs) || mtimeMs <= 0) {
+    throw statusError('invalid_metadata', 'rules.content.mtimeMs must be a valid millisecond timestamp');
+  }
+  return { path: GROUP_RULES_FILE_PATH, size, mtimeMs };
+}
+
+function metadataFromRulesStat(value: unknown): Partial<GroupRulesFileMetadata> {
+  if (!isRecord(value)) return { path: GROUP_RULES_FILE_PATH };
+  return {
+    path: GROUP_RULES_FILE_PATH,
+    size: numberField(value, ['size', 'sizeBytes', 'size_bytes', 'bytes']),
+    mtimeMs: mtimeMsField(value),
+  };
+}
+
+function metadataMatches(expected: GroupRulesFileMetadata, actual: Partial<GroupRulesFileMetadata>): boolean {
+  return actual.size === expected.size
+    && actual.mtimeMs !== undefined
+    && Math.abs(actual.mtimeMs - expected.mtimeMs) <= MTIME_TOLERANCE_MS;
+}
+
+function groupIndexEtagFromUpdate(result: Record<string, unknown>, groupId: string): string | undefined {
+  const meta = isRecord(result._meta) ? result._meta : {};
+  const groupIndexes = isRecord(meta.group_indexes) ? meta.group_indexes : {};
+  const direct = isRecord(groupIndexes[groupId]) ? groupIndexes[groupId] : undefined;
+  if (typeof direct?.etag === 'string') return direct.etag;
+  for (const value of Object.values(groupIndexes)) {
+    if (isRecord(value) && typeof value.etag === 'string') return value.etag;
+  }
+  return undefined;
+}
+
+function sha256Hex(bytes: Uint8Array): string {
+  return createHash('sha256').update(bytes).digest('hex');
+}
+
+function bearerHeaders(client: AUNClient): Record<string, string> | undefined {
+  const token = accessTokenFromClient(client);
+  return token ? { Authorization: `Bearer ${token}` } : undefined;
+}
+
+function accessTokenFromClient(client: AUNClient): string {
+  const anyClient = client as any;
+  if (typeof anyClient.getAccessToken === 'function') {
+    const token = stringValue(anyClient.getAccessToken());
+    if (token) return token;
+  }
+  return stringValue(anyClient.accessToken)
+    || stringValue(anyClient.access_token)
+    || stringValue(anyClient._identity?.access_token)
+    || stringValue(anyClient._sessionParams?.access_token);
+}
+
+function stringField(obj: Record<string, unknown>, keys: string[]): string | undefined {
+  for (const key of keys) {
+    const value = obj[key];
+    if (typeof value === 'string' && value.trim()) return value;
+  }
+  return undefined;
+}
+
+async function currentGroupIndexEtag(client: AUNClient, groupId: string): Promise<string | undefined> {
+  try {
+    const check = await checkGroupIndex(client, groupId);
+    for (const key of ['remote_etag', 'local_etag', 'etag']) {
+      const value = check[key];
+      if (typeof value === 'string' && value) return value;
+    }
+  } catch {
+    // Fall through to a pulled index below.
+  }
+  try {
+    const index = await getGroupIndex(client, groupId);
+    const meta = isRecord(index.meta) ? index.meta : {};
+    return typeof meta.etag === 'string' ? meta.etag : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function statusError(status: GroupRulesFileStatus, message: string): Error & { groupRulesFileStatus?: GroupRulesFileStatus } {
+  const error = new Error(message) as Error & { groupRulesFileStatus?: GroupRulesFileStatus };
+  error.groupRulesFileStatus = status;
+  return error;
+}
+
+function statusFromTaggedError(error: unknown): GroupRulesFileStatus | undefined {
+  if (isRecord(error) && typeof error.groupRulesFileStatus === 'string') {
+    const status = error.groupRulesFileStatus;
+    if (isGroupRulesFileStatus(status)) return status;
+  }
+  return undefined;
+}
+
+function rulesFileStatusFromError(error: unknown): GroupRulesFileStatus {
+  const tagged = statusFromTaggedError(error);
+  if (tagged) return tagged;
+  const haystack = errorHaystack(error);
+  if (/(forbidden|unauthorized|permission|denied|no_permission|permission_denied|无权限|权限|拒绝|\b401\b|\b403\b)/i.test(haystack)) {
+    return 'forbidden';
+  }
+  if (/(not[_ -]?found|notfound|no such|enoent|missing|不存在|\b404\b|rules not found)/i.test(haystack)) {
+    return 'missing';
+  }
+  if (/(signature|verify|verification|signed_by|body_hash|invalid signature|验签|签名|json|metadata)/i.test(haystack)) {
+    return 'invalid_metadata';
+  }
+  if (/(timeout|temporar|unavailable|econn|network|socket|reset|下载|读取)/i.test(haystack)) {
+    return 'unreadable';
+  }
+  return 'error';
+}
+
+function isGroupRulesFileStatus(value: string): value is GroupRulesFileStatus {
+  return value === 'ok'
+    || value === 'missing'
+    || value === 'forbidden'
+    || value === 'invalid_metadata'
+    || value === 'file_mismatch'
+    || value === 'too_large'
+    || value === 'unreadable'
+    || value === 'error';
+}
+
+function errorHaystack(error: unknown): string {
+  if (!isRecord(error)) return errorMessage(error);
+  return [
+    error.name,
+    error.message,
+    error.code,
+    error.status,
+    error.statusCode,
+    error.error,
+  ].map(value => value === undefined ? '' : String(value)).join(' ');
+}
+
+function numberField(obj: Record<string, unknown>, keys: string[]): number | undefined {
+  for (const key of keys) {
+    const value = obj[key];
+    if (typeof value === 'number' && Number.isFinite(value)) return value;
+    if (typeof value === 'string' && value.trim() && Number.isFinite(Number(value))) return Number(value);
+  }
+  return undefined;
+}
+
+function stringValue(value: unknown): string {
+  return value === undefined || value === null ? '' : String(value).trim();
+}
+
+function mtimeMsField(obj: Record<string, unknown>): number | undefined {
+  const direct = numberField(obj, ['mtimeMs', 'mtime_ms', 'updatedAtMs', 'updated_at_ms']);
+  if (direct !== undefined) return direct;
+  const seconds = numberField(obj, ['mtime', 'updated_at', 'updatedAt', 'last_modified', 'modified_at']);
+  if (seconds !== undefined) return seconds > 10_000_000_000 ? seconds : seconds * 1000;
+  for (const key of ['modifiedAt', 'modified_at', 'mtime_iso']) {
+    const value = obj[key];
+    if (typeof value === 'string') {
+      const parsed = Date.parse(value);
+      if (Number.isFinite(parsed)) return parsed;
+    }
+  }
+  return undefined;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
 
 function formatRpcError(e: any): MsgError {
   if (e?.code !== undefined && e?.message !== undefined) {

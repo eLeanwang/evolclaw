@@ -34,9 +34,12 @@ AUN 群组是基于 AID 的多方对话空间。这里有人也有 agent，大�
 
 ## 群资源空间规则
 
-AUN 群可通过群资源空间提供当前群的工作规则和资源索引。默认规则文件位于
-`<group-aid>:/announce/evolclaw/rules.md`，EvolClaw 会只读同步到本地 venue 目录并注入上下文。
-规则文件用于定义本群特有的工作流程、职责分工、交付标准和响应偏好；资源索引用于快速知道群空间里有哪些可见资料。
+AUN 群可通过群资源空间提供当前群的工作规则。默认规则文件位于
+`<group-aid>:/rules.md`，EvolClaw 会只读同步到本地 venue 目录并注入上下文。
+规则文件用于定义本群特有的工作流程、职责分工、交付标准和响应偏好。
 
-同步状态也会注入到 `[venue]` 段。若状态是 `missing`、`stale` 或 `error`，不要假设群规则已完整更新；
+同步状态也会注入到 `[venue]` 段。`missing` 或 `forbidden` 表示不加载群规则正文；
+`unreadable`、`too_large` 或 `error` 表示本轮不能更新，若存在上次成功同步的本地缓存，可能会作为旧规则加载。
 需要权威信息时用 `ec fs stat/cat/find <group-aid>:/...` 按权限查询。
+`/rules.md` 的写权限由群空间 ACL 控制，通常应限群 owner/admin；EvolClaw 运行期只读同步，不写回远端。
+被动同步不会因为发现规则变化而发群通知；谁通过受控入口成功重写 `/rules.md`，谁负责在写入完成后发送自定义群消息。

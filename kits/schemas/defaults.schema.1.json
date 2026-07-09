@@ -63,21 +63,6 @@
         "aunSdkLog": { "type": "boolean" },
         "upmsg": { "type": "boolean" }
       }
-    },
-    "group_venue_sync": {
-      "type": "object",
-      "description": "群资源空间同步到本地 venues 的全局默认策略（群规则 + 资源索引）",
-      "x-merge": "dict",
-      "additionalProperties": false,
-      "properties": {
-        "enabled": { "type": "boolean", "description": "是否启用群资源空间同步，默认 true" },
-        "rulesPath": { "type": "string", "description": "群空间内规则文件路径，默认 /announce/evolclaw/rules.md" },
-        "indexPath": { "type": "string", "description": "群空间资源索引扫描根路径，默认 /" },
-        "maxIndexItems": { "type": "number", "description": "注入资源索引最大条目数，默认 80" },
-        "maxRulesBytes": { "type": "number", "description": "规则文件最大字节数，默认 65536" },
-        "refreshIntervalMs": { "type": "number", "description": "两次远端 mtime 检查最小间隔，默认 60000ms" },
-        "allowRemoteWrite": { "type": "boolean", "description": "预留：运行期同步不写远端，只有显式管理命令可使用" }
-      }
     }
   }
 }

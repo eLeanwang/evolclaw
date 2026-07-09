@@ -135,6 +135,7 @@ export function getManagementCommandPermissions(_role: ManagementRole): Record<s
     'role.assign': { allow: true, scopes: ['agent'] },
     'role.revoke': { allow: true, scopes: ['agent'] },
     '*': { allow: true },
+    'agent.reload': { allow: true, dangerous: true, scopes: ['agent'], constraints: { ownAgentOnly: true } },
     'dangerous:*': { allow: true, dangerous: true, constraints: { requireDaemonOwner: true } },
   };
 }

@@ -140,18 +140,6 @@
       "description": "群资源空间同步的群规则"
     },
     {
-      "id": "venue-group-resource-index",
-      "type": "file",
-      "file": "$VENUES_DIR/{{venueKey}}/resource-index.md",
-      "order": 43.4,
-      "needsInjection": false,
-      "when": { "and": [
-        { "var": "groupResourceIndexPath", "neq": null },
-        { "var": "lifecycle", "neq": "bootstrapping" }
-      ] },
-      "description": "群资源空间索引"
-    },
-    {
       "id": "venue-client",
       "type": "file",
       "file": "$KITS_DOCS/venues/client-{{clientType}}.md",

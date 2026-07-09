@@ -47,6 +47,9 @@ export {
   groupBanlist,
   groupRules,
   groupUpdateRules,
+  groupRulesFileGet,
+  groupRulesFileSet,
+  groupRulesFilePublish,
 } from './group.js';
 
 export type {
@@ -91,6 +94,13 @@ export type {
   GroupRulesResult,
   GroupRulesArgs,
   GroupUpdateRulesArgs,
+  GroupRulesFileStatus,
+  GroupRulesFileMetadata,
+  GroupRulesFileNotice,
+  GroupRulesFileResult,
+  GroupRulesFileGetArgs,
+  GroupRulesFileSetArgs,
+  GroupRulesFilePublishArgs,
   GroupSimpleResult,
   GroupCommonOpts,
 } from './group.js';

@@ -81,11 +81,9 @@ describe('integration: ec config CLI', () => {
   });
 
   it('D7：--default + 不支持的字段 → 拒绝', async () => {
-    // v3: defaults schema 不支持 chatmode 字段
     const r = await runJson(['set', 'chatmode.private', 'proactive', '--default']);
     expect(r.ok).toBe(false);
-    // 错误码：字段不在 defaults schema 中
-    expect(r.code).toBe('UNKNOWN_FIELD');
+    expect(r.code).toBe('DEFAULT_BEHAVIOR_REJECT');
   });
 
   it('agent 托管环境写 H 字段 → 拒绝', async () => {
@@ -99,7 +97,7 @@ describe('integration: ec config CLI', () => {
     process.env.EVOLCLAW_SESSION_ID = 'sess-1';
     // v3 当前实现：所有字段都在 agent-config（H），托管环境统一禁止写入
     // TODO: 未来应迁移到字段级权限控制
-    const r = await runJson(['set', 'show_activities', 'none', '--self', AID]);
+    const r = await runJson(['set', 'show_activities', 'false', '--self', AID]);
     expect(r.ok).toBe(false);
     expect(r.code).toBe('FORBIDDEN_H_WRITE');
   });
@@ -131,7 +129,7 @@ describe('integration: ec config CLI', () => {
   });
 
   it('snapshot → history → restore 周期', async () => {
-    await runJson(['set', 'show_activities', 'none', '--self', AID]);
+    await runJson(['set', 'show_activities', 'false', '--self', AID]);
     const snap = await runJson(['snapshot']);
     expect(snap.ok).toBe(true);
     const hist = await runJson(['history']);

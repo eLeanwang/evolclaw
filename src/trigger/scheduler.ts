@@ -7,7 +7,7 @@ import type { TriggerDefinitionManager } from './manager.js';
 import type { TriggerRunStateStore } from './state.js';
 import type { TriggerAuditLogger, TriggerRunStats } from './audit.js';
 import type { TriggerScriptExecutor } from './script-executor.js';
-import type { TriggerFeedbackDispatcher } from './feedback.js';
+import type { TriggerFeedbackDispatcher, TriggerFeedbackDispatchResult } from './feedback.js';
 import type { DaemonChannel } from '../channels/daemon.js';
 import { TriggerEventSource } from './sources/event-source.js';
 import {
@@ -19,8 +19,6 @@ import {
   sha256,
 } from './validation.js';
 import type {
-  FeedbackDisposition,
-  FeedbackTarget,
   TriggerActiveRun,
   TriggerAuditRecord,
   TriggerCreateFile,
@@ -38,6 +36,7 @@ import type {
   TriggerSourceEvent,
   TriggerSourceRunInfo,
   TriggerSubscriptionInfo,
+  TriggerFeedbackTarget,
 } from './types.js';
 
 const MAX_TIMER_MS = 2_147_483_647;
@@ -55,10 +54,11 @@ interface TriggerRuntimeConfig {
 }
 
 interface ExecutionRunResult {
-  branch: TriggerFeedbackBranch;
+  branch?: TriggerFeedbackBranch;
   script: TriggerScriptResult | null;
   processing: TriggerProcessingAudit;
-  reply: TriggerReply;
+  reply: TriggerReply | null;
+  feedbackResult?: TriggerFeedbackDispatchResult;
 }
 
 type TriggerLimitDisabledReason = NonNullable<TriggerLimitState['disabledReason']>;
@@ -125,7 +125,7 @@ export class TriggerRuntimeScheduler {
   }
 
   private scriptPreview(definition: TriggerDefinition): TriggerScriptPreview | undefined {
-    if (definition.execution.mode !== 'script' || !definition.execution.script) return undefined;
+    if (definition.execution.type !== 'script' || !definition.execution.script) return undefined;
     const script = definition.execution.script;
     const preview: TriggerScriptPreview = {
       path: script.path,
@@ -380,31 +380,34 @@ export class TriggerRuntimeScheduler {
       }
 
       if (!payload.dryRun) {
+        const executionFailed = execution.reply
+          ? shouldRetryExecution(execution.reply)
+          : execution.feedbackResult?.status === 'failed';
         this.state.appendEvent(definition.id, runId, {
-          event: shouldRetryExecution(execution.reply) ? 'execution.failed' : 'execution.completed',
+          event: executionFailed ? 'execution.failed' : 'execution.completed',
           ts: Date.now(),
-          mode: definition.execution.mode,
-          outcome: execution.reply.outcome,
+          mode: definition.execution.type,
+          outcome: execution.reply?.outcome ?? execution.feedbackResult?.status,
           ...(script ? { exitCode: script.exitCode } : {}),
         });
-        this.state.setPhase(definition.id, runId, 'feedback-pending', {
-          deadlineAt: Date.now() + 30_000,
-        });
-        this.state.appendEvent(definition.id, runId, {
-          event: 'feedback.pending',
-          ts: Date.now(),
-          branch: execution.branch,
-        });
+        if (!execution.feedbackResult) {
+          this.state.setPhase(definition.id, runId, 'feedback-pending', {
+            deadlineAt: Date.now() + 30_000,
+          });
+          this.state.appendEvent(definition.id, runId, {
+            event: 'feedback.pending',
+            ts: Date.now(),
+            branch: execution.branch,
+          });
+        }
       }
 
-      const disposition = this.selectDisposition(definition, execution.branch);
-      const feedbackResult = await this.feedback.dispatch({
+      const feedbackResult = execution.feedbackResult ?? await this.feedback.dispatch({
         trigger: definition,
         runId,
         firedAt,
         branch: execution.branch,
-        disposition,
-        reply: execution.reply,
+        reply: execution.reply!,
         sourcePayload: source.payload,
         dryRun: payload.dryRun,
       });
@@ -476,7 +479,7 @@ export class TriggerRuntimeScheduler {
       ? definition.reliability.retry.maxAttempts
       : 0;
     let execution = await this.runExecutionAttempt(definition, runId, firedAt, sourcePayload, signal, dryRun);
-    for (let attempt = 0; shouldRetryExecution(execution.reply) && attempt < maxAttempts && !signal.aborted; attempt++) {
+    for (let attempt = 0; execution.reply && shouldRetryExecution(execution.reply) && attempt < maxAttempts && !signal.aborted; attempt++) {
       await sleep(definition.reliability.retry.backoffMs);
       execution = await this.runExecutionAttempt(definition, runId, firedAt, sourcePayload, signal, dryRun);
     }
@@ -491,7 +494,7 @@ export class TriggerRuntimeScheduler {
     signal: AbortSignal,
     dryRun: boolean,
   ): Promise<ExecutionRunResult> {
-    if (definition.execution.mode === 'script') {
+    if (definition.execution.type === 'script') {
       const script = await this.runScriptOnce(definition, runId, firedAt, sourcePayload, signal);
       if (script.error || script.exitCode !== 0) {
         const reply = errorReply(runId, script.durationMs, script.error?.code || 'script_error', script.error?.message || 'script failed');
@@ -518,10 +521,26 @@ export class TriggerRuntimeScheduler {
       source: { type: definition.source.type, payload: sourcePayload },
     });
     const processing = {
-      mode: 'agent' as const,
+      mode: definition.execution.type,
       renderedTextHash: sha256(prompt),
       renderedTextPreview: previewText(prompt),
     };
+
+    if (definition.execution.type === 'target_session') {
+      const feedbackResult = await this.feedback.dispatchTargetSession({
+        trigger: definition,
+        runId,
+        firedAt,
+        prompt,
+        dryRun,
+      });
+      return {
+        script: null,
+        processing,
+        reply: null,
+        feedbackResult,
+      };
+    }
 
     if (dryRun) {
       const reply: TriggerReply = {
@@ -543,6 +562,7 @@ export class TriggerRuntimeScheduler {
         definition,
         this.runtime.projectPath,
         runtimeBaseagent,
+        runId,
       );
       const daemonReply = await this.daemonChannel.converse(prompt, {
         trigger: definition,
@@ -573,12 +593,6 @@ export class TriggerRuntimeScheduler {
         reply,
       };
     }
-  }
-
-  private selectDisposition(definition: TriggerDefinition, branch: TriggerFeedbackBranch): FeedbackDisposition {
-    if (branch === 'onReply') return definition.feedback.onReply;
-    if (branch === 'onNoop') return definition.feedback.onNoop;
-    return definition.feedback.onFailure;
   }
 
   private async runScriptOnce(
@@ -666,6 +680,8 @@ export class TriggerRuntimeScheduler {
   private resolveScheduledAt(definition: TriggerDefinition): number | null {
     const now = Date.now();
     switch (definition.source.type) {
+      case 'once':
+        return now;
       case 'delay': {
         const at = definition.createdAt + definition.source.afterMs;
         return at <= now && definition.reliability.missedPolicy === 'skip' ? null : Math.max(at, now);
@@ -769,6 +785,7 @@ export class TriggerRuntimeScheduler {
 
   private sourcePayload(source: TriggerSource): Record<string, unknown> {
     switch (source.type) {
+      case 'once': return {};
       case 'delay': return { afterMs: source.afterMs };
       case 'at': return { at: source.at };
       case 'cron': return { expression: source.expression, timezone: source.timezone };
@@ -812,7 +829,7 @@ export class TriggerRuntimeScheduler {
       reason: input.reason,
       conflictRunId: input.conflictRunId,
       definition: {
-        schemaVersion: 3,
+        schemaVersion: 4,
         revision: definitionRevision(input.definition),
         name: input.definition.name,
       },
@@ -876,7 +893,7 @@ export class TriggerRuntimeScheduler {
   }
 
   private isOneShot(source: TriggerSource): boolean {
-    return source.type === 'delay' || source.type === 'at';
+    return source.type === 'once' || source.type === 'delay' || source.type === 'at';
   }
 
   private isPeriodic(source: TriggerSource): source is Extract<TriggerSource, { type: 'cron' | 'interval' }> {
@@ -1029,6 +1046,7 @@ export class TriggerRuntimeScheduler {
       case 'interval': return `${source.everyMs}ms`;
       case 'delay': return `${source.afterMs}ms`;
       case 'at': return String(source.at);
+      case 'once': return 'once';
       case 'event': return source.eventPattern;
     }
   }
@@ -1044,7 +1062,7 @@ function replyFromScriptResult(script: TriggerScriptResult, runId: string): Trig
       script,
       runId,
       'script_reply_invalid',
-      'script stdout must be a V3 TriggerReply object with outcome: success | noop | error | interrupted | timeout',
+      'script stdout must be a TriggerReply object with outcome: success | noop | error | interrupted | timeout',
     );
   }
   const files = Array.isArray(result.files)
@@ -1135,14 +1153,15 @@ function summarizeReply(reply: TriggerReply | null | undefined): TriggerAuditRec
   };
 }
 
-function primaryTarget(definition: TriggerDefinition): FeedbackTarget | undefined {
-  for (const disposition of [definition.feedback.onReply, definition.feedback.onFailure, definition.feedback.onNoop]) {
-    if (disposition.kind === 'forward' && disposition.targets.length > 0) return disposition.targets[0];
-  }
-  if (definition.origin?.channel && definition.origin.peerId) {
-    return { channelKey: definition.origin.channel, channelId: definition.origin.peerId, delivery: 'direct' };
-  }
-  return undefined;
+function primaryTarget(definition: TriggerDefinition): TriggerFeedbackTarget | undefined {
+  if (definition.feedback.strategy === 'target') return definition.feedback.target;
+  if (!definition.origin) return undefined;
+  return {
+    channelKey: definition.origin.channelKey,
+    channelId: definition.origin.channelId,
+    session: definition.origin.session,
+    threadId: definition.origin.threadId,
+  };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

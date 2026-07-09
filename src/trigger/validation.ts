@@ -1,15 +1,14 @@
 import path from 'path';
 import crypto from 'crypto';
 import type {
-  FeedbackDisposition,
-  FeedbackTarget,
   TriggerDefinition,
   TriggerEffort,
   TriggerEventFilter,
   TriggerExecution,
+  TriggerExecutionThread,
+  TriggerFeedbackConfig,
+  TriggerFeedbackTarget,
   TriggerPermissionMode,
-  TriggerExecutionSession,
-  TriggerExecutionSessionStrategy,
   TriggerLimits,
   TriggerMatchValue,
   TriggerOrigin,
@@ -37,8 +36,8 @@ export function normalizeTriggerDefinition(input: unknown, opts: { now?: number 
   const raw = input as Record<string, unknown>;
   const version = raw.$schema_version;
   if (version === undefined) throw new Error('trigger definition missing required field: $schema_version');
-  if (version !== 3) throw new Error(`trigger schema version 3 is required; got ${version}`);
-  return normalizeV3(raw, opts);
+  if (version !== 4) throw new Error(`trigger schema version 4 is required; got ${version}`);
+  return normalizeV4(raw, opts);
 }
 
 export function validateTriggerDefinition(definition: TriggerDefinition): void {
@@ -187,7 +186,7 @@ function defaultTemplate(ctx: { reply?: Record<string, unknown>; result?: Record
   return '';
 }
 
-function normalizeV3(raw: Record<string, unknown>, opts: { now?: number }): TriggerDefinition {
+function normalizeV4(raw: Record<string, unknown>, opts: { now?: number }): TriggerDefinition {
   const now = opts.now ?? Date.now();
   const id = optionalString(raw.id) || generateTriggerId();
   const agentAid = requiredString(raw.agentAid, 'agentAid');
@@ -195,7 +194,7 @@ function normalizeV3(raw: Record<string, unknown>, opts: { now?: number }): Trig
   const createdAt = optionalNumber(raw.createdAt) ?? now;
   const updatedAt = optionalNumber(raw.updatedAt) ?? now;
   const definition: TriggerDefinition = {
-    $schema_version: 3,
+    $schema_version: 4,
     id,
     agentAid,
     enabled: raw.enabled === undefined ? true : requiredBoolean(raw.enabled, 'enabled'),
@@ -218,8 +217,15 @@ function normalizeOrigin(value: unknown): TriggerOrigin | undefined {
   if (value === undefined) return undefined;
   if (!isObject(value)) throw new Error('origin must be an object');
   const raw = value as Record<string, unknown>;
+  const session = normalizeSessionKind(raw.session, 'origin.session');
+  const threadId = optionalString(raw.threadId);
+  if (session === 'main' && threadId) throw new Error('origin.threadId is not allowed when origin.session=main');
+  if (session === 'thread' && !threadId) throw new Error('origin.threadId is required when origin.session=thread');
   return {
-    channel: optionalString(raw.channel),
+    channelKey: requiredString(raw.channelKey, 'origin.channelKey'),
+    channelId: requiredString(raw.channelId, 'origin.channelId'),
+    session,
+    threadId,
     peerId: optionalString(raw.peerId),
     sessionKey: optionalString(raw.sessionKey),
   };
@@ -230,6 +236,9 @@ function normalizeSource(value: unknown): TriggerSource {
   const raw = value as Record<string, unknown>;
   const type = requiredString(raw.type, 'source.type');
   switch (type) {
+    case 'once':
+      rejectFields(raw, ['afterMs', 'at', 'expression', 'timezone', 'everyMs', 'eventPattern', 'filter'], 'source');
+      return { type };
     case 'delay':
       return { type, afterMs: positiveNumber(raw.afterMs, 'source.afterMs') };
     case 'at': {
@@ -334,16 +343,21 @@ function normalizeMatchValue(value: unknown, label: string): TriggerMatchValue {
   return normalized as TriggerMatchValue;
 }
 
-function normalizeExecution(value: unknown, opts: { id: string }): TriggerExecution {
+function normalizeExecution(value: unknown, _opts: { id: string }): TriggerExecution {
   if (!isObject(value)) throw new Error('execution must be an object');
   const raw = value as Record<string, unknown>;
-  const mode = requiredString(raw.mode, 'execution.mode');
-  if (mode !== 'agent' && mode !== 'script') throw new Error('execution.mode must be agent or script');
+  if ('mode' in raw) throw new Error('execution.mode is not supported in schema v4; use execution.type');
+  if ('session' in raw) throw new Error('execution.session is not supported in schema v4; use execution.thread or feedback.target');
+  const type = requiredString(raw.type, 'execution.type');
+  if (type !== 'script' && type !== 'trigger_session' && type !== 'target_session') {
+    throw new Error('execution.type must be script, trigger_session, or target_session');
+  }
+  const thread = normalizeExecutionThread(raw.thread);
   const execution: TriggerExecution = {
-    mode,
-    prompt: mode === 'agent' ? requiredString(raw.prompt, 'execution.prompt') : optionalString(raw.prompt),
-    script: mode === 'script' ? normalizeScript(raw.script) : undefined,
-    session: normalizeExecutionSession(raw.session, opts),
+    type,
+    prompt: type === 'script' ? optionalString(raw.prompt) : requiredString(raw.prompt, 'execution.prompt'),
+    script: type === 'script' ? normalizeScript(raw.script) : undefined,
+    thread: type === 'trigger_session' ? (thread ?? 'per_run') : thread,
     model: optionalString(raw.model),
     effort: normalizeEffort(raw.effort),
     permissionMode: normalizePermissionMode(raw.permissionMode),
@@ -351,6 +365,15 @@ function normalizeExecution(value: unknown, opts: { id: string }): TriggerExecut
     noopSentinel: optionalString(raw.noopSentinel) ?? DEFAULT_NOOP_SENTINEL,
   };
   return execution;
+}
+
+function normalizeExecutionThread(value: unknown): TriggerExecutionThread | undefined {
+  const thread = optionalString(value);
+  if (thread === undefined) return undefined;
+  if (thread !== 'per_run' && thread !== 'by_trigger') {
+    throw new Error('execution.thread must be per_run or by_trigger');
+  }
+  return thread;
 }
 
 function normalizeEffort(value: unknown): TriggerEffort | undefined {
@@ -369,27 +392,6 @@ function normalizePermissionMode(value: unknown): TriggerPermissionMode | undefi
     throw new Error('execution.permissionMode must be one of auto, bypass, readonly, plan, edit, request, noask');
   }
   return mode as TriggerPermissionMode;
-}
-
-function normalizeExecutionSession(value: unknown, opts: { id: string }): TriggerExecutionSession {
-  const raw = isObject(value) ? value as Record<string, unknown> : {};
-  const rawStrategy = optionalString(raw.strategy) ?? 'isolated';
-  const strategy = (rawStrategy === 'main' ? 'isolated' : rawStrategy) as TriggerExecutionSessionStrategy;
-  if (strategy !== 'isolated' && strategy !== 'thread') {
-    throw new Error('execution.session.strategy must be isolated or thread');
-  }
-  const session: TriggerExecutionSession = {
-    strategy,
-    baseagent: optionalString(raw.baseagent),
-    channelKey: optionalString(raw.channelKey),
-    channelId: optionalString(raw.channelId),
-    threadId: optionalString(raw.threadId),
-    name: optionalString(raw.name),
-  };
-  if (strategy === 'thread' && !session.threadId) {
-    session.threadId = `trigger:${opts.id}`;
-  }
-  return session;
 }
 
 function normalizeScript(value: unknown): TriggerScriptConfig {
@@ -412,74 +414,48 @@ function normalizeScript(value: unknown): TriggerScriptConfig {
   };
 }
 
-function normalizeFeedback(value: unknown): TriggerDefinition['feedback'] {
+function normalizeFeedback(value: unknown): TriggerFeedbackConfig {
   if (!isObject(value)) throw new Error('feedback must be an object');
   const raw = value as Record<string, unknown>;
-  if (raw.default !== undefined) {
-    throw new Error('feedback.default has been removed; use feedback.onFailure');
+  const strategy = requiredString(raw.strategy, 'feedback.strategy');
+  if (strategy !== 'origin' && strategy !== 'target' && strategy !== 'silent') {
+    throw new Error('feedback.strategy must be origin, target, or silent');
   }
   return {
-    onReply: normalizeDisposition(raw.onReply, 'feedback.onReply'),
-    onNoop: normalizeDisposition(raw.onNoop, 'feedback.onNoop'),
-    onFailure: normalizeDisposition(raw.onFailure, 'feedback.onFailure'),
+    strategy,
+    target: raw.target === undefined ? undefined : normalizeFeedbackTarget(raw.target, 'feedback.target'),
+    onReply: normalizeFeedbackTemplate(raw.onReply, 'feedback.onReply'),
+    onNoop: normalizeFeedbackTemplate(raw.onNoop, 'feedback.onNoop'),
+    onFailure: normalizeFeedbackTemplate(raw.onFailure, 'feedback.onFailure'),
   };
 }
 
-function normalizeDisposition(value: unknown, label: string): FeedbackDisposition {
-  if (value === undefined) {
-    throw new Error(`${label} is required`);
-  }
+function normalizeFeedbackTarget(value: unknown, label: string): TriggerFeedbackTarget {
   if (!isObject(value)) throw new Error(`${label} must be an object`);
   const raw = value as Record<string, unknown>;
-  const kind = requiredString(raw.kind, `${label}.kind`);
-  if (kind === 'silent') return { kind };
-  if (kind === 'reply-origin') {
-    return {
-      kind,
-      delivery: normalizeDelivery(raw.delivery, `${label}.delivery`),
-      template: optionalTemplate(raw.template),
-    };
-  }
-  if (kind === 'forward') {
-    if (!Array.isArray(raw.targets) || raw.targets.length === 0) {
-      throw new Error(`${label}.targets must be a non-empty array`);
-    }
-    return {
-      kind,
-      targets: raw.targets.map((target, i) => normalizeTarget(target, `${label}.targets[${i}]`)),
-      template: optionalTemplate(raw.template),
-    };
-  }
-  throw new Error(`${label}.kind must be forward, reply-origin, or silent`);
-}
-
-function normalizeTarget(value: unknown, label: string, fallback?: FeedbackTarget): FeedbackTarget {
-  if (!isObject(value)) {
-    if (fallback) return { ...fallback };
-    throw new Error(`${label} must be an object`);
-  }
-  const raw = value as Record<string, unknown>;
-  const channelKey = optionalString(raw.channelKey)
-    ?? optionalString(raw.channelName)
-    ?? optionalString(raw.channel)
-    ?? optionalString(raw.channelType)
-    ?? fallback?.channelKey;
-  const channelId = optionalString(raw.channelId) ?? fallback?.channelId;
-  if (!channelKey) throw new Error(`${label}.channelKey is required`);
-  if (!channelId) throw new Error(`${label}.channelId is required`);
-  const delivery = normalizeDelivery(raw.delivery ?? fallback?.delivery, `${label}.delivery`);
+  const session = normalizeSessionKind(raw.session, `${label}.session`);
+  const threadId = optionalString(raw.threadId);
+  if (session === 'main' && threadId) throw new Error(`${label}.threadId is not allowed when ${label}.session=main`);
+  if (session === 'thread' && !threadId) throw new Error(`${label}.threadId is required when ${label}.session=thread`);
   return {
-    channelKey,
-    channelId,
-    delivery,
-    threadId: optionalString(raw.threadId) ?? fallback?.threadId,
+    channelKey: requiredString(raw.channelKey, `${label}.channelKey`),
+    channelId: requiredString(raw.channelId, `${label}.channelId`),
+    session,
+    threadId,
   };
 }
 
-function normalizeDelivery(value: unknown, label: string): 'direct' | 'inbound' {
-  const delivery = optionalString(value);
-  if (delivery !== 'direct' && delivery !== 'inbound') throw new Error(`${label} must be direct or inbound`);
-  return delivery;
+function normalizeFeedbackTemplate(value: unknown, label: string): { template?: string } | undefined {
+  if (value === undefined) return undefined;
+  if (!isObject(value)) throw new Error(`${label} must be an object`);
+  const raw = value as Record<string, unknown>;
+  return { template: optionalTemplate(raw.template) };
+}
+
+function normalizeSessionKind(value: unknown, label: string): 'main' | 'thread' {
+  const session = optionalString(value) ?? 'main';
+  if (session !== 'main' && session !== 'thread') throw new Error(`${label} must be main or thread`);
+  return session;
 }
 
 function normalizeReliability(value: unknown): TriggerReliability {
@@ -538,14 +514,30 @@ function normalizeOnError(value: unknown): 'fail' | 'retry' {
 }
 
 function validateTriggerSemantics(definition: TriggerDefinition): void {
-  if (definition.execution.mode === 'agent' && !definition.execution.prompt) {
-    throw new Error('execution.prompt is required when execution.mode=agent');
+  const execution = definition.execution;
+  if (execution.type === 'script') {
+    if (!execution.script) throw new Error('execution.script is required when execution.type=script');
+    if (execution.prompt !== undefined) throw new Error('execution.prompt is not allowed when execution.type=script');
+    if (execution.thread !== undefined) throw new Error('execution.thread is not allowed when execution.type=script');
   }
-  if (definition.execution.mode === 'script' && !definition.execution.script) {
-    throw new Error('execution.script is required when execution.mode=script');
+  if (execution.type === 'trigger_session') {
+    if (!execution.prompt) throw new Error('execution.prompt is required when execution.type=trigger_session');
+    if (execution.script !== undefined) throw new Error('execution.script is not allowed when execution.type=trigger_session');
   }
-  if (!definition.feedback.onReply || !definition.feedback.onNoop || !definition.feedback.onFailure) {
-    throw new Error('feedback must define onReply, onNoop, and onFailure');
+  if (execution.type === 'target_session') {
+    if (!execution.prompt) throw new Error('execution.prompt is required when execution.type=target_session');
+    if (execution.script !== undefined) throw new Error('execution.script is not allowed when execution.type=target_session');
+    if (execution.thread !== undefined) throw new Error('execution.thread is not allowed when execution.type=target_session');
+    if (definition.feedback.strategy === 'silent') throw new Error('feedback.strategy=silent is not allowed when execution.type=target_session');
+  }
+  if (definition.feedback.strategy === 'target' && !definition.feedback.target) {
+    throw new Error('feedback.target is required when feedback.strategy=target');
+  }
+  if (definition.feedback.strategy !== 'target' && definition.feedback.target) {
+    throw new Error('feedback.target is only allowed when feedback.strategy=target');
+  }
+  if (execution.type !== 'script' && (definition.feedback.onReply || definition.feedback.onNoop || definition.feedback.onFailure)) {
+    throw new Error('feedback.onReply/onNoop/onFailure are only allowed when execution.type=script');
   }
 }
 
@@ -576,6 +568,12 @@ function positiveNumber(value: unknown, label: string): number {
   const n = optionalNumber(value);
   if (n === undefined || n <= 0) throw new Error(`${label} must be a positive number`);
   return n;
+}
+
+function rejectFields(raw: Record<string, unknown>, fields: string[], label: string): void {
+  for (const field of fields) {
+    if (raw[field] !== undefined) throw new Error(`${label}.${field} is not allowed`);
+  }
 }
 
 function requiredBoolean(value: unknown, label: string): boolean {

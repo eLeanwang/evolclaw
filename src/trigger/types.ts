@@ -27,14 +27,15 @@ export interface TriggerSourceEvent {
 }
 
 export type TriggerSource =
+  | { type: 'once' }
   | { type: 'delay'; afterMs: number }
   | { type: 'at'; at: string }
   | { type: 'cron'; expression: string; timezone?: string }
   | { type: 'interval'; everyMs: number }
   | TriggerEventSource;
 
-export type TriggerExecutionMode = 'agent' | 'script';
-export type TriggerExecutionSessionStrategy = 'isolated' | 'thread';
+export type TriggerExecutionType = 'script' | 'trigger_session' | 'target_session';
+export type TriggerExecutionThread = 'per_run' | 'by_trigger';
 export type TriggerConcurrency = 'forbid' | 'replace' | 'allow';
 export type TriggerMissedPolicy = 'skip' | 'run_once' | 'run_all';
 export type TriggerFeedbackBranch = 'onReply' | 'onNoop' | 'onFailure';
@@ -44,7 +45,10 @@ export type TriggerPermissionMode = PermissionMode;
 export type TriggerEffort = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 
 export interface TriggerOrigin {
-  channel?: string;
+  channelKey: string;
+  channelId: string;
+  session: 'main' | 'thread';
+  threadId?: string;
   peerId?: string;
   sessionKey?: string;
 }
@@ -66,20 +70,11 @@ export interface TriggerScriptPreview {
   error?: string;
 }
 
-export interface TriggerExecutionSession {
-  strategy: TriggerExecutionSessionStrategy;
-  baseagent?: string;
-  channelKey?: string;
-  channelId?: string;
-  threadId?: string;
-  name?: string;
-}
-
 export interface TriggerExecution {
-  mode: TriggerExecutionMode;
+  type: TriggerExecutionType;
   prompt?: string;
   script?: TriggerScriptConfig;
-  session: TriggerExecutionSession;
+  thread?: TriggerExecutionThread;
   model?: string;
   effort?: TriggerEffort;
   permissionMode?: TriggerPermissionMode;
@@ -87,24 +82,25 @@ export interface TriggerExecution {
   noopSentinel: string;
 }
 
-export type FeedbackDelivery = 'direct' | 'inbound';
-
-export interface FeedbackTarget {
+export interface TriggerFeedbackTarget {
   channelKey: string;
   channelId: string;
-  delivery: FeedbackDelivery;
+  session: 'main' | 'thread';
   threadId?: string;
 }
 
-export type FeedbackDisposition =
-  | { kind: 'forward'; targets: FeedbackTarget[]; template?: string }
-  | { kind: 'reply-origin'; delivery: FeedbackDelivery; template?: string }
-  | { kind: 'silent' };
+export type TriggerFeedbackStrategy = 'origin' | 'target' | 'silent';
+
+export interface TriggerFeedbackTemplate {
+  template?: string;
+}
 
 export interface TriggerFeedbackConfig {
-  onReply: FeedbackDisposition;
-  onNoop: FeedbackDisposition;
-  onFailure: FeedbackDisposition;
+  strategy: TriggerFeedbackStrategy;
+  target?: TriggerFeedbackTarget;
+  onReply?: TriggerFeedbackTemplate;
+  onNoop?: TriggerFeedbackTemplate;
+  onFailure?: TriggerFeedbackTemplate;
 }
 
 export interface TriggerReliability {
@@ -122,7 +118,7 @@ export interface TriggerLimits {
 }
 
 export interface TriggerDefinition {
-  $schema_version: 3;
+  $schema_version: 4;
   id: string;
   agentAid: string;
   enabled: boolean;
@@ -236,7 +232,7 @@ export interface TriggerReply {
 }
 
 export interface TriggerProcessingAudit {
-  mode: TriggerExecutionMode;
+  mode: TriggerExecutionType;
   renderedTextHash?: string;
   renderedTextPreview?: string;
 }
@@ -265,7 +261,7 @@ export interface TriggerAuditRecord {
   reason?: string;
   conflictRunId?: string;
   definition: {
-    schemaVersion: 3;
+    schemaVersion: 4;
     revision: string;
     name: string;
   };
@@ -283,9 +279,9 @@ export interface TriggerAuditRecord {
     toolCallCount: number;
   } | null;
   feedback?: {
-    branch: TriggerFeedbackBranch;
-    disposition: FeedbackDisposition['kind'];
-    target?: FeedbackTarget | FeedbackTarget[];
+    branch?: TriggerFeedbackBranch;
+    strategy: TriggerFeedbackStrategy;
+    target?: TriggerFeedbackTarget;
     renderedTextHash?: string;
     renderedTextPreview?: string;
   } | null;

@@ -49,10 +49,10 @@ describe('ResponseModeCoordinator', () => {
     expect(g?.modeId).toBe('proactive'); // group 系统兜底
   });
 
-  it('session.chatMode overrides agent default response mode', async () => {
+  it('response_modes default has priority over chatMode fallback', async () => {
     const deps = makeDeps({ response_modes: { default_private: 'interactive' } });
     const r = await coord.resolveInbound(msg('private'), deps, 'proactive');
-    expect(r?.modeId).toBe('proactive');
+    expect(r?.modeId).toBe('interactive');
   });
 
   it('relation override remains higher priority than session.chatMode', async () => {

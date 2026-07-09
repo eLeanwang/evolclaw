@@ -69,6 +69,8 @@ function renderOneItem(
   };
 
   const isOwnerHint = item.kind === 'owner-hint';
+  const isHandoff = item.kind === 'handoff';
+  const handoffPreviousSentinel = `\x00ECMSG-HANDOFF-PREV-${randomUUID()}\x00`;
 
   // item-level vars: session vars overlaid with this message's own sender/timestamp.
   const itemVars: Vars = {
@@ -100,6 +102,19 @@ function renderOneItem(
     injectTime: isOwnerHint
       ? formatLocalTime(item.injectTime ?? item.timestamp ?? Date.now(), sessionVars.timezone ? String(sessionVars.timezone) : undefined)
       : undefined,
+    // msg send 跨会话一次性上下文
+    isHandoff,
+    handoffKind: item.handoff?.kind,
+    handoffOriginChannel: item.handoff?.origin?.channel,
+    handoffOriginPeerId: item.handoff?.origin?.peerId,
+    handoffOriginThreadId: item.handoff?.origin?.threadId,
+    handoffOriginPeerName: item.handoff?.origin?.peerName,
+    handoffOriginPeerType: item.handoff?.origin?.peerType,
+    handoffOriginRole: item.handoff?.origin?.role,
+    handoffPreviousMessageId: item.handoff?.previousMessageId ?? undefined,
+    handoffPreviousContent: item.handoff ? handoffPreviousSentinel : undefined,
+    handoffReplyCommand: item.handoff?.replyCommand,
+    handoffContinueCommand: item.handoff?.continueCommand,
     // content held as a per-call random sentinel, swapped back post-render.
     // Using a UUID means no real message can collide with it.
     content: contentSentinel,
@@ -115,7 +130,9 @@ function renderOneItem(
         ? renderTemplate(rawContent, itemVars, /* stripBlankLines */ false)
         : rawContent;
       // swap the sentinel back to the real message text (literal replace, no parsing).
-      const withContent = rendered.split(contentSentinel).join(item.content);
+      const withContent = rendered
+        .split(contentSentinel).join(item.content)
+        .split(handoffPreviousSentinel).join(item.handoff?.previousContent ?? '');
       if (withContent.trim()) out.push(withContent.replace(/\s+$/, ''));
     }
   }

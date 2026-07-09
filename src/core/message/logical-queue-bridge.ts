@@ -69,8 +69,9 @@ export class LogicalQueueBridge {
     // 逻辑队列给出下一个 messageId（使用 peek 避免提前移除）
     let next: InboundMessage | undefined;
     if (queue.size() > 0) {
-      // 直接访问队首元素（FIFOQueue 的 peek 是同步的）
-      next = (queue as any).queue?.[0];
+      next = queue.peekSync?.();
+      // 兼容旧的内置 FIFO 实现形状；自定义队列应实现 peekSync，避免这里出队。
+      if (!next) next = (queue as any).queue?.[0];
       if (!next) {
         // 兜底：如果没有内部 queue 数组，使用 dequeueSync（旧行为）
         next = queue.dequeueSync();
@@ -95,7 +96,7 @@ export class LogicalQueueBridge {
     for (const msgId of messageIds) {
       // 从队首依次匹配并移除
       if (queue.size() > 0) {
-        const head = (queue as any).queue?.[0];
+        const head = queue.peekSync?.() ?? (queue as any).queue?.[0];
         if (head?.messageId === msgId) {
           queue.dequeueSync();
         }

@@ -8,6 +8,7 @@ import type { AidStatsSnapshot, StatsSnapshot } from './utils/stats.js';
 import { fileCache } from './core/daemon-file-cache.js';
 import type { FileCacheStats } from './core/daemon-file-cache.js';
 import type { BindBeginRequest, BindBeginResponse, BindErrorResponse, BindStatusResponse } from './utils/aid-bind.js';
+import type { HandoffMetadata, TaskRuntimeContext } from './core/message/handoff.js';
 
 const isWindows = process.platform === 'win32';
 const isNamedPipe = (p: string) => isWindows && p.startsWith('\\\\.\\pipe\\');
@@ -66,6 +67,26 @@ export interface IpcCtlResponse {
   error?: string;
 }
 
+export interface IpcAunMsgSendResponse {
+  ok: boolean;
+  message_id?: string;
+  seq?: number;
+  timestamp?: number;
+  status?: string;
+  delivery_mode?: string;
+  encrypt?: boolean;
+  chatmode?: string;
+  log_written?: boolean;
+  error?: string;
+  code?: string | number;
+}
+
+export interface IpcAunMsgSendLogRequest {
+  content: string;
+  source?: 'daemon' | 'cli' | 'msg' | 'ctl' | 'owner-inject';
+  handoff?: HandoffMetadata;
+}
+
 type StatusProvider = () => IpcStatusResponse;
 type CommandExecutor = (cmd: string, sessionId: string) => Promise<IpcCtlResponse>;
 type AunAidProvider = () => AidConnectionState[];
@@ -89,6 +110,8 @@ type AgentStatsProvider = () => AgentStatsSnapshot[];
 type QueueSnapshotProvider = (params: { agent: string }) => Array<{ status: string; sessionKey: string; channelType: string; channelId: string; projectPath: string; peerName?: string; preview: string; messageId?: string; elapsedMs?: number }>;
 type QueueActionExecutor = (params: { agent: string; action: 'clear' | 'cancel' | 'interrupt'; messageId?: string; sessionKey?: string }) => Promise<{ ok: boolean; cleared?: number; cancelled?: boolean; interrupted?: boolean; error?: string }>;
 type TriggerExecutor = (cmd: { type: string; [key: string]: any }) => Promise<any>;
+type TaskRuntimeContextProvider = (params: { sessionId: string }) => TaskRuntimeContext | null | undefined;
+type AunMsgSender = (params: { aid: string; to: string; payload: Record<string, unknown>; encrypt?: boolean; log?: IpcAunMsgSendLogRequest }) => Promise<IpcAunMsgSendResponse>;
 type BindExecutor = {
   begin: (cmd: BindBeginRequest) => BindBeginResponse | BindErrorResponse;
   status: (taskId: string) => BindStatusResponse | BindErrorResponse;
@@ -107,6 +130,8 @@ export class IpcServer {
   private queueSnapshotProvider?: QueueSnapshotProvider;
   private queueActionExecutor?: QueueActionExecutor;
   private triggerExecutor?: TriggerExecutor;
+  private taskRuntimeContextProvider?: TaskRuntimeContextProvider;
+  private aunMsgSender?: AunMsgSender;
   private bindExecutor?: BindExecutor;
 
   // CPU 占用追踪：IPC handler 是一次性同步调用，无法在响应里做 200ms 异步采样，
@@ -174,6 +199,16 @@ export class IpcServer {
   /** Inject daemon-level trigger executor for ec trigger. */
   setTriggerExecutor(executor: TriggerExecutor): void {
     this.triggerExecutor = executor;
+  }
+
+  /** Inject active task runtime-context provider for in-task CLI handoff metadata. */
+  setTaskRuntimeContextProvider(provider: TaskRuntimeContextProvider): void {
+    this.taskRuntimeContextProvider = provider;
+  }
+
+  /** Inject daemon-backed AUN private message sender for in-task `ec msg send`. */
+  setAunMsgSender(sender: AunMsgSender): void {
+    this.aunMsgSender = sender;
   }
 
   /** Inject bootstrap QR bind executor for init/init aun. */
@@ -349,6 +384,41 @@ export class IpcServer {
           return { ok: true };
         } catch (e: any) {
           return { ok: false, error: String(e?.message || e) };
+        }
+      }
+      case 'task-runtime-context': {
+        if (!this.taskRuntimeContextProvider) return { ok: false, error: 'task runtime context not configured' };
+        if (!cmd.sessionId || typeof cmd.sessionId !== 'string') return { ok: false, error: 'missing sessionId' };
+        const context = this.taskRuntimeContextProvider({ sessionId: cmd.sessionId }) ?? null;
+        return { ok: true, context };
+      }
+      case 'aun-msg-send': {
+        if (!this.aunMsgSender) return { ok: false, error: 'aun msg sender not configured' };
+        if (!cmd.aid || typeof cmd.aid !== 'string') return { ok: false, error: 'missing aid' };
+        if (!cmd.to || typeof cmd.to !== 'string') return { ok: false, error: 'missing to' };
+        if (!cmd.payload || typeof cmd.payload !== 'object' || Array.isArray(cmd.payload)) {
+          return { ok: false, error: 'missing payload' };
+        }
+        const rawLog = cmd.log && typeof cmd.log === 'object' && !Array.isArray(cmd.log)
+          ? cmd.log as Record<string, unknown>
+          : undefined;
+        const log: IpcAunMsgSendLogRequest | undefined = typeof rawLog?.content === 'string'
+          ? {
+            content: rawLog.content,
+            source: rawLog.source as IpcAunMsgSendLogRequest['source'],
+            handoff: rawLog.handoff as IpcAunMsgSendLogRequest['handoff'],
+          }
+          : undefined;
+        try {
+          return await this.aunMsgSender({
+            aid: cmd.aid,
+            to: cmd.to,
+            payload: cmd.payload as Record<string, unknown>,
+            encrypt: cmd.encrypt === true,
+            log,
+          });
+        } catch (e: any) {
+          return { ok: false, error: e?.message || String(e) };
         }
       }
       case 'ctl': {

@@ -124,6 +124,7 @@ export class ChannelLoader {
       type: 'aun',
       name: aunEffName,
       aid: agent.aid,
+      owner: agent.getOwner(aunEffName),
       enabled: true,
     } as any;
 

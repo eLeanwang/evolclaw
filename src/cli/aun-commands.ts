@@ -1063,7 +1063,10 @@ export async function cmdGroup(args: string[]): Promise<void> {
   dissolve <from> <group-id>                            解散群
   suspend <from> <group-id>                             暂停群
   resume <from> <group-id>                              恢复群
-  rules <from> <group-id> [--mode M] [--question Q] [--max-pending N]  查看/更新规则
+  rules <from> <group-id> get                          读取已发布群规则文件 /rules.md
+  rules <from> <group-id> set <file>                   上传并发布群规则文件
+  rules <from> <group-id> publish                      发布当前群空间 /rules.md
+  rules <from> <group-id> [--mode M] [--question Q] [--max-pending N]  查看/更新入群规则
 
 成员:
   join <from> <group-id> [--message M] [--answer A]    申请加入
@@ -1092,6 +1095,7 @@ Options:
   evolclaw group send alice.agentid.pub g-dev.agentid.pub "hello team"
   evolclaw group send alice.agentid.pub g-dev.agentid.pub "@bob 看下 PR" --mention bob.agentid.pub
   evolclaw group send alice.agentid.pub g-dev.agentid.pub --file ./arch.png
+  evolclaw group rules alice.agentid.pub g-dev.agentid.pub set ./rules.md
   evolclaw group invite alice.agentid.pub g-dev.agentid.pub bob.agentid.pub carol.agentid.pub
   evolclaw group members alice.agentid.pub g-dev.agentid.pub`);
     return;
@@ -1115,6 +1119,7 @@ Options:
     groupJoin, groupLeave, groupInvite, groupKick, groupMembers, groupOnline,
     groupSetRole, groupTransferOwner, groupBan, groupUnban, groupBanlist,
     groupRules, groupUpdateRules,
+    groupRulesFileGet, groupRulesFileSet, groupRulesFilePublish,
   } = await import('../aun/msg/index.js');
   const commonOpts = { aunPath, slotId: appSlot };
 
@@ -1411,6 +1416,95 @@ Options:
 
   if (sub === 'rules') {
     const groupId = requireGroupId();
+    const action = args[3];
+    const printRulesFileUsage = () => {
+      console.log(`用法:
+  evolclaw group rules <from> <group-id> get
+  evolclaw group rules <from> <group-id> set <file>
+  evolclaw group rules <from> <group-id> publish
+  evolclaw group rules <from> <group-id> [--mode open|approval|invite_only|closed] [--question Q] [--max-pending N]
+
+说明:
+  get      读取当前已发布的群规则文件 /rules.md
+  set      上传本地文件到群空间 /rules.md，发布 rules.content 元数据，并发送 group.rules.updated 通知
+  publish  不上传文件，仅发布当前群空间 /rules.md 的元数据并发送通知
+
+兼容:
+  不带 get/set/publish 时仍使用旧的入群规则接口。`);
+    };
+    const printRulesFileState = (result: any, verb: 'get' | 'set' | 'publish') => {
+      if (!result.ok) {
+        if (formatJson) { console.log(JSON.stringify(result)); }
+        else { console.error(`❌ ${result.error}`); }
+        process.exit(1);
+      }
+      if (formatJson) {
+        console.log(JSON.stringify(result));
+        return;
+      }
+
+      if (verb === 'get' && result.status === 'ok') {
+        process.stdout.write(String(result.content ?? ''));
+        return;
+      }
+
+      if (result.status === 'ok') {
+        console.log(`✓ 群规则已发布 ${result.group_id}:/rules.md`);
+      } else {
+        console.log(`群规则状态: ${result.status}`);
+      }
+      if (result.metadata) {
+        console.log(`  元数据: path=${result.metadata.path} size=${result.metadata.size} mtimeMs=${result.metadata.mtimeMs}`);
+      }
+      if (result.remote) {
+        console.log(`  远端: size=${result.remote.size ?? '-'} mtimeMs=${result.remote.mtimeMs ?? '-'}`);
+      }
+      if (result.group_index_etag) {
+        console.log(`  group.index etag: ${result.group_index_etag}`);
+      }
+      if (result.notice) {
+        if (result.notice.ok) console.log(`  通知: 已发送${result.notice.message_id ? ` message_id=${result.notice.message_id}` : ''}`);
+        else console.warn(`  通知: 发送失败 ${result.notice.error ?? ''}`.trimEnd());
+      }
+      if (result.error) {
+        console.log(`  错误: ${result.error}`);
+      }
+      if ((verb === 'set' || verb === 'publish') && result.status !== 'ok') {
+        process.exit(1);
+      }
+    };
+
+    if (action && isHelpFlag(action)) {
+      printRulesFileUsage();
+      return;
+    }
+    if (action === 'get') {
+      const result = await groupRulesFileGet({ from, groupId, ...commonOpts });
+      printRulesFileState(result, 'get');
+      return;
+    }
+    if (action === 'set') {
+      const filePath = args[4];
+      if (!filePath || filePath.startsWith('--')) {
+        console.error('❌ 缺少 <file> 参数');
+        printRulesFileUsage();
+        process.exit(1);
+      }
+      const result = await groupRulesFileSet({ from, groupId, filePath, ...commonOpts });
+      printRulesFileState(result, 'set');
+      return;
+    }
+    if (action === 'publish') {
+      const result = await groupRulesFilePublish({ from, groupId, ...commonOpts });
+      printRulesFileState(result, 'publish');
+      return;
+    }
+    if (action && !action.startsWith('--')) {
+      console.error(`❌ 未知 rules 动作: ${action}`);
+      printRulesFileUsage();
+      process.exit(1);
+    }
+
     const wantsUpdate = args.includes('--mode') || args.includes('--question') || args.includes('--max-pending');
     if (!wantsUpdate) {
       const result = await groupRules({ from, groupId, ...commonOpts });

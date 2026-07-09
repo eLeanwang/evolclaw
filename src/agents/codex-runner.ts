@@ -382,7 +382,8 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
     images?: Array<{ data: string; mimeType?: string }>,
     systemPromptAppend?: string,
     sessionManager?: any,
-    modelOverride?: { model?: string; effort?: string; permissionMode?: string }
+    modelOverride?: { model?: string; effort?: string; permissionMode?: string },
+    runtimeEnv?: Record<string, string>
   ): Promise<AsyncIterable<AgentEvent>> {
     let agentSessionId = initialAgentSessionId || this.activeSessions.get(sessionId);
     const callModel = modelOverride?.model || this.model;
@@ -416,6 +417,7 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
       sandbox: callSandboxMode,
       config: this.mergeThreadConfig(
         this.buildEvolclawShellEnvironmentConfig(sessionId),
+        runtimeEnv ? { shell_environment_policy: { set: runtimeEnv } } : undefined,
         capabilityConfig,
       ),
       ...(systemPromptAppend ? { developerInstructions: systemPromptAppend } : {}),
@@ -1463,6 +1465,11 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
         if (editEvent) {
           if (item.id) state?.emittedEditCallIds.add(item.id);
           yield editEvent;
+        } else {
+          const desc = this.normalizeFileChanges(item.changes).map((change: any) => this.describeFileChange(change)).join(', ');
+          if (desc) {
+            yield { type: 'tool_use', name: 'FileChange', input: { description: desc }, callId: item.id };
+          }
         }
         break;
       }

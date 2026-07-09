@@ -27,7 +27,7 @@ import { isValidAid } from '../../aun/aid/validation.js';
 
 export type ExecResult = { data: any } | { error: string; code: string };
 
-const SUPPORTED_AGENT_PATCH_FIELDS = new Set(['aid', 'name', 'avatar', 'active_baseagent', 'baseagents', 'projects', 'owners', 'chatmode', 'channels']);
+const SUPPORTED_AGENT_PATCH_FIELDS = new Set(['aid', 'name', 'avatar', 'active_baseagent', 'baseagents', 'projects', 'owners', 'chatmode', 'channels', 'channelOwners']);
 const HIDDEN_VALUE = '[hidden]';
 const SENSITIVE_CONFIG_KEYS = new Set([
   'apiKey',
@@ -151,6 +151,86 @@ function mergeBaseagentsPatch(existing: unknown, patch: Record<string, Record<st
   }
 
   return current;
+}
+
+type ChannelOwnersPatchItem = { type: string; name: string; owners: string[] };
+
+function normalizeStringList(value: unknown, label: string): { ok: true; value: string[] } | { ok: false; error: string } {
+  const rawItems = Array.isArray(value)
+    ? value
+    : (typeof value === 'string' ? value.split(/[\s,，]+/) : null);
+  if (!rawItems) return { ok: false, error: `${label} 必须是字符串数组或分隔字符串` };
+
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const raw of rawItems) {
+    if (typeof raw !== 'string') return { ok: false, error: `${label} 只能包含字符串` };
+    const item = raw.trim();
+    if (!item || seen.has(item)) continue;
+    seen.add(item);
+    out.push(item);
+  }
+  return { ok: true, value: out };
+}
+
+function normalizeChannelOwnersPatch(value: unknown): { ok: true; value: ChannelOwnersPatchItem[] } | { ok: false; error: string } {
+  if (!Array.isArray(value)) return { ok: false, error: 'channelOwners 必须是数组' };
+  const out: ChannelOwnersPatchItem[] = [];
+  const seen = new Set<string>();
+
+  for (const [idx, raw] of value.entries()) {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+      return { ok: false, error: `channelOwners[${idx}] 必须是对象` };
+    }
+    const item = raw as Record<string, unknown>;
+    const type = typeof item.type === 'string' ? item.type.trim() : '';
+    const name = typeof item.name === 'string' ? item.name.trim() : '';
+    if (!type || !name) return { ok: false, error: `channelOwners[${idx}] 缺少 type/name` };
+    if (type === 'aun') return { ok: false, error: 'AUN 渠道 owner 由 agent 顶层 owners 管理，不支持 channelOwners 编辑' };
+    const owners = normalizeStringList(item.owners, `channelOwners[${idx}].owners`);
+    if (!owners.ok) return owners;
+
+    const key = `${type}\0${name}`;
+    if (seen.has(key)) return { ok: false, error: `channelOwners 重复渠道: ${type}/${name}` };
+    seen.add(key);
+    out.push({ type, name, owners: owners.value });
+  }
+  return { ok: true, value: out };
+}
+
+function applyChannelOwnersPatch(config: AgentConfig, patch: ChannelOwnersPatchItem[]): { ok: true; changed: boolean } | { ok: false; error: string } {
+  const channels = Array.isArray((config as any).channels) ? (config as any).channels : [];
+  let changed = false;
+
+  for (const item of patch) {
+    const channel = channels.find((c: any) =>
+      c && typeof c === 'object' && !Array.isArray(c) &&
+      String(c.type || '').trim() === item.type &&
+      String(c.name || '').trim() === item.name
+    );
+    if (!channel) return { ok: false, error: `未找到渠道: ${item.type}/${item.name}` };
+
+    const before = JSON.stringify({
+      owners: channel.owners,
+      owner: channel.owner,
+      ownerId: channel.ownerId,
+      ownerAid: channel.ownerAid,
+      ownerIds: channel.ownerIds,
+      ownerAids: channel.ownerAids,
+      admins: channel.admins,
+    });
+    channel.owners = item.owners;
+    delete channel.owner;
+    delete channel.ownerId;
+    delete channel.ownerAid;
+    delete channel.ownerIds;
+    delete channel.ownerAids;
+    delete channel.admins;
+    const after = JSON.stringify({ owners: channel.owners });
+    if (before !== after) changed = true;
+  }
+
+  return { ok: true, changed };
 }
 
 function sanitizeConfigValue(value: unknown): unknown {
@@ -296,7 +376,7 @@ export async function execAgentAction(
     if (!a.aid || !a.name || !a.baseagent) {
       return { error: '缺少必填参数：aid / name / baseagent', code: 'INVALID_ARGS' };
     }
-    const owner = typeof a.owner === 'string' ? a.owner.trim() : '';
+    const owner = typeof a.owner === 'string' && a.owner.trim() ? a.owner.trim() : peerId.trim();
     if (!owner) return { error: '缺少 owner AID', code: 'INVALID_ARGS' };
     if (!isValidAid(owner)) return { error: `无效 owner AID: ${owner}`, code: 'INVALID_ARGS' };
     if (!a.project || typeof a.project !== 'string') {
@@ -379,7 +459,8 @@ export async function execAgentAction(
  *  直接通过 ConfigManager 读写 agent config（不走 agentSet，避免其内部自动 evolagent.reload）——
  *  重载由用户在 Agents 页操作列手动触发（带任务执行检查）。
  *  AUN 渠道绑定 agent 顶层 aid，不可通过 patch 编辑：拒绝改 aid、拒绝 channels 数组里出现 aun 条目。
- *  可写字段：name / active_baseagent / baseagents / projects / owners / chatmode / channels（非 aun）。 */
+ *  可写字段：name / active_baseagent / baseagents / projects / owners / chatmode / channels（非 aun）/
+ *  channelOwners（按 type/name 局部更新非 AUN channel owners，避免前端回写脱敏 credentials）。 */
 export async function execAgentUpdate(args: Record<string, any> | undefined): Promise<ExecResult> {
   const a = args ?? {};
   if (!a.aid) return { error: '缺少 aid', code: 'INVALID_ARGS' };
@@ -409,6 +490,9 @@ export async function execAgentUpdate(args: Record<string, any> | undefined): Pr
   if (Array.isArray(p.channels) && p.channels.some((c: any) => c?.type === 'aun')) {
     return { error: 'AUN 渠道不可通过 patch 编辑（由 agent aid 隐式管理）', code: 'INVALID_ARGS' };
   }
+  if (p.channels !== undefined && p.channelOwners !== undefined) {
+    return { error: 'channels 与 channelOwners 不能同时提交', code: 'INVALID_ARGS' };
+  }
   const config = cfgRead<AgentConfig>(ConfigTarget.Agent, { self: a.aid });
   if (!config) return { error: `Agent "${a.aid}" not found`, code: 'NOT_FOUND' };
 
@@ -422,7 +506,7 @@ export async function execAgentUpdate(args: Record<string, any> | undefined): Pr
 
   let touched = false;
   const data: Record<string, any> = { aid: a.aid };
-  const hasConfigPatch = p.active_baseagent !== undefined || p.baseagents !== undefined || p.projects !== undefined || p.owners !== undefined || p.chatmode !== undefined || p.channels !== undefined;
+  const hasConfigPatch = p.active_baseagent !== undefined || p.baseagents !== undefined || p.projects !== undefined || p.owners !== undefined || p.chatmode !== undefined || p.channels !== undefined || p.channelOwners !== undefined;
   if (p.active_baseagent !== undefined) {
     if (typeof p.active_baseagent !== 'string' || !p.active_baseagent.trim()) {
       return { error: `无效 active_baseagent: ${JSON.stringify(p.active_baseagent)}（必须是非空字符串）`, code: 'INVALID_ARGS' };
@@ -449,6 +533,13 @@ export async function execAgentUpdate(args: Record<string, any> | undefined): Pr
   if (p.owners !== undefined)     { (config as any).owners = p.owners; touched = true; }
   if (p.chatmode !== undefined)   { (config as any).chatmode = p.chatmode; touched = true; }
   if (p.channels !== undefined)   { (config as any).channels = p.channels; touched = true; }
+  if (p.channelOwners !== undefined) {
+    const normalized = normalizeChannelOwnersPatch(p.channelOwners);
+    if (!normalized.ok) return { error: normalized.error, code: 'INVALID_ARGS' };
+    const applied = applyChannelOwnersPatch(config, normalized.value);
+    if (!applied.ok) return { error: applied.error, code: 'INVALID_ARGS' };
+    touched = true;
+  }
 
   if (p.name !== undefined) {
     const result = await updateAgentMdName(a.aid, p.name);

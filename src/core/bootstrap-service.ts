@@ -125,7 +125,7 @@ export class BootstrapService {
     saveAgent(withLifecycleForWrite(cfg, lifecycle) as AgentConfig);
   }
 
-  private resolveConfiguredRecipient(config: AgentConfig, channelKey: string, _channelType?: string): string | undefined {
+  private resolveConfiguredRecipient(config: AgentConfig, _channelKey: string, _channelType?: string): string | undefined {
     return config.owners?.[0];
   }
 

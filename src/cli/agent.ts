@@ -128,6 +128,12 @@ export interface AgentDeleteResult {
   stopped: boolean;
 }
 
+export interface AgentRenameResult {
+  ok: true;
+  aid: string;
+  name: string;
+}
+
 export interface AgentReadyResult {
   ok: true;
   aid: string;
@@ -984,17 +990,14 @@ export async function agentDisable(aid: string): Promise<AgentResult<AgentEnable
 
 async function agentSetEnabled(aid: string, enabled: boolean): Promise<AgentResult<AgentEnableDisableResult>> {
   const p = resolvePaths();
-  const configPath = path.join(p.agentsDir, aid, 'config.json');
-
-  if (!fs.existsSync(configPath)) {
-    return { ok: false, error: `Agent "${aid}" not found` };
-  }
-
-  let config: AgentConfig;
+  let config: AgentConfig | null;
   try {
-    config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+    config = loadAgent(aid);
   } catch (e: any) {
     return { ok: false, error: `Failed to read config: ${e?.message || e}` };
+  }
+  if (!config) {
+    return { ok: false, error: `Agent "${aid}" not found` };
   }
 
   config.enabled = enabled;
@@ -1183,6 +1186,40 @@ export async function agentDelete(aid: string, purge: boolean = false): Promise<
   } catch {}
 
   return { ok: true, aid, purged: purge, stopped };
+}
+
+// ==================== agentRename ====================
+
+export async function agentRename(aid: string, name: string): Promise<AgentResult<AgentRenameResult>> {
+  const config = loadAgent(aid);
+  if (!config) {
+    return { ok: false, error: `Agent "${aid}" not found` };
+  }
+
+  const agentMdFilePath = getAgentMdPath(aid);
+  if (!fs.existsSync(agentMdFilePath)) {
+    return { ok: false, error: `agent.md not found: ${toPosix(agentMdFilePath)}` };
+  }
+
+  const content = fs.readFileSync(agentMdFilePath, 'utf-8');
+  const quotedName = JSON.stringify(name);
+  let next: string;
+
+  if (/^---\n[\s\S]*?\n---/.test(content)) {
+    const frontmatter = content.match(/^---\n([\s\S]*?)\n---/);
+    const bodyStart = frontmatter ? frontmatter[0].length : 0;
+    const fm = frontmatter?.[1] ?? '';
+    const nextFm = /^name:\s*.*$/m.test(fm)
+      ? fm.replace(/^name:\s*.*$/m, `name: ${quotedName}`)
+      : `name: ${quotedName}\n${fm}`;
+    next = `---\n${nextFm}\n---${content.slice(bodyStart)}`;
+  } else {
+    next = `---\naid: ${JSON.stringify(aid)}\nname: ${quotedName}\n---\n${content}`;
+  }
+
+  fs.mkdirSync(path.dirname(agentMdFilePath), { recursive: true });
+  fs.writeFileSync(agentMdFilePath, next);
+  return { ok: true, aid, name };
 }
 // ==================== agentReady ====================
 

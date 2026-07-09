@@ -90,6 +90,7 @@ export class DaemonChannel implements ChannelAdapter {
       messageId: runId,
       timestamp: Date.now(),
       source: 'trigger',
+      replyContext: { metadata: { triggerRunId: runId } },
       triggerMeta: {
         triggerId: ctx.trigger.id,
         runId,
@@ -134,6 +135,10 @@ export class DaemonChannel implements ChannelAdapter {
       case 'result.error':
         slot.acc.error = { reason: payload.reason, text: payload.text };
         break;
+      case 'system.error':
+        slot.acc.error = { reason: payload.subtype, text: payload.text };
+        this.finish(runId, 'error', { errorType: payload.subtype });
+        break;
       case 'status.progress':
         if (payload.metadata?.activityType === 'tool_call') slot.acc.toolCallCount += 1;
         break;
@@ -156,19 +161,19 @@ export class DaemonChannel implements ChannelAdapter {
     trigger: TriggerDefinition,
     projectPath: string,
     baseagent: string,
+    runId: string,
   ): Promise<Session> {
-    const strategy = trigger.execution.session.strategy;
-    const channelId = trigger.execution.session.channelId || `trigger:${trigger.id}`;
-    const threadId = strategy === 'isolated'
-      ? `run:${Date.now()}`
-      : (trigger.execution.session.threadId || `trigger:${trigger.id}`);
+    const channelId = `trigger:${trigger.id}`;
+    const threadId = trigger.execution.thread === 'by_trigger'
+      ? `trigger:${trigger.id}`
+      : `trigger:${trigger.id}:${runId}`;
     return await this.sessionManager.getOrCreateSession(
       this.channelName,
       channelId,
       projectPath,
       threadId,
       { channelKey: this.channelKey, peerId: `trigger:${trigger.id}`, peerName: trigger.name },
-      trigger.execution.session.name || trigger.name,
+      trigger.name,
       undefined,
       'private',
       baseagent,

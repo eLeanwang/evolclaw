@@ -93,7 +93,9 @@ export interface AgentRunnerFull {
     sessionManager?: any,
     /** 本次调用的模型/强度/权限模式覆盖（按 关系>agent>全局 解析后传入；缺省用 runner 默认）。
      *  permissionMode 作为 per-call 入参传入，避免多会话共享 runner 实例时 setMode 的并发污染。 */
-    modelOverride?: { model?: string; effort?: string; permissionMode?: string }
+    modelOverride?: { model?: string; effort?: string; permissionMode?: string },
+    /** 本轮任务注入给 baseagent shell/tool 环境的变量。 */
+    runtimeEnv?: Record<string, string>
   ): Promise<AsyncIterable<AgentEvent>>;
 
   // 中断
