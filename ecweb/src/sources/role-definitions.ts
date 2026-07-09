@@ -22,12 +22,14 @@ async function getRolesModule() {
   const rolesPath = resolveParentDistModule('config', 'roles.js');
   const cmPath = resolveParentDistModule('config', 'config-manager.js');
   const resolverPath = resolveParentDistModule('config', 'peer-role-resolver.js');
+  const authPath = resolveParentDistModule('core', 'auth', 'auth-gateway.js');
 
   // Windows 上需要转换为 file:// URL
   try {
     const rolesMod = await import(toFileUrl(rolesPath));
     const cmMod = await import(toFileUrl(cmPath));
     const resolverMod = await import(toFileUrl(resolverPath));
+    const authMod = await import(toFileUrl(authPath));
 
     if (!rolesMod.readRolesConfig) throw new Error('readRolesConfig not found in roles.js');
     if (!rolesMod.getBuiltinRolesConfig) throw new Error('getBuiltinRolesConfig not found in roles.js');
@@ -35,6 +37,8 @@ async function getRolesModule() {
     if (!cmMod.read) throw new Error('read not found in config-manager.js');
     if (!cmMod.write) throw new Error('write not found in config-manager.js');
     if (!cmMod.ConfigTarget) throw new Error('ConfigTarget not found in config-manager.js');
+    if (!authMod.buildAuthSubject) throw new Error('buildAuthSubject not found in auth-gateway.js');
+    if (!authMod.authorizeOperation) throw new Error('authorizeOperation not found in auth-gateway.js');
 
     return {
       readRolesConfig: rolesMod.readRolesConfig as (selfAid?: string) => any,
@@ -44,6 +48,8 @@ async function getRolesModule() {
       write: cmMod.write as (target: any, value: any, sel?: any) => void,
       ConfigTarget: cmMod.ConfigTarget as any,
       resolver: resolverMod as any,
+      buildAuthSubject: authMod.buildAuthSubject as (input: any) => any,
+      authorizeOperation: authMod.authorizeOperation as (input: any) => Promise<any>,
     };
   } catch (err) {
     console.error('[role-definitions] Failed to import roles modules:', err);
@@ -80,15 +86,54 @@ function isWriteMethod(method: string | undefined): boolean {
   return method === 'PUT' || method === 'POST' || method === 'DELETE';
 }
 
-function canManageRoleDefinitions(processConfig: any, auth: RoleWriteAuth, aid: string, resolver: any): boolean {
-  if (auth.localDirect) return true;
+function isReadMethod(method: string | undefined): boolean {
+  return method === 'GET';
+}
+
+async function authorizeRolePolicyOperation(
+  modules: any,
+  processConfig: any,
+  auth: RoleWriteAuth,
+  aid: string,
+  operation: 'role.policy.read' | 'role.policy.write',
+  args: Record<string, unknown>,
+): Promise<any> {
   const actor = auth.actorAid || '';
-  if (!actor) return false;
-  if (Array.isArray(processConfig?.owners) && processConfig.owners.includes(actor)) return true;
-  return !!aid && (
-    !!resolver.isStaticAgentOwner?.(aid, actor)
-    || !!resolver.isStaticAgentAdmin?.(aid, actor)
-  );
+  const processOwners = Array.isArray(processConfig?.owners) ? processConfig.owners.map(String) : [];
+  const syntheticOwner = !!auth.localDirect || (!!actor && processOwners.includes(actor));
+  const subject = modules.buildAuthSubject({
+    selfAid: aid,
+    actorId: auth.localDirect ? 'local-direct' : actor || undefined,
+    channel: `ecweb#${aid}`,
+    channelType: 'aun',
+    channelId: actor || 'ecweb',
+    chatType: 'private',
+    conversationId: actor || 'ecweb',
+    processOwners,
+    ...(syntheticOwner ? {
+      roleDetail: {
+        effectiveRole: 'owner',
+        source: 'agent-config-owner',
+        isAuthenticated: true,
+        allowAccess: true,
+        roleExists: true,
+      },
+    } : {}),
+  });
+
+  return modules.authorizeOperation({
+    source: 'ecweb',
+    subject,
+    intent: {
+      operation,
+      scope: 'agent',
+      source: 'ecweb',
+      args: {
+        self: aid,
+        ...args,
+      },
+    },
+  });
 }
 
 const MODEL_PERMISSION_FIELD = 'baseagents.claude.model';
@@ -97,6 +142,9 @@ const COMMAND_PERMISSION_SCOPES = new Set(['relation', 'role', 'agent', 'process
 const COMMAND_CONSTRAINT_KEYS = new Set([
   'ownPeerOnly',
   'ownAgentOnly',
+  'targetCurrentAgentOnly',
+  'requireAgentAdmin',
+  'requireAgentOwner',
   'privateOnly',
   'groupOnly',
   'requireDaemonOwner',
@@ -116,6 +164,9 @@ const COMMAND_CONSTRAINT_KEYS = new Set([
 const COMMAND_BOOLEAN_CONSTRAINTS = new Set([
   'ownPeerOnly',
   'ownAgentOnly',
+  'targetCurrentAgentOnly',
+  'requireAgentAdmin',
+  'requireAgentOwner',
   'privateOnly',
   'groupOnly',
   'requireDaemonOwner',
@@ -601,20 +652,35 @@ export async function handleRoleDefinitionsApi(req: any, res: any, auth: RoleWri
       return;
     }
 
-    if (isWriteMethod(req.method)) {
+    if ((isWriteMethod(req.method) || (isReadMethod(req.method) && aid)) && urlPath !== '/api/role-definitions/operations') {
       if (!aid) {
         sendJson(res, 400, { error: 'aid is required' });
         return;
       }
       const processConfig = read(ConfigTarget.Process) || {};
-      if (!canManageRoleDefinitions(processConfig, auth, aid, modules.resolver)) {
-        console.warn('[role-definitions] Write forbidden:', {
+      const operation = isWriteMethod(req.method) ? 'role.policy.write' : 'role.policy.read';
+      const decision = await authorizeRolePolicyOperation(modules, processConfig, auth, aid, operation, {
+        method: req.method,
+        path: urlPath,
+      });
+      if (!decision.allow) {
+        console.warn('[role-definitions] Role policy access forbidden:', {
           method: req.method,
           url: req.url,
           actorAid: auth.actorAid,
-          localDirect: !!auth.localDirect
+          localDirect: !!auth.localDirect,
+          operation,
+          code: decision.code,
+          reason: decision.reason,
         });
-        sendJson(res, 403, { error: 'forbidden: agent owner/admin required' });
+        sendJson(res, 403, {
+          error: isWriteMethod(req.method)
+            ? 'forbidden: agent owner required'
+            : 'forbidden: role policy read not allowed',
+          code: decision.code,
+          reason: decision.reason,
+          actorRole: decision.subject?.role,
+        });
         return;
       }
     }

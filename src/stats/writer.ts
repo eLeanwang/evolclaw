@@ -2,9 +2,10 @@
  * writer.ts — 写入 usage_events 和 context_breakdown。
  */
 
-import { getDb } from './db.js';
+import { getDb, resetStatsDb } from './db.js';
 import type { UsageEvent } from './normalizer.js';
 import { resolvePrices, type GatewayPricingCache, type PricePair } from './price-resolver.js';
+import { logger } from '../utils/logger.js';
 
 export interface ContextBreakdown {
   ts: number;
@@ -36,79 +37,99 @@ export function insertUsageEvent(
   if (!db) return prices;
 
   try {
-    // 明细 INSERT + rollup UPSERT 包进同一事务：进程在两者间崩溃也不会让 rollup 与明细漂移。
-    db.exec('BEGIN');
-    db.prepare(`
-      INSERT INTO usage_events
-        (ts, agent_aid, peer_key, usage_subject_key, role, peer_type, session_id, model, billing_fn,
-         input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
-         cache_hit_tokens, cache_miss_tokens, image_tokens, total_context_tokens,
-         turns, duration_ms, context_window_pct,
-         cost_official_usd, cost_official_cny, cost_gateway_usd, cost_gateway_cny)
-      VALUES
-        (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      event.ts, event.agent_aid, event.peer_key,
-      event.usage_subject_key ?? event.peer_key ?? '',
-      event.role ?? '',
-      event.peer_type ?? null,
-      event.session_id ?? null, event.model, event.billing_fn,
-      event.input_tokens, event.output_tokens,
-      event.cache_creation_tokens, event.cache_read_tokens,
-      event.cache_hit_tokens ?? null, event.cache_miss_tokens ?? null,
-      event.image_tokens ?? null, event.total_context_tokens ?? null,
-      event.turns, event.duration_ms ?? null, event.context_window_pct ?? null,
-      prices.official?.usd ?? null, prices.official?.cny ?? null,
-      prices.gateway?.usd ?? null, prices.gateway?.cny ?? null,
-    );
-    // 写时增量：累加到日级预聚合表（grain 与 db.ts rebuildDailyRollup 一致）。
-    db.prepare(`
-      INSERT INTO usage_daily
-        (day, agent_aid, peer_key, peer_type, session_id, model, billing_fn,
-         input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
-         cache_hit_tokens, cache_miss_tokens, image_tokens, total_context_tokens,
-         turns, calls,
-         cost_official_usd, cost_official_cny, cost_gateway_usd, cost_gateway_cny)
-      VALUES
-        (strftime('%Y-%m-%d', ?/1000, 'unixepoch', 'localtime'),
-         ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)
-      ON CONFLICT(day, agent_aid, peer_key, session_id, model, billing_fn) DO UPDATE SET
-        peer_type             = excluded.peer_type,
-        input_tokens          = input_tokens          + excluded.input_tokens,
-        output_tokens         = output_tokens         + excluded.output_tokens,
-        cache_creation_tokens = cache_creation_tokens + excluded.cache_creation_tokens,
-        cache_read_tokens     = cache_read_tokens     + excluded.cache_read_tokens,
-        cache_hit_tokens      = cache_hit_tokens      + excluded.cache_hit_tokens,
-        cache_miss_tokens     = cache_miss_tokens     + excluded.cache_miss_tokens,
-        image_tokens          = image_tokens          + excluded.image_tokens,
-        total_context_tokens  = total_context_tokens  + excluded.total_context_tokens,
-        turns                 = turns                 + excluded.turns,
-        calls                 = calls                 + 1,
-        cost_official_usd     = COALESCE(cost_official_usd, 0) + COALESCE(excluded.cost_official_usd, 0),
-        cost_official_cny     = COALESCE(cost_official_cny, 0) + COALESCE(excluded.cost_official_cny, 0),
-        cost_gateway_usd      = COALESCE(cost_gateway_usd, 0)  + COALESCE(excluded.cost_gateway_usd, 0),
-        cost_gateway_cny      = COALESCE(cost_gateway_cny, 0)  + COALESCE(excluded.cost_gateway_cny, 0)
-    `).run(
-      event.ts,
-      event.agent_aid, event.peer_key, event.peer_type ?? '', event.session_id ?? '',
-      event.model, event.billing_fn,
-      event.input_tokens, event.output_tokens,
-      event.cache_creation_tokens, event.cache_read_tokens,
-      event.cache_hit_tokens ?? 0, event.cache_miss_tokens ?? 0,
-      event.image_tokens ?? 0, event.total_context_tokens ?? 0,
-      event.turns,
-      prices.official?.usd ?? null, prices.official?.cny ?? null,
-      prices.gateway?.usd ?? null, prices.gateway?.cny ?? null,
-    );
-    db.exec('COMMIT');
+    writeUsageEvent(db, event, prices);
   } catch (e) {
     // 写入失败不影响主流程
     try { db.exec('ROLLBACK'); } catch {}
-    import('../utils/logger.js').then(({ logger }) =>
-      logger.warn(`[StatsWriter] insertUsageEvent failed: ${e}`)
-    );
+    if (isSchemaMismatchError(e)) {
+      logger.warn(`[StatsWriter] insertUsageEvent schema mismatch, retrying after DB migration: ${e}`);
+      const retryDb = resetStatsDb(evolclawHome);
+      if (retryDb) {
+        try {
+          writeUsageEvent(retryDb, event, prices);
+          return prices;
+        } catch (retryError) {
+          try { retryDb.exec('ROLLBACK'); } catch {}
+          logger.error(`[StatsWriter] insertUsageEvent retry failed: ${retryError}`);
+        }
+      }
+    } else {
+      logger.warn(`[StatsWriter] insertUsageEvent failed: ${e}`);
+    }
   }
   return prices;
+}
+
+function isSchemaMismatchError(error: unknown): boolean {
+  return /no column|no such column|has no column/i.test(String(error));
+}
+
+function writeUsageEvent(db: any, event: UsageEvent, prices: PricePair): void {
+  // 明细 INSERT + rollup UPSERT 包进同一事务：进程在两者间崩溃也不会让 rollup 与明细漂移。
+  db.exec('BEGIN');
+  db.prepare(`
+    INSERT INTO usage_events
+      (ts, agent_aid, peer_key, usage_subject_key, role, peer_type, session_id, model, billing_fn,
+       input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
+       cache_hit_tokens, cache_miss_tokens, image_tokens, total_context_tokens,
+       turns, duration_ms, context_window_pct,
+       cost_official_usd, cost_official_cny, cost_gateway_usd, cost_gateway_cny)
+    VALUES
+      (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    event.ts, event.agent_aid, event.peer_key,
+    event.usage_subject_key ?? event.peer_key ?? '',
+    event.role ?? '',
+    event.peer_type ?? null,
+    event.session_id ?? null, event.model, event.billing_fn,
+    event.input_tokens, event.output_tokens,
+    event.cache_creation_tokens, event.cache_read_tokens,
+    event.cache_hit_tokens ?? null, event.cache_miss_tokens ?? null,
+    event.image_tokens ?? null, event.total_context_tokens ?? null,
+    event.turns, event.duration_ms ?? null, event.context_window_pct ?? null,
+    prices.official?.usd ?? null, prices.official?.cny ?? null,
+    prices.gateway?.usd ?? null, prices.gateway?.cny ?? null,
+  );
+  // 写时增量：累加到日级预聚合表（grain 与 db.ts rebuildDailyRollup 一致）。
+  db.prepare(`
+    INSERT INTO usage_daily
+      (day, agent_aid, peer_key, peer_type, session_id, model, billing_fn,
+       input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
+       cache_hit_tokens, cache_miss_tokens, image_tokens, total_context_tokens,
+       turns, calls,
+       cost_official_usd, cost_official_cny, cost_gateway_usd, cost_gateway_cny)
+    VALUES
+      (strftime('%Y-%m-%d', ?/1000, 'unixepoch', 'localtime'),
+       ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)
+    ON CONFLICT(day, agent_aid, peer_key, session_id, model, billing_fn) DO UPDATE SET
+      peer_type             = excluded.peer_type,
+      input_tokens          = input_tokens          + excluded.input_tokens,
+      output_tokens         = output_tokens         + excluded.output_tokens,
+      cache_creation_tokens = cache_creation_tokens + excluded.cache_creation_tokens,
+      cache_read_tokens     = cache_read_tokens     + excluded.cache_read_tokens,
+      cache_hit_tokens      = cache_hit_tokens      + excluded.cache_hit_tokens,
+      cache_miss_tokens     = cache_miss_tokens     + excluded.cache_miss_tokens,
+      image_tokens          = image_tokens          + excluded.image_tokens,
+      total_context_tokens  = total_context_tokens  + excluded.total_context_tokens,
+      turns                 = turns                 + excluded.turns,
+      calls                 = calls                 + 1,
+      cost_official_usd     = COALESCE(cost_official_usd, 0) + COALESCE(excluded.cost_official_usd, 0),
+      cost_official_cny     = COALESCE(cost_official_cny, 0) + COALESCE(excluded.cost_official_cny, 0),
+      cost_gateway_usd      = COALESCE(cost_gateway_usd, 0)  + COALESCE(excluded.cost_gateway_usd, 0),
+      cost_gateway_cny      = COALESCE(cost_gateway_cny, 0)  + COALESCE(excluded.cost_gateway_cny, 0)
+  `).run(
+    event.ts,
+    event.agent_aid, event.peer_key, event.peer_type ?? '', event.session_id ?? '',
+    event.model, event.billing_fn,
+    event.input_tokens, event.output_tokens,
+    event.cache_creation_tokens, event.cache_read_tokens,
+    event.cache_hit_tokens ?? 0, event.cache_miss_tokens ?? 0,
+    event.image_tokens ?? 0, event.total_context_tokens ?? 0,
+    event.turns,
+    prices.official?.usd ?? null, prices.official?.cny ?? null,
+    prices.gateway?.usd ?? null, prices.gateway?.cny ?? null,
+  );
+  db.exec('COMMIT');
 }
 
 export function insertContextBreakdown(evolclawHome: string, bd: ContextBreakdown): void {

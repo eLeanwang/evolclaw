@@ -222,6 +222,8 @@ function groupFor(target: ConfigTarget, sel?: Selector): string {
 export interface WriteOpts {
   /** 璺宠繃 schema 鏍￠獙锛堣縼绉诲唴閮ㄥ啓鍥炵敤锛夈€?*/
   skipValidate?: boolean;
+  /** Allow trusted internal migrations to persist configs that would be downgraded at runtime. */
+  allowRoleConstraintViolations?: boolean;
 }
 
 function normalizeAgentConfigForWrite<T extends Record<string, any>>(value: T): T {
@@ -390,13 +392,12 @@ export function write<T = any>(target: ConfigTarget, value: T, sel?: Selector, o
       if (!validation.valid) {
         console.warn(`[config-manager] Role constraint violations on write:`,
           validation.violations.map(v => `${v.field}: ${v.reason}`));
-        // 娉ㄦ剰锛氬綋鍓嶄负璀﹀憡妯″紡锛屼笉闃绘鍐欏叆
-        // 鏈潵鍙互閫氳繃鐜鍙橀噺鍚敤涓ユ牸妯″紡锛?
-        // if (process.env.EVOLCLAW_STRICT_ROLE_MODE === 'true') {
-        //   throw new ConfigError('ROLE_VIOLATION', 'Config violates role constraints');
-        // }
+        if (sel.role && !opts.allowRoleConstraintViolations) {
+          throw new ConfigError('ROLE_VIOLATION', 'Config violates role constraints');
+        }
       }
     } catch (err) {
+      if (err instanceof ConfigError && err.code === 'ROLE_VIOLATION') throw err;
       console.warn('[config-manager] Failed to validate role constraints on write:', err);
       // 楠岃瘉澶辫触涓嶉樆姝㈠啓鍏ワ紝鍙褰曡鍛?
     }

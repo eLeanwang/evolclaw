@@ -1015,10 +1015,11 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
     if (toolName === 'Bash') return checkReadonly(toolName, input, projectPath, readonlyContext);
     if (toolName !== 'FileChange') return { behavior: 'allow' };
 
-    const tmpDir = path.join(projectPath, '.evolclaw', 'tmp') + path.sep;
+    const tmpDir = path.resolve(projectPath, '.evolclaw', 'tmp');
     const isAllowedPath = (filePath: string): boolean => {
-      const resolved = path.resolve(projectPath, filePath) + (filePath.endsWith(path.sep) ? path.sep : '');
-      return resolved.startsWith(tmpDir) || resolved === tmpDir.slice(0, -1);
+      const resolved = path.resolve(projectPath, filePath);
+      const relative = path.relative(tmpDir, resolved);
+      return relative === '' || (!!relative && !relative.startsWith('..') && !path.isAbsolute(relative));
     };
 
     const grantRoot = input.grantRoot;

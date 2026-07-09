@@ -18,6 +18,18 @@ function readRelationPermissionMode(peerId = 'user1'): string | undefined {
   return JSON.parse(fs.readFileSync(file, 'utf-8')).permissionMode;
 }
 
+function readRelationConfig(peerId = 'user1'): Record<string, any> {
+  const file = agentRelationConfig(TEST_AID, formatPeerKey('aun', peerId));
+  if (!fs.existsSync(file)) return {};
+  return JSON.parse(fs.readFileSync(file, 'utf-8'));
+}
+
+function writeRelationConfig(peerId: string, patch: Record<string, any>): void {
+  const file = agentRelationConfig(TEST_AID, formatPeerKey('aun', peerId));
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, JSON.stringify({ ...readRelationConfig(peerId), ...patch }));
+}
+
 function relationPermissionResult(mode: string) {
   return {
     data: {
@@ -61,6 +73,7 @@ beforeEach(() => {
     permissionMode: 'auto',
     show_activities: 'all',
   }));
+  writeRelationConfig('user1', { permissionMode: 'bypass' });
 });
 
 afterEach(() => {
@@ -228,7 +241,7 @@ describe('execMenuQuery', () => {
     it('returns current mode', async () => {
       const { handler } = createHandler();
       const result = await handler.execMenuQuery('/chatmode', 'aun', 'chat1', 'user1');
-      expect(result).toEqual({ data: { mode: 'interactive', scope: 'agent', field: 'chatmode.private', self: TEST_AID } });
+      expect(result).toEqual({ data: { mode: 'interactive', scope: 'relation', field: 'chatmode.private', self: TEST_AID, peerKey: formatPeerKey('aun', 'user1') } });
     });
 
     it('falls back to agent config when no session', async () => {
@@ -236,7 +249,7 @@ describe('execMenuQuery', () => {
       const sm = createMockSessionManager({ getActiveSession: vi.fn().mockResolvedValue(null) });
       const { handler } = createHandler({ sessionManager: sm });
       const result = await handler.execMenuQuery('/chatmode', 'aun', 'chat1', 'user1');
-      expect(result).toEqual({ data: { mode: 'proactive', scope: 'agent', field: 'chatmode.private', self: TEST_AID } });
+      expect(result).toEqual({ data: { mode: 'proactive', scope: 'relation', field: 'chatmode.private', self: TEST_AID, peerKey: formatPeerKey('aun', 'user1') } });
     });
   });
 
@@ -257,7 +270,7 @@ describe('execMenuQuery', () => {
       });
       const { handler } = createHandler({ sessionManager: sm });
       const result = await handler.execMenuQuery('/dispatch', 'aun', 'chat1', 'user1');
-      expect(result).toEqual({ data: { mode: 'mention', scope: 'agent', field: 'dispatch', self: TEST_AID } });
+      expect(result).toEqual({ data: { mode: 'mention', scope: 'relation', field: 'dispatch', self: TEST_AID, peerKey: formatPeerKey('aun', 'chat1') } });
     });
   });
 
@@ -447,6 +460,14 @@ describe('execMenuUpdate', () => {
       expect(readRelationPermissionMode()).toBe('readonly');
     });
 
+    it('rejects /perm update through the chat command path for visitor', async () => {
+      const sm = createMockSessionManager({ resolveIdentity: vi.fn().mockReturnValue({ role: 'visitor' }) });
+      const { handler } = createHandler({ sessionManager: sm });
+      const result = await handler.handle('/perm readonly', 'aun', 'chat1', undefined, 'user1') as any;
+      expect(result.kind).toBe('command.error');
+      expect(readRelationPermissionMode()).toBe('bypass');
+    });
+
     it('rejects invalid mode', async () => {
       const { handler } = createHandler();
       const result = await handler.execMenuUpdate('/perm', 'invalid', 'aun', 'chat1', 'user1') as any;
@@ -473,8 +494,8 @@ describe('execMenuUpdate', () => {
     it('switches mode in session', async () => {
       const { handler } = createHandler();
       const result = await handler.execMenuUpdate('/chatmode', 'proactive', 'aun', 'chat1', 'user1');
-      expect(result).toEqual({ data: { mode: 'proactive', scope: 'agent', field: 'chatmode.private', self: TEST_AID } });
-      expect(readTestAgentConfig().chatmode.private).toBe('proactive');
+      expect(result).toEqual({ data: { mode: 'proactive', scope: 'relation', field: 'chatmode.private', self: TEST_AID, peerKey: formatPeerKey('aun', 'user1') } });
+      expect(readRelationConfig().chatmode.private).toBe('proactive');
     });
 
     it('rejects invalid mode', async () => {
@@ -483,12 +504,12 @@ describe('execMenuUpdate', () => {
       expect(result.code).toBe('INVALID_VALUE');
     });
 
-    it('writes to agent config when no session', async () => {
+    it('writes relation config when no session', async () => {
       const sm = createMockSessionManager({ getActiveSession: vi.fn().mockResolvedValue(null) });
       const { handler } = createHandler({ sessionManager: sm });
       const result = await handler.execMenuUpdate('/chatmode', 'proactive', 'aun', 'chat1', 'user1');
-      expect(result).toEqual({ data: { mode: 'proactive', scope: 'agent', field: 'chatmode.private', self: TEST_AID } });
-      expect(readTestAgentConfig().chatmode.private).toBe('proactive');
+      expect(result).toEqual({ data: { mode: 'proactive', scope: 'relation', field: 'chatmode.private', self: TEST_AID, peerKey: formatPeerKey('aun', 'user1') } });
+      expect(readRelationConfig().chatmode.private).toBe('proactive');
     });
 
     it('rejects non-admin in group chat', async () => {
@@ -500,7 +521,7 @@ describe('execMenuUpdate', () => {
       });
       const { handler } = createHandler({ sessionManager: sm });
       const result = await handler.execMenuUpdate('/chatmode', 'proactive', 'aun', 'chat1', 'user1') as any;
-      expect(result.code).toBe('NO_PERMISSION');
+      expect(result.code).toBe('NOT_ALLOWED');
     });
   });
 
@@ -515,8 +536,8 @@ describe('execMenuUpdate', () => {
       });
       const { handler } = createHandler({ sessionManager: sm });
       const result = await handler.execMenuUpdate('/dispatch', 'broadcast', 'aun', 'chat1', 'user1');
-      expect(result).toEqual({ data: { mode: 'broadcast', scope: 'agent', field: 'dispatch', self: TEST_AID } });
-      expect(readTestAgentConfig().dispatch).toBe('broadcast');
+      expect(result).toEqual({ data: { mode: 'broadcast', scope: 'relation', field: 'dispatch', self: TEST_AID, peerKey: formatPeerKey('aun', 'chat1') } });
+      expect(readRelationConfig('chat1').dispatch).toBe('broadcast');
     });
 
     it('rejects in private chat', async () => {
@@ -535,8 +556,24 @@ describe('execMenuUpdate', () => {
       });
       const { handler } = createHandler({ sessionManager: sm });
       const result = await handler.execMenuUpdate('/dispatch', 'clear', 'aun', 'chat1', 'user1');
-      expect(result).toEqual({ data: { mode: null, scope: 'agent', field: 'dispatch', self: TEST_AID } });
-      expect(readTestAgentConfig().dispatch).toBeUndefined();
+      expect(result).toEqual({ data: { mode: null, scope: 'relation', field: 'dispatch', self: TEST_AID, peerKey: formatPeerKey('aun', 'chat1') } });
+      expect(readRelationConfig('chat1').dispatch).toBeUndefined();
+    });
+
+    it('rejects /dispatch update through the chat command path for visitor', async () => {
+      const sm = createMockSessionManager({
+        getActiveSession: vi.fn().mockResolvedValue({
+          id: 'sess-1', chatType: 'group', sessionMode: 'interactive',
+          metadata: { permissionMode: 'auto' }, projectPath: '/tmp', agentId: 'claude',
+          baseagent: 'claude', selfAID: TEST_AID, channelType: 'aun',
+          createdAt: Date.now(), updatedAt: Date.now(),
+        }),
+        resolveIdentity: vi.fn().mockReturnValue({ role: 'visitor' }),
+      });
+      const { handler } = createHandler({ sessionManager: sm });
+      const result = await handler.handle('/dispatch broadcast', 'aun', 'chat1', undefined, 'user1') as any;
+      expect(result.kind).toBe('command.error');
+      expect(readTestAgentConfig().dispatch).toBe('mention');
     });
   });
 

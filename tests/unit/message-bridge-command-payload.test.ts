@@ -1,5 +1,12 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
 import { MessageBridge } from '../../src/core/message/message-bridge.js';
+import { ConfigTarget, write } from '../../src/config/config-manager.js';
+import { formatPeerKey } from '../../src/core/relation/peer-identity.js';
+import { _resetRoot } from '../../src/paths.js';
+import { _resetSchemaCache } from '../../src/config/schema-registry.js';
 import type { ChannelAdapter, InboundMessage, ReplyContext, OutboundEnvelope, OutboundPayload } from '../../src/types.js';
 
 /**
@@ -28,6 +35,11 @@ interface BridgeHarness {
   sendReply: ReturnType<typeof vi.fn>;
   triggerInbound: (msg: InboundMessage) => Promise<void>;
 }
+
+const BRIDGE_AID = 'bridge-test.agentid.pub';
+const BRIDGE_PEER = 'peer-1';
+const oldHome = process.env.EVOLCLAW_HOME;
+let tmpRoot: string;
 
 /** 构造一个最小的 MessageBridge harness，捕获 adapter.send / sendReply 调用 */
 function makeBridge(opts: { adapterSend?: ReturnType<typeof vi.fn> | undefined } = {}): BridgeHarness {
@@ -71,9 +83,9 @@ function makeBridge(opts: { adapterSend?: ReturnType<typeof vi.fn> | undefined }
 
   // agentRegistry 是可选注入，命令路径只读 resolveByChannel
   bridge.setAgentRegistry({
-    resolveByChannel: vi.fn().mockReturnValue({ name: 'evol-agent', projectPath: '/tmp/proj', config: {} }),
+    resolveByChannel: vi.fn().mockReturnValue({ aid: BRIDGE_AID, name: 'evol-agent', projectPath: '/tmp/proj', config: {} }),
     setChannelOwner: vi.fn(),
-    getOwner: vi.fn().mockReturnValue('peer-1'),
+    getOwner: vi.fn().mockReturnValue(BRIDGE_PEER),
   } as any);
 
   let registeredHandler: ((m: InboundMessage) => Promise<void>) | undefined;
@@ -100,7 +112,8 @@ function makeInbound(over: Partial<InboundMessage> = {}): InboundMessage {
     channel: 'test-instance',
     channelType: 'test-type',
     channelId: 'chat-1',
-    peerId: 'peer-1',
+    selfAID: BRIDGE_AID,
+    peerId: BRIDGE_PEER,
     chatType: 'private',
     content: '/help',
     ...over,
@@ -113,11 +126,31 @@ function parseCustomResponse(sendMock: ReturnType<typeof vi.fn>) {
   return JSON.parse((payload as any).payload);
 }
 
-const NONE_IDENTITY = { role: 'none', mode: 'interactive' };
+const MEMBER_IDENTITY = { role: 'member', mode: 'interactive' };
 
 describe('MessageBridge — 命令回显走 adapter.send', () => {
   beforeEach(() => {
+    tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'evolclaw-bridge-'));
+    process.env.EVOLCLAW_HOME = tmpRoot;
+    _resetRoot();
+    _resetSchemaCache();
+    write(ConfigTarget.Agent, {
+      aid: BRIDGE_AID,
+      owners: ['owner.aid.pub'],
+      channels: [],
+    }, { self: BRIDGE_AID });
+    write(ConfigTarget.Relation, {
+      roles: { assigned: 'member' },
+    }, { self: BRIDGE_AID, peerKey: formatPeerKey('test-type', BRIDGE_PEER) });
     vi.clearAllMocks();
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpRoot, { recursive: true, force: true });
+    if (oldHome) process.env.EVOLCLAW_HOME = oldHome;
+    else delete process.env.EVOLCLAW_HOME;
+    _resetRoot();
+    _resetSchemaCache();
   });
 
   it('cmdHandler 返回 string → 包装为 command.result payload', async () => {
@@ -212,7 +245,27 @@ describe('MessageBridge — 命令回显走 adapter.send', () => {
 
 describe('MessageBridge — menu 协议', () => {
   beforeEach(() => {
+    tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'evolclaw-bridge-'));
+    process.env.EVOLCLAW_HOME = tmpRoot;
+    _resetRoot();
+    _resetSchemaCache();
+    write(ConfigTarget.Agent, {
+      aid: BRIDGE_AID,
+      owners: ['owner.aid.pub'],
+      channels: [],
+    }, { self: BRIDGE_AID });
+    write(ConfigTarget.Relation, {
+      roles: { assigned: 'member' },
+    }, { self: BRIDGE_AID, peerKey: formatPeerKey('test-type', BRIDGE_PEER) });
     vi.clearAllMocks();
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpRoot, { recursive: true, force: true });
+    if (oldHome) process.env.EVOLCLAW_HOME = oldHome;
+    else delete process.env.EVOLCLAW_HOME;
+    _resetRoot();
+    _resetSchemaCache();
   });
 
   it('menu.list 返回菜单树', async () => {
@@ -241,7 +294,7 @@ describe('MessageBridge — menu 协议', () => {
       chatType: 'group',
     }));
 
-    expect(h.cmdHandler.getMenuItems).toHaveBeenCalledWith('none', 'group', 'agent');
+    expect(h.cmdHandler.getMenuItems).toHaveBeenCalledWith('member', 'group', 'agent');
   });
 
   it('menu.list 在控制 channel 使用 control scope', async () => {
@@ -254,7 +307,7 @@ describe('MessageBridge — menu 协议', () => {
       isControlChannel: true,
     }));
 
-    expect(h.cmdHandler.getMenuItems).toHaveBeenCalledWith('none', 'private', 'control');
+    expect(h.cmdHandler.getMenuItems).toHaveBeenCalledWith('member', 'private', 'control');
   });
 
   it('menu.query 通过 name 解析 cmd 并调用 execMenuQuery', async () => {
@@ -264,7 +317,7 @@ describe('MessageBridge — menu 协议', () => {
 
     await h.triggerInbound(makeInbound({ content: JSON.stringify({ type: 'menu.query', id: 'q1', name: 'chatmode' }) }));
 
-    expect(h.cmdHandler.execMenuQuery).toHaveBeenCalledWith('/chatmode', 'test-instance', 'chat-1', 'peer-1', undefined, 'private', false, NONE_IDENTITY);
+    expect(h.cmdHandler.execMenuQuery).toHaveBeenCalledWith('/chatmode', 'test-instance', 'chat-1', BRIDGE_PEER, undefined, 'private', false, MEMBER_IDENTITY);
     expect(parseCustomResponse(sendMock)).toEqual({
       type: 'menu.response',
       id: 'q1',
@@ -280,7 +333,7 @@ describe('MessageBridge — menu 协议', () => {
 
     await h.triggerInbound(makeInbound({ content: JSON.stringify({ type: 'menu.options', id: 'o1', name: 'chatmode' }) }));
 
-    expect(h.cmdHandler.getSubMenuItems).toHaveBeenCalledWith('/chatmode', 'test-instance', 'chat-1', 'peer-1', undefined, NONE_IDENTITY, 'private', false);
+    expect(h.cmdHandler.getSubMenuItems).toHaveBeenCalledWith('/chatmode', 'test-instance', 'chat-1', BRIDGE_PEER, undefined, MEMBER_IDENTITY, 'private', false);
     expect(parseCustomResponse(sendMock)).toEqual({
       type: 'menu.response',
       id: 'o1',
@@ -296,7 +349,7 @@ describe('MessageBridge — menu 协议', () => {
 
     await h.triggerInbound(makeInbound({ content: JSON.stringify({ type: 'menu.update', id: 'u1', name: 'chatmode', value: 'proactive' }) }));
 
-    expect(h.cmdHandler.execMenuUpdate).toHaveBeenCalledWith('/chatmode', 'proactive', 'test-instance', 'chat-1', 'peer-1', NONE_IDENTITY, false, undefined);
+    expect(h.cmdHandler.execMenuUpdate).toHaveBeenCalledWith('/chatmode', 'proactive', 'test-instance', 'chat-1', BRIDGE_PEER, MEMBER_IDENTITY, false, undefined);
     expect(parseCustomResponse(sendMock)).toEqual({
       type: 'menu.response',
       id: 'u1',
@@ -327,7 +380,7 @@ describe('MessageBridge — menu 协议', () => {
 
     await h.triggerInbound(makeInbound({ content: JSON.stringify({ type: 'menu.action', id: 'a1', name: 'session', action: 'stop' }) }));
 
-    expect(h.cmdHandler.execMenuAction).toHaveBeenCalledWith('/session', 'stop', undefined, 'test-instance', 'chat-1', 'peer-1', NONE_IDENTITY, 'private', 'a1', false);
+    expect(h.cmdHandler.execMenuAction).toHaveBeenCalledWith('/session', 'stop', undefined, 'test-instance', 'chat-1', BRIDGE_PEER, MEMBER_IDENTITY, 'private', 'a1', false);
     expect(parseCustomResponse(sendMock)).toEqual({
       type: 'menu.response',
       id: 'a1',
@@ -346,7 +399,7 @@ describe('MessageBridge — menu 协议', () => {
     }) }));
 
     expect(h.cmdHandler.execMenuAction).toHaveBeenCalledWith(
-      '/session', 'switch', { target: '前端重构' }, 'test-instance', 'chat-1', 'peer-1', NONE_IDENTITY, 'private', 'a2', false
+      '/session', 'switch', { target: '前端重构' }, 'test-instance', 'chat-1', BRIDGE_PEER, MEMBER_IDENTITY, 'private', 'a2', false
     );
   });
 
@@ -357,7 +410,7 @@ describe('MessageBridge — menu 协议', () => {
 
     await h.triggerInbound(makeInbound({ content: JSON.stringify({ type: 'menu.options', id: 'topic-o1', name: 'topic' }) }));
 
-    expect(h.cmdHandler.getSubMenuItems).toHaveBeenCalledWith('/topic', 'test-instance', 'chat-1', 'peer-1', undefined, NONE_IDENTITY, 'private', false);
+    expect(h.cmdHandler.getSubMenuItems).toHaveBeenCalledWith('/topic', 'test-instance', 'chat-1', BRIDGE_PEER, undefined, MEMBER_IDENTITY, 'private', false);
     expect(parseCustomResponse(sendMock)).toEqual({
       type: 'menu.response',
       id: 'topic-o1',

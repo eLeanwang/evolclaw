@@ -463,7 +463,7 @@ interface MenuModelTarget {
 }
 
 function menuChatmodeScope(args?: Record<string, any>): MenuChatmodeScope | { error: string; code: string } {
-  const raw = menuStringArg(args, 'scope') ?? 'agent';
+  const raw = menuStringArg(args, 'scope') ?? 'relation';
   if (raw === 'agent' || raw === 'relation') return raw;
   return { error: `无效 scope: ${raw}，可选: agent / relation`, code: 'INVALID_SCOPE' };
 }
@@ -567,7 +567,7 @@ function writeMenuChatmode(target: MenuChatmodeTarget, value: MenuChatmodeValue)
 }
 
 function menuDispatchScope(args?: Record<string, any>): MenuDispatchScope | { error: string; code: string } {
-  const raw = menuStringArg(args, 'scope') ?? 'agent';
+  const raw = menuStringArg(args, 'scope') ?? 'relation';
   if (raw === 'agent' || raw === 'relation') return raw;
   return { error: `无效 scope: ${raw}，可选: agent / relation`, code: 'INVALID_SCOPE' };
 }
@@ -692,23 +692,29 @@ function isMenuPermissionValue(value: string | undefined): value is MenuPermissi
 }
 
 function readMenuPermission(target: MenuPermissionTarget): MenuPermissionValue {
+  const sel = target.scope === 'relation'
+    ? { ...target.sel, role: undefined }
+    : target.sel;
   try {
-    const mode = resolveEffective(target.sel, { cache: true }).permissionMode;
+    const mode = resolveEffective(sel, { cache: true }).permissionMode;
     if (isMenuPermissionValue(mode)) return mode;
   } catch {}
-  const fallback = resolvePermissionMode(target.sel);
+  const fallback = resolvePermissionMode(sel);
   return isMenuPermissionValue(fallback) ? fallback : 'auto';
 }
 
 function writeMenuPermission(target: MenuPermissionTarget, value: MenuPermissionValue): void {
   const route = routeFieldPath(target.fieldPath, target.scope);
-  const cur = (cfgRead<Record<string, any>>(route.target, target.sel) as Record<string, any>) || {};
+  const sel = target.scope === 'relation'
+    ? { ...target.sel, role: undefined }
+    : target.sel;
+  const cur = (cfgRead<Record<string, any>>(route.target, sel) as Record<string, any>) || {};
   cur.permissionMode = value;
-  cfgWrite(route.target, cur, target.sel);
+  cfgWrite(route.target, cur, sel);
 }
 
 function menuModelScope(args?: Record<string, any>): MenuModelScope | { error: string; code: string } {
-  const raw = menuStringArg(args, 'scope') ?? 'agent';
+  const raw = menuStringArg(args, 'scope') ?? 'relation';
   if (raw === 'agent' || raw === 'relation') return raw;
   return { error: `无效 scope: ${raw}，可选: agent / relation`, code: 'INVALID_SCOPE' };
 }
@@ -856,11 +862,13 @@ function buildMenuIntent(
     source: 'menu',
     args: { ...payload, ...(extra ?? {}) },
   });
-  const modelScope = args?.scope === 'relation' ? 'relation' : 'agent';
+  const modelScope = args?.scope === 'agent' ? 'agent' : 'relation';
 
   if (verb === 'query') {
     if (cmdBase === '/model') return intent('model.current', modelScope);
     if (cmdBase === '/effort') return intent('model.current', modelScope);
+    if (cmdBase === '/chatmode') return intent('chatmode.current', args?.scope === 'agent' ? 'agent' : 'relation');
+    if (cmdBase === '/dispatch') return intent('dispatch.current', args?.scope === 'agent' ? 'agent' : 'relation');
     if (cmdBase === '/gateway') return intent('gateway.read', 'process');
     if (cmdBase === '/config') return intent('config.read', 'process');
     if (cmdBase === '/system') return intent('system.status', 'process');
@@ -872,6 +880,8 @@ function buildMenuIntent(
   if (verb === 'update') {
     if (cmdBase === '/model') return intent('model.use', modelScope, { model: value });
     if (cmdBase === '/effort') return intent('model.effort', modelScope, { effort: value });
+    if (cmdBase === '/chatmode') return intent('chatmode.update', args?.scope === 'agent' ? 'agent' : 'relation', { value });
+    if (cmdBase === '/dispatch') return intent('dispatch.update', args?.scope === 'agent' ? 'agent' : 'relation', { value });
     if (cmdBase === '/gateway') return intent('gateway.write', 'process');
     if (cmdBase === '/config') return intent('config.write', 'process');
   }
@@ -2070,7 +2080,6 @@ export async function execMenuUpdate(this: any,
   }
 
   if (cmdBase === '/effort') {
-    if (!isAdmin) return { error: '无权限', code: 'NO_PERMISSION' };
     const target = resolveMenuModelTarget.call(this, {
       args,
       session,
@@ -2116,7 +2125,6 @@ export async function execMenuUpdate(this: any,
   }
 
   if (cmdBase === '/chatmode') {
-    if (!isAdmin) return { error: '无权限', code: 'NO_PERMISSION' };
     if (arg !== 'interactive' && arg !== 'proactive') {
       return { error: `无效模式: ${arg}`, code: 'INVALID_VALUE' };
     }
@@ -2147,7 +2155,6 @@ export async function execMenuUpdate(this: any,
   }
 
   if (cmdBase === '/dispatch') {
-    if (!isAdmin) return { error: '无权限', code: 'NO_PERMISSION' };
     if (arg !== 'mention' && arg !== 'broadcast' && arg !== 'clear') {
       return { error: `无效模式: ${arg}`, code: 'INVALID_VALUE' };
     }

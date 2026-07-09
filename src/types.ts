@@ -1245,7 +1245,11 @@ export interface CommandAuthorizationContext {
 
 export interface CommandPermissionConstraints {
   ownPeerOnly?: boolean;
+  /** @deprecated Use targetCurrentAgentOnly. This only checks that the target self is the current agent. */
   ownAgentOnly?: boolean;
+  targetCurrentAgentOnly?: boolean;
+  requireAgentAdmin?: boolean;
+  requireAgentOwner?: boolean;
   privateOnly?: boolean;
   groupOnly?: boolean;
   requireDaemonOwner?: boolean;

@@ -55,7 +55,14 @@ export function getBuiltinUserRoleDefinitions(): Record<string, RoleDefinition> 
         'role.revoke': { allow: false },
         'category:read': { allow: true },
         'category:write-own': { allow: true },
-        'model.*': { allow: true, scopes: ['relation', 'agent'], constraints: { ownPeerOnly: true, ownAgentOnly: true } },
+        'model.*': { allow: true, scopes: ['relation'], constraints: { ownPeerOnly: true, targetCurrentAgentOnly: true } },
+        'permission.current': { allow: true, scopes: ['relation'], constraints: { ownPeerOnly: true, targetCurrentAgentOnly: true } },
+        'permission.answer': { allow: true, scopes: ['relation'], constraints: { ownPeerOnly: true, targetCurrentAgentOnly: true } },
+        'permission.update': { allow: false },
+        'chatmode.current': { allow: true, scopes: ['relation'], constraints: { ownPeerOnly: true, targetCurrentAgentOnly: true } },
+        'chatmode.update': { allow: true, scopes: ['relation'], constraints: { ownPeerOnly: true, targetCurrentAgentOnly: true, requireFieldOverride: 'chatmode' } },
+        'dispatch.current': { allow: true, scopes: ['relation'], constraints: { groupOnly: true } },
+        'dispatch.update': { allow: false },
         'ec.msg.send': { allow: true, constraints: { ownPeerOnly: true } },
         'ec.msg.file': { allow: true, constraints: { ownPeerOnly: true } },
         'ec.group.send': { allow: true, constraints: { groupOnly: true } },
@@ -94,13 +101,20 @@ export function getBuiltinUserRoleDefinitions(): Record<string, RoleDefinition> 
       commandPermissions: {
         'role.assign': { allow: false },
         'role.revoke': { allow: false },
-        'model.list': { allow: true, scopes: ['relation'], constraints: { ownPeerOnly: true, ownAgentOnly: true } },
-        'model.current': { allow: true, scopes: ['relation'], constraints: { ownPeerOnly: true, ownAgentOnly: true } },
+        'model.list': { allow: true, scopes: ['relation'], constraints: { ownPeerOnly: true, targetCurrentAgentOnly: true } },
+        'model.current': { allow: true, scopes: ['relation'], constraints: { ownPeerOnly: true, targetCurrentAgentOnly: true } },
         'model.use': {
           allow: true,
           scopes: ['relation'],
-          constraints: { ownPeerOnly: true, ownAgentOnly: true, requireFieldOverride: 'baseagents.claude.model' },
+          constraints: { ownPeerOnly: true, targetCurrentAgentOnly: true, requireFieldOverride: 'baseagents.claude.model' },
         },
+        'permission.current': { allow: true, scopes: ['relation'], constraints: { ownPeerOnly: true, targetCurrentAgentOnly: true } },
+        'permission.answer': { allow: true, scopes: ['relation'], constraints: { ownPeerOnly: true, targetCurrentAgentOnly: true } },
+        'permission.update': { allow: false },
+        'chatmode.current': { allow: true, scopes: ['relation'], constraints: { ownPeerOnly: true, targetCurrentAgentOnly: true } },
+        'chatmode.update': { allow: false },
+        'dispatch.current': { allow: true, scopes: ['relation'], constraints: { groupOnly: true } },
+        'dispatch.update': { allow: false },
         'session.list': { allow: true, scopes: ['relation'], constraints: { ownPeerOnly: true } },
         'ec.msg.send': { allow: true, scopes: ['relation'], constraints: { ownPeerOnly: true, privateOnly: true } },
         'ec.msg.file': { allow: false },
@@ -147,13 +161,24 @@ export function getManagementFieldPermissions(role: ManagementRole): Record<stri
 }
 
 export function getManagementCommandPermissions(_role: ManagementRole): Record<string, CommandPermission> {
-  return {
+  const permissions: Record<string, CommandPermission> = {
     'role.assign': { allow: true, scopes: ['agent'] },
     'role.revoke': { allow: true, scopes: ['agent'] },
+    'role.policy.read': { allow: true, scopes: ['agent'] },
+    'role.policy.write': { allow: true, dangerous: true, scopes: ['agent'], constraints: { requireAgentOwner: true } },
     '*': { allow: true },
-    'agent.reload': { allow: true, dangerous: true, scopes: ['agent'], constraints: { ownAgentOnly: true } },
+    'agent.reload': { allow: true, dangerous: true, scopes: ['agent'], constraints: { targetCurrentAgentOnly: true, requireAgentAdmin: true } },
     'dangerous:*': { allow: true, dangerous: true, constraints: { requireDaemonOwner: true } },
   };
+  if (_role === 'admin') {
+    permissions['role.policy.write'] = {
+      allow: false,
+      dangerous: true,
+      scopes: ['agent'],
+      reason: 'Role policy changes require agent owner permission',
+    };
+  }
+  return permissions;
 }
 
 export function getManagementRoleDefinition(role: ManagementRole): RoleDefinition {

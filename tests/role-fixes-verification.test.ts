@@ -1,10 +1,15 @@
 import { describe, expect, it } from 'vitest';
+import fs from 'fs';
+import path from 'path';
+import { createRequire } from 'module';
 import { ConfigTarget, validateConfig, write } from '../src/config/config-manager.js';
 import { resolveRoot } from '../src/paths.js';
-import { getDb } from '../src/stats/db.js';
+import { closeStatsDb, getDb } from '../src/stats/db.js';
 import { formatUsageSubjectKey, getRoleBudgetStatus } from '../src/stats/role-budget.js';
+import { insertUsageEvent } from '../src/stats/writer.js';
 
 const SELF_AID = 'agent.agentid.pub';
+const requireFromHere = createRequire(import.meta.url);
 
 function writeAgentConfig(definitions: Record<string, any> = {}): void {
   write(ConfigTarget.Agent, {
@@ -323,4 +328,118 @@ describe('role source cleanup verification', () => {
     expect(status.used_amount).toBe(5);
     expect(status.hard_blocked).toBe(true);
   });
+
+  it('migrates old usage_events schema before creating role budget index', () => {
+    const dbPath = createOldStatsDb();
+    const db = getDb(resolveRoot());
+    if (!db) throw new Error('stats db unavailable');
+
+    const cols = db.prepare(`PRAGMA table_info(usage_events)`).all() as Array<{ name: string }>;
+    const indexes = db.prepare(`PRAGMA index_list(usage_events)`).all() as Array<{ name: string }>;
+    expect(cols.some(c => c.name === 'usage_subject_key')).toBe(true);
+    expect(cols.some(c => c.name === 'role')).toBe(true);
+    expect(indexes.some(i => i.name === 'idx_ue_role_budget')).toBe(true);
+    expect(fs.existsSync(dbPath)).toBe(true);
+  });
+
+  it('retries usage_events insert after repairing old schema', () => {
+    createOldStatsDb();
+    const firstDb = getDb(resolveRoot());
+    if (!firstDb) throw new Error('stats db unavailable');
+    firstDb.exec(`DROP INDEX IF EXISTS idx_ue_role_budget`);
+    firstDb.exec(`ALTER TABLE usage_events DROP COLUMN usage_subject_key`);
+    firstDb.exec(`ALTER TABLE usage_events DROP COLUMN role`);
+
+    insertUsageEvent(resolveRoot(), {
+      ts: Date.now(),
+      agent_aid: SELF_AID,
+      peer_key: 'aun#conversation',
+      usage_subject_key: 'aun:private:alice.aid.pub',
+      role: 'member',
+      peer_type: 'private',
+      session_id: 'schema-retry-session',
+      model: 'test-model',
+      billing_fn: 'per_token_v1',
+      input_tokens: 1,
+      output_tokens: 2,
+      cache_creation_tokens: 0,
+      cache_read_tokens: 0,
+      turns: 1,
+    });
+
+    const retryDb = getDb(resolveRoot());
+    const row = retryDb.prepare(`
+      SELECT usage_subject_key, role, input_tokens, output_tokens
+      FROM usage_events
+      WHERE session_id = ?
+    `).get('schema-retry-session') as any;
+    expect(row).toMatchObject({
+      usage_subject_key: 'aun:private:alice.aid.pub',
+      role: 'member',
+      input_tokens: 1,
+      output_tokens: 2,
+    });
+  });
 });
+
+function createOldStatsDb(): string {
+  closeStatsDb();
+  const statsDir = path.join(resolveRoot(), 'data', 'stats');
+  fs.mkdirSync(statsDir, { recursive: true });
+  const dbPath = path.join(statsDir, 'usage.db');
+  const sqlite = requireFromHere('node:sqlite');
+  const db = new sqlite.DatabaseSync(dbPath);
+  db.exec(`
+    CREATE TABLE usage_events (
+      id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+      ts                    INTEGER NOT NULL,
+      agent_aid             TEXT    NOT NULL,
+      peer_key              TEXT    NOT NULL,
+      peer_type             TEXT,
+      session_id            TEXT,
+      model                 TEXT    NOT NULL,
+      billing_fn            TEXT    NOT NULL,
+      input_tokens          INTEGER NOT NULL DEFAULT 0,
+      output_tokens         INTEGER NOT NULL DEFAULT 0,
+      cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+      cache_read_tokens     INTEGER NOT NULL DEFAULT 0,
+      cache_hit_tokens      INTEGER,
+      cache_miss_tokens     INTEGER,
+      image_tokens          INTEGER,
+      total_context_tokens  INTEGER,
+      turns                 INTEGER NOT NULL DEFAULT 1,
+      duration_ms           INTEGER,
+      context_window_pct    REAL,
+      cost_official_usd     REAL,
+      cost_official_cny     REAL,
+      cost_gateway_usd      REAL,
+      cost_gateway_cny      REAL
+    );
+    CREATE TABLE usage_daily (
+      day          TEXT NOT NULL,
+      agent_aid    TEXT NOT NULL,
+      peer_key     TEXT NOT NULL,
+      peer_type    TEXT NOT NULL DEFAULT '',
+      session_id   TEXT NOT NULL DEFAULT '',
+      model        TEXT NOT NULL,
+      billing_fn   TEXT NOT NULL,
+      input_tokens          INTEGER NOT NULL DEFAULT 0,
+      output_tokens         INTEGER NOT NULL DEFAULT 0,
+      cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+      cache_read_tokens     INTEGER NOT NULL DEFAULT 0,
+      cache_hit_tokens      INTEGER NOT NULL DEFAULT 0,
+      cache_miss_tokens     INTEGER NOT NULL DEFAULT 0,
+      image_tokens          INTEGER NOT NULL DEFAULT 0,
+      total_context_tokens  INTEGER NOT NULL DEFAULT 0,
+      turns        INTEGER NOT NULL DEFAULT 0,
+      calls        INTEGER NOT NULL DEFAULT 0,
+      cost_official_usd     REAL,
+      cost_official_cny     REAL,
+      cost_gateway_usd      REAL,
+      cost_gateway_cny      REAL,
+      PRIMARY KEY (day, agent_aid, peer_key, session_id, model, billing_fn)
+    );
+  `);
+  db.close();
+  return dbPath;
+}

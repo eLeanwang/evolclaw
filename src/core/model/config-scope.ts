@@ -186,7 +186,7 @@ export function writeScope(
   // relation
   requirePeer(sel);
   const target = ConfigTarget.Relation;
-  const selr: Selector = { self: sel.self, peerKey: sel.peerKey };
+  const selr: Selector = { self: sel.self, peerKey: sel.peerKey, role: sel.role };
   const cur = (read<RelationConfig>(target, selr) as RelationConfig) || {};
   applyBaPatch(cur, ba, ef, patch);
   ensureFile(target, selr);
@@ -224,7 +224,7 @@ function writeRoleModelPermission(def: RoleDefinition, field: string, value: str
 }
 
 /** 写关系级 permissionMode（供 /perm 命令使用）。null 删除字段。 */
-export function writeRelationPermissionMode(self: string, peerKey: string, mode: string | null): void {
+export function writeRelationPermissionMode(self: string, peerKey: string, mode: string | null, _role?: string): void {
   const target = ConfigTarget.Relation;
   const sel: Selector = { self, peerKey };
   const cur = (read<RelationConfig>(target, sel) as RelationConfig) || {};

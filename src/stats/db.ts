@@ -40,6 +40,11 @@ export function closeStatsDb(): void {
   _db = null;
 }
 
+export function resetStatsDb(evolclawHome: string): any | null {
+  closeStatsDb();
+  return getDb(evolclawHome);
+}
+
 /** 获取写者单例（daemon 调用）。首次调用时建表。 */
 export function getDb(evolclawHome: string): any | null {
   if (_db) return _db;
@@ -58,6 +63,8 @@ export function getDb(evolclawHome: string): any | null {
     logger.info(`[StatsDB] Opened: ${dbPath}`);
     return _db;
   } catch (e) {
+    try { _db?.close(); } catch {}
+    _db = null;
     logger.error(`[StatsDB] Failed to open DB: ${e}`);
     return null;
   }
@@ -108,7 +115,6 @@ function _initTables(db: any): void {
     CREATE INDEX IF NOT EXISTS idx_ue_ts         ON usage_events(ts);
     CREATE INDEX IF NOT EXISTS idx_ue_agent_ts   ON usage_events(agent_aid, ts);
     CREATE INDEX IF NOT EXISTS idx_ue_peer_ts    ON usage_events(agent_aid, peer_key, ts);
-    CREATE INDEX IF NOT EXISTS idx_ue_role_budget ON usage_events(agent_aid, role, usage_subject_key, ts);
     CREATE INDEX IF NOT EXISTS idx_ue_model_ts   ON usage_events(model, ts);
     CREATE INDEX IF NOT EXISTS idx_ue_session_ts ON usage_events(session_id, ts);
 
@@ -234,9 +240,10 @@ function _initTables(db: any): void {
   }
 
   try {
-    const cols = db.prepare(`PRAGMA table_info(usage_events)`).all() as Array<{ name: string }>;
+    let cols = db.prepare(`PRAGMA table_info(usage_events)`).all() as Array<{ name: string }>;
     if (!cols.some(c => c.name === 'usage_subject_key')) {
       db.exec(`ALTER TABLE usage_events ADD COLUMN usage_subject_key TEXT NOT NULL DEFAULT ''`);
+      cols = db.prepare(`PRAGMA table_info(usage_events)`).all() as Array<{ name: string }>;
     }
     if (!cols.some(c => c.name === 'role')) {
       db.exec(`ALTER TABLE usage_events ADD COLUMN role TEXT NOT NULL DEFAULT ''`);

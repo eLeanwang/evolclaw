@@ -14,6 +14,8 @@ import { SessionManager } from '../../src/core/session/session-manager.js';
 import { MessageProcessor } from '../../src/core/message/message-processor.js';
 import { appendHintAdd } from '../../src/core/message/pending-hints.js';
 import { _resetRoot, resolvePaths } from '../../src/paths.js';
+import { ConfigTarget, write } from '../../src/config/config-manager.js';
+import { formatPeerKey } from '../../src/core/relation/peer-identity.js';
 import type {
   AgentContext, ChannelAdapter, ChannelPolicy, EvolAgentRegistryHandle,
   EvolAgentHandle, GlobalSettings, Message, MergedAgentConfig,
@@ -124,6 +126,14 @@ beforeEach(() => {
   process.env.EVOLCLAW_HOME = home;
   _resetRoot();
   fs.mkdirSync(resolvePaths().sessionsDir, { recursive: true });
+  write(ConfigTarget.Agent, {
+    aid: SELF,
+    owners: [OWNER],
+    channels: [],
+  }, { self: SELF });
+  write(ConfigTarget.Relation, {
+    roles: { assigned: 'member' },
+  }, { self: SELF, peerKey: formatPeerKey('aun', PEER) });
   captured = {};
 });
 afterEach(() => {
