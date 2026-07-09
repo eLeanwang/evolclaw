@@ -22,6 +22,8 @@ export interface InboundMessage {
   messageId?: string;
   /** 发送者 ID（渠道原生 ID） */
   peerId: string;
+  /** 对端类型（human/ai/system/unknown 等，由支持身份解析的渠道填充） */
+  peerType?: string;
   /** 消息内容 */
   content: string;
   /** 聊天类型 */

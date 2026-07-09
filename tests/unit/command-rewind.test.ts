@@ -1,7 +1,11 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { execFileSync } from 'node:child_process';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { CommandHandler } from '../../src/core/command/command-handler.js';
 import { EventBus } from '../../src/core/event-bus.js';
-import type { Config, ChannelAdapter } from '../../src/types.js';
+import type { Config, ChannelAdapter, SessionIdentity } from '../../src/types.js';
 
 // === Mock Factories ===
 
@@ -478,5 +482,92 @@ describe('/rewind command', () => {
       expect((result as any)?.text || '').not.toContain('新消息插入');
       expect((result as any)?.text || '').not.toContain('无视之前中断');
     });
+  });
+});
+
+describe('/status Git visibility', () => {
+  const tmpRoots: string[] = [];
+
+  function makeTempDir(prefix: string): string {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+    tmpRoots.push(dir);
+    return dir;
+  }
+
+  function initGitRepo(): string {
+    const dir = makeTempDir('evolclaw-status-git-');
+    execFileSync('git', ['init', '-b', 'main'], { cwd: dir, stdio: 'ignore' });
+    fs.writeFileSync(path.join(dir, 'untracked.txt'), 'dirty\n');
+    return dir;
+  }
+
+  async function statusText(projectPath: string, role: string): Promise<string> {
+    const now = Date.now();
+    const session = {
+      id: `session-${role}`,
+      channel: 'aun',
+      channelType: 'aun',
+      channelId: 'chat1',
+      baseagent: 'claude',
+      threadId: '',
+      sessionKey: `aun#chat1#${role}`,
+      chatType: 'private',
+      chatMode: 'interactive',
+      projectPath,
+      agentSessionId: 'agent-session-1',
+      name: 'status test',
+      metadata: {},
+      identity: { role, mode: 'interactive' },
+      createdAt: now,
+      updatedAt: now,
+    };
+    const sessionManager = createMockSessionManager({
+      resolveIdentity: vi.fn().mockReturnValue({ role, mode: 'interactive' }),
+      getActiveSession: vi.fn().mockResolvedValue(session),
+      getHealthStatus: vi.fn().mockResolvedValue({
+        consecutiveErrors: 0,
+        safeMode: false,
+        lastSuccessTime: now,
+      }),
+      getSessionFileInfo: vi.fn().mockReturnValue({ turns: 3, title: session.name }),
+    });
+    const handler = new CommandHandler(
+      sessionManager,
+      createMockAgentRunner(),
+      createMockMessageCache(),
+      new EventBus(),
+    );
+    handler.setMessageQueue({
+      isProcessing: vi.fn().mockReturnValue(false),
+      getQueueLength: vi.fn().mockReturnValue(0),
+    } as any);
+    const identity: SessionIdentity = { role, mode: 'interactive' };
+    const result = await handler.handle('/status', 'aun', 'chat1', undefined, `${role}-user`, undefined, undefined, 'user', undefined, undefined, identity);
+    return (result as any).text;
+  }
+
+  afterEach(() => {
+    for (const dir of tmpRoots.splice(0)) {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('shows Git info to owner/admin when project path is a Git work tree', async () => {
+    const repo = initGitRepo();
+
+    await expect(statusText(repo, 'owner')).resolves.toMatch(/^Git: /m);
+    await expect(statusText(repo, 'admin')).resolves.toMatch(/^Git: /m);
+  });
+
+  it('hides Git info from non-admin users even inside a Git work tree', async () => {
+    const repo = initGitRepo();
+
+    await expect(statusText(repo, 'guest')).resolves.not.toMatch(/^Git: /m);
+  });
+
+  it('hides Git info from owner/admin when project path is not a Git work tree', async () => {
+    const dir = makeTempDir('evolclaw-status-plain-');
+
+    await expect(statusText(dir, 'owner')).resolves.not.toMatch(/^Git: /m);
   });
 });

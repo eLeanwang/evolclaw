@@ -77,8 +77,13 @@ type ProactiveRuntimeState = {
   toolCount: number;
   lastQueueReminderLen: number;
   chatType: string;
+  peerType?: string;
   preTool1stMsgChk: boolean;
   toolUseReminder: boolean;
+  firstSendRequired: boolean;
+  toolReportRequired: boolean;
+  toolReportInterval: number;
+  toolReportPending: boolean;
 };
 
 type ContextRecoveryOptions = {
@@ -1097,6 +1102,7 @@ export class ResponseEngine implements IMessageProcessor {
       session,
       message: {
         messageId: message.messageId, peerId: message.peerId, content: message.content,
+        peerType: message.peerType || (session.metadata as any)?.peerType,
         chatType: chatType as 'private' | 'group', isMentioned: message.isMentioned,
         mentionAids: message.mentionAids, source: message.source,
       },
@@ -1116,7 +1122,14 @@ export class ResponseEngine implements IMessageProcessor {
     snapshot.set(session.id, taskId, {
       chatMode: effectiveChatMode,
       proactiveState: proactive
-        ? { preTool1stMsgChk: proactive.preTool1stMsgChk, toolUseReminder: proactive.toolUseReminder, chatType: proactive.chatType }
+        ? {
+          preTool1stMsgChk: proactive.preTool1stMsgChk,
+          toolUseReminder: proactive.toolUseReminder,
+          firstSendRequired: proactive.firstSendRequired,
+          toolReportRequired: proactive.toolReportRequired,
+          chatType: proactive.chatType,
+          peerType: proactive.peerType,
+        }
         : null,
     });
 
@@ -1328,12 +1341,9 @@ export class ResponseEngine implements IMessageProcessor {
             const result = pluginHook(toolName, toolInput);
 
             if (result?.block) {
-              // 拦截事件（首工具非表态）
+              // 拦截事件（首工具非表态 / 工具进展汇报未完成）
               snapshot.set(session.id, taskId, { policyHook: { triggered: true, blocked: true, toolName } });
-              const st = modeState.get('proactive');
-              const cmdHint = st?.chatType === 'group' ? 'ec group send' : 'ec msg send';
-              const target = st?.chatType === 'group' ? '群里' : '对方';
-              const errorMsg = `⚠️ proactive 模式违规：收到消息后首次工具调用必须是 ${cmdHint} 向${target}表态，不要闷头干。请重新执行正确的命令。`;
+              const errorMsg = `⚠️ proactive 模式违规：${result.reason ?? '请先发送必要说明'}。请重新执行正确的命令。`;
               agent.injectUserMessage?.(session.id, errorMsg);
               return result;
             }
@@ -1507,7 +1517,7 @@ export class ResponseEngine implements IMessageProcessor {
             peerKey,
             peerName: peerName || undefined,
             peerRole,
-            peerType: message.peerType || undefined,
+            peerType: message.peerType || (session.metadata as any)?.peerType || undefined,
             sameDevice: message.sameDevice ?? false,
             sameNetwork: message.sameNetwork ?? false,
             sameEgressIp: message.sameEgressIp ?? false,
@@ -1544,6 +1554,10 @@ export class ResponseEngine implements IMessageProcessor {
             chatMode: isProactive ? 'proactive' : 'interactive',
             proactivePreTool1stMsgChk: proactive?.preTool1stMsgChk ?? true,
             proactiveToolUseReminder: proactive?.toolUseReminder ?? true,
+            proactiveFirstSendRequired: proactive?.firstSendRequired ?? false,
+            proactiveToolReportRequired: proactive?.toolReportRequired ?? false,
+            proactiveToolReportInterval: proactive?.toolReportInterval ?? 10,
+            proactiveSendTargetLabel: chatType === 'group' ? '群里' : '对方',
             readonly: effectivePermissionMode === 'readonly',
             baseAgent: normalizedBaseagent.canonical,
             baseAgentName: normalizedBaseagent.displayName,

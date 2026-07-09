@@ -355,20 +355,37 @@ async function getGitWorkingDirInfo(projectPath: string): Promise<string | null>
   try {
     const { execFileSync } = await import('child_process');
 
-    // 获取分支名
-    const branchOutput = execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], {
+    const isInsideWorkTree = execFileSync('git', ['rev-parse', '--is-inside-work-tree'], {
       cwd: projectPath,
       encoding: 'utf8',
-      timeout: 1000
-    });
-    const branch = branchOutput.trim();
+      timeout: 1000,
+      stdio: ['ignore', 'pipe', 'ignore']
+    }).trim();
+    if (isInsideWorkTree !== 'true') return null;
+
+    // 获取分支名
+    let branch = execFileSync('git', ['branch', '--show-current'], {
+      cwd: projectPath,
+      encoding: 'utf8',
+      timeout: 1000,
+      stdio: ['ignore', 'pipe', 'ignore']
+    }).trim();
+    if (!branch) {
+      branch = execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], {
+        cwd: projectPath,
+        encoding: 'utf8',
+        timeout: 1000,
+        stdio: ['ignore', 'pipe', 'ignore']
+      }).trim();
+    }
     if (!branch) return null;
 
     // 检查文件状态
     const statusOutput = execFileSync('git', ['--no-optional-locks', 'status', '--porcelain'], {
       cwd: projectPath,
       encoding: 'utf8',
-      timeout: 1000
+      timeout: 1000,
+      stdio: ['ignore', 'pipe', 'ignore']
     });
 
     // 解析文件状态统计
@@ -415,7 +432,7 @@ async function getGitWorkingDirInfo(projectPath: string): Promise<string | null>
       const revOutput = execFileSync(
         'git',
         ['rev-list', '--left-right', '--count', '@{upstream}...HEAD'],
-        { cwd: projectPath, timeout: 1000, encoding: 'utf8' }
+        { cwd: projectPath, timeout: 1000, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }
       );
       const revParts = revOutput.trim().split(/\s+/);
       if (revParts.length === 2) {
@@ -2102,9 +2119,6 @@ export async function handleSlashCommand(this: any,
       }
     }
 
-    // 获取 git 工作目录信息
-    const gitInfo = await getGitWorkingDirInfo(session.projectPath);
-
     const lines: string[] = [];
     const chatMode = getAgentChatmode(session);
     const dispatchTarget = resolveSlashDispatchTarget.call(this, {
@@ -2122,6 +2136,7 @@ export async function handleSlashCommand(this: any,
     const chatModeLine = `会话模式: ${chatMode}`;
     const dispatchModeLine = session.chatType === 'group' ? `分发模式: ${dispatchMode}` : null;
     if (isAdmin) {
+      const gitInfo = await getGitWorkingDirInfo(session.projectPath);
       lines.push(
         `📊 ${isThread ? '话题' : '会话'}状态 (Agent: ${agentName})：`,
         `渠道: ${this.resolveChannelType(channel)} / 项目: ${projectName} / 会话: ${displaySessionTitle(session.name, '(未命名)')}`,
@@ -2150,9 +2165,6 @@ export async function handleSlashCommand(this: any,
         `📊 ${isThread ? '话题' : '会话'}状态 (Agent: ${agentName})：`,
         `渠道: ${channel} / 项目: ${projectName} / ${session.baseagent}会话`,
       );
-      if (gitInfo) {
-        lines.push(`Git: ${gitInfo}`);
-      }
       lines.push(
         `状态: ${sessionStatus} / 轮数: ${sessionTurns}`,
         chatModeLine,

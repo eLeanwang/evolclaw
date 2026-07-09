@@ -1,7 +1,7 @@
 # 跨会话沟通协作机制设计（Context Handoff）
 
-> 状态：设计草案
-> 最后更新：2026-07-01
+> 状态：已实现
+> 最后更新：2026-07-09
 > 关联模块：`ec msg send`、AUN 入站消息、`messages.jsonl`、ResponseEngine 渲染层
 
 ## 1. 背景

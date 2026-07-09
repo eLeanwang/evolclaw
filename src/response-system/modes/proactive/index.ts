@@ -20,11 +20,42 @@ export interface ProactiveState {
   toolCount: number;
   lastQueueReminderLen: number;
   chatType: string;
+  peerType?: string;
   preTool1stMsgChk: boolean;
   toolUseReminder: boolean;
+  firstSendRequired: boolean;
+  toolReportRequired: boolean;
+  toolReportInterval: number;
+  toolReportPending: boolean;
 }
 
 const STATE_KEY = 'proactive';
+const TOOL_REPORT_INTERVAL = 10;
+
+function isHumanFacingMessage(message: InboundMessage): boolean {
+  if (message.source === 'trigger') return false;
+  if (message.chatType === 'group') return true;
+  return message.chatType === 'private' && message.peerType === 'human';
+}
+
+function buildState(message: InboundMessage, cfg: Record<string, any>): ProactiveState {
+  const preTool1stMsgChk = cfg.pre_tool_1stmsgchk ?? true;
+  const toolUseReminder = cfg.tool_use_reminder ?? true;
+  const humanFacing = isHumanFacingMessage(message);
+  return {
+    firstToolDone: false,
+    toolCount: 0,
+    lastQueueReminderLen: 0,
+    chatType: message.chatType,
+    peerType: message.peerType,
+    preTool1stMsgChk,
+    toolUseReminder,
+    firstSendRequired: preTool1stMsgChk && humanFacing,
+    toolReportRequired: toolUseReminder && humanFacing,
+    toolReportInterval: TOOL_REPORT_INTERVAL,
+    toolReportPending: false,
+  };
+}
 
 export class ProactiveMode implements ResponseMode {
   readonly id = 'proactive';
@@ -54,14 +85,7 @@ export class ProactiveMode implements ResponseMode {
   async handleInbound(message: InboundMessage): Promise<InboundDecision> {
     this.context?.logger.debug('[ResponseSystem] proactive inbound chatType=' + message.chatType + ' peerId=' + message.peerId);
     const cfg = this.context?.modeConfig ?? {};
-    const state: ProactiveState = {
-      firstToolDone: false,
-      toolCount: 0,
-      lastQueueReminderLen: 0,
-      chatType: message.chatType,
-      preTool1stMsgChk: cfg.pre_tool_1stmsgchk ?? true,
-      toolUseReminder: cfg.tool_use_reminder ?? true,
-    };
+    const state = buildState(message, cfg);
     return {
       action: 'process',
       queueBehavior: 'enqueue',
@@ -84,37 +108,33 @@ export class ProactiveMode implements ResponseMode {
   // ─── beforeProcess（迁移点 1：把 runtimeState 落入 ctx.state，供后续钩子共享）───
   beforeProcess(ctx: ProcessContext): void {
     const cfg = ctx.modeConfig ?? {};
-    const state: ProactiveState = {
-      firstToolDone: false,
-      toolCount: 0,
-      lastQueueReminderLen: 0,
-      chatType: ctx.message.chatType,
-      preTool1stMsgChk: cfg.pre_tool_1stmsgchk ?? true,
-      toolUseReminder: cfg.tool_use_reminder ?? true,
-    };
+    const state = buildState(ctx.message, cfg);
     ctx.state.set(STATE_KEY, state);
   }
 
   // ─── configureRun（迁移点 2：policyHook 首工具表态）───
   configureRun(ctx: ProcessContext): RunConfig | undefined {
     const state = ctx.state.get(STATE_KEY) as ProactiveState | undefined;
-    if (!state || !state.preTool1stMsgChk) return undefined;
-
-    // Trigger execution is routed by trigger feedback disposition, so it should
-    // not be forced to send a human-facing first message in proactive mode.
-    const isTrigger = ctx.message.source === 'trigger';
+    if (!state || (!state.firstSendRequired && !state.toolReportRequired)) return undefined;
 
     return {
       policyHook: (toolName, toolInput) => {
-        if (isTrigger) return undefined;
-        const isAllowedFirstTool = ctx.isSendCommand(toolName, toolInput);
-        if (!state.firstToolDone) {
-          state.firstToolDone = true;
-          if (!isAllowedFirstTool) {
+        const isSendCommand = ctx.isSendCommand(toolName, toolInput);
+        if (state.firstSendRequired && !state.firstToolDone) {
+          if (!isSendCommand) {
             const cmdHint = state.chatType === 'group' ? 'ec group send' : 'ec msg send';
             const target = state.chatType === 'group' ? '群里' : '对方';
             return { block: true, reason: `请先用 ${cmdHint} 向${target}说明你的意图，再执行其他工具` };
           }
+          state.firstToolDone = true;
+        }
+        if (state.toolReportPending) {
+          if (!isSendCommand) {
+            const cmdHint = state.chatType === 'group' ? 'ec group send' : 'ec msg send';
+            const target = state.chatType === 'group' ? '群里' : '对方';
+            return { block: true, reason: `工具调用已达到 ${state.toolCount} 次，请先用 ${cmdHint} 向${target}汇报当前情况和下一步意图，再执行其他工具` };
+          }
+          state.toolReportPending = false;
         }
         return undefined;
       },
@@ -140,13 +160,14 @@ export class ProactiveMode implements ResponseMode {
 
     // 工具计数（排除表态命令白名单）
     const isAllowedTool = ctx.isSendCommand(ctx.toolName, ctx.toolInput);
-    if (!isAllowedTool) state.toolCount++;
+    if (state.toolReportRequired && !isAllowedTool) state.toolCount++;
 
-    // 10 次工具调用警告
-    if (state.toolCount === 10) {
+    // 每 N 次工具调用警告
+    if (state.toolReportRequired && state.toolCount > 0 && state.toolCount % state.toolReportInterval === 0) {
+      state.toolReportPending = true;
       const cmdHint = state.chatType === 'group' ? 'ec group send' : 'ec msg send';
       const target = state.chatType === 'group' ? '群里' : '对方';
-      ctx.injectToModel(`⚠️ 工具调用已超过 10 次，请立即用 ${cmdHint} 向${target}汇报当前情况和下一步意图。`);
+      ctx.injectToModel(`⚠️ 工具调用已达到 ${state.toolCount} 次，请立即用 ${cmdHint} 向${target}汇报当前情况和下一步意图。`);
     }
   }
 

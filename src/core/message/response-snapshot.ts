@@ -35,7 +35,10 @@ export interface BehaviorSnapshot {
   proactiveState?: {
     preTool1stMsgChk: boolean;
     toolUseReminder: boolean;
+    firstSendRequired?: boolean;
+    toolReportRequired?: boolean;
     chatType: string;
+    peerType?: string;
   } | null;
 
   // ─── 流程介入点 ───
