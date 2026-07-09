@@ -183,7 +183,7 @@ src/response-system/engines/v2/
 
 1. 群聊支持 `hold / delay / transfer`。
 2. 单聊支持 `delay / transfer`，不使用 `hold`。
-3. mention fast-track 在 V2Engine 中处理，不在 channel adapter 中丢弃普通消息。
+3. mention-only 提及模式 在 V2Engine 中处理，不在 channel adapter 中丢弃普通消息。
 4. 辅助会话失败后执行退避重试和降级投递。
 5. HOLD 超时后强制投递，保证消息可达性。
 6. 主会话反馈不单独触发辅助 LLM 调用，只作为后续辅助判断上下文。
@@ -277,13 +277,13 @@ src/channels/aun.ts
 
 1. 保留 `isMentioned` 标记。
 2. dual-session-lite 下，普通群消息进入辅助队列
-3. mention fast-track 由 V2Engine 处理。
+3. mention-only 提及模式 由 V2Engine 处理。
 4. interactive/proactive 的既有行为必须回归验证。
 
 **验收标准**：
 
 - [ ] 群聊未 mention 消息能进入 dual-session-lite 辅助队列。
-- [ ] 被 mention 消息能触发 fast-track。
+- [ ] 被 mention 消息能触发 mention-only 处理。
 - [ ] 非 dual-session-lite 模式不发生行为回归。
 
 ---
@@ -307,7 +307,7 @@ tests/response-system/
 4. V2 main queue 批次构建、打断、大小限制。
 5. V2 main session 反馈生成。
 6. dual-session-lite 模式选择和生命周期。
-7. AUN mention fast-track 与普通群消息路径。
+7. AUN mention-only 提及模式 与普通群消息路径。
 8. ECK prompt 分流。
 
 **验收标准**：

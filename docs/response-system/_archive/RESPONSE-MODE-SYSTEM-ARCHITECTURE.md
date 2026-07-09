@@ -1,14 +1,12 @@
 # EvolClaw 响应模式体系架构
 
-**文档版本**: 3.1  
+**文档版本**: 3.0  
 **创建时间**: 2026-07-08  
 **状态**: 架构定稿
 
 ---
 
 ## 一、整体架构
-
-### 1.1 三层架构
 
 ```
 ┌─────────────────────────────────────────┐
@@ -28,7 +26,7 @@
 ┌─────────────────────────────────────────┐
 │      响应模式实现                         │
 │   - single-session (基于 V1 引擎)       │
-│   - dual-session (基于 V2 引擎)         │
+│   - dual-session (于 V2 引擎)         │
 │   - workflow (未来)                     │
 └────────────────┬────────────────────────┘
                  ↓
@@ -38,15 +36,17 @@
 └─────────────────────────────────────────┘
 ```
 
-### 1.2 核心设计原则
+---
 
-#### 三层分离
+## 二、核心设计原则
+
+### 2.1 三层分离
 
 1. **用户配置层**：选择响应模式 + 配置参数
 2. **响应模式层**：用户可见的模式实现（插件）
 3. **响应引擎层**：技术实现基础
 
-#### 参数正交
+### 2.2 参数正交
 
 | 维度 | 类型 | 说明 |
 |------|------|------|
@@ -61,74 +61,7 @@
 
 ---
 
-## 二、目录结构
-
-### 2.1 代码目录
-
-```
-src/response-system/
-│
-├── registry.ts                          # 响应模式注册表
-├── selector.ts                          # 响应模式选择器
-├── types.ts                             # 公共类型定义
-├── index.ts                             # 公共 API 导出
-│
-├── engines/                             # 响应引擎层
-│   ├── v1/                             # V1 引擎（单会话）
-│   │   ├── engine.ts
-│   │   ├── types.ts
-│   │   └── README.md
-│   │
-│   └── v2/                             # V2 引擎（双会话）
-│       ├── engine.ts
-│       ├── auxiliary-queue.ts
-│       ├── auxiliary-session.ts
-│       ├── main-queue.ts
-│       ├── main-session.ts
-│       ├── types.ts
-│       └── README.md
-│
-└── modes/                              # 响应模式实现
-    ├── single-session/                # 单会话模式
-    │   ├── index.ts
-    │   └── config-schema.json
-    │
-    ├── dual-session/                  # 双会话模式（原 dual-session-lite）
-    │   ├── index.ts
-    │   └── config-schema.json
-    │
-    └── workflow/                      # 工作流模式（未来）
-        ├── index.ts
-        └── config-schema.json
-```
-
-### 2.2 文档目录
-
-```
-docs/response-system/
-├── README.md                          # 响应模式体系总览
-├── ARCHITECTURE.md                    # 本文档（体系架构）
-│
-├── dual-session/                      # dual-session 详细设计
-│   ├── README.md
-│   ├── architecture.md               # dual-session 内部架构
-│   ├── data-structures.md
-│   ├── config/
-│   └── prompts/
-│
-├── dual-session-lite/                 # 参考设计（完整文档目录）
-│
-└── _archive/                          # 归档的旧体系架构文档
-    ├── RESPONSE-MODE-ARCHITECTURE-V2.md
-    ├── ARCHITECTURE-FINAL.md
-    └── RESPONSE-MODE-SYSTEM-ARCHITECTURE.md
-```
-
----
-
-## 三、通用参数
-
-### 3.1 接口定义
+## 三、通用参数（所有响应模式都支持）
 
 ```typescript
 interface CommonResponseModeConfig {
@@ -136,14 +69,14 @@ interface CommonResponseModeConfig {
   chatMode: 'interactive' | 'proactive';
   
   // 2. Mention 处理策略（可选）
-  mentionMode?: 'disabled' | 'mention-only';
+  mentionMode?: 'disabled' | 'mention-only' | 'fast-track';
   
   // 3. 模型选择（可选，默认由响应模式决定）
   model?: string;  // 如 'claude-opus', 'claude-sonnet'
 }
 ```
 
-### 3.2 chatMode（交互方式）
+### 3.1 chatMode（交互方式）
 
 **语义**：决定如何投递回复
 
@@ -157,7 +90,9 @@ interface CommonResponseModeConfig {
 - 双会话：主会话根据 chatMode 决定回复方式
 - 工作流：工作流结束后根据 chatMode 决定回复方式
 
-### 3.3 mentionMode（Mention 处理策略）
+---
+
+### 3.2 mentionMode（Mention 处理策略）
 
 **语义**：决定如何处理 mention 消息
 
@@ -165,18 +100,28 @@ interface CommonResponseModeConfig {
 |---|------|-----------------|
 | `disabled` | 所有消息都处理 | 默认值 |
 | `mention-only` | 仅处理被 @ 的消息 | 过滤未 @ 的消息 |
+| `fast-track` | 被 @ 消息走快速通道 | 特定模式有特殊语义 |
 
 **各响应模式的实现**：
 
 #### single-session
 - `disabled`：所有消息直接进入会话处理
 - `mention-only`：只有被 @ 的消息进入会话，其他过滤
+- `fast-track`：等同于 `disabled`（无快速通道概念）
 
 #### dual-session
 - `disabled`：所有消息进辅助队列 → 辅助会话判断
 - `mention-only`：只有被 @ 的消息进辅助队列，其他过滤
+- `fast-track`：被 @ 的消息跳过辅助队列，直接投递主队列；未 @ 的消息进辅助队列
 
-### 3.4 model（模型选择）
+#### workflow（未来）
+- `disabled`：所有消息进工作流
+- `mention-only`：只有被 @ 的消息进工作流
+- `fast-track`：被 @ 的消息高优先级处理
+
+---
+
+### 3.3 model（模型选择）
 
 **语义**：主会话使用的模型
 
@@ -242,10 +187,8 @@ interface DualSessionConfig extends CommonResponseModeConfig {
 
 **适用场景**：
 - 多 agent 群聊（避免竞争回复）
-- 快慢模型组合场景
+- 快慢模型不对齐场景
 - 需要智能判断消息相关性的场景
-
-**详细设计**：见 [dual-session/README.md](./dual-session/README.md)
 
 ---
 
@@ -280,7 +223,133 @@ interface WorkflowConfig extends CommonResponseModeConfig {
 
 ---
 
-## 五、注册表设计
+## 五、配置示例
+
+### 5.1 coding 模式（无渠道）
+
+```json
+{
+  "responseMode": "single-session",
+  "config": {
+    "chatMode": "interactive"
+  }
+}
+```
+
+### 5.2 传统单聊/群聊
+
+```json
+{
+  "responseMode": "single-session",
+  "config": {
+    "chatMode": "proactive",
+    "mentionMode": "disabled"
+  }
+}
+```
+
+### 5.3 mention-only 单聊（只响应 @）
+
+```json
+{
+  "responseMode": "single-session",
+  "config": {
+    "chatMode": "proactive",
+    "mentionMode": "mention-only"
+  }
+}
+```
+
+### 5.4 双会话群聊（标准配置）
+
+```json
+{
+  "responseMode": "dual-session",
+  "config": {
+    "chatMode": "proactive",
+    "mentionMode": "disabled",
+    "debounceMs": 3000,
+    "maxWaitMs": 15000,
+    "auxiliaryModel": "deepseek-v4-flash"
+  }
+}
+```
+
+### 5.5 双会话群聊（快速通道）
+
+```json
+{
+  "responseMode": "dual-session",
+  "config": {
+    "chatMode": "proactive",
+    "mentionMode": "fast-track",
+    "debounceMs": 3000
+  }
+}
+```
+
+### 5.6 工作流模式（未来）
+
+```json
+{
+  "responseMode": "workflow",
+  "config": {
+    "chatMode": "proactive",
+    "mentionMode": "disabled",
+    "workflowEngine": "advanced",
+    "workflowFile": "./workflows/customer-support.yml"
+  }
+}
+```
+
+---
+
+## 六、目录结构
+
+```
+src/response-system/
+│
+├── registry.ts                          # 响应模式注册表
+├── router.ts                            # 响应模式路由器
+├── types.ts                             # 公共类型定义
+├── index.ts                             # 公共 API 导出
+├── README.md                            # 响应系统总览
+│
+├── engines/                             # 响应引擎层
+│   ├── v1/                             # V1 引擎（单会话）
+│   │   ├── engine.ts
+│   │   ├── types.ts
+│   │   └── README.md
+│   │
+│   └── v2/                             # V2 引擎（双会话）
+│       ├── engine.ts
+│       ├── auxiliary-queue.ts
+│       ├── auxiliary-session.ts
+│       ├── main-queue.ts
+│       ├── main-session.ts
+│       ├── types.ts
+│       └── README.md
+│
+└── modes/                              # 响应模式实现
+    ├── single-session/                # 单会话模式
+    │   ├── index.ts
+    │   ├── config-schema.json
+    │   └── README.md
+    │
+    ├── dual-session/                  # 双会话模式（原 dual-session-lite）
+    │   ├── index.ts
+    │   ├── config-schema.json
+    │   └── README.md
+    │
+    └── workflow/                      # 工作流模式（未来）
+        ├── index.ts
+        ├── config-schema.json
+        └── README.md
+```
+
+---
+
+## 七、注册表设计
 
 ```typescript
 // src/response-system/registry.ts
@@ -328,63 +397,9 @@ export const responseModeRegistry: Record<string, ResponseModeDescriptor> = {
 
 ---
 
-## 六、配置示例
+## 八、ECK 集成
 
-### 6.1 coding 模式（无渠道）
-
-```json
-{
-  "responseMode": "single-session",
-  "config": {
-    "chatMode": "interactive"
-  }
-}
-```
-
-### 6.2 传统单聊/群聊
-
-```json
-{
-  "responseMode": "single-session",
-  "config": {
-    "chatMode": "proactive",
-    "mentionMode": "disabled"
-  }
-}
-```
-
-### 6.3 mention-only 单聊（只响应 @）
-
-```json
-{
-  "responseMode": "single-session",
-  "config": {
-    "chatMode": "proactive",
-    "mentionMode": "mention-only"
-  }
-}
-```
-
-### 6.4 双会话群聊（标准配置）
-
-```json
-{
-  "responseMode": "dual-session",
-  "config": {
-    "chatMode": "proactive",
-    "mentionMode": "disabled",
-    "debounceMs": 3000,
-    "maxWaitMs": 15000,
-    "auxiliaryModel": "deepseek-v4-flash"
-  }
-}
-```
-
----
-
-## 七、ECK 集成
-
-### 7.1 ECK Vars
+### 8.1 ECK Vars
 
 ```typescript
 interface ECKVars {
@@ -393,8 +408,7 @@ interface ECKVars {
   
   // 通用参数（从 config 中提取）
   chatMode: 'interactive' | 'proactive';
-  mentionMode: 'disabled' | 'mention-only';
-  model: string;
+  mentionMode: 'disabled' | 'mention-only' | 'fast-track';
   
   // dual-session 特有
   sessionType?: 'auxiliary' | 'main';
@@ -404,12 +418,11 @@ interface ECKVars {
   channel: string;
   selfAid: string;
   peerId: string;
-  peerKey: string;  // <channel>#<urlEncode(peerId)>
   // ...
 }
 ```
 
-### 7.2 Context Assembly Manifest
+### 8.2 Context Assembly Manifest
 
 ```yaml
 sections:
@@ -418,14 +431,14 @@ sections:
     when: "responseMode === 'dual-session' && sessionType === 'auxiliary'"
     source:
       type: file
-      path: "$KITS_DOCS/response-system/dual-session/prompts/auxiliary-base.md"
+      path: "$KITS/docs/response-system/dual-session/prompts/auxiliary-base.md"
   
   # 主会话提示词（dual-session 特有）
   - id: main-session-prompt
     when: "responseMode === 'dual-session' && sessionType === 'main'"
     source:
       type: file
-      path: "$KITS_DOCS/response-system/dual-session/prompts/main-base.md"
+      path: "$KITS/docs/response-system/dual-session/prompts/main-base.md"
   
   # chatMode 说明（所有模式通用）
   - id: chat-mode-guide-proactive
@@ -439,26 +452,82 @@ sections:
     content: |
       ## 回复方式
       直接输出即回复。
+  
+  # mentionMode 说明（所有模式通用）
+  - id: mention-mode-guide
+    when: "mentionMode === 'mention-only'"
+    content: |
+      ## Mention 策略
+      当前启用 mention-only 模式，只处理被 @ 的消息。
 ```
 
 ---
 
-## 八、总结
+## 九、迁移方案
 
-### 8.1 核心设计
+### 9.1 旧配置 → 新配置映射
+
+```typescript
+function migrateConfig(oldConfig: any): ResponseModeConfig {
+  // 旧的 responseMode 映射
+  if (oldConfig.responseMode === 'interactive') {
+    return {
+      responseMode: 'single-session',
+      config: {
+        chatMode: 'interactive',
+        ...oldConfig.config,
+      },
+    };
+  }
+  
+  if (oldConfig.responseMode === 'proactive') {
+    return {
+      responseMode: 'single-session',
+      config: {
+        chatMode: 'proactive',
+        ...oldConfig.config,
+      },
+    };
+  }
+  
+  if (oldConfig.responseMode === 'dual-session-lite') {
+    return {
+      responseMode: 'dual-session',
+      config: oldConfig.config,
+    };
+  }
+  
+  // 已经是新格式
+  return oldConfig;
+}
+```
+
+### 9.2 文档迁移
+
+| 旧路径 | 新路径 | 操作 |
+|--------|--------|------|
+| `docs/response-system/dual-session-lite/` | `docs/response-system/dual-session/` | 重命名目录 |
+| 文档中的 `dual-session-lite` | `dual-session` | 批量替换 |
+| `responseMode: 'dual-session-lite'` | `responseMode: 'dual-session'` | 批量替换 |
+
+---
+
+## 十、总结
+
+### 核心设计
 
 1. **响应模式参数**：`responseMode`（`single-session` / `dual-session` / `workflow`）
 2. **通用参数**：`chatMode`, `mentionMode`, `model`
 3. **特有参数**：各响应模式各自定义
 
-### 8.2 当前响应模式
+### 当前响应模式
 
 | 模式 | 引擎 | 通用参数 | 特有参数 |
 |------|------|---------|---------|
 | `single-session` | V1 | ✅ 全部支持 | 无 |
 | `dual-session` | V2 | ✅ 全部支持 | 7 个（队列/压缩/打断） |
 
-### 8.3 设计优势
+### 设计优势
 
 ✅ **概念清晰**：响应模式 + 通用参数 + 特有参数  
 ✅ **参数正交**：chatMode/mentionMode 是参数，不是模式  
@@ -468,5 +537,6 @@ sections:
 
 ---
 
+**文档维护者**: Claude Code (Opus 4.8)  
 **最后更新**: 2026-07-08  
-**维护者**: Claude Code
+**状态**: ✅ 架构定稿

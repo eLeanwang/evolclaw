@@ -1064,7 +1064,7 @@ $AGENT_DIR/relations/<channel>#<peerId>/_threads/<threadId>/_queues/
 **结论**：关闭此优化建议
 - ✅ 保持辅助会话的 LLM 判断机制
 - ✅ 自主性优先于代码规则
-- ✅ @ 本 agent 的快速通道通过 `mentionMode: fast-track` 配置实现（可选）
+- ✅ @ 本 agent 的提及模式通过 `mentionMode: mention-only` 配置实现（可选）
 - ✅ 不在辅助会话判断中硬编码规则
 
 ---

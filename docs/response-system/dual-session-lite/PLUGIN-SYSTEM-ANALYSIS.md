@@ -351,7 +351,7 @@ class ResponseEngineV2Plugin implements ResponseEngine {
   
   async processMessage(message: InboundMessage): Promise<void> {
     // mention 快速通道
-    if (this.config.mentionMode === 'fast-track' && message.isMentioned) {
+    if (this.config.mentionMode === 'mention-only' && message.isMentioned) {
       await this.mainQueue.interrupt([message]);
       return;
     }

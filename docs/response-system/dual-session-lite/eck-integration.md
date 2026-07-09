@@ -73,7 +73,6 @@ sections:
     source:
       type: file
       path: "$KITS/docs/response-system/dual-session-lite/prompts/auxiliary-base.md"
-    priority: 100
     order: 50
   
   # ========================================
@@ -84,7 +83,6 @@ sections:
     source:
       type: file
       path: "$KITS/docs/response-system/dual-session-lite/prompts/main-base.md"
-    priority: 100
     order: 50
 ```
 
@@ -104,11 +102,8 @@ async function renderSystemPrompt(session: Session): Promise<string> {
     return evaluateCondition(section.when, vars);
   });
   
-  // 4. 按 priority + order 排序
-  sections.sort((a, b) => {
-    if (a.priority !== b.priority) return b.priority - a.priority;
-    return a.order - b.order;
-  });
+  // 4. 按 order 升序排序（与 context-assembly.md 一致）
+  sections.sort((a, b) => a.order - b.order);
   
   // 5. 渲染每个 section
   const parts: string[] = [];
@@ -150,7 +145,7 @@ const vars = {
   source:
     type: file
     path: "$SELF_DIR/persona.md"
-  priority: 90
+  order: 20
 ```
 
 这些 section 会根据各自的 `when` 条件独立判断是否加载。

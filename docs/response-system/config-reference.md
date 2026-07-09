@@ -1,433 +1,304 @@
-# 配置参考
+# 响应模式配置参考（Config Reference）
 
-## 文档信息
+**版本**: 1.0  
+**创建时间**: 2026-07-08  
+**状态**: 参数唯一事实源（SSOT）
 
-| 项目 | 内容 |
-|------|------|
-| 文档名称 | 响应模式配置参考 |
-| 版本 | v1.0 |
-| 状态 | Draft |
-| 适用读者 | 配置管理者、运维 |
-
----
-
-## 一、配置文件位置与层级
-
-响应模式配置复用 EvolClaw 现有配置体系，遵循三级覆盖链。
-
-```
-defaults.json                                  # 全局默认（最低优先级）
-  ↓ 覆盖
-agents/<aid>/config.json                       # Agent 级
-  ↓ 覆盖
-agents/<aid>/relations/<peerKey>/config.json   # Relation 级（最高优先级）
-```
-
-| 层级 | 文件 | 作用域 |
-|------|------|--------|
-| 全局 | `agents/defaults.json` | 所有 agent |
-| Agent | `agents/<aid>/config.json` | 单个 agent |
-| 关系 | `agents/<aid>/relations/<peerKey>/config.json` | 特定对端/群 |
+> 本文档是**响应模式所有配置参数的唯一事实源**。其他文档（common-params.md /
+> specific-params.md / data-structures.md）保留各自的细节说明，但参数集合、默认值、
+> 可选值以本文档为准。发现不一致时，以本文档为准并回改其他文档。
 
 ---
 
-## 二、response_modes 配置块
+## 一、配置结构总览
 
-所有响应模式配置集中在 `response_modes` 块下。
-
-### 2.1 完整结构
-
-```typescript
-interface ResponseModesConfig {
-  /** 默认响应模式（单聊） */
-  default_private?: string;
-
-  /** 默认响应模式（群聊） */
-  default_group?: string;
-
-  /** 各模式的配置参数 */
-  configs?: {
-    [modeId: string]: any;
-  };
-
-  /** 会话级覆盖 */
-  overrides?: {
-    [peerKey: string]: {
-      mode: string;
-      config?: any;
-    };
-  };
-}
-```
-
-### 2.2 字段说明
-
-#### default_private
-
-单聊场景的默认响应模式。
-
-- **类型**：string（模式 ID）
-- **默认值**：`interactive`
-- **示例**：`"default_private": "interactive"`
-
-#### default_group
-
-群聊场景的默认响应模式。
-
-- **类型**：string（模式 ID）
-- **默认值**：`proactive`
-- **示例**：`"default_group": "dual-session"`
-
-#### configs
-
-各响应模式的配置参数。键为模式 ID，值为该模式的配置对象（结构由模式的 `configSchema` 定义）。
+配置分为**顶层**和 **config 内**两部分：
 
 ```json
 {
-  "configs": {
-    "dual-session": {
-      "auxiliary_model": "haiku",
-      "relevance_threshold": 0.7
-    },
-    "batch-processing": {
-      "max_count": 50,
-      "idle_ms_default": 180000
-    }
+  "responseMode": "dual-session",      // 顶层：选择响应模式
+  "config": {                          // config 内：该模式的参数
+    "chatMode": "proactive",           //   通用参数（所有模式支持）
+    "mentionMode": "disabled",
+    "model": "claude-opus",
+    "debounceMs": 3000,                //   特有参数（仅 dual-session）
+    "auxiliaryModel": "deepseek-v4-flash"
   }
 }
 ```
 
-#### overrides
+**参数分三级**：
 
-针对特定对端/群的覆盖配置。键为 `peerKey`（`<channel>#<urlEncode(peerId)>`）。
+| 级别 | 位置 | 说明 |
+|------|------|------|
+| **顶层** | 与 `config` 平级 | `responseMode`：选哪个模式 |
+| **通用** | `config` 内 | 所有响应模式都支持 |
+| **特有** | `config` 内 | 仅特定模式支持（如 dual-session 的队列参数） |
+
+---
+
+## 二、顶层参数：responseMode
+
+**唯一的顶层参数**，决定使用哪个响应模式（进而决定底层引擎）。
+
+| 值 | 引擎 | 说明 | 状态 |
+|----|------|------|------|
+| `single-session` | V1 | 单会话直接响应（合并了旧的 interactive / proactive） | ✅ 可用 |
+| `dual-session` | V2 | 双会话（辅助会话判断投递时机 + 主会话处理） | ✅ 可用 |
+| `workflow` | V3 | 工作流模式 | ⚠️ 未来，未实现 |
+
+> **废弃值（自动迁移，见 migration-guide.md）**：
+> - `interactive` → `single-session` + `chatMode: 'interactive'`
+> - `proactive` → `single-session` + `chatMode: 'proactive'`
+> - `dual-session-lite` → `dual-session`
+
+---
+
+## 三、通用参数（所有响应模式）
+
+**存放级别**：`config` 内 · **适用**：single-session / dual-session / workflow
+
+| 参数 | 存放级别 | 必选 | 可选值 | 默认值 | 用途 |
+|------|---------|------|--------|--------|------|
+| `chatMode` | config（通用） | ✅ 必选 | `interactive` \| `proactive` | — | 回复投递方式：interactive=输出即回复（coding 无渠道）；proactive=CLI 发送（单聊/群聊） |
+| `mentionMode` | config（通用） | 可选 | `disabled` \| `mention-only` | `disabled` | @ 处理策略：disabled=处理所有消息；mention-only=只处理被 @ 的消息，未 @ 作引用上下文 |
+| `model` | config（通用） | 可选 | 模型 ID 字符串 | `claude-opus` | 主会话使用的模型（辅助会话另有 `auxiliaryModel`） |
+
+**说明**：
+- `chatMode` 详见 [config/common-params.md §三](./dual-session/config/common-params.md)
+- `mentionMode` 详细机制见 [MENTION-MODE-MECHANISM.md](./dual-session/MENTION-MODE-MECHANISM.md)
+
+---
+
+## 四、single-session 特有参数
+
+**无特有参数**。single-session 只使用通用参数。
+
+| responseMode | 特有参数 |
+|--------------|---------|
+| `single-session` | 无 |
+
+配置示例：
 
 ```json
-{
-  "overrides": {
-    "aun#work-group.company.com": {
-      "mode": "workflow",
-      "config": {
-        "workflow_file": "task-flow.json"
-      }
-    },
-    "aun#alice.aid.pub": {
-      "mode": "interactive"
-    }
-  }
-}
+// coding 模式（无渠道）
+{ "responseMode": "single-session", "config": { "chatMode": "interactive" } }
+
+// 单聊/群聊
+{ "responseMode": "single-session", "config": { "chatMode": "proactive", "mentionMode": "disabled" } }
 ```
 
 ---
 
-## 三、解析优先级
+## 五、dual-session 特有参数
 
-会话的响应模式按以下优先级解析：
+**存放级别**：`config` 内 · **适用**：仅 `dual-session`
+
+参数按用途分组。「等级」列区分**核心参数**（常用）与**高级参数**（一般用默认值，需要时才调）。
+
+### 5.1 队列触发参数
+
+| 参数 | 等级 | 可选值/范围 | 默认值 | 用途 |
+|------|------|-----------|--------|------|
+| `debounceMs` | 核心 | 0-6000 | 3000 | 防抖时间：新消息到达后等待多久触发辅助会话（期间有新消息则重置） |
+| `maxWaitMs` | 核心 | 5000-30000 | 15000 | 最早消息最长等待：防抖被反复重置时的强制触发上限 |
+| `maxQueueSize` | 核心 | 10-100 | 群聊 50 / 单聊 15 | 队列满强制转投阈值：累积到此值直接投主队列，不经辅助会话 |
+| `maxBatchSize` | 高级 | 正整数 | 50 | 单批最多消息数（extractBatch / extractForceTransferBatch 上限） |
+| `maxBatchBytes` | 高级 | 正整数 | 10240 | 单批最多字节数 |
+
+### 5.2 延迟投递参数
+
+延迟投递总时长公式（**单聊与群聊相同**）：
 
 ```
-1. overrides[peerKey].mode    （最高优先级，特定对端）
-   ↓ 未命中
-2. default_private / default_group  （按 chatType）
-   ↓ 未命中
-3. 系统兜底（private→interactive, group→proactive）
+实际延迟 = baseDelayMs + random(0, effectiveLevelMs)
+
+effectiveLevelMs = baseLevelMs(delayLevel) × 对端系数
+
+baseLevelMs: short=60000, medium=120000, long=180000（辅助会话决策输出的等级）
+对端系数:    agent ×1.0 / 人 ×0.5（代码按发送者类型自动判定）
 ```
 
-配置解析也遵循三级文件覆盖链。最终生效配置 = `deepMerge(defaults, agentConfig, relationConfig)`。
+**延迟投递有双重目的**：①群聊多 agent 时错开、避免竞态回复；②等待用户完整意图输入。
+因此单聊也有 delay（等意图）、也带随机；若意图已完整则辅助会话直接 transfer，不 delay。
+
+- 随机上限 = `effectiveLevelMs`，即等级时长乘对端系数
+- 对端是人时上限减半（人打字比 agent 慢但不会竞态，等待可更短）
+- 对端判定：群聊消息集合**含 agent 就算 agent**，全是人才算人；单聊看对端本身
+
+| 参数 | 等级 | 可选值/范围 | 默认值 | 用途 |
+|------|------|-----------|--------|------|
+| `baseDelayMs` | 高级 | ≥0 | 0 | 延迟基础偏移，打底叠加在随机延迟之上 |
+
+> `delayLevel`（short/medium/long）**不是配置参数**，而是辅助会话每次决策的输出字段
+> （见 [data-structures.md AuxiliaryDecision](./dual-session/data-structures.md)）。
+> 对端系数由代码按发送者类型自动判定，无需配置参数控制。
+
+### 5.3 模型参数
+
+| 参数 | 等级 | 可选值 | 默认值 | 用途 |
+|------|------|--------|--------|------|
+| `model` | 核心（通用） | 模型 ID | `claude-opus` | 主会话模型（通用参数，见 §三；此处列出以便对照） |
+| `auxiliaryModel` | 核心 | 模型 ID | `deepseek-v4-flash` | 辅助会话模型（判断投递时机，用便宜快速模型降本） |
+
+> 已统一：主会话模型一律用通用参数 **`model`**；不再使用 `mainModel`。
+
+### 5.4 会话压缩参数
+
+| 参数 | 等级 | 可选值/范围 | 默认值 | 用途 |
+|------|------|-----------|--------|------|
+| `auxiliaryMaxTokens` | 高级 | 20000-80000 | 40000 | 辅助会话上下文超过此 token 数触发压缩 |
+| `auxiliaryMaxMessages` | 高级 | 正整数 | 100 | 辅助会话消息数超过此值触发压缩 |
+| `mainMaxTokens` | 高级 | 80000-500000 | 160000 | 主会话上下文超过此 token 数触发压缩 |
+| `mainMaxMessages` | 高级 | 正整数 | 200 | 主会话消息数超过此值触发压缩 |
+| `compressionTarget` | 高级 | 正整数 | 2000 | 压缩摘要目标字数 |
+
+### 5.5 打断与调试参数
+
+| 参数 | 等级 | 可选值 | 默认值 | 用途 |
+|------|------|--------|--------|------|
+| `interruptEnabled` | 核心 | boolean | true | 是否允许辅助会话打断正在处理的主会话（紧急消息） |
+| `enableDebug` | 高级 | boolean | false | 是否输出调试日志 |
 
 ---
 
-## 四、配置示例
+## 六、单聊 vs 群聊的差异
 
-### 4.1 最小配置
+延迟机制（公式、随机、到期/新消息重判）**单聊与群聊完全相同**，仅以下不同：
 
-```json
-{
-  "response_modes": {
-    "default_private": "interactive",
-    "default_group": "proactive"
-  }
-}
-```
-
-### 4.2 群聊使用双会话模式
-
-```json
-{
-  "response_modes": {
-    "default_private": "interactive",
-    "default_group": "dual-session",
-    "configs": {
-      "dual-session": {
-        "auxiliary_model": "haiku",
-        "relevance_threshold": 0.7
-      }
-    }
-  }
-}
-```
-
-### 4.3 不同群使用不同模式
-
-```json
-{
-  "response_modes": {
-    "default_group": "proactive",
-    "configs": {
-      "dual-session": { "auxiliary_model": "haiku" },
-      "workflow": { "coordinator_role": "owner" }
-    },
-    "overrides": {
-      "aun#busy-chat.group.com": {
-        "mode": "dual-session"
-      },
-      "aun#task-board.group.com": {
-        "mode": "workflow",
-        "config": { "workflow_file": "sprint-flow.json" }
-      },
-      "aun#casual-chat.group.com": {
-        "mode": "rate-limited",
-        "config": { "rate_limit": { "window_ms": 600000, "max_responses": 5 } }
-      }
-    }
-  }
-}
-```
+| 项 | 群聊 | 单聊 | 原因 |
+|------|---------|---------|------|
+| `maxQueueSize` 默认 | 50 | 15 | 单聊消息量小，更快触发 |
+| 决策类型 | hold / delay / transfer | delay / transfer（无 hold） | 单聊一对一都相关，无需 hold |
+| 对端系数判定 | 消息集合含 agent 就算 agent | 看对端本身是人/agent | 见 §5.2 延迟公式 |
 
 ---
 
-## 五、内置模式配置参数
+## 七、配置层级与覆盖优先级
 
-### 5.1 interactive（交互模式）
+参数可在多个层级配置，优先级从高到低：
 
-无特殊配置参数。
+| 优先级 | 层级 | 路径 |
+|--------|------|------|
+| 1（最高） | 关系级 | `$RELATIONS_DIR/<peerKey>/config.json` |
+| 2 | 环境级 | `$VENUES_DIR/<venueKey>/config.json` |
+| 3 | Agent 级 | `$AGENT_DIR/config.json` |
+| 4（最低） | 出厂默认值 | 代码内置 |
 
-### 5.2 proactive（主动模式）
-
-| 参数 | 类型 | 默认 | 说明 |
-|------|------|------|------|
-| `pre_tool_1stmsgchk` | boolean | true | 首个工具调用前是否必须先表态 |
-| `tool_use_reminder` | boolean | true | 是否启用工具使用提醒 |
-
-### 5.3 dual-session（双会话模式）
-
-| 参数 | 类型 | 默认 | 说明 |
-|------|------|------|------|
-| `auxiliary_model` | string | haiku | 辅助会话模型 |
-| `relevance_threshold` | number | 0.7 | 相关性阈值（0-1） |
-| `model_switching_rules` | object | {} | 模型切换规则（按内容类型） |
+**覆盖示例**：
 
 ```json
+// Agent 级（$AGENT_DIR/config.json）
 {
-  "auxiliary_model": "haiku",
-  "relevance_threshold": 0.7,
-  "model_switching_rules": {
-    "image": "opus",
-    "video": "opus"
-  }
+  "responseMode": "dual-session",
+  "config": { "chatMode": "proactive", "mentionMode": "disabled" }
 }
-```
 
-### 5.4 thread-tracking（线索追踪模式）
-
-| 参数 | 类型 | 默认 | 说明 |
-|------|------|------|------|
-| `max_active_threads` | number | 5 | 最多追踪线索数 |
-| `thread_timeout_ms` | number | 1800000 | 线索过期时间（30分钟） |
-| `auto_join_on_mention` | boolean | true | 被@时自动加入线索 |
-| `context_injection` | boolean | true | 是否注入线索历史上下文 |
-
-### 5.5 workflow（工作流模式）
-
-| 参数 | 类型 | 默认 | 说明 |
-|------|------|------|------|
-| `workflow_file` | string | - | 工作流定义文件路径 |
-| `coordinator_role` | string | owner | 协调者角色 |
-| `state_persistence` | boolean | true | 是否持久化工作流状态 |
-
-### 5.6 context-enhanced（上下文增强模式）
-
-| 参数 | 类型 | 默认 | 说明 |
-|------|------|------|------|
-| `document_sources` | array | [] | 文档来源列表 |
-| `injection_strategy` | string | cached | 注入策略（always/on-demand/cached） |
-
-```json
+// 关系级覆盖（$RELATIONS_DIR/aun#alice.aid.pub/config.json）
 {
-  "document_sources": [
-    { "type": "file", "path": "./group-rules.md", "refresh_interval_ms": 3600000 }
-  ],
-  "injection_strategy": "cached"
+  "config": { "mentionMode": "mention-only" }   // 只覆盖这一项
 }
-```
 
-### 5.7 batch-processing（批量处理模式）
-
-| 参数 | 类型 | 默认 | 说明 |
-|------|------|------|------|
-| `max_count` | number | 50 | 队列达 N 条立即处理 |
-| `max_bytes` | number | 16384 | 累计字节达 M 立即处理 |
-| `idle_ms_default` | number | 180000 | 无新消息静默超时（3分钟） |
-| `idle_ms_active` | number | 10000 | 有活跃交互对象时的超时（10秒） |
-| `flush_on_mention` | boolean | true | 被@时立即处理 |
-
-### 5.8 selective-response（选择性响应模式）
-
-| 参数 | 类型 | 默认 | 说明 |
-|------|------|------|------|
-| `whitelist_aids` | string[] | - | 白名单（仅响应这些 AID） |
-| `blacklist_aids` | string[] | - | 黑名单（不响应这些 AID） |
-| `keyword_rules` | array | [] | 关键词规则 |
-| `min_influence_threshold` | number | 0 | 最低影响力阈值 |
-
-### 5.9 rate-limited（速率限制模式）
-
-| 参数 | 类型 | 默认 | 说明 |
-|------|------|------|------|
-| `rate_limit.window_ms` | number | 600000 | 时间窗口（10分钟） |
-| `rate_limit.max_responses` | number | 20 | 窗口内最大响应次数 |
-| `cooldown_ms` | number | 0 | 冷却期 |
-| `priority_preemption` | boolean | true | owner/admin 可打断冷却 |
-
-### 5.10 autonomous（自主模式）
-
-| 参数 | 类型 | 默认 | 说明 |
-|------|------|------|------|
-| `allow_inbound` | boolean | false | 是否接受外部消息 |
-| `trigger_only` | boolean | true | 仅触发器驱动 |
-
----
-
-## 六、调度层配置
-
-调度层配置在 `scheduler` 块下（独立于 `response_modes`）。
-
-```typescript
-interface SchedulerConfig {
-  /** 最大并发会话数（per-agent） */
-  max_concurrent_sessions?: number;
-
-  /** 调度策略 */
-  strategy?: 'rule-based' | 'ai-based' | 'hybrid';
-
-  /** 全局 token 预算 */
-  global_budget?: number;
-
-  /** 规则驱动配置 */
-  rule_config?: {
-    role_weights?: Record<string, number>;
-    chattype_weights?: Record<string, number>;
-    wait_time_factor?: number;
-  };
-
-  /** AI 驱动配置 */
-  ai_config?: {
-    scheduler_model?: string;
-    max_sessions_per_call?: number;
-  };
-
-  /** 混合配置 */
-  hybrid_config?: {
-    ai_trigger_threshold?: number;
-    ai_trigger_conditions?: string[];
-  };
-}
-```
-
-### 6.1 示例
-
-```json
+// 最终生效
 {
-  "scheduler": {
-    "max_concurrent_sessions": 3,
-    "strategy": "hybrid",
-    "global_budget": 1000000,
-    "rule_config": {
-      "role_weights": { "owner": 100, "admin": 80, "guest": 50, "anonymous": 10 },
-      "chattype_weights": { "private": 20, "group": 0 },
-      "wait_time_factor": 0.05
-    },
-    "ai_config": {
-      "scheduler_model": "haiku",
-      "max_sessions_per_call": 10
-    },
-    "hybrid_config": {
-      "ai_trigger_threshold": 5,
-      "ai_trigger_conditions": ["queue_length > 5", "has_urgent_keyword"]
-    }
+  "responseMode": "dual-session",
+  "config": {
+    "chatMode": "proactive",        // 继承 Agent 级
+    "mentionMode": "mention-only"   // 关系级覆盖
   }
 }
 ```
 
 ---
 
-## 七、配置校验
+## 八、完整配置示例
 
-### 7.1 Schema 校验
-
-每个响应模式的配置参数根据其 `configSchema` 校验：
-
-- 参数名必须在 schema 中定义
-- 参数类型必须匹配
-- 必填参数（required）不能缺失
-- 枚举值（enum）必须在允许范围内
-- 数值范围（minimum/maximum）必须满足
-
-### 7.2 校验时机
-
-- `ec response config set` 命令执行时
-- 配置文件加载时
-- 模式 `initialize` 时
-
-### 7.3 校验失败处理
-
-- 命令行：拒绝写入，显示错误信息
-- 文件加载：使用默认值，记录警告日志
-
----
-
-## 八、配置迁移
-
-### 8.1 从现有 chatmode 迁移
-
-现有的 `chatmode` 配置：
+### 8.1 single-session（coding 模式）
 
 ```json
 {
-  "chatmode": {
-    "private": "interactive",
-    "group": "proactive"
+  "responseMode": "single-session",
+  "config": { "chatMode": "interactive" }
+}
+```
+
+### 8.2 dual-session 标准群聊
+
+```json
+{
+  "responseMode": "dual-session",
+  "config": {
+    "chatMode": "proactive",
+    "mentionMode": "disabled",
+    "model": "claude-opus",
+    "auxiliaryModel": "deepseek-v4-flash",
+    "debounceMs": 3000,
+    "maxWaitMs": 15000,
+    "maxQueueSize": 50,
+    "interruptEnabled": true
   }
 }
 ```
 
-迁移到 `response_modes`：
+### 8.3 dual-session 单聊（低延迟）
 
 ```json
 {
-  "response_modes": {
-    "default_private": "interactive",
-    "default_group": "proactive"
+  "responseMode": "dual-session",
+  "config": {
+    "chatMode": "proactive",
+    "mentionMode": "disabled",
+    "maxQueueSize": 15,
+    "debounceMs": 2000
   }
 }
 ```
 
-### 8.2 从现有 dispatch 迁移
+### 8.4 dual-session 低成本
 
-现有的 `dispatch` 配置（mention/broadcast）映射到响应模式：
-
-- `dispatch: mention` → 使用 `selective-response` 模式（仅@响应）
-- `dispatch: broadcast` → 使用 `proactive` 模式（全部响应）
-
-### 8.3 兼容性
-
-迁移期间，系统同时支持新旧配置：
-- 优先读 `response_modes`
-- 回落到 `chatmode` + `dispatch`
+```json
+{
+  "responseMode": "dual-session",
+  "config": {
+    "chatMode": "proactive",
+    "model": "claude-sonnet",
+    "auxiliaryModel": "deepseek-v4-flash",
+    "debounceMs": 5000,
+    "auxiliaryMaxTokens": 20000,
+    "mainMaxTokens": 80000
+  }
+}
+```
 
 ---
 
-## 附录：相关文档
+## 九、参数速查总表
 
-- [架构设计](./architecture.md)
-- [插件开发指南](./plugin-guide.md)
-- [命令参考](./command-reference.md)
-- [内置模式文档](./builtin-modes.md)
+一站式速查（★=核心，☆=高级）：
+
+| 参数（英文名） | 中文名 | 级别 | 模式 | 可选值 | 默认 | ★/☆ |
+|------|------|------|------|--------|------|------|
+| `responseMode` | 响应模式 | 顶层 | — | single-session / dual-session / workflow | — | ★ |
+| `chatMode` | 交互方式 | config·通用 | 全部 | interactive / proactive | — | ★ |
+| `mentionMode` | 提及处理策略 | config·通用 | 全部 | disabled / mention-only | disabled | ★ |
+| `model` | 主会话模型 | config·通用 | 全部 | 模型 ID | claude-opus | ★ |
+| `auxiliaryModel` | 辅助会话模型 | config·特有 | dual-session | 模型 ID | deepseek-v4-flash | ★ |
+| `debounceMs` | 防抖时间 | config·特有 | dual-session | 0-6000 | 3000 | ★ |
+| `maxWaitMs` | 最长等待时间 | config·特有 | dual-session | 5000-30000 | 15000 | ★ |
+| `maxQueueSize` | 队列最大容量 | config·特有 | dual-session | 10-100 | 群50/单15 | ★ |
+| `interruptEnabled` | 是否启用打断 | config·特有 | dual-session | boolean | true | ★ |
+| `maxBatchSize` | 单批最多消息数 | config·特有 | dual-session | 正整数 | 50 | ☆ |
+| `maxBatchBytes` | 单批最多字节数 | config·特有 | dual-session | 正整数 | 10240 | ☆ |
+| `baseDelayMs` | 延迟基础偏移 | config·特有 | dual-session | ≥0 | 0 | ☆ |
+| `auxiliaryMaxTokens` | 辅助会话压缩 token 阈值 | config·特有 | dual-session | 20000-80000 | 40000 | ☆ |
+| `auxiliaryMaxMessages` | 辅助会话压缩消息数阈值 | config·特有 | dual-session | 正整数 | 100 | ☆ |
+| `mainMaxTokens` | 主会话压缩 token 阈值 | config·特有 | dual-session | 80000-500000 | 160000 | ☆ |
+| `mainMaxMessages` | 主会话压缩消息数阈值 | config·特有 | dual-session | 正整数 | 200 | ☆ |
+| `compressionTarget` | 压缩摘要目标字数 | config·特有 | dual-session | 正整数 | 2000 | ☆ |
+| `enableDebug` | 是否启用调试输出 | config·特有 | dual-session | boolean | false | ☆ |
+
+---
+
+**文档维护者**: Claude Code (Opus 4.8)  
+**最后更新**: 2026-07-08  
+**状态**: ✅ 参数唯一事实源

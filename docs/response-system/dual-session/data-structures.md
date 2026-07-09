@@ -2,8 +2,9 @@
 
 ## 文档说明
 
-**版本**: 1.0 (Lite)  
-**创建时间**: 2026-07-01  
+**版本**: 2.0  
+**创建时间**: 2026-07-08  
+**来源**: 从 dual-session-lite 迁移  
 **关联**: [README.md](./README.md) | [架构设计](./architecture.md)
 
 ---
@@ -18,6 +19,7 @@ interface Message {
   channel: string;                 // 渠道（aun/feishu/wechat等）
   peerId: string;                  // 发送者 ID
   peerName: string;                // 发送者名称
+  peerRole: 'owner' | 'admin' | 'guest' | 'anonymous';  // 发送者角色（权限判断依据，必填）
   content: string;                 // 消息内容
   timestamp: number;               // 时间戳（毫秒）
   
@@ -35,6 +37,11 @@ interface Attachment {
   mimeType?: string;
 }
 ```
+
+> **peerRole 字段说明**：来自关系层（见 `kits/rules/04-relation.md`），是每条消息的固有属性，
+> 权限判断（主队列按角色分组、PreToolUse Hook 判断 owner/guest 权限）依赖它，因此**必填**。
+> 兜底：无 token 或 token 残缺时按 `anonymous` 处理。全系统统一用平级字段 `message.peerRole`
+> （不用 `message.role`，也不用嵌套的 `message.from.role`）。
 
 ---
 
@@ -86,8 +93,9 @@ interface AuxiliaryInput {
   
   // 如果 type = 'aun-messages'
   aunMessages?: {
-    queue: Message[];              // 辅助队列中所有未投递的消息
-    newMessages: Message[];        // 本次新增的消息（触发本次判断）
+    newMessages: Message[];        // 本次新增的消息（触发本次判断，只给这批）
+    remainingInQueue: number;      // 【信号A】去掉本批次后，辅助队列还剩多少条待判断
+                                   // 越大 → 判断越果断，少 hold/少 delay/优先 short，尽快清空积压
   };
   
   // 如果 type = 'main-feedback'
@@ -99,10 +107,14 @@ interface AuxiliaryInput {
 
 interface MainSessionStatus {
   status: 'idle' | 'processing';
-  currentBatchSize?: number;       // 当前批次大小（如果正在处理）
-  queueSize: number;               // 主队列剩余消息数
+  pendingCount: number;            // 【信号B】主队列待处理消息数（= queueSize，不含正在处理的批次）
+                                   // 越大 → 主会话越忙，应更倾向 delay/更长等级，别再压给它
+                                   // 例外：紧急消息仍照常 transfer + 打断
 }
 ```
+
+> **两个信号方向相反**：`remainingInQueue`（信号A）催辅助会话**加快**清空积压；
+> `pendingCount`（信号B）提示主会话忙、要辅助会话**放慢**投递。辅助会话在两者间权衡。
 
 ---
 
@@ -121,12 +133,11 @@ interface AuxiliaryOutput {
 }
 
 interface AuxiliaryDecision {
-  // 决策类型（三选一）
+  // 决策类型（群聊：hold/delay/transfer；单聊：delay/transfer，无 hold）
   action: 'hold' | 'delay' | 'transfer';
   
   // 如果 action = 'delay'
-  delayMs?: number;                // 基础延迟时间（已废弃，使用 delayLevel 代替）
-  delayLevel?: 'short' | 'medium' | 'long';  // 延迟等级：short=1分钟, medium=2分钟(默认), long=3分钟，群聊会加随机数，单聊不加
+  delayLevel?: 'short' | 'medium' | 'long';  // 延迟等级（默认 medium）；换算见下方说明
   
   // 如果 action = 'transfer'
   interrupt?: boolean;             // 是否打断主会话（默认false）
@@ -138,18 +149,32 @@ interface AuxiliaryDecision {
 }
 
 /**
- * delayLevel 延迟等级说明：
- * - short (1分钟)：高相关性、紧急问题
- * - medium (2分钟，默认)：中等相关性
- * - long (3分钟)：低相关性、不紧急
- * 
- * 群聊会在基础时间上加随机数（减少多 agent 碰撞），单聊不加随机数
+ * 延迟投递机制（单聊与群聊公式相同）：
+ *
+ *   实际延迟 = baseDelayMs + random(0, effectiveLevelMs)
+ *   effectiveLevelMs = baseLevelMs(delayLevel) × 对端系数
+ *
+ * baseLevelMs：short=60000(1分钟) / medium=120000(2分钟) / long=180000(3分钟)
+ *
+ * 对端系数（代码自动判定，不由辅助会话输出）：
+ *   - 对端是 agent → ×1.0（群聊消息集合含 agent 就算 agent）
+ *   - 对端是 人   → ×0.5（群聊全是人 / 单聊对端是人）
+ *
+ * 延迟的双重目的：①避免多 agent 竞态回复 ②等待用户完整意图输入。
+ * 因此单聊也需要 delay（等意图），也带随机。若意图已完整应直接 transfer，不 delay。
+ *
+ * delayLevel 选择建议：
+ *   - short：高相关性、紧急
+ *   - medium（默认）：中等相关性
+ *   - long：低相关性、不紧急
  */
 
 /**
- * previousMessageStrategy 三种策略：
+ * previousMessageStrategy 三种策略（均为提示词层建议，非队列层机制；
+ * 详见 interrupt-mechanism.md §6）：
  * - ignore：忽略被打断的消息，只处理新消息
  * - defer：先处理新消息，完成后再处理被打断的消息
+ *          （注意：无队列层"稍后重投"，靠主会话同 turn 从上下文自行捞回）
  * - continue：继续处理被打断的消息，但考虑新消息的内容
  */
 
@@ -212,16 +237,19 @@ interface MainFeedback {
 
 ### 2.1 DualSessionConfig（双会话配置）
 
+> **参数唯一事实源见 [config-reference.md](../config-reference.md)**。本接口与之保持一致，
+> 若有出入以 config-reference.md 为准。
+
 ```typescript
 interface DualSessionConfig {
   // 模型配置
   auxiliaryModel: string;          // 辅助会话模型（默认：deepseek-v4-flash）
-  mainModel: string;               // 主会话模型（默认：claude-opus）
+  // 注意：主会话模型用通用参数 model（不是 mainModel），见 common-params.md
   
   // mention 机制配置
   mentionMode: 'disabled' | 'mention-only';  // 默认：disabled
   // - disabled: 所有消息进入辅助队列，由辅助会话判断
-  // - mention-only: 只处理被 @ 的消息，未 @ 消息作为引用上下文
+  // - mention-only: 只处理被 @ 的消息，未 @ 消息作为引用上下文（详见 MENTION-MODE-MECHANISM.md）
   
   // 队列配置
   debounceMs: number;              // 防抖时间（默认：3000，可配置 0-6000）
@@ -230,9 +258,12 @@ interface DualSessionConfig {
   maxBatchSize: number;            // 每批最多消息数（默认：50）
   maxBatchBytes: number;           // 每批最多字节数（默认：10240）
   
-  // 延迟配置
-  baseDelayMs: number;             // 基础延迟时间（默认：3000）
-  randomDelayMaxMs: number;        // 随机延迟最大值（群聊：60000，单聊：0）
+  // 延迟配置（单聊与群聊公式相同）
+  // 实际延迟 = baseDelayMs + random(0, effectiveLevelMs)
+  // effectiveLevelMs = baseLevelMs(delayLevel) × 对端系数（agent×1.0 / 人×0.5）
+  // 其中 delayLevel 是辅助会话决策的输出（short/medium/long），不是配置项
+  // 对端系数由代码按发送者类型自动判定，无需配置参数
+  baseDelayMs: number;             // 延迟基础偏移（默认：0，打底叠加在随机延迟上）
   
   // 压缩配置
   auxiliaryMaxTokens: number;      // 辅助会话触发压缩阈值（默认：40000）
@@ -241,15 +272,16 @@ interface DualSessionConfig {
   mainMaxMessages: number;         // 主会话触发压缩阈值（默认：200）
   compressionTarget: number;       // 压缩摘要目标字数（默认：2000）
   
-  // 调试配置
+  // 打断与调试
+  interruptEnabled: boolean;       // 是否允许打断主会话（默认：true）
   enableDebug: boolean;            // 是否启用调试输出（默认：false）
 }
 ```
 
-**单聊与群聊配置差异**：
+**单聊与群聊差异**（延迟机制完全相同，仅以下不同）：
 - `maxQueueSize`: 群聊 50 条，单聊 15 条
-- `randomDelayMaxMs`: 群聊 60000（60秒），单聊 0（不加随机数）
-- 单聊场景下会启用主会话空闲监听机制
+- 决策类型：群聊 hold/delay/transfer；单聊 delay/transfer（无 hold，一对一都相关）
+- 对端系数：群聊按"消息集合是否含 agent"判定，单聊按对端是人/agent 判定
 
 ---
 
@@ -257,11 +289,11 @@ interface DualSessionConfig {
 
 ```typescript
 interface AgentConfig {
-  // 响应模式
-  responseMode: 'dual-session-lite' | null;
+  // 响应模式（见 config-reference.md §二）
+  responseMode: 'single-session' | 'dual-session' | 'workflow' | null;
   
-  // 双会话配置
-  dualSessionConfig?: DualSessionConfig;
+  // 响应模式配置（通用参数 + 特有参数）
+  config?: DualSessionConfig | SingleSessionConfig;
   
   // 其他现有配置
   aid: string;
