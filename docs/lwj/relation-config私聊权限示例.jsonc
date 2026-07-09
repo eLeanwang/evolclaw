@@ -1,0 +1,29 @@
+{
+  // 规范类型：Relation 级私聊配置示例
+  // 目标路径：{evolclaw_home}/agents/{aid}/relations/aun#alice.aid.pub/config.json
+  //
+  // 当前 relation-config schema 已支持 permissionMode、baseagents、chatmode 等字段。
+  // roles.assigned 是目标权限体系扩展字段，落地时需要同步扩展 relation-config schema。
+
+  "$schema_version": 1,
+
+  "roles": {
+    "assigned": "member"
+  },
+
+  "permissionMode": "auto",
+  "active_baseagent": "claude",
+  "baseagents": {
+    "claude": {
+      "model": "claude-sonnet-4-6",
+      "effort": "medium"
+    }
+  },
+  "chatmode": {
+    "private": "interactive"
+  },
+  "show_activities": "all",
+  "flush_delay": 3,
+  "debounce": 0,
+  "enable_rich_content": false
+}

@@ -57,7 +57,7 @@ describe('integration: ec config CLI', () => {
     }
     expect(setRes.ok).toBe(true);
     // v3: 不再区分 H/HA 权限
-    expect(setRes.permission).toBe('H');
+    expect(setRes.permission).toBe('human-only');
     // v3: 所有字段都在 config.json
     const cfg = JSON.parse(fs.readFileSync(path.join(root, 'agents', AID, 'config.json'), 'utf-8'));
     expect(cfg.chatmode.private).toBe('proactive');
@@ -69,7 +69,7 @@ describe('integration: ec config CLI', () => {
   it('set H 字段 → config.json', async () => {
     const setRes = await runJson(['set', 'observable', 'true', '--self', AID]);
     expect(setRes.ok).toBe(true);
-    expect(setRes.permission).toBe('H');
+    expect(setRes.permission).toBe('human-only');
     const cfg = JSON.parse(fs.readFileSync(path.join(root, 'agents', AID, 'config.json'), 'utf-8'));
     expect(cfg.observable).toBe(true);
   });
@@ -124,9 +124,10 @@ describe('integration: ec config CLI', () => {
     await runJson(['set', 'chatmode.private', 'proactive', '--self', AID]);
     const r = await runJson(['effective', '--self', AID]);
     expect(r.ok).toBe(true);
-    expect(r.effective.aid).toBe(AID);
+    expect(r.effective.aid).toEqual({ value: AID, source: 'agent' });
     // v3: 所有字段在顶层（不再有 effective.behavior 子树）
-    expect(r.effective.chatmode.private).toBe('proactive');
+    expect(r.effective.chatmode.value.private).toBe('proactive');
+    expect(r.effective.chatmode.source).toBe('agent');
   });
 
   it('snapshot → history → restore 周期', async () => {

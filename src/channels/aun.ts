@@ -27,7 +27,7 @@ import { getProcessStartTime } from '../utils/process-introspect.js';
 import * as outbox from '../aun/outbox.js';
 import { guessMime, formatSize } from '../utils/media-cache.js';
 import { PeerIdentityCache } from '../core/relation/peer-identity.js';
-import { getFirstRoleAssignment } from '../config/role-assignments.js';
+import { getFirstStaticAgentOwner } from '../config/peer-role-resolver.js';
 
 /**
  * 构造 connect extra_info：自描述本进程身份。
@@ -944,7 +944,7 @@ export class AUNChannel {
         return;
       }
 
-      const owner = getFirstRoleAssignment(aidName, { scope: 'private', role: 'owner' })?.peerId;
+      const owner = getFirstStaticAgentOwner(aidName);
       if (!owner) {
         logger.info(`${this.logPrefix()} No owner configured, skipping welcome message (will retry after auto-bind)`);
         return;

@@ -160,7 +160,7 @@ const PARAM_DESCRIPTIONS: Record<string, string> = {
   peerId: '对端在该渠道的原生 ID',
   peerKey: '对端跨渠道唯一标识（channel#urlEncode(peerId)）',
   peerName: '对端显示名',
-  peerRole: '对端角色（owner/admin/guest/anonymous）',
+  peerRole: '对端角色（owner/admin/member/visitor/none）',
   peerType: '对端类型（human/agent）',
   sameDevice: '对端与本端同一物理设备（SDK 0.4.9 起明文/密文消息均可携带，具体字段以网关下发为准）',
   sameNetwork: '对端与本端在同一网络内',

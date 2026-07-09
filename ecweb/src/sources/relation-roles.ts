@@ -21,16 +21,15 @@ export interface RoleAssignment {
   scope: 'private' | 'group' | 'group-member';
   peerId?: string;
   groupId?: string;
+  peerKey: string;
   role: string;
-  note?: string;
-  createdAt?: number;
-  updatedAt?: number;
+  source: 'relation-config';
 }
 
 type ScopedAssignmentTarget =
-  | ({ scope: 'private'; peerId: string } & Record<string, unknown>)
-  | ({ scope: 'group'; groupId: string } & Record<string, unknown>)
-  | ({ scope: 'group-member'; groupId: string; peerId: string } & Record<string, unknown>);
+  | ({ scope: 'private'; peerId: string; peerKey: string } & Record<string, unknown>)
+  | ({ scope: 'group'; groupId: string; peerKey: string } & Record<string, unknown>)
+  | ({ scope: 'group-member'; groupId: string; peerId: string; peerKey: string } & Record<string, unknown>);
 
 interface LocalAgentMdInfo {
   name?: string;
@@ -71,14 +70,14 @@ export interface ConversationSeed {
 }
 
 async function getParentModules() {
-  const assignmentsPath = resolveParentDistModule('config', 'role-assignments.js');
+  const configPath = resolveParentDistModule('config', 'config-manager.js');
   const rolesPath = resolveParentDistModule('config', 'roles.js');
   const resolverPath = resolveParentDistModule('config', 'peer-role-resolver.js');
 
-  const assignments = await import(toFileUrl(assignmentsPath));
+  const config = await import(toFileUrl(configPath));
   const roles = await import(toFileUrl(rolesPath));
   const resolver = await import(toFileUrl(resolverPath));
-  return { assignments, roles, resolver };
+  return { config, roles, resolver };
 }
 
 async function getCommandModules() {
@@ -91,25 +90,32 @@ async function getCommandModules() {
 
 export const ROLE_ASSIGNMENT_POLICY = {
   owner: {
-    assign: '*',
+    assign: 'user-roles',
     revoke: '*',
   },
   admin: {
-    assign: ['member', 'guest', 'anonymous'],
-    revoke: ['member', 'guest', 'anonymous'],
+    assign: 'user-roles',
+    revoke: 'user-roles',
   },
 } as const;
 
+function isManagementRoleName(role: string | null | undefined): boolean {
+  return role === 'owner' || role === 'admin';
+}
+
+function isAssignableUserRole(role: string | null | undefined): role is string {
+  return typeof role === 'string' && !!role && !isManagementRoleName(role);
+}
+
 export function canAssignRole(actorRole: string, targetRole: string): boolean {
-  if (actorRole === 'owner') return true;
-  if (actorRole !== 'admin') return false;
-  return ROLE_ASSIGNMENT_POLICY.admin.assign.includes(targetRole as any);
+  if (!isAssignableUserRole(targetRole)) return false;
+  return actorRole === 'owner' || actorRole === 'admin';
 }
 
 export function canRevokeRole(actorRole: string, targetRole?: string): boolean {
   if (actorRole === 'owner') return true;
   if (actorRole !== 'admin' || !targetRole) return false;
-  return ROLE_ASSIGNMENT_POLICY.admin.revoke.includes(targetRole as any);
+  return isAssignableUserRole(targetRole);
 }
 
 async function getAgentsFromIpc(): Promise<any[]> {
@@ -148,18 +154,18 @@ async function authorizeRoleAssignmentWrite(
   const actorRole = auth.localDirect
     ? 'owner'
     : auth.actorAid
-      ? modules.resolver.resolvePeerRoleDetail({
+      ? (modules.resolver.resolvePeerRoleDetail({
         selfAid: aid,
         channelType: 'aun',
         chatType: 'private',
         actorId: auth.actorAid,
         conversationId: auth.actorAid,
-      }).effectiveRole
-      : 'anonymous';
+      }).effectiveRole || 'none')
+      : 'none';
 
   const targetPeerId = typeof args.peerId === 'string' ? args.peerId : undefined;
   if (targetPeerId && modules.resolver.isStaticAgentOwner?.(aid, targetPeerId)) {
-    const reason = `Static owner ${targetPeerId} is defined in agents/${aid}/config.json and cannot be changed by scoped role assignments`;
+    const reason = `Static owner ${targetPeerId} is defined in agents/${aid}/config.json and cannot be changed by relation role assignments`;
     await audit.auditCommandAuthorization({
       ts: Date.now(),
       source: 'ecweb',
@@ -177,7 +183,7 @@ async function authorizeRoleAssignmentWrite(
     return {
       allow: false,
       status: 403,
-      error: 'forbidden: static owner cannot be changed by role assignments',
+      error: 'forbidden: static owner cannot be changed by relation role assignments',
       code: 'IMMUTABLE_STATIC_OWNER',
       reason,
       actorRole,
@@ -275,8 +281,10 @@ async function authorizeRoleAssignmentWrite(
   return { allow: true, actorRole };
 }
 
-function roleExists(roles: any, role: string): boolean {
-  return !!roles.readRolesConfig().roles?.[role];
+function roleExists(roles: any, aid: string, role: string): boolean {
+  if (!isAssignableUserRole(role)) return false;
+  if (typeof roles.roleExists === 'function') return !!roles.roleExists(role, aid);
+  return !!roles.readRolesConfig(aid).roles?.[role];
 }
 
 function parseBody(req: any): Promise<any> {
@@ -313,64 +321,31 @@ function assignmentFromPath(urlPath: string): { aid: string; targetId: string } 
   };
 }
 
-function roleAssignmentKey(assignments: any, item: Pick<RoleAssignment, 'scope' | 'peerId' | 'groupId'>): string {
-  if (item.scope === 'private') {
-    return assignments.privateAssignmentKey
-      ? assignments.privateAssignmentKey(item.peerId)
-      : `private::${encodeURIComponent(item.peerId || '')}`;
-  }
-  if (item.scope === 'group') {
-    return assignments.groupAssignmentKey
-      ? assignments.groupAssignmentKey(item.groupId)
-      : `group::${encodeURIComponent(item.groupId || '')}`;
-  }
-  return assignments.groupMemberAssignmentKey
-    ? assignments.groupMemberAssignmentKey(item.groupId, item.peerId)
-    : `group-member::${encodeURIComponent(item.groupId || '')}::${encodeURIComponent(item.peerId || '')}`;
+function formatPeerKey(channelType: string, channelId: string): string {
+  return `${channelType}#${encodeURIComponent(channelId)}`;
 }
 
-function normalizeRoleAssignment(item: any): RoleAssignment | null {
-  if (!item || typeof item !== 'object') return null;
-  if (typeof item.role !== 'string' || !item.role) return null;
-  const scope = item.scope || (item.groupId ? (item.peerId ? 'group-member' : 'group') : (item.peerId ? 'private' : ''));
-  if (scope !== 'private' && scope !== 'group' && scope !== 'group-member') return null;
-  if (scope === 'private' && !item.peerId) return null;
-  if (scope === 'group' && !item.groupId) return null;
-  if (scope === 'group-member' && (!item.groupId || !item.peerId)) return null;
+function looksLikePeerKey(value: string): boolean {
+  return /^[a-z][a-z0-9_-]*#/i.test(value);
+}
 
+function parsePeerKey(peerKey: string): { channelType: string; channelId: string } {
+  const idx = peerKey.indexOf('#');
+  if (idx <= 0) return { channelType: 'aun', channelId: peerKey };
   return {
-    scope,
-    ...(item.peerId ? { peerId: item.peerId } : {}),
-    ...(item.groupId ? { groupId: item.groupId } : {}),
-    role: item.role,
-    ...(typeof item.note === 'string' ? { note: item.note } : {}),
-    ...(typeof item.createdAt === 'number' ? { createdAt: item.createdAt } : {}),
-    ...(typeof item.updatedAt === 'number' ? { updatedAt: item.updatedAt } : {}),
+    channelType: peerKey.slice(0, idx),
+    channelId: decodeURIComponent(peerKey.slice(idx + 1)),
   };
 }
 
-function ensureScopedRoleAssignments(assignments: any, aid: string): void {
-  const config = assignments.readRoleAssignments(aid);
-  const sourceAssignments = config.assignments || {};
-  const nextAssignments: Record<string, RoleAssignment> = {};
-  let changed = config.$schema_version !== 2;
-
-  for (const [key, raw] of Object.entries<any>(sourceAssignments)) {
-    const item = normalizeRoleAssignment(raw);
-    if (!item) {
-      nextAssignments[key] = raw as RoleAssignment;
-      continue;
-    }
-    const nextKey = roleAssignmentKey(assignments, item);
-    nextAssignments[nextKey] = item;
-    if (key !== nextKey || JSON.stringify(raw) !== JSON.stringify(item)) changed = true;
+function relationTargetFromId(raw: string): { peerKey: string; channelId: string } {
+  const value = String(raw || '').trim();
+  if (!value) throw new Error('target id is required');
+  if (looksLikePeerKey(value)) {
+    const parsed = parsePeerKey(value);
+    return { peerKey: formatPeerKey(parsed.channelType, parsed.channelId), channelId: parsed.channelId };
   }
-
-  if (!changed) return;
-  assignments.writeRoleAssignments(aid, {
-    $schema_version: 2,
-    assignments: nextAssignments,
-  });
+  return { peerKey: formatPeerKey('aun', value), channelId: value };
 }
 
 function readActive(aunDir: string, aid: string, conversationId: string): SessionFile | undefined {
@@ -589,16 +564,74 @@ function loadConversationSeeds(aid: string): ConversationSeed[] {
   return buildConversationSeeds(aid, peerInfos, localAgentMdLookup);
 }
 
-function resolveGroupRoleDetail(assignments: any, roles: any, aid: string, groupId: string): { effectiveRole: string; source: string; assignment?: RoleAssignment } {
-  const assignment = assignments.getGroupRoleAssignment(aid, groupId) as RoleAssignment | undefined;
-  if (assignment) {
-    return { effectiveRole: assignment.role, source: 'assignment', assignment };
-  }
-  const rolesConfig = roles.readRolesConfig();
-  return { effectiveRole: rolesConfig.defaultRoles?.group || 'guest', source: 'default' };
+function readRelationConfig(config: any, aid: string, peerKey: string): any {
+  return config.read(config.ConfigTarget.Relation, { self: aid, peerKey }, { cache: true }) || {};
 }
 
-function withResolvedRoles(seed: ConversationSeed, modules: { assignments: any; roles: any; resolver: any }): any {
+function writeRelationConfig(config: any, aid: string, peerKey: string, value: any): void {
+  config.write(config.ConfigTarget.Relation, value, { self: aid, peerKey });
+}
+
+function explicitAssignment(scope: RoleAssignment['scope'], peerKey: string, role: string | null | undefined, ids: { peerId?: string; groupId?: string }): RoleAssignment | undefined {
+  if (!role) return undefined;
+  return {
+    scope,
+    peerKey,
+    role,
+    ...(ids.peerId ? { peerId: ids.peerId } : {}),
+    ...(ids.groupId ? { groupId: ids.groupId } : {}),
+    source: 'relation-config',
+  };
+}
+
+function resolveGroupRoleDetail(modules: { config: any; roles: any }, aid: string, groupId: string): { effectiveRole: string | null; source: string; assignment?: RoleAssignment } {
+  const target = relationTargetFromId(groupId);
+  const relation = readRelationConfig(modules.config, aid, target.peerKey);
+  const assigned = typeof relation.roles?.assigned === 'string' && roleExists(modules.roles, aid, relation.roles.assigned)
+    ? relation.roles.assigned
+    : null;
+  if (assigned) {
+    return {
+      effectiveRole: assigned,
+      source: 'relation-assigned',
+      assignment: explicitAssignment('group', target.peerKey, assigned, { groupId: target.channelId }),
+    };
+  }
+
+  const defaultRole = modules.roles.readRolesConfig(aid).defaultRoles?.group ?? null;
+  const effective = defaultRole && roleExists(modules.roles, aid, defaultRole) ? defaultRole : null;
+  return { effectiveRole: effective, source: effective ? 'default' : 'none' };
+}
+
+function assignmentForDetail(
+  detail: any,
+  modules: { config: any; roles: any },
+  seed: ConversationSeed,
+  member?: ConversationMemberSeed,
+): RoleAssignment | undefined {
+  const role = detail?.effectiveRole;
+  if (!role) return undefined;
+  if (seed.chatType === 'private' && detail.source === 'relation-assigned') {
+    const target = relationTargetFromId(seed.peerId || seed.conversationId);
+    return explicitAssignment('private', target.peerKey, role, { peerId: target.channelId });
+  }
+  const groupId = seed.groupId || seed.conversationId;
+  const groupTarget = relationTargetFromId(groupId);
+  if (member && detail.source === 'group-member') {
+    return explicitAssignment('group-member', groupTarget.peerKey, role, { groupId: groupTarget.channelId, peerId: member.peerId });
+  }
+  if (member && detail.source === 'private-inherited') {
+    const privateTarget = relationTargetFromId(member.peerId);
+    return explicitAssignment('private', privateTarget.peerKey, role, { peerId: member.peerId });
+  }
+  if (member && detail.source === 'group-default') {
+    return explicitAssignment('group', groupTarget.peerKey, role, { groupId: groupTarget.channelId });
+  }
+  void modules;
+  return undefined;
+}
+
+function withResolvedRoles(seed: ConversationSeed, modules: { config: any; roles: any; resolver: any }): any {
   if (seed.chatType === 'private') {
     const detail = modules.resolver.resolvePeerRoleDetail({
       selfAid: seed.self,
@@ -612,12 +645,12 @@ function withResolvedRoles(seed: ConversationSeed, modules: { assignments: any; 
       ...seed,
       role: detail.effectiveRole,
       source: detail.source,
-      assignment: detail.assignment,
+      assignment: assignmentForDetail(detail, modules, seed),
     };
   }
 
   const groupId = seed.groupId || seed.conversationId;
-  const groupDetail = resolveGroupRoleDetail(modules.assignments, modules.roles, seed.self, groupId);
+  const groupDetail = resolveGroupRoleDetail(modules, seed.self, groupId);
   const members = (seed.members || []).map(member => {
     const detail = modules.resolver.resolvePeerRoleDetail({
       selfAid: seed.self,
@@ -631,7 +664,7 @@ function withResolvedRoles(seed: ConversationSeed, modules: { assignments: any; 
       ...member,
       role: detail.effectiveRole,
       source: detail.source,
-      assignment: detail.assignment,
+      assignment: assignmentForDetail(detail, modules, seed, member),
     };
   });
 
@@ -646,6 +679,47 @@ function withResolvedRoles(seed: ConversationSeed, modules: { assignments: any; 
   };
 }
 
+function listRelationRoleAssignments(config: any, aid: string): RoleAssignment[] {
+  const out: RoleAssignment[] = [];
+  const relationsDir = path.join(resolvePaths().root, 'agents', aid, 'relations');
+  if (!fs.existsSync(relationsDir)) return out;
+
+  for (const entry of fs.readdirSync(relationsDir, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const peerKey = entry.name;
+    const relation = readRelationConfig(config, aid, peerKey);
+    const roles = relation.roles;
+    if (!roles || typeof roles !== 'object') continue;
+
+    const parsed = parsePeerKey(peerKey);
+    const hasMembers = roles.members && typeof roles.members === 'object' && Object.keys(roles.members).length > 0;
+    if (typeof roles.assigned === 'string') {
+      out.push({
+        scope: hasMembers ? 'group' : 'private',
+        peerKey,
+        role: roles.assigned,
+        ...(hasMembers ? { groupId: parsed.channelId } : { peerId: parsed.channelId }),
+        source: 'relation-config',
+      });
+    }
+    if (roles.members && typeof roles.members === 'object') {
+      for (const [peerId, role] of Object.entries(roles.members)) {
+        if (typeof role !== 'string') continue;
+        out.push({
+          scope: 'group-member',
+          peerKey,
+          groupId: parsed.channelId,
+          peerId,
+          role,
+          source: 'relation-config',
+        });
+      }
+    }
+  }
+
+  return out;
+}
+
 async function buildSnapshot(): Promise<any> {
   const modules = await getParentModules();
   const agents = await getAgentsFromIpc();
@@ -655,14 +729,14 @@ async function buildSnapshot(): Promise<any> {
   for (const agent of agents) {
     const aid = agent.aid;
     if (!aid) continue;
-    ensureScopedRoleAssignments(modules.assignments, aid);
-    const config = modules.assignments.readRoleAssignments(aid);
-    const roleItems = Object.values(config.assignments || {}) as RoleAssignment[];
+    const roleConfig = modules.roles.readRolesConfig(aid);
     snapshotAgents.push({
       aid,
       displayName: agent.displayName ?? agent.personalName,
       name: agent.name,
-      assignments: roleItems,
+      roles: Object.keys(roleConfig.roles || {}),
+      defaultRoles: roleConfig.defaultRoles,
+      assignments: listRelationRoleAssignments(modules.config, aid),
     });
 
     for (const seed of loadConversationSeeds(aid)) {
@@ -673,7 +747,7 @@ async function buildSnapshot(): Promise<any> {
   return { agents: snapshotAgents, conversations };
 }
 
-export const roleAssignmentsSource: WatchSource = {
+export const relationRolesSource: WatchSource = {
   kind: 'roles',
 
   async snapshot(): Promise<any> {
@@ -694,7 +768,7 @@ export const roleAssignmentsSource: WatchSource = {
           push(snap);
         }
       } catch (err) {
-        console.error('[role-assignments] polling error:', err);
+        console.error('[relation-roles] polling error:', err);
       }
     };
     tick();
@@ -713,86 +787,105 @@ function requireScope(body: any): RoleAssignment['scope'] {
   return body.scope;
 }
 
-function setScopedAssignment(assignments: any, aid: string, body: any, fallbackTargetId?: string): RoleAssignment {
-  ensureScopedRoleAssignments(assignments, aid);
-  const scope = requireScope(body);
-  const role = body.role;
-  if (!role) throw new Error('role is required');
-  if (scope === 'private') {
-    const peerId = body.peerId || fallbackTargetId;
-    if (!peerId) throw new Error('peerId is required');
-    return assignments.setPrivateRoleAssignment(aid, peerId, role, { note: body.note });
-  }
-  if (scope === 'group') {
-    const groupId = body.groupId || fallbackTargetId;
-    if (!groupId) throw new Error('groupId is required');
-    return assignments.setGroupRoleAssignment(aid, groupId, role, { note: body.note });
-  }
-  const groupId = body.groupId;
-  const peerId = body.peerId || fallbackTargetId;
-  if (!groupId || !peerId) throw new Error('groupId and peerId are required');
-  return assignments.setGroupMemberRoleAssignment(aid, groupId, peerId, role, { note: body.note });
-}
-
 function scopedAssignmentArgs(body: any, fallbackTargetId?: string): ScopedAssignmentTarget {
   const scope = requireScope(body);
   if (scope === 'private') {
-    const peerId = body.peerId || fallbackTargetId;
-    if (!peerId) throw new Error('peerId is required');
-    return { scope, peerId };
+    const raw = body.peerKey || body.peerId || fallbackTargetId;
+    if (!raw) throw new Error('peerId is required');
+    const target = relationTargetFromId(raw);
+    return { scope, peerId: target.channelId, peerKey: target.peerKey };
   }
   if (scope === 'group') {
-    const groupId = body.groupId || fallbackTargetId;
-    if (!groupId) throw new Error('groupId is required');
-    return { scope, groupId };
+    const raw = body.peerKey || body.groupId || fallbackTargetId;
+    if (!raw) throw new Error('groupId is required');
+    const target = relationTargetFromId(raw);
+    return { scope, groupId: target.channelId, peerKey: target.peerKey };
   }
-  const groupId = body.groupId;
+  const groupRaw = body.groupKey || body.groupPeerKey || body.groupId;
   const peerId = body.peerId || fallbackTargetId;
-  if (!groupId || !peerId) throw new Error('groupId and peerId are required');
-  return { scope, groupId, peerId };
+  if (!groupRaw || !peerId) throw new Error('groupId and peerId are required');
+  const target = relationTargetFromId(groupRaw);
+  return { scope, groupId: target.channelId, peerId, peerKey: target.peerKey };
 }
 
-function getScopedAssignment(assignments: any, aid: string, body: any, fallbackTargetId?: string): RoleAssignment | undefined {
-  ensureScopedRoleAssignments(assignments, aid);
+function pruneEmptyRoles(config: any): any {
+  const roles = config.roles;
+  if (!roles || typeof roles !== 'object') return config;
+  if (roles.members && typeof roles.members === 'object' && Object.keys(roles.members).length === 0) {
+    delete roles.members;
+  }
+  if (!Object.prototype.hasOwnProperty.call(roles, 'assigned') && !roles.members) {
+    delete config.roles;
+  }
+  return config;
+}
+
+function setScopedAssignment(configMod: any, aid: string, body: any, fallbackTargetId?: string): RoleAssignment {
   const target = scopedAssignmentArgs(body, fallbackTargetId);
-  if (target.scope === 'private') {
-    return assignments.getPrivateRoleAssignment(aid, target.peerId);
+  const role = body.role;
+  if (!role) throw new Error('role is required');
+
+  const config = readRelationConfig(configMod, aid, target.peerKey);
+  const roles = config.roles && typeof config.roles === 'object' ? { ...config.roles } : {};
+  if (target.scope === 'group-member') {
+    roles.members = roles.members && typeof roles.members === 'object' ? { ...roles.members } : {};
+    roles.members[target.peerId] = role;
+  } else {
+    roles.assigned = role;
   }
-  if (target.scope === 'group') {
-    return assignments.getGroupRoleAssignment(aid, target.groupId);
-  }
-  return assignments.getGroupMemberRoleAssignment(aid, target.groupId, target.peerId);
+  writeRelationConfig(configMod, aid, target.peerKey, { ...config, roles });
+
+  if (target.scope === 'private') return { scope: 'private', peerId: target.peerId, peerKey: target.peerKey, role, source: 'relation-config' };
+  if (target.scope === 'group') return { scope: 'group', groupId: target.groupId, peerKey: target.peerKey, role, source: 'relation-config' };
+  return { scope: 'group-member', groupId: target.groupId, peerId: target.peerId, peerKey: target.peerKey, role, source: 'relation-config' };
 }
 
-function deleteScopedAssignment(assignments: any, aid: string, body: any, fallbackTargetId?: string): boolean {
-  ensureScopedRoleAssignments(assignments, aid);
-  const scope = requireScope(body);
-  if (scope === 'private') {
-    const peerId = body.peerId || fallbackTargetId;
-    if (!peerId) throw new Error('peerId is required');
-    return assignments.deletePrivateRoleAssignment(aid, peerId);
+function getScopedAssignment(configMod: any, aid: string, body: any, fallbackTargetId?: string): RoleAssignment | undefined {
+  const target = scopedAssignmentArgs(body, fallbackTargetId);
+  const config = readRelationConfig(configMod, aid, target.peerKey);
+  if (target.scope === 'group-member') {
+    const role = config.roles?.members?.[target.peerId];
+    return explicitAssignment('group-member', target.peerKey, role, { groupId: target.groupId, peerId: target.peerId });
   }
-  if (scope === 'group') {
-    const groupId = body.groupId || fallbackTargetId;
-    if (!groupId) throw new Error('groupId is required');
-    return assignments.deleteGroupRoleAssignment(aid, groupId);
-  }
-  const groupId = body.groupId;
-  const peerId = body.peerId || fallbackTargetId;
-  if (!groupId || !peerId) throw new Error('groupId and peerId are required');
-  return assignments.deleteGroupMemberRoleAssignment(aid, groupId, peerId);
+  const role = config.roles?.assigned;
+  if (target.scope === 'private') return explicitAssignment('private', target.peerKey, role, { peerId: target.peerId });
+  return explicitAssignment('group', target.peerKey, role, { groupId: target.groupId });
 }
 
-export async function handleRoleAssignmentsApi(req: any, res: any, auth: RoleWriteAuth = {}): Promise<void> {
+function deleteScopedAssignment(configMod: any, aid: string, body: any, fallbackTargetId?: string): boolean {
+  const target = scopedAssignmentArgs(body, fallbackTargetId);
+  const config = readRelationConfig(configMod, aid, target.peerKey);
+  if (!config.roles || typeof config.roles !== 'object') return false;
+
+  const roles = { ...config.roles };
+  let deleted = false;
+  if (target.scope === 'group-member') {
+    const members = roles.members && typeof roles.members === 'object' ? { ...roles.members } : {};
+    deleted = Object.prototype.hasOwnProperty.call(members, target.peerId);
+    delete members[target.peerId];
+    roles.members = members;
+  } else {
+    deleted = Object.prototype.hasOwnProperty.call(roles, 'assigned');
+    delete roles.assigned;
+  }
+
+  writeRelationConfig(configMod, aid, target.peerKey, pruneEmptyRoles({ ...config, roles }));
+  return deleted;
+}
+
+export async function handleRelationRolesApi(req: any, res: any, auth: RoleWriteAuth = {}): Promise<void> {
   try {
     const modules = await getParentModules();
-    const { assignments, roles } = modules;
+    const { config, roles } = modules;
     const urlPath = (req.url || '').split('?')[0];
 
     if (req.method === 'GET' && urlPath.startsWith('/api/roles/agent/')) {
       const aid = decodeURIComponent(urlPath.split('/').filter(Boolean).pop() || '');
       if (!aid) return sendJson(res, 400, { error: 'missing aid' });
-      return sendJson(res, 200, assignments.readRoleAssignments(aid));
+      return sendJson(res, 200, {
+        $schema_version: 1,
+        assignments: listRelationRoleAssignments(config, aid),
+      });
     }
 
     if ((req.method === 'POST' || req.method === 'PUT') && urlPath.startsWith('/api/roles/agent/')) {
@@ -803,8 +896,8 @@ export async function handleRoleAssignmentsApi(req: any, res: any, auth: RoleWri
       if (typeof body.role !== 'string' || !body.role) {
         return sendJson(res, 400, { error: 'role is required' });
       }
-      if (!roleExists(roles, body.role)) {
-        return sendJson(res, 400, { error: `Unknown role: ${body.role}` });
+      if (!roleExists(roles, aid, body.role)) {
+        return sendJson(res, 400, { error: `Unknown user role: ${body.role}` });
       }
 
       const args = scopedAssignmentArgs(body);
@@ -818,7 +911,7 @@ export async function handleRoleAssignmentsApi(req: any, res: any, auth: RoleWri
       );
       if (!authorization.allow) return sendAuthorizationDenied(res, authorization);
 
-      const item = setScopedAssignment(assignments, aid, body);
+      const item = setScopedAssignment(config, aid, body);
       return sendJson(res, 200, { ok: true, assignment: item });
     }
 
@@ -831,7 +924,7 @@ export async function handleRoleAssignmentsApi(req: any, res: any, auth: RoleWri
 export async function handlePeerRoleApi(req: any, res: any, auth: RoleWriteAuth = {}): Promise<void> {
   try {
     const modules = await getParentModules();
-    const { assignments, roles } = modules;
+    const { config, roles } = modules;
     const urlPath = (req.url || '').split('?')[0];
     const target = assignmentFromPath(urlPath);
     if (!target) return sendJson(res, 400, { error: 'missing aid or target id' });
@@ -839,7 +932,7 @@ export async function handlePeerRoleApi(req: any, res: any, auth: RoleWriteAuth 
     if (req.method === 'DELETE') {
       const body = await parseBody(req);
       const args = scopedAssignmentArgs(body, target.targetId);
-      const existing = getScopedAssignment(assignments, target.aid, body, target.targetId);
+      const existing = getScopedAssignment(config, target.aid, body, target.targetId);
       const authorization = await authorizeRoleAssignmentWrite(
         modules,
         target.aid,
@@ -850,7 +943,7 @@ export async function handlePeerRoleApi(req: any, res: any, auth: RoleWriteAuth 
       );
       if (!authorization.allow) return sendAuthorizationDenied(res, authorization);
 
-      const deleted = deleteScopedAssignment(assignments, target.aid, body, target.targetId);
+      const deleted = deleteScopedAssignment(config, target.aid, body, target.targetId);
       return sendJson(res, 200, { ok: true, deleted });
     }
     if (req.method === 'PUT') {
@@ -858,8 +951,8 @@ export async function handlePeerRoleApi(req: any, res: any, auth: RoleWriteAuth 
       if (typeof body.role !== 'string' || !body.role) {
         return sendJson(res, 400, { error: 'role is required' });
       }
-      if (!roleExists(roles, body.role)) {
-        return sendJson(res, 400, { error: `Unknown role: ${body.role}` });
+      if (!roleExists(roles, target.aid, body.role)) {
+        return sendJson(res, 400, { error: `Unknown user role: ${body.role}` });
       }
 
       const args = scopedAssignmentArgs(body, target.targetId);
@@ -873,7 +966,7 @@ export async function handlePeerRoleApi(req: any, res: any, auth: RoleWriteAuth 
       );
       if (!authorization.allow) return sendAuthorizationDenied(res, authorization);
 
-      const item = setScopedAssignment(assignments, target.aid, body, target.targetId);
+      const item = setScopedAssignment(config, target.aid, body, target.targetId);
       return sendJson(res, 200, { ok: true, assignment: item });
     }
 

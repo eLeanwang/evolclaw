@@ -21,14 +21,10 @@ function normalizeBaseagent(baseagent?: string): string {
   return (baseagent || 'claude').trim() || 'claude';
 }
 
-export function getRoleModelPermission(role: string | undefined, baseagent: string | undefined): RoleModelPermission {
+export function getRoleModelPermission(role: string | undefined, baseagent: string | undefined, selfAid?: string): RoleModelPermission {
   const ba = normalizeBaseagent(baseagent);
-  const effectiveRole = role || 'anonymous';
-  const perm = getFieldPermission(effectiveRole, `baseagents.${ba}.model`);
-  const fallback = ba === 'claude' && effectiveRole !== 'member'
-    ? getFieldPermission('member', 'baseagents.claude.model')
-    : null;
-  const selected = perm ?? fallback;
+  if (!role) return { allowOverride: false, constrained: true };
+  const selected = getFieldPermission(role, `baseagents.${ba}.model`, selfAid);
 
   if (!selected || !Array.isArray(selected.allowedModels)) {
     return { allowOverride: true, constrained: false };
@@ -51,8 +47,9 @@ export function isModelAllowedForRoleBaseagent(
   baseagent: string | undefined,
   model: string,
   resolveModelId?: Resolver,
+  selfAid?: string,
 ): boolean {
-  const permission = getRoleModelPermission(role, baseagent);
+  const permission = getRoleModelPermission(role, baseagent, selfAid);
   if (!permission.constrained) return true;
   const allowed = permission.allowedModels || [];
   const resolved = resolveCandidateModel(model, resolveModelId);
@@ -64,11 +61,12 @@ export function filterModelsForRole(
   baseagent: string | undefined,
   models: string[],
   resolveModelId?: Resolver,
+  selfAid?: string,
 ): string[] {
-  const permission = getRoleModelPermission(role, baseagent);
+  const permission = getRoleModelPermission(role, baseagent, selfAid);
   if (!permission.constrained) return models;
 
-  return models.filter(model => isModelAllowedForRoleBaseagent(role, baseagent, model, resolveModelId));
+  return models.filter(model => isModelAllowedForRoleBaseagent(role, baseagent, model, resolveModelId, selfAid));
 }
 
 export function validateModelSelectionForRole(opts: {
@@ -77,8 +75,9 @@ export function validateModelSelectionForRole(opts: {
   requestedModel: string;
   models?: string[];
   resolveModelId?: Resolver;
+  selfAid?: string;
 }): ModelPermissionDecision {
-  const permission = getRoleModelPermission(opts.role, opts.baseagent);
+  const permission = getRoleModelPermission(opts.role, opts.baseagent, opts.selfAid);
   const resolvedModel = resolveCandidateModel(opts.requestedModel, opts.resolveModelId);
   const catalogModel = opts.models?.includes(resolvedModel)
     ? resolvedModel
@@ -105,7 +104,7 @@ export function validateModelSelectionForRole(opts: {
     };
   }
 
-  if (!isModelAllowedForRoleBaseagent(opts.role, opts.baseagent, targetModel, opts.resolveModelId)) {
+  if (!isModelAllowedForRoleBaseagent(opts.role, opts.baseagent, targetModel, opts.resolveModelId, opts.selfAid)) {
     return {
       ok: false,
       code: 'MODEL_NOT_ALLOWED',
@@ -121,12 +120,13 @@ export function constrainResolvedModelForRole(opts: {
   baseagent?: string;
   model?: string;
   resolveModelId?: Resolver;
+  selfAid?: string;
 }): { model?: string; constrained: boolean } {
-  const permission = getRoleModelPermission(opts.role, opts.baseagent);
+  const permission = getRoleModelPermission(opts.role, opts.baseagent, opts.selfAid);
   if (!permission.constrained) return { model: opts.model, constrained: false };
   if (!permission.allowOverride) return { model: permission.defaultModel || opts.model, constrained: true };
   if (!opts.model) return { model: permission.defaultModel, constrained: true };
-  if (isModelAllowedForRoleBaseagent(opts.role, opts.baseagent, opts.model, opts.resolveModelId)) {
+  if (isModelAllowedForRoleBaseagent(opts.role, opts.baseagent, opts.model, opts.resolveModelId, opts.selfAid)) {
     return { model: opts.model, constrained: false };
   }
   return { model: permission.defaultModel || opts.model, constrained: true };

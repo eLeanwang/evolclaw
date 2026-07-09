@@ -893,11 +893,11 @@ export class CommandHandler {
   }
 
   private canReadTopics(role: string): boolean {
-    return role !== 'anonymous';
+    return role !== 'none';
   }
 
   private canDeleteTopic(role: string, chatType: MenuChatType, topic: Session, userId?: string): boolean {
-    if (role === 'anonymous') return false;
+    if (role === 'none') return false;
     if (isAdminRole(role)) return true;
     if (chatType === 'group') return false;
     return !!userId && topic.metadata?.peerId === userId;
@@ -922,7 +922,7 @@ export class CommandHandler {
 
   /**
    * 返回结构化命令菜单（供 menu.query 使用）
-   * owner 看到全部命令，admin 看到管理级命令（不含 owner-only），guest 仅看到用户级命令
+   * owner 看到全部命令，admin 看到管理级命令（不含 owner-only），visitor/member 仅看到用户级命令
    */
   getMenuItems(role: string, chatType: string = 'private', scope: 'agent' | 'control' = 'agent'): { group: string; commands: MenuItem[] }[] {
     return menuGetMenuItems.call(this, role, chatType, scope);

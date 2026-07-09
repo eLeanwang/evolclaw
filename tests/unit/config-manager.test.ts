@@ -207,13 +207,22 @@ describe('resolveEffective (v3 覆盖链: defaults → agent → relation)', () 
       $schema_version: 2,
       aid: AID,
       channels: [],
-      roles: { vip: { baseagents: { claude: { model: 'vip-model' } } } },
+      roles: {
+        definitions: {
+          vip: {
+            description: 'VIP collaborator',
+            permissions: {
+              'baseagents.claude.model': { default: 'vip-model', allowOverride: true },
+            },
+          },
+        },
+      },
     }, { self: AID });
 
     const eff = resolveEffective({ self: AID });
     // v3: roles 块保留在配置中（用于角色寻址）
     expect(eff.roles).toBeDefined();
-    expect(eff.roles?.vip).toBeDefined();
+    expect(eff.roles?.definitions?.vip).toBeDefined();
   });
 });
 

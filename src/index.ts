@@ -17,8 +17,7 @@ import { resolveAnthropicConfig } from './agents/baseagent.js';
 import { loadDefaults, loadAllAgents, ensureAgentDirSkeleton, migrateIdentitiesIfNeeded, migrateProcessConfigIfNeeded, loadEvolclawConfig } from './config-store.js';
 import { initConfigManager, resolveEffective } from './config/config-manager.js';
 import { shouldFailFastForMissingOwners } from './config/owner-policy.js';
-import { resolvePeerRoleDetail, roleToSessionIdentity } from './config/peer-role-resolver.js';
-import { getFirstRoleAssignment, listRoleAssignments } from './config/role-assignments.js';
+import { getFirstStaticAgentOwner, resolvePeerRoleDetail, roleToSessionIdentity } from './config/peer-role-resolver.js';
 import { snapshot as configSnapshot, retentionCleanup, readCurrent, readWVersion, writeWVersion, diffWorkingVsVersion, paramDiff, incrementSuccessCount, collectConfigFiles } from './config/snapshot.js';
 import { appendBootLog, selfDiagnose } from './config/boot-log.js';
 import type { Config, EffectiveAgentConfig, AgentConfig, DefaultsConfig, SessionIdentity } from './types.js';
@@ -772,7 +771,7 @@ async function main() {
     const parsed = tryParseChannelKey(channel);
     const owningAgent = agentRegistry.resolveByChannel(channel);
     const selfAid = owningAgent?.aid ?? parsed?.selfAID;
-    if (!selfAid || !userId) return { role: 'anonymous', mode: 'interactive' };
+    if (!selfAid || !userId) return { role: 'none', mode: 'interactive' };
     const detail = resolvePeerRoleDetail({
       selfAid,
       channelType: parsed?.type || channel,
@@ -1243,12 +1242,7 @@ async function main() {
         const owningAgent = agentRegistry.resolveByChannel(channelKey);
         return {
           observable: owningAgent?.getObservable() ?? false,
-          owners: owningAgent ? Array.from(new Set([
-            ...(owningAgent.config.owners ?? []),
-            ...listRoleAssignments(owningAgent.aid, { scope: 'private', role: 'owner' })
-              .map(a => a.peerId)
-              .filter((peerId): peerId is string => !!peerId),
-          ])) : [],
+          owners: owningAgent ? Array.from(new Set(owningAgent.config.owners ?? [])) : [],
         };
       });
     }
@@ -1344,7 +1338,7 @@ async function main() {
     const agent = agentRegistry.resolveByChannel(inst.adapter.channelKey) ?? agentRegistry.resolveByChannel(name);
     if (!agent) return;
     if (!agent.config.debug?.upmsg) return;
-    const ownerAid = getFirstRoleAssignment(agent.aid, { scope: 'private', role: 'owner' })?.peerId;
+    const ownerAid = getFirstStaticAgentOwner(agent.aid);
     if (!ownerAid) return;
     const noticeKey = `${agent.aid}#${name}`;
     if (onlineNoticeSent.has(noticeKey)) return;
@@ -1675,7 +1669,7 @@ async function main() {
       if (notified.has(otherType)) continue;  // 同类型已通知过
       const owningAgent = agentRegistry.resolveByChannel(other.adapter.channelKey);
       const ownerId = owningAgent
-        ? getFirstRoleAssignment(owningAgent.aid, { scope: 'private', role: 'owner' })?.peerId
+        ? getFirstStaticAgentOwner(owningAgent.aid)
         : undefined;
       if (!ownerId) continue;
       notified.add(otherType);

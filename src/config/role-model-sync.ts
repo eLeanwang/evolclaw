@@ -1,15 +1,18 @@
 /**
- * role-model-sync.ts
+ * Synchronize relation model overrides against locked role defaults.
  *
- * 角色模型自动同步功能：当角色定义中设置 allowOverride=false 时，
- * 自动扫描并修正所有违反该约束的 relation 配置。
+ * Role assignments now live inside relation config:
+ * - roles.assigned for the relation default role
+ * - roles.members for group member-specific roles
+ *
+ * The relation config is shared by all members of a group, so member-specific
+ * roles can only be normalized when their locked defaults agree.
  */
 
 import * as fs from 'fs';
-import { agentRelationsDir, agentRoleAssignmentsConfig, resolvePaths } from '../paths.js';
-import { parsePeerKey } from '../core/relation/peer-identity.js';
+import { agentRelationsDir, resolvePaths } from '../paths.js';
 import { ConfigTarget, read, write } from './config-manager.js';
-import type { RoleAssignment, RoleAssignmentsConfig, RolesConfig, RelationConfig } from '../types.js';
+import type { RelationConfig, RoleDefinition, RolesConfig } from '../types.js';
 
 interface LockedModelDefault {
   baseagent: string;
@@ -24,12 +27,6 @@ export interface RoleModelSyncResult {
 
 const MODEL_PERMISSION_RE = /^baseagents\.([^.]+)\.model$/;
 
-/**
- * 扫描所有 agent，同步不允许覆盖的角色模型设置。
- *
- * 当角色定义中某个模型设置为 allowOverride=false 时，
- * 此函数会自动将所有分配了该角色的 relation 配置修正为角色默认值。
- */
 export function syncNoOverrideRoleModelsForAllAgents(roles: RolesConfig): RoleModelSyncResult {
   const agentsDir = resolvePaths().agentsDir;
   const result: RoleModelSyncResult = {
@@ -49,9 +46,6 @@ export function syncNoOverrideRoleModelsForAllAgents(roles: RolesConfig): RoleMo
   return result;
 }
 
-/**
- * 同步单个 agent 的角色模型设置。
- */
 export function syncNoOverrideRoleModelsForAgent(aid: string, roles: RolesConfig): RoleModelSyncResult {
   const result: RoleModelSyncResult = {
     scannedAgents: 1,
@@ -61,156 +55,106 @@ export function syncNoOverrideRoleModelsForAgent(aid: string, roles: RolesConfig
   const lockedByRole = buildLockedModelDefaults(roles);
   if (lockedByRole.size === 0) return result;
 
-  const assignments = readAssignments(aid).assignments || {};
-  const relationKeys = listRelationKeys(aid);
-  if (relationKeys.length === 0) return result;
+  for (const peerKey of listRelationKeys(aid)) {
+    const relation = read<RelationConfig>(ConfigTarget.Relation, { self: aid, peerKey });
+    if (!relation?.roles) continue;
 
-  for (const assignment of Object.values(assignments)) {
-    result.scannedAssignments += 1;
-    const locked = lockedByRole.get(assignment.role);
-    if (!locked || locked.length === 0) continue;
+    const assignedRoles = assignedRolesForRelation(relation);
+    result.scannedAssignments += assignedRoles.length;
+    const locked = mergeCompatibleLockedModels(assignedRoles, lockedByRole);
+    if (!locked.length) continue;
 
-    for (const peerKey of relationKeysForAssignment(assignment, relationKeys)) {
-      if (normalizeRelationModels(aid, peerKey, locked)) {
-        result.updatedRelations += 1;
-      }
-    }
+    const { value: next, changed } = applyLockedModels(relation, locked);
+    if (!changed) continue;
+    write(ConfigTarget.Relation, next, { self: aid, peerKey });
+    result.updatedRelations += 1;
   }
+
   return result;
 }
 
-/**
- * 规范化单个 relation 配置的模型设置（用于写入时验证）。
- */
 export function normalizeRelationBehaviorForAssignedRole(
   aid: string,
   peerKey: string,
   value: RelationConfig,
   roles: RolesConfig,
 ): RelationConfig {
-  const role = explicitRoleForRelation(aid, peerKey);
-  if (!role) return value;
-  const locked = buildLockedModelDefaults(roles).get(role);
-  if (!locked || locked.length === 0) return value;
+  const lockedByRole = buildLockedModelDefaults(roles);
+  if (lockedByRole.size === 0) return value;
+
+  const assignedRoles = assignedRolesForRelation(value);
+  const locked = mergeCompatibleLockedModels(assignedRoles, lockedByRole);
+  if (!locked.length) return value;
+
   return applyLockedModels(value, locked).value;
 }
 
-/**
- * 从角色配置中提取所有 allowOverride=false 的模型约束。
- */
 function buildLockedModelDefaults(roles: RolesConfig): Map<string, LockedModelDefault[]> {
   const out = new Map<string, LockedModelDefault[]>();
   for (const [roleName, roleDef] of Object.entries(roles.roles || {})) {
-    const locked: LockedModelDefault[] = [];
-    for (const [field, permission] of Object.entries(roleDef.permissions || {})) {
-      const match = MODEL_PERMISSION_RE.exec(field);
-      if (!match) continue;
-      if (permission.allowOverride !== false) continue;
-      if (typeof permission.default !== 'string' || !permission.default.trim()) continue;
-      locked.push({ baseagent: match[1], model: permission.default.trim() });
-    }
+    const locked = lockedDefaultsForRole(roleDef);
     if (locked.length > 0) out.set(roleName, locked);
   }
   return out;
 }
 
-/**
- * 读取 agent 的角色分配配置。
- */
-function readAssignments(aid: string): RoleAssignmentsConfig {
-  try {
-    const config = read<RoleAssignmentsConfig>(ConfigTarget.RoleAssignments, { self: aid });
-    return config ?? { $schema_version: 2, assignments: {} };
-  } catch {
-    return { $schema_version: 2, assignments: {} };
+function lockedDefaultsForRole(roleDef: RoleDefinition): LockedModelDefault[] {
+  const locked: LockedModelDefault[] = [];
+  for (const [field, permission] of Object.entries(roleDef.permissions || {})) {
+    const match = MODEL_PERMISSION_RE.exec(field);
+    if (!match) continue;
+    if (permission.allowOverride !== false) continue;
+    if (typeof permission.default !== 'string' || !permission.default.trim()) continue;
+    locked.push({ baseagent: match[1], model: permission.default.trim() });
   }
+  return locked;
 }
 
-/**
- * 列出 agent 的所有 relation 目录（peerKey）。
- */
+function assignedRolesForRelation(config: RelationConfig): string[] {
+  const roles = config.roles;
+  if (!roles) return [];
+  const out = new Set<string>();
+  if (typeof roles.assigned === 'string' && roles.assigned) out.add(roles.assigned);
+  for (const role of Object.values(roles.members || {})) {
+    if (typeof role === 'string' && role) out.add(role);
+  }
+  return [...out];
+}
+
+function mergeCompatibleLockedModels(
+  roleNames: string[],
+  lockedByRole: Map<string, LockedModelDefault[]>,
+): LockedModelDefault[] {
+  const byBaseagent = new Map<string, string>();
+  const conflicts = new Set<string>();
+
+  for (const roleName of roleNames) {
+    for (const locked of lockedByRole.get(roleName) || []) {
+      if (conflicts.has(locked.baseagent)) continue;
+      const existing = byBaseagent.get(locked.baseagent);
+      if (existing && existing !== locked.model) {
+        byBaseagent.delete(locked.baseagent);
+        conflicts.add(locked.baseagent);
+        continue;
+      }
+      byBaseagent.set(locked.baseagent, locked.model);
+    }
+  }
+
+  return [...byBaseagent.entries()].map(([baseagent, model]) => ({ baseagent, model }));
+}
+
 function listRelationKeys(aid: string): string[] {
   const dir = agentRelationsDir(aid);
   if (!fs.existsSync(dir)) return [];
   return fs.readdirSync(dir, { withFileTypes: true })
-    .filter(entry => entry.isDirectory() && !entry.name.startsWith('_')) // 跳过 _index, _trash 等
+    .filter(entry => entry.isDirectory() && !entry.name.startsWith('_'))
     .map(entry => entry.name);
 }
 
-/**
- * 根据角色分配查找对应的 relation keys。
- */
-function relationKeysForAssignment(assignment: RoleAssignment, existingKeys: string[]): string[] {
-  const targetId = relationTargetId(assignment);
-  if (!targetId) return [];
-
-  const matched = existingKeys.filter(peerKey => relationChannelId(peerKey) === targetId);
-  const canonicalAun = `aun#${encodeURIComponent(targetId)}`;
-  if (existingKeys.includes(canonicalAun) && !matched.includes(canonicalAun)) {
-    matched.push(canonicalAun);
-  }
-  return matched;
-}
-
-/**
- * 从角色分配中提取目标 ID（peerId 或 groupId）。
- */
-function relationTargetId(assignment: RoleAssignment): string | null {
-  if (assignment.scope === 'private') return assignment.peerId || null;
-  if (assignment.scope === 'group') return assignment.groupId || null;
-  return null;
-}
-
-/**
- * 查找 relation 的显式角色分配。
- */
-function explicitRoleForRelation(aid: string, peerKey: string): string | null {
-  const channelId = relationChannelId(peerKey);
-  if (!channelId) return null;
-
-  const assignments = Object.values(readAssignments(aid).assignments || {});
-  const privateAssignment = assignments.find(assignment =>
-    assignment.scope === 'private' && assignment.peerId === channelId);
-  if (privateAssignment) return privateAssignment.role;
-
-  const groupAssignment = assignments.find(assignment =>
-    assignment.scope === 'group' && assignment.groupId === channelId);
-  if (groupAssignment) return groupAssignment.role;
-
-  return null;
-}
-
-/**
- * 从 peerKey 中提取 channelId（解析后的 peerId/groupId）。
- */
-function relationChannelId(peerKey: string): string | null {
-  try {
-    return parsePeerKey(peerKey).channelId;
-  } catch {
-    return null;
-  }
-}
-
-/**
- * 检查并修正单个 relation 的模型配置。
- */
-function normalizeRelationModels(aid: string, peerKey: string, locked: LockedModelDefault[]): boolean {
-  const existing = read<RelationConfig>(ConfigTarget.Relation, { self: aid, peerKey });
-  if (!existing) return false; // 没有配置文件，跳过
-
-  const { value: next, changed } = applyLockedModels(existing, locked);
-  if (!changed) return false;
-
-  write(ConfigTarget.Relation, next, { self: aid, peerKey });
-  return true;
-}
-
-/**
- * 应用锁定的模型设置到配置对象。
- */
 function applyLockedModels(
   value: RelationConfig,
-  locked: LockedModelDefault[]
+  locked: LockedModelDefault[],
 ): { value: RelationConfig; changed: boolean } {
   let next: RelationConfig | null = null;
 
@@ -230,9 +174,6 @@ function applyLockedModels(
   return { value: next || value, changed: !!next };
 }
 
-/**
- * 深拷贝配置对象。
- */
 function cloneConfig(value: RelationConfig): RelationConfig {
   return JSON.parse(JSON.stringify(value || {}));
 }

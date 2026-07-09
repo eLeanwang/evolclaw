@@ -538,8 +538,8 @@ function buildMenuAuthContext(
   },
 ): CommandAuthorizationContext {
   const agent = owner.getOwningAgent?.(params.channel);
-  const selfAid = agent?.aid;
-  const channelType = owner.resolveChannelType?.(params.channel);
+  const selfAid = agent?.aid || params.session?.selfAID;
+  const channelType = owner.resolveChannelType?.(params.channel) || params.session?.channelType;
   const chatType = (params.session?.chatType as 'private' | 'group' | undefined) ?? params.explicitChatType;
   const peerKeyId = chatType === 'group'
     ? (params.session?.metadata?.groupId || params.channelId)
@@ -687,13 +687,13 @@ export function validateScheduleParams(scheduleType: string, scheduleValue: stri
 
 /**
  * 返回结构化命令菜单（供 menu.query 使用）
- * owner 看到全部命令，admin 看到管理级命令（不含 owner-only），guest 仅看到用户级命令
+ * owner 看到全部命令，admin 看到管理级命令（不含 owner-only），visitor/member 仅看到用户级命令
  */
 export function getMenuItems(this: any, role: string, chatType: string = 'private', scope: 'agent' | 'control' = 'agent'): { group: string; commands: MenuItem[] }[] {
   const isOwner = role === 'owner';
   const isAdmin = role === 'owner' || role === 'admin';
   const isControlScope = scope === 'control';
-  const canReadTopic = role !== 'anonymous';
+  const canReadTopic = role !== 'none';
   const items: { group: string; commands: MenuItem[] }[] = [];
 
   if (!isAdmin && chatType === 'group') {
@@ -1040,8 +1040,8 @@ export async function getSubMenuItems(this: any, cmd: string, channel: string, c
   }
 
   if (cmd === '/perm') {
-    const permSelfAid = this.getOwningAgent?.(channel)?.aid;
-    const permChannelType = this.resolveChannelType?.(channel);
+    const permSelfAid = this.getOwningAgent?.(channel)?.aid || session?.selfAID;
+    const permChannelType = this.resolveChannelType?.(channel) || session?.channelType;
     const permPeerKeyId = session?.chatType === 'group'
       ? (session.metadata?.groupId || channelId)
       : (userId || session?.metadata?.peerId);
@@ -1339,8 +1339,8 @@ export async function execMenuQuery(this: any,
   if (cmdBase === '/perm') {
     const need = this.requireSession(session);
     if (need) return need;
-    const pmSelfAid = this.getOwningAgent?.(channel)?.aid;
-    const pmChannelType = this.resolveChannelType?.(channel);
+    const pmSelfAid = this.getOwningAgent?.(channel)?.aid || session!.selfAID;
+    const pmChannelType = this.resolveChannelType?.(channel) || session!.channelType;
     const pmPeerKeyId = session!.chatType === 'group'
       ? (session!.metadata?.groupId || channelId)
       : (userId || session!.metadata?.peerId);
@@ -1651,8 +1651,8 @@ export async function execMenuUpdate(this: any,
       : [...PERMISSION_MODE_KEYS];
     if (!validModes.includes(arg)) return { error: `无效模式: ${arg}`, code: 'INVALID_VALUE' };
     // 写关系级 config.json（运行时 per-message 解析，不再写 session.metadata）
-    const permSelfAid = this.getOwningAgent?.(channel)?.aid;
-    const permChannelType = this.resolveChannelType?.(channel);
+    const permSelfAid = this.getOwningAgent?.(channel)?.aid || session!.selfAID;
+    const permChannelType = this.resolveChannelType?.(channel) || session!.channelType;
     const permPeerKeyId = session!.chatType === 'group'
       ? (session!.metadata?.groupId || channelId)
       : (userId || session!.metadata?.peerId);
@@ -1702,6 +1702,9 @@ export async function execMenuAction(this: any,
   if (gated) return gated;
   const { session: authSession } = await this.loadMenuContext(channel, channelId);
   const authIdentity = overrideIdentity ?? this.sessionManager.resolveIdentity(channel, userId);
+  if (cmdBase === '/system' && fromControlChannel && !isProcessLevelOwner(userId, loadEvolclawConfig().owners)) {
+    return { error: '操作需要 owner 权限', code: 'FORBIDDEN' };
+  }
   if (cmdBase === '/agent' && !fromControlChannel && !args?.aid) {
     const selfAid = this.getOwningAgent?.(channel)?.aid;
     if (selfAid) args = { ...(args ?? {}), aid: selfAid };

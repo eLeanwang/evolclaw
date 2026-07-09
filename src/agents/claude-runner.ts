@@ -1288,7 +1288,7 @@ export class AgentRunner {
           chatType: session?.identity?.chatType,
           selfAid: session?.identity?.self,
           peerKey: session?.identity?.peerKey,
-          role: session?.identity?.role || 'anonymous',
+          role: session?.identity?.role || 'none',
           isDaemonOwner: false, // claude-runner 在会话内执行，不是 daemon owner 操作
           fromControlChannel: permCtx?.channel?.startsWith('control#') || false,
         };

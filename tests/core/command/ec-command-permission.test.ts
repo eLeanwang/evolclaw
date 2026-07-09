@@ -126,40 +126,40 @@ describe('EC Command Permission', () => {
       }
     });
 
-    it('should allow guest ec msg send with strict constraints', () => {
-      const guestContext: EcCommandAuthorizationContext = {
+    it('should allow visitor ec msg send with strict constraints', () => {
+      const visitorContext: EcCommandAuthorizationContext = {
         ...baseContext,
-        role: 'guest',
+        role: 'visitor',
       };
-      const decision = authorizeEcCommand('ec msg send agent1.agentid.pub user1 hello', guestContext);
+      const decision = authorizeEcCommand('ec msg send agent1.agentid.pub user1 hello', visitorContext);
       expect(decision).not.toBeNull();
       expect(decision?.allow).toBe(true);
       if (decision?.allow) {
-        expect(decision.role).toBe('guest');
+        expect(decision.role).toBe('visitor');
       }
     });
 
-    it('should deny guest ec msg file (explicit deny in builtin-roles)', () => {
-      const guestContext: EcCommandAuthorizationContext = {
+    it('should deny visitor ec msg file (explicit deny in builtin-roles)', () => {
+      const visitorContext: EcCommandAuthorizationContext = {
         ...baseContext,
-        role: 'guest',
+        role: 'visitor',
       };
-      const decision = authorizeEcCommand('ec msg file agent1.agentid.pub user1 /tmp/file', guestContext);
+      const decision = authorizeEcCommand('ec msg file agent1.agentid.pub user1 /tmp/file', visitorContext);
       expect(decision).not.toBeNull();
       if (!decision) return;
       expect(decision.allow).toBe(false);
     });
 
-    it('should deny guest ec group send (explicit deny)', () => {
-      const guestContext: EcCommandAuthorizationContext = {
+    it('should allow visitor ec group send in group chats', () => {
+      const visitorContext: EcCommandAuthorizationContext = {
         ...baseContext,
-        role: 'guest',
+        role: 'visitor',
         chatType: 'group',
       };
-      const decision = authorizeEcCommand('ec group send agent1.agentid.pub group123 hello', guestContext);
+      const decision = authorizeEcCommand('ec group send agent1.agentid.pub group123 hello', visitorContext);
       expect(decision).not.toBeNull();
       if (!decision) return;
-      expect(decision.allow).toBe(false);
+      expect(decision.allow).toBe(true);
     });
 
     it('should return null for non-ec commands', () => {

@@ -8,6 +8,7 @@ import type {
   OperationCategory,
 } from '../../types.js';
 import { getRoleDefinition } from '../../config/roles.js';
+import { isManagementRole } from '../../config/builtin-roles.js';
 import { getOperationMeta } from './operation-registry.js';
 import { formatPeerKey, parsePeerKey } from '../relation/peer-identity.js';
 
@@ -21,6 +22,47 @@ interface ConstraintCheckResult {
   ok: boolean;
   reason?: string;
 }
+
+export const USER_PLANE_CAPABILITY_CEILING = {
+  allowOperations: new Set<string>([
+    'model.list',
+    'model.current',
+    'model.use',
+    'model.effort',
+    'model.reset',
+    'session.list',
+    'session.create',
+    'session.rename',
+    'trigger.list',
+    'stats.summary',
+    'stats.session',
+    'stats.context',
+    'file.list',
+    'file.fetch',
+    'ec.msg.send',
+    'ec.msg.file',
+    'ec.group.send',
+    'ec.group.file',
+  ]),
+  denyOperations: new Set<string>([
+    'role.assign',
+    'role.revoke',
+    'config.write',
+    'gateway.write',
+    'cli.exec.raw',
+    'shell.exec',
+    'rce.exec',
+  ]),
+  denyNamespaces: new Set<string>([
+    'role',
+    'agent',
+    'system',
+    'storage',
+    'aid',
+  ]),
+  allowCategories: new Set<OperationCategory>(['read', 'write-own']),
+  denyCategories: new Set<OperationCategory>(['write-agent', 'process', 'dangerous']),
+};
 
 export function authorizeCommand(
   ctx: CommandAuthorizationContext
@@ -44,13 +86,17 @@ export function authorizeCommand(
     );
   }
 
-  const roleDef = getRoleDefinition(role);
+  const roleDef = getRoleDefinition(role, ctx.selfAid);
   if (!roleDef) {
     return denyDecision(ctx, 'ROLE_ACCESS_DENIED', `Unknown role: ${role}`, operation, intent.scope, opMeta.dangerous);
   }
 
   if (roleDef.allowAccess === false) {
     return denyDecision(ctx, 'ROLE_ACCESS_DENIED', `Role ${role} is not allowed to access commands`, operation, intent.scope, opMeta.dangerous);
+  }
+
+  if (!isManagementRole(role) && !isUserPlaneOperationAllowed(operation, opMeta.category, opMeta.dangerous)) {
+    return denyDecision(ctx, 'NOT_ALLOWED', `Operation ${operation} is outside the user permission plane`, operation, intent.scope, opMeta.dangerous);
   }
 
   const matchResult = matchCommandPermission(
@@ -180,6 +226,16 @@ function getRuleRank(
 
 function isExplicitDangerousGrant(rule: string, permission: CommandPermission): boolean {
   return permission.allow === true && permission.dangerous === true && (rule === 'dangerous:*' || !rule.includes('*') && !rule.startsWith('category:'));
+}
+
+function isUserPlaneOperationAllowed(operation: string, category: OperationCategory, dangerous: boolean): boolean {
+  const namespace = operation.split('.')[0];
+  if (dangerous) return false;
+  if (USER_PLANE_CAPABILITY_CEILING.denyCategories.has(category)) return false;
+  if (!USER_PLANE_CAPABILITY_CEILING.allowCategories.has(category)) return false;
+  if (USER_PLANE_CAPABILITY_CEILING.denyOperations.has(operation)) return false;
+  if (USER_PLANE_CAPABILITY_CEILING.denyNamespaces.has(namespace)) return false;
+  return USER_PLANE_CAPABILITY_CEILING.allowOperations.has(operation);
 }
 
 function checkConstraints(
@@ -386,7 +442,7 @@ function parseLegacyChannelType(peerKey: string): string | undefined {
 }
 
 function checkFieldOverride(ctx: CommandAuthorizationContext, field: string): ConstraintCheckResult {
-  const roleDef = getRoleDefinition(ctx.role);
+  const roleDef = getRoleDefinition(ctx.role, ctx.selfAid);
   const fieldPermission = roleDef?.permissions?.[field];
   if (!fieldPermission) {
     return { ok: false, reason: `Role ${ctx.role} has no field permission for ${field}` };

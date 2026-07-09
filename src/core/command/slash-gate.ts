@@ -82,17 +82,17 @@ export function guardThreadCommand(content: string, threadId?: string): Outbound
 export function guardRoleCommand(content: string, activeChatType: string, isAdmin: boolean): OutboundPayload | undefined {
   if (!content.startsWith('/')) return undefined;
 
-  // guest 在群聊和私聊中均可访问的只读命令：纯查询形态（带参写操作由各 handler 内部守卫拦截）
-  const guestGroupCommands = [
+  // visitor/member 在群聊和私聊中均可访问的只读命令：纯查询形态（带参写操作由各 handler 内部守卫拦截）
+  const userGroupCommands = [
     '/status', '/help', '/evolhelp', '/check', '/chatmode', '/dispatch',
     '/model', '/setmodel', '/effort', '/baseagent', '/perm', '/activity', '/stop',
     '/resume', '/trigger',
   ];
   const userCommands = activeChatType === 'group' && !isAdmin
-    ? guestGroupCommands
+    ? userGroupCommands
     : [
-        ...guestGroupCommands,
-        // 私聊 guest 额外可用：会话自管理 + 私聊专属的 /rewind 历史查看
+        ...userGroupCommands,
+        // 私聊 visitor/member 额外可用：会话自管理 + 私聊专属的 /rewind 历史查看
         '/slist', '/new', '/session', '/rename', '/name', '/del', '/s ', '/rewind',
       ];
   const isUserCommand = userCommands.some(cmd =>

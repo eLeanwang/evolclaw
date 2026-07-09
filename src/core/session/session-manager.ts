@@ -90,7 +90,7 @@ export class SessionManager {
   }
 
   resolveIdentity(channel: string, userId?: string): SessionIdentity {
-    return this.identityResolver?.(channel, userId) ?? { role: 'anonymous', mode: 'interactive' };
+    return this.identityResolver?.(channel, userId) ?? { role: 'none', mode: 'interactive' };
   }
 
   async updateIdentity(sessionId: string, identity: SessionIdentity): Promise<void> {

@@ -482,10 +482,10 @@ export async function handleSlashCommand(this: any,
     cmds.push({ command: '/pwd', description: '显示当前项目路径', category: '项目', roles: ['admin', 'owner'] });
 
     // 会话管理
-    cmds.push({ command: '/new', args: '[名称]', description: '创建新会话（清空历史请用此命令，可选命名）', category: '会话管理', roles: ['guest', 'admin', 'owner'] });
-    cmds.push({ command: '/s', aliases: ['/session', '/slist'], args: '[cli|名称|序号|uuid]', description: '列出或切换会话', category: '会话管理', roles: ['guest', 'admin', 'owner'] });
-    cmds.push({ command: '/name', aliases: ['/rename'], args: '<新名称>', description: '重命名当前会话', category: '会话管理', roles: ['guest', 'admin', 'owner'] });
-    cmds.push({ command: '/del', args: '<名称>', description: '删除指定会话（仅解绑，不删除文件）', category: '会话管理', roles: ['guest', 'admin', 'owner'] });
+    cmds.push({ command: '/new', args: '[名称]', description: '创建新会话（清空历史请用此命令，可选命名）', category: '会话管理', roles: ['visitor', 'member', 'admin', 'owner'] });
+    cmds.push({ command: '/s', aliases: ['/session', '/slist'], args: '[cli|名称|序号|uuid]', description: '列出或切换会话', category: '会话管理', roles: ['visitor', 'member', 'admin', 'owner'] });
+    cmds.push({ command: '/name', aliases: ['/rename'], args: '<新名称>', description: '重命名当前会话', category: '会话管理', roles: ['visitor', 'member', 'admin', 'owner'] });
+    cmds.push({ command: '/del', args: '<名称>', description: '删除指定会话（仅解绑，不删除文件）', category: '会话管理', roles: ['visitor', 'member', 'admin', 'owner'] });
     if (isAdmin) {
       cmds.push({ command: '/fork', args: '[名称]', description: '分支当前会话（从当前对话点创建分支）', category: '会话管理', roles: ['admin', 'owner'] });
       cmds.push({ command: '/rewind', aliases: ['/rw'], args: '[N] [chat|file|all]', description: '查看历史/撤销指定轮次', category: '会话管理', roles: ['admin', 'owner'] });
@@ -506,9 +506,9 @@ export async function handleSlashCommand(this: any,
     }
 
     // 运维
-    cmds.push({ command: '/status', description: '显示会话状态', category: '运维', roles: ['guest', 'admin', 'owner'] });
+    cmds.push({ command: '/status', description: '显示会话状态', category: '运维', roles: ['visitor', 'member', 'admin', 'owner'] });
     cmds.push({ command: '/stop', description: '中断当前任务', category: '运维', roles: ['admin', 'owner'] });
-    cmds.push({ command: '/check', description: '检查 EvolAgent 实例健康', category: '运维', roles: ['guest', 'admin', 'owner'] });
+    cmds.push({ command: '/check', description: '检查 EvolAgent 实例健康', category: '运维', roles: ['visitor', 'member', 'admin', 'owner'] });
     if (isAdmin) {
       cmds.push({ command: '/activity', args: '[all|none]', description: '查看/控制中间输出显示模式', category: '聊天设置', roles: ['admin', 'owner'] });
     }
@@ -530,10 +530,10 @@ export async function handleSlashCommand(this: any,
     }
 
     // 交互
-    cmds.push({ command: '/ask', args: '<选项>', description: '回答 Agent 的交互式问题', category: '运维', roles: ['guest', 'admin', 'owner'] });
+    cmds.push({ command: '/ask', args: '<选项>', description: '回答 Agent 的交互式问题', category: '运维', roles: ['visitor', 'member', 'admin', 'owner'] });
 
     // 帮助
-    cmds.push({ command: '/help', description: '显示帮助信息', category: '帮助', roles: ['guest', 'admin', 'owner'] });
+    cmds.push({ command: '/help', description: '显示帮助信息', category: '帮助', roles: ['visitor', 'member', 'admin', 'owner'] });
 
     const categories = [...new Set(cmds.map(c => c.category))];
     return { kind: 'command.result' as const, text: JSON.stringify({ commands: cmds, categories }) };
@@ -549,15 +549,15 @@ export async function handleSlashCommand(this: any,
     const permAgent = this.getAgent(channel, permSession.baseagent);
 
     // 关系级 scope 选择器：用于读/写关系级 permissionMode
-    const permSelfAid = selfAID ?? this.resolveSelfAID(channel);
-    const permChannelType = this.resolveChannelType(channel);
+    const permSelfAid = selfAID ?? permSession.selfAID ?? this.resolveSelfAID(channel);
+    const permChannelType = permSession.channelType ?? this.resolveChannelType(channel);
     const permPeerKeyId = permSession.chatType === 'group'
       ? (permSession.metadata?.groupId || channelId)
       : (userId || permSession.metadata?.peerId);
     const permPeerKey = (permChannelType && permPeerKeyId)
       ? formatPeerKey(permChannelType, permPeerKeyId)
       : undefined;
-    const permRole = permSession.identity?.role || identity.role || 'anonymous';
+    const permRole = permSession.identity?.role || identity.role || 'none';
     const permScope = { self: permSelfAid || undefined, peerKey: permPeerKey, role: permRole };
 
     // /perm（无参数）：显示当前模式和可选模式
@@ -639,7 +639,7 @@ export async function handleSlashCommand(this: any,
           if (!matched.available) {
             return { kind: 'command.error' as const, text: `❌ ${matched.key} 模式当前不可用：${matched.unavailableReason}` };
           }
-          // 关系级权限模式切换允许 owner/admin；guest 只能查询当前模式。
+          // 关系级权限模式切换允许 owner/admin；visitor/member 只能查询当前模式。
           if (!isAdmin) {
             return { kind: 'command.error' as const, text: '❌ 权限模式切换仅限管理员' };
           }
@@ -1816,7 +1816,7 @@ export async function handleSlashCommand(this: any,
     return { kind: 'command.result' as const, text: `✓ 已创建新会话${sessionName ? `: ${sessionName}` : ''}\n  项目: ${this.getProjectName(projectPath)}\n  后端: ${backendBits}\n  之前的对话历史已保留，可通过 /s 查看` };
   }
 
-  // /check 命令：检查 EvolAgent 实例健康（guest 可用，详情仅 admin）
+  // /check 命令：检查 EvolAgent 实例健康（visitor/member 可用，详情仅 admin）
   if (normalizedContent === '/check' || normalizedContent.startsWith('/check ')) {
 
     // 限定可见渠道：agent-owned 通道仅显示该 agent 名下的渠道；
@@ -1866,7 +1866,7 @@ export async function handleSlashCommand(this: any,
     }
 
     if (!isAdmin) {
-      // guest/user: 仅显示实例通道摘要
+      // visitor/member: 仅显示实例通道摘要
       const total = [...groups.values()].flat().length;
       const healthy = [...groups.values()].flat().filter(i => i.status.includes('✓')).length;
       lines.push(`  ${healthy}/${total} 渠道正常`);

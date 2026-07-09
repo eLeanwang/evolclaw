@@ -5,8 +5,8 @@ import {
   isModelAllowedForRoleBaseagent,
   validateModelSelectionForRole,
 } from '../src/core/model/model-permission.js';
-import { clearRolesCache, getBuiltinRolesConfig } from '../src/config/roles.js';
-import { writeRoles } from '../src/config/config-manager.js';
+import { clearRolesCache } from '../src/config/roles.js';
+import { ConfigTarget, write } from '../src/config/config-manager.js';
 
 describe('model permission helpers', () => {
   beforeEach(() => {
@@ -25,7 +25,7 @@ describe('model permission helpers', () => {
       'claude-sonnet-4-6',
       'claude-haiku-4-5-20251001',
     ]);
-    expect(filterModelsForRole('guest', 'claude', catalog)).toEqual([
+    expect(filterModelsForRole('visitor', 'claude', catalog)).toEqual([
       'claude-haiku-4-5-20251001',
     ]);
     expect(filterModelsForRole('owner', 'claude', catalog)).toEqual(catalog);
@@ -53,46 +53,59 @@ describe('model permission helpers', () => {
   });
 
   it('rejects model switching when override is disabled', () => {
-    expect(filterModelsForRole('guest', 'claude', catalog)).toEqual(['claude-haiku-4-5-20251001']);
+    expect(filterModelsForRole('visitor', 'claude', catalog)).toEqual(['claude-haiku-4-5-20251001']);
     expect(validateModelSelectionForRole({
-      role: 'guest',
+      role: 'visitor',
       baseagent: 'claude',
       requestedModel: 'claude-haiku-4-5-20251001',
       models: catalog,
     })).toMatchObject({ ok: false, code: 'MODEL_OVERRIDE_DISABLED' });
     expect(constrainResolvedModelForRole({
-      role: 'guest',
+      role: 'visitor',
       baseagent: 'claude',
       model: 'claude-opus-4-8',
     })).toEqual({ model: 'claude-haiku-4-5-20251001', constrained: true });
   });
 
   it('lists all allowed models even when override is disabled', () => {
-    const roles = getBuiltinRolesConfig();
-    roles.roles.guest.permissions['baseagents.claude.model'] = {
-      default: 'claude-haiku-4-5-20251001',
-      allowOverride: false,
-      allowedModels: ['claude-haiku-*', 'claude-opus-4-8'],
-    };
-    writeRoles(roles);
+    const selfAid = 'models.agentid.pub';
+    write(ConfigTarget.Agent, {
+      aid: selfAid,
+      channels: [],
+      roles: {
+        definitions: {
+          visitor: {
+            description: 'visitor override',
+            permissions: {
+              'baseagents.claude.model': {
+                default: 'claude-haiku-4-5-20251001',
+                allowOverride: false,
+                allowedModels: ['claude-haiku-*', 'claude-opus-4-8'],
+              },
+            },
+          },
+        },
+      },
+    }, { self: selfAid });
     clearRolesCache();
 
-    expect(filterModelsForRole('guest', 'claude', catalog)).toEqual([
+    expect(filterModelsForRole('visitor', 'claude', catalog, undefined, selfAid)).toEqual([
       'claude-opus-4-8',
       'claude-haiku-4-5-20251001',
     ]);
     expect(validateModelSelectionForRole({
-      role: 'guest',
+      role: 'visitor',
       baseagent: 'claude',
       requestedModel: 'claude-opus-4-8',
       models: catalog,
+      selfAid,
     })).toMatchObject({ ok: false, code: 'MODEL_OVERRIDE_DISABLED' });
   });
 
   it('does not constrain non-claude baseagents without role permissions', () => {
-    expect(filterModelsForRole('guest', 'codex', ['gpt-5', 'gpt-5-mini'])).toEqual(['gpt-5', 'gpt-5-mini']);
+    expect(filterModelsForRole('visitor', 'codex', ['gpt-5', 'gpt-5-mini'])).toEqual(['gpt-5', 'gpt-5-mini']);
     expect(validateModelSelectionForRole({
-      role: 'guest',
+      role: 'visitor',
       baseagent: 'codex',
       requestedModel: 'gpt-5',
       models: ['gpt-5'],

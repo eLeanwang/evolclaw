@@ -117,7 +117,7 @@ const state = {
 #### roleDefinitions 视图 (角色定义)
 - **渲染函数**: `renderRoleDefinitions()` (app.js:4023)
 - **功能**:
-  - 显示系统内置的角色定义 (owner/admin/member/guest/anonymous)
+  - 显示用户角色定义 (member/visitor/自定义；owner/admin 由管理名单决定)
   - 编辑和重置角色权限
   - 配置权限模式、模型、分发模式等
 

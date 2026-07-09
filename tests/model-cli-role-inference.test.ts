@@ -1,7 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { setPrivateRoleAssignment } from '../src/config/role-assignments.js';
-import { ConfigTarget, write, writeRoles, read } from '../src/config/config-manager.js';
-import { clearRolesCache, getBuiltinRolesConfig } from '../src/config/roles.js';
+import { ConfigTarget, write, read } from '../src/config/config-manager.js';
+import { clearRolesCache } from '../src/config/roles.js';
 
 vi.mock('../src/core/model/model-catalog.js', () => ({
   getCatalog: vi.fn(async () => ({
@@ -24,7 +23,8 @@ describe('model CLI role inference', () => {
   it('filters model list by role inferred from --self and --peer', async () => {
     const selfAid = 'frontend-peer.agentid.pub';
     const currentAid = 'current-user.aid.pub';
-    setPrivateRoleAssignment(selfAid, currentAid, 'guest');
+    write(ConfigTarget.Agent, { aid: selfAid, channels: [] }, { self: selfAid });
+    write(ConfigTarget.Relation, { roles: { assigned: 'visitor' } }, { self: selfAid, peerKey: `aun#${currentAid}` });
 
     const logs: string[] = [];
     vi.spyOn(console, 'log').mockImplementation((msg?: any) => {
@@ -35,7 +35,7 @@ describe('model CLI role inference', () => {
     await cmdModel(['list', '--self', selfAid, '--peer', currentAid, '--format', 'json']);
 
     const payload = JSON.parse(logs.at(-1) || '{}');
-    expect(payload.role).toBe('guest');
+    expect(payload.role).toBe('visitor');
     expect(payload.models.map((model: any) => model.id)).toEqual([
       'claude-haiku-4-5-20251001',
     ]);
@@ -44,16 +44,25 @@ describe('model CLI role inference', () => {
   it('rejects model list when inferred role denies command permission', async () => {
     const selfAid = 'frontend-peer.agentid.pub';
     const currentAid = 'current-user.aid.pub';
-    const roles = getBuiltinRolesConfig();
-    roles.roles.guest.commandPermissions = {
-      ...roles.roles.guest.commandPermissions,
-      'model.list': {
-        allow: false,
-        reason: 'model list disabled for guest',
+    write(ConfigTarget.Agent, {
+      aid: selfAid,
+      channels: [],
+      roles: {
+        definitions: {
+          blocked: {
+            description: 'cannot list models',
+            permissions: {},
+            commandPermissions: {
+              'model.list': {
+                allow: false,
+                reason: 'model list disabled for blocked',
+              },
+            },
+          },
+        },
       },
-    };
-    writeRoles(roles);
-    setPrivateRoleAssignment(selfAid, currentAid, 'guest');
+    }, { self: selfAid });
+    write(ConfigTarget.Relation, { roles: { assigned: 'blocked' } }, { self: selfAid, peerKey: `aun#${currentAid}` });
 
     const logs: string[] = [];
     vi.spyOn(console, 'log').mockImplementation((msg?: any) => {
@@ -74,7 +83,7 @@ describe('model CLI role inference', () => {
     expect(payload).toMatchObject({
       ok: false,
       code: 'NOT_ALLOWED',
-      error: 'model list disabled for guest',
+      error: 'model list disabled for blocked',
     });
     expect(catalog.getCatalog).not.toHaveBeenCalled();
   });
@@ -82,12 +91,13 @@ describe('model CLI role inference', () => {
   it('returns effective model without leaking scope diagnostics', async () => {
     const selfAid = 'frontend-peer.agentid.pub';
     const currentAid = 'current-user.aid.pub';
-    setPrivateRoleAssignment(selfAid, currentAid, 'guest');
+    write(ConfigTarget.Agent, { aid: selfAid, channels: [] }, { self: selfAid });
+    write(ConfigTarget.Relation, { roles: { assigned: 'visitor' } }, { self: selfAid, peerKey: `aun#${currentAid}` });
     // v3: 写入 relation config 时提供 role，会触发角色约束警告，但仍写入原始值
     write(
       ConfigTarget.Relation,
-      { baseagents: { claude: { model: 'claude-opus-4-8' } } },
-      { self: selfAid, peerKey: `aun#${currentAid}`, role: 'guest' },
+      { roles: { assigned: 'visitor' }, baseagents: { claude: { model: 'claude-opus-4-8' } } },
+      { self: selfAid, peerKey: `aun#${currentAid}`, role: 'visitor' },
     );
 
     const logs: string[] = [];
@@ -113,7 +123,8 @@ describe('model CLI role inference', () => {
   it('rejects disallowed model use by inferred role', async () => {
     const selfAid = 'frontend-peer.agentid.pub';
     const currentAid = 'current-user.aid.pub';
-    setPrivateRoleAssignment(selfAid, currentAid, 'guest');
+    write(ConfigTarget.Agent, { aid: selfAid, channels: [] }, { self: selfAid });
+    write(ConfigTarget.Relation, { roles: { assigned: 'visitor' } }, { self: selfAid, peerKey: `aun#${currentAid}` });
 
     const logs: string[] = [];
     vi.spyOn(console, 'log').mockImplementation((msg?: any) => {

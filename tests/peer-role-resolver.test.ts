@@ -1,97 +1,41 @@
 import { describe, expect, it } from 'vitest';
+import { formatPeerKey } from '../src/core/relation/peer-identity.js';
 import {
-  deleteGroupMemberRoleAssignment,
-  deleteGroupRoleAssignment,
-  deletePrivateRoleAssignment,
-  getFirstRoleAssignment,
-  getGroupMemberRoleAssignment,
-  getGroupRoleAssignment,
-  getPrivateRoleAssignment,
-  groupAssignmentKey,
-  groupMemberAssignmentKey,
-  listRoleAssignments,
-  privateAssignmentKey,
-  readRoleAssignments,
-  setGroupMemberRoleAssignment,
-  setGroupRoleAssignment,
-  setPrivateRoleAssignment,
-} from '../src/config/role-assignments.js';
-import {
+  addStaticAgentOwner,
   checkRoleAccess,
   isAuthenticated,
   resolvePeerRoleDetail,
   roleToSessionIdentity,
 } from '../src/config/peer-role-resolver.js';
-import { write, ConfigTarget } from '../src/config/config-manager.js';
-
-describe('peer role assignments', () => {
-  const aid = 'bot.agentid.pub';
-
-  it('stores private assignments under peer scope', () => {
-    const item = setPrivateRoleAssignment(aid, 'alice.aid.pub', 'owner', { note: 'test' });
-
-    expect(privateAssignmentKey('alice.aid.pub')).toBe('private::alice.aid.pub');
-    expect(item.role).toBe('owner');
-    expect(item.scope).toBe('private');
-    expect(item.note).toBe('test');
-    expect(getPrivateRoleAssignment(aid, 'alice.aid.pub')?.role).toBe('owner');
-    expect(readRoleAssignments(aid).assignments[privateAssignmentKey('alice.aid.pub')]).toBeDefined();
-  });
-
-  it('stores group and group-member assignments under separate scopes', () => {
-    setGroupRoleAssignment(aid, 'group.team', 'guest');
-    setGroupMemberRoleAssignment(aid, 'group.team', 'alice.aid.pub', 'admin');
-
-    expect(groupAssignmentKey('group.team')).toBe('group::group.team');
-    expect(groupMemberAssignmentKey('group.team', 'alice.aid.pub')).toBe('group-member::group.team::alice.aid.pub');
-    expect(getGroupRoleAssignment(aid, 'group.team')?.role).toBe('guest');
-    expect(getGroupMemberRoleAssignment(aid, 'group.team', 'alice.aid.pub')?.role).toBe('admin');
-  });
-
-  it('filters assignments by scope and role', () => {
-    setPrivateRoleAssignment(aid, 'owner.aid.pub', 'owner');
-    setPrivateRoleAssignment(aid, 'admin.aid.pub', 'admin');
-    setGroupMemberRoleAssignment(aid, 'group.team', 'owner.aid.pub', 'member');
-
-    expect(listRoleAssignments(aid, { scope: 'private' })).toHaveLength(2);
-    expect(listRoleAssignments(aid, { scope: 'private', role: 'owner' }).map(a => a.peerId)).toContain('owner.aid.pub');
-    expect(getFirstRoleAssignment(aid, { scope: 'group-member', groupId: 'group.team', peerId: 'owner.aid.pub' })?.role).toBe('member');
-  });
-
-  it('deletes only the exact scoped assignment', () => {
-    setPrivateRoleAssignment(aid, 'same.aid.pub', 'owner');
-    setGroupRoleAssignment(aid, 'group.team', 'guest');
-    setGroupMemberRoleAssignment(aid, 'group.team', 'same.aid.pub', 'admin');
-
-    expect(deletePrivateRoleAssignment(aid, 'same.aid.pub')).toBe(true);
-    expect(getPrivateRoleAssignment(aid, 'same.aid.pub')).toBeUndefined();
-    expect(getGroupMemberRoleAssignment(aid, 'group.team', 'same.aid.pub')?.role).toBe('admin');
-
-    expect(deleteGroupMemberRoleAssignment(aid, 'group.team', 'same.aid.pub')).toBe(true);
-    expect(deleteGroupRoleAssignment(aid, 'group.team')).toBe(true);
-  });
-
-  it('rejects unknown role names at write time', () => {
-    expect(() => setPrivateRoleAssignment(aid, 'alice.aid.pub', 'not-a-role')).toThrow('Unknown role');
-  });
-});
+import { ConfigTarget, write } from '../src/config/config-manager.js';
 
 describe('peer role resolver', () => {
   const aid = 'resolver.agentid.pub';
 
-  it('uses static agent owners before scoped role assignments', () => {
-    const staticAid = 'static-owner.agentid.pub';
-    const owner = 'root.agentid.pub';
+  function writeAgent(extra: Record<string, unknown> = {}) {
     write(ConfigTarget.Agent, {
-      aid: staticAid,
+      aid,
       channels: [],
-      owners: [owner],
-    }, { self: staticAid });
-    setPrivateRoleAssignment(staticAid, owner, 'guest');
-    setGroupMemberRoleAssignment(staticAid, 'team.group', owner, 'member');
+      ...extra,
+    }, { self: aid });
+  }
+
+  function writeRelation(channelId: string, value: Record<string, unknown>) {
+    write(ConfigTarget.Relation, value, {
+      self: aid,
+      peerKey: formatPeerKey('aun', channelId),
+    });
+  }
+
+  it('uses static agent owners and admins before relation roles', () => {
+    const owner = 'root.agentid.pub';
+    const admin = 'ops.agentid.pub';
+    writeAgent({ owners: [owner], admins: [admin] });
+    writeRelation(owner, { roles: { assigned: 'visitor' } });
+    writeRelation(admin, { roles: { assigned: 'member' } });
 
     expect(resolvePeerRoleDetail({
-      selfAid: staticAid,
+      selfAid: aid,
       channelType: 'aun',
       chatType: 'private',
       actorId: owner,
@@ -99,51 +43,64 @@ describe('peer role resolver', () => {
     })).toMatchObject({ effectiveRole: 'owner', source: 'agent-config-owner' });
 
     expect(resolvePeerRoleDetail({
-      selfAid: staticAid,
+      selfAid: aid,
       channelType: 'aun',
-      chatType: 'group',
-      actorId: owner,
-      conversationId: 'team.group',
+      chatType: 'private',
+      actorId: admin,
+      conversationId: admin,
+    })).toMatchObject({ effectiveRole: 'admin', source: 'agent-config-admin' });
+  });
+
+  it('can append static owners through the resolver helper', () => {
+    writeAgent();
+    addStaticAgentOwner(aid, 'alice.agentid.pub');
+
+    expect(resolvePeerRoleDetail({
+      selfAid: aid,
+      channelType: 'aun',
+      chatType: 'private',
+      actorId: 'alice.agentid.pub',
+      conversationId: 'alice.agentid.pub',
     })).toMatchObject({ effectiveRole: 'owner', source: 'agent-config-owner' });
   });
 
-  it('uses private role assignments as explicit private role source', () => {
-    setPrivateRoleAssignment(aid, 'owner.aid.pub', 'owner');
+  it('uses private relation assigned role as explicit private role source', () => {
+    writeAgent();
+    writeRelation('member.aid.pub', { roles: { assigned: 'member' } });
 
     const detail = resolvePeerRoleDetail({
       selfAid: aid,
       channelType: 'aun',
       chatType: 'private',
-      actorId: 'owner.aid.pub',
-      conversationId: 'owner.aid.pub',
+      actorId: 'member.aid.pub',
+      conversationId: 'member.aid.pub',
     });
 
-    expect(detail.effectiveRole).toBe('owner');
-    expect(detail.source).toBe('assignment');
+    expect(detail.effectiveRole).toBe('member');
+    expect(detail.source).toBe('relation-assigned');
     expect(detail.allowAccess).toBe(true);
-    expect(roleToSessionIdentity(detail.effectiveRole)).toEqual({ role: 'owner', mode: 'interactive' });
+    expect(roleToSessionIdentity(detail.effectiveRole)).toEqual({ role: 'member', mode: 'interactive' });
   });
 
-  it('falls back to private default role without private assignment', () => {
+  it('fails closed for private peers without an assigned role', () => {
+    writeAgent();
+
     const detail = resolvePeerRoleDetail({
       selfAid: aid,
       channelType: 'aun',
       chatType: 'private',
-      actorId: 'guest.aid.pub',
-      conversationId: 'guest.aid.pub',
+      actorId: 'plain.aid.pub',
+      conversationId: 'plain.aid.pub',
     });
 
-    expect(detail.effectiveRole).toBe('anonymous');
-    expect(detail.source).toBe('default');
+    expect(detail.effectiveRole).toBeNull();
+    expect(detail.source).toBe('none');
     expect(detail.isAuthenticated).toBe(true);
+    expect(roleToSessionIdentity(detail.effectiveRole)).toEqual({ role: 'none', mode: 'interactive' });
   });
 
-  it('uses configured defaultRoles.private for unauthenticated private peers', () => {
-    write(ConfigTarget.Roles, {
-      $schema_version: 3,
-      defaultRoles: { private: 'guest', group: 'guest' },
-      roles: {},
-    });
+  it('uses configured defaultRoles.private when set on agent config', () => {
+    writeAgent({ roles: { defaultRoles: { private: 'visitor', group: 'visitor' } } });
 
     const detail = resolvePeerRoleDetail({
       selfAid: aid,
@@ -153,31 +110,36 @@ describe('peer role resolver', () => {
       conversationId: 'ou_123',
     });
 
-    expect(detail.effectiveRole).toBe('guest');
+    expect(detail.effectiveRole).toBe('visitor');
     expect(detail.source).toBe('default');
     expect(detail.isAuthenticated).toBe(false);
   });
 
-  it('resolves group members by member assignment, private inheritance, group role, then group default', () => {
-    setGroupRoleAssignment(aid, 'team.group', 'guest');
-    setPrivateRoleAssignment(aid, 'private-owner.aid.pub', 'owner');
-    setGroupMemberRoleAssignment(aid, 'team.group', 'member-admin.aid.pub', 'admin');
+  it('resolves group members by member role, private inheritance, group assigned role, then denies without group default', () => {
+    writeAgent();
+    writeRelation('team.group', {
+      roles: {
+        assigned: 'visitor',
+        members: { 'direct.aid.pub': 'member' },
+      },
+    });
+    writeRelation('private-member.aid.pub', { roles: { assigned: 'member' } });
 
     expect(resolvePeerRoleDetail({
       selfAid: aid,
       channelType: 'aun',
       chatType: 'group',
-      actorId: 'member-admin.aid.pub',
+      actorId: 'direct.aid.pub',
       conversationId: 'team.group',
-    })).toMatchObject({ effectiveRole: 'admin', source: 'assignment' });
+    })).toMatchObject({ effectiveRole: 'member', source: 'group-member' });
 
     expect(resolvePeerRoleDetail({
       selfAid: aid,
       channelType: 'aun',
       chatType: 'group',
-      actorId: 'private-owner.aid.pub',
+      actorId: 'private-member.aid.pub',
       conversationId: 'team.group',
-    })).toMatchObject({ effectiveRole: 'owner', source: 'private-inherited' });
+    })).toMatchObject({ effectiveRole: 'member', source: 'private-inherited' });
 
     expect(resolvePeerRoleDetail({
       selfAid: aid,
@@ -185,22 +147,59 @@ describe('peer role resolver', () => {
       chatType: 'group',
       actorId: 'plain-member.aid.pub',
       conversationId: 'team.group',
-    })).toMatchObject({ effectiveRole: 'guest', source: 'group-default' });
+    })).toMatchObject({ effectiveRole: 'visitor', source: 'group-default' });
+
+    expect(resolvePeerRoleDetail({
+      selfAid: aid,
+      channelType: 'aun',
+      chatType: 'group',
+      actorId: 'someone.aid.pub',
+      conversationId: 'other.group',
+    })).toMatchObject({ effectiveRole: null, source: 'none' });
   });
 
-  it('denies access for roles with allowAccess false', () => {
-    write(ConfigTarget.Roles, {
-      $schema_version: 3,
-      defaultRoles: { private: 'anonymous', group: 'guest' },
+  it('uses configured defaultRoles.group when explicitly set on agent config', () => {
+    writeAgent({ roles: { defaultRoles: { group: 'visitor' } } });
+
+    expect(resolvePeerRoleDetail({
+      selfAid: aid,
+      channelType: 'aun',
+      chatType: 'group',
+      actorId: 'someone.aid.pub',
+      conversationId: 'other.group',
+    })).toMatchObject({ effectiveRole: 'visitor', source: 'default' });
+  });
+
+  it('allows access for custom roles when selfAid is supplied', () => {
+    writeAgent({
       roles: {
-        suspended: {
-          description: 'blocked peer',
-          allowAccess: false,
-          permissions: {},
+        definitions: {
+          reviewer: {
+            description: 'custom reviewer',
+            allowAccess: true,
+            permissions: {},
+          },
         },
       },
     });
-    setPrivateRoleAssignment(aid, 'blocked.aid.pub', 'suspended');
+
+    expect(checkRoleAccess('reviewer')).toBe(false);
+    expect(checkRoleAccess('reviewer', aid)).toBe(true);
+  });
+
+  it('denies access for custom roles with allowAccess false', () => {
+    writeAgent({
+      roles: {
+        definitions: {
+          suspended: {
+            description: 'blocked peer',
+            allowAccess: false,
+            permissions: {},
+          },
+        },
+      },
+    });
+    writeRelation('blocked.aid.pub', { roles: { assigned: 'suspended' } });
 
     const detail = resolvePeerRoleDetail({
       selfAid: aid,
@@ -212,7 +211,7 @@ describe('peer role resolver', () => {
 
     expect(detail.effectiveRole).toBe('suspended');
     expect(detail.allowAccess).toBe(false);
-    expect(checkRoleAccess('suspended')).toBe(false);
+    expect(checkRoleAccess('suspended', aid)).toBe(false);
   });
 
   it('recognizes only signed AID-style actors as authenticated', () => {

@@ -873,6 +873,7 @@ export interface ProcessConfig {
   $schema_version?: number;
   aid?: string;
   owners?: string[];
+  admins?: string[];
   debug?: DebugBlock;
   tunnel?: { targets: Array<{ name: string; port: number; pathPrefix?: string }> };
   aun?: { encryptionSeed?: string | null };
@@ -919,6 +920,7 @@ export interface AgentConfig {
   initialized?: boolean;
   /** Agent owner AID 列表；当前控制面仍需要读取旧 config 字段。 */
   owners?: string[];
+  admins?: string[];
   aun?: AunRuntimeBlock;
   channels: ChannelInstance[];
   models?: ModelsBlock;
@@ -956,7 +958,7 @@ export interface AgentConfig {
   // 执行权限模式
   permissionMode?: string;
   // 角色级覆盖
-  roles?: Record<string, RoleOverride>;
+  roles?: RolePolicyConfig;
 }
 
 /**
@@ -981,7 +983,7 @@ export interface RelationConfig {
   render?: { private?: string; group?: string; inject?: string };
   enable_rich_content?: boolean;
   permissionMode?: string;
-  roles?: Record<string, RoleOverride>;
+  roles?: RelationRolesConfig;
 }
 
 /**
@@ -997,6 +999,7 @@ export interface EffectiveAgentConfig {
   lifecycle?: AgentLifecycle;
   initialized?: boolean;
   owners?: string[];
+  admins?: string[];
   aun?: AunRuntimeBlock;
   channels: ChannelInstance[];
   models?: ModelsBlock;
@@ -1031,7 +1034,7 @@ export interface EffectiveAgentConfig {
   // 执行权限模式
   permissionMode?: string;
   // 角色级覆盖
-  roles?: Record<string, RoleOverride>;
+  roles?: RolePolicyConfig;
 }
 
 // ── 出站协议类型（OutboundPayload / OutboundEnvelope / ChannelCapabilities） ──
@@ -1332,39 +1335,37 @@ export interface CommandAuthorizationAuditEvent {
 
 // ── Role System Types ──
 
-export type BuiltinRole = 'owner' | 'admin' | 'member' | 'guest' | 'anonymous';
+export type ManagementRole = 'owner' | 'admin';
+export type BuiltinUserRole = 'member' | 'visitor';
+export type BuiltinRole = ManagementRole | BuiltinUserRole;
 
 export interface RolesConfig {
   $schema_version: number;
   defaultRoles?: {
-    private: string;
-    group: string;
+    private?: string | null;
+    group?: string | null;
   };
   roles: Record<string, RoleDefinition>;
 }
 
+export interface RolePolicyConfig {
+  defaultRoles?: {
+    private?: string | null;
+    group?: string | null;
+  };
+  definitions?: Record<string, RoleDefinition>;
+}
+
 export interface RoleDefinition {
   description: string;
-  allowAccess?: boolean;  // 该角色是否允许访问，默认 true（anonymous 默认 false）
+  allowAccess?: boolean;  // 该角色是否允许访问，默认 true
   permissions: Record<string, FieldPermission>;
   commandPermissions?: Record<string, CommandPermission>;  // 命令权限配置
 }
 
-export type RoleAssignmentScope = 'private' | 'group' | 'group-member';
-
-export interface RoleAssignment {
-  scope: RoleAssignmentScope;
-  peerId?: string;
-  groupId?: string;
-  role: string;
-  note?: string;
-  createdAt?: number;
-  updatedAt?: number;
-}
-
-export interface RoleAssignmentsConfig {
-  $schema_version: number;
-  assignments: Record<string, RoleAssignment>;
+export interface RelationRolesConfig {
+  assigned?: string | null;
+  members?: Record<string, string | null>;
 }
 
 export interface FieldPermission<T = any> {

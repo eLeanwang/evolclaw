@@ -31,7 +31,7 @@ import { gatewaySource } from './sources/gateway.js';
 import { queryStatsForDashboard, queryStatsExplorer, queryStatsByPeer, queryStatsByAgent, queryStatsOverview, queryUsageDetail, queryUsedModels } from './sources/stats.js';
 import { getSessionsAunDir, listLocalAids, listPeers, readMessages } from './fs-utils.js';
 import { ccProjectsDir } from './paths.js';
-import { roleAssignmentsSource, handleRoleAssignmentsApi, handlePeerRoleApi } from './sources/role-assignments.js';
+import { relationRolesSource, handleRelationRolesApi, handlePeerRoleApi } from './sources/relation-roles.js';
 import { roleDefinitionsSource, handleRoleDefinitionsApi } from './sources/role-definitions.js';
 import { handleModelsApi } from './sources/models.js';
 import { detectBaseAgents } from './sources/baseagent-detector.js';
@@ -44,7 +44,7 @@ const PAIRING_TTL_MS = 5 * 60 * 1000;       // 5min
 const DEFAULT_PORT = 42705;
 const PROTOCOL_VERSION = 1;                  // 与 evolclaw ping response 对齐的软校验版本
 
-const SOURCES: Record<ViewKind, WatchSource> = { agents: aidSource, msg: msgSource, session: sessionSource, cache: cacheSource, system: systemSource, triggers: triggersSource, monitor: monitorSource, gateway: gatewaySource, roles: roleAssignmentsSource, roleDefinitions: roleDefinitionsSource };
+const SOURCES: Record<ViewKind, WatchSource> = { agents: aidSource, msg: msgSource, session: sessionSource, cache: cacheSource, system: systemSource, triggers: triggersSource, monitor: monitorSource, gateway: gatewaySource, roles: relationRolesSource, roleDefinitions: roleDefinitionsSource };
 
 // ECWeb 自身版本：渲染 System 页时随快照下发（不走 daemon IPC，ECWeb 就是这个进程）。
 function readEcwebVersion(): string {
@@ -677,7 +677,7 @@ export async function startWatchWebServer(opts: { port?: number; log?: (s: strin
         res.end(JSON.stringify({ error: 'unauthorized' }));
         return;
       }
-      handleRoleAssignmentsApi(req, res, roleWriteAuth(req));
+      handleRelationRolesApi(req, res, roleWriteAuth(req));
     } else if ((req.url || '') === '/api/role-definitions' || (req.url || '').startsWith('/api/role-definitions/') || (req.url || '').startsWith('/api/role-definitions?')) {
       // Role Definitions API（含集合端点 /api/role-definitions 与 /api/role-definitions/:role）
       const authHeader = req.headers.authorization || '';

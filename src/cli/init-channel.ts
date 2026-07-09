@@ -18,7 +18,7 @@ import { ipcQuery } from '../ipc.js';
 import { cmdStart } from './daemon-commands.js';
 import * as platform from '../utils/cross-platform.js';
 import { cleanupInstances } from '../utils/instance-registry.js';
-import { setPrivateRoleAssignment } from '../config/role-assignments.js';
+import { addStaticAgentOwner } from '../config/peer-role-resolver.js';
 
 function ask(rl: readline.Interface, question: string): Promise<string> {
   return new Promise(resolve => rl.question(question, resolve));
@@ -522,7 +522,7 @@ export async function cmdInitFeishu(): Promise<void> {
 
   await commitChannel(aid!, channel, choice.action);
   if (result.openId) {
-    setPrivateRoleAssignment(aid!, result.openId, 'owner', { note: 'bound by feishu init flow' });
+    addStaticAgentOwner(aid!, result.openId);
   }
 
   console.log(`  App ID: ${result.appId}`);

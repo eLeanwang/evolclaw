@@ -1,6 +1,20 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
 import { CommandHandler } from '../../src/core/command/command-handler.js';
 import { EventBus } from '../../src/core/event-bus.js';
+import { _resetRoot, agentRelationConfig } from '../../src/paths.js';
+import { formatPeerKey } from '../../src/core/relation/peer-identity.js';
+
+const TEST_AID = 'bot.agentid.pub';
+let tempRoot = '';
+
+function readRelationPermissionMode(peerId = 'user1'): string | undefined {
+  const file = agentRelationConfig(TEST_AID, formatPeerKey('aun', peerId));
+  if (!fs.existsSync(file)) return undefined;
+  return JSON.parse(fs.readFileSync(file, 'utf-8')).permissionMode;
+}
 
 // D1：/system 进程级鉴权查 evolclaw.json.owners。默认让 user1 在 owners 名单内，
 // 使既有正向用例继续通过；FORBIDDEN 用例按需覆写。
@@ -13,22 +27,37 @@ vi.mock('../../src/config-store.js', async (importOriginal) => {
   };
 });
 
+beforeEach(() => {
+  tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'evolclaw-menu-'));
+  process.env.EVOLCLAW_HOME = tempRoot;
+  ownersMock.value = ['user1'];
+  _resetRoot();
+});
+
+afterEach(() => {
+  try { fs.rmSync(tempRoot, { recursive: true, force: true }); } catch {}
+  delete process.env.EVOLCLAW_HOME;
+  _resetRoot();
+});
+
 function createMockSessionManager(overrides: Record<string, any> = {}) {
   return {
     getOrCreateSession: vi.fn().mockResolvedValue(null),
     getActiveSession: vi.fn().mockResolvedValue({
       id: 'sess-1', channel: 'aun', channelId: 'chat1',
-      projectPath: '/tmp/test', agentId: 'claude',
+      projectPath: '/tmp/test', agentId: 'claude', baseagent: 'claude',
+      selfAID: TEST_AID, channelType: 'aun', sessionKey: 'aun#chat1#',
       agentSessionId: 'agent-sess-123',
-      chatType: 'private', sessionMode: 'interactive',
-      metadata: { permissionMode: 'auto' },
+      chatType: 'private', sessionMode: 'interactive', chatMode: 'interactive',
+      metadata: { permissionMode: 'auto', peerId: 'user1' },
       createdAt: Date.now(), updatedAt: Date.now(),
     }),
     getActiveSessionSync: vi.fn().mockReturnValue({
       id: 'sess-1', channel: 'aun', channelId: 'chat1',
-      projectPath: '/tmp/test', agentId: 'claude',
-      chatType: 'private', sessionMode: 'interactive',
-      metadata: { permissionMode: 'auto' },
+      projectPath: '/tmp/test', agentId: 'claude', baseagent: 'claude',
+      selfAID: TEST_AID, channelType: 'aun', sessionKey: 'aun#chat1#',
+      chatType: 'private', sessionMode: 'interactive', chatMode: 'interactive',
+      metadata: { permissionMode: 'auto', peerId: 'user1' },
       createdAt: Date.now(), updatedAt: Date.now(),
     }),
     resolveIdentity: vi.fn().mockReturnValue({ role: 'owner', mode: 'interactive' }),
@@ -93,6 +122,7 @@ function createHandler(opts: { sessionManager?: any; agentRegistry?: any; messag
   const mq = opts.messageQueue ?? { isProcessing: vi.fn().mockReturnValue(false), getQueueLength: vi.fn().mockReturnValue(0), getQueueLengthByAgent: vi.fn().mockReturnValue(0), getProcessingCountByAgent: vi.fn().mockReturnValue(0) } as any;
   const eb = new EventBus();
   const handler = new CommandHandler(sm, agentRunner, cache, eb);
+  handler.registerChannel('aun', {}, 'aun');
   handler.setMessageQueue(mq);
   if (opts.agentRegistry) handler.setAgentRegistry(opts.agentRegistry);
   return { handler, sm, eb, agentRunner };
@@ -103,7 +133,7 @@ describe('execMenuQuery', () => {
     it('returns current mode', async () => {
       const { handler } = createHandler();
       const result = await handler.execMenuQuery('/perm', 'aun', 'chat1', 'user1');
-      expect(result).toEqual({ data: { mode: 'auto' } });
+      expect(result).toEqual({ data: { mode: 'bypass' } });
     });
 
     it('returns NO_ACTIVE_SESSION when no session', async () => {
@@ -298,14 +328,16 @@ describe('execMenuUpdate', () => {
       const { handler, sm } = createHandler();
       const result = await handler.execMenuUpdate('/perm', 'bypass', 'aun', 'chat1', 'user1');
       expect(result).toEqual({ data: { mode: 'bypass' } });
-      expect(sm.updateSession).toHaveBeenCalledWith('sess-1', { metadata: { permissionMode: 'bypass' } });
+      expect(sm.updateSession).not.toHaveBeenCalled();
+      expect(readRelationPermissionMode()).toBe('bypass');
     });
 
     it('switches to readonly mode (owner)', async () => {
       const { handler, sm } = createHandler();
       const result = await handler.execMenuUpdate('/perm', 'readonly', 'aun', 'chat1', 'user1');
       expect(result).toEqual({ data: { mode: 'readonly' } });
-      expect(sm.updateSession).toHaveBeenCalledWith('sess-1', { metadata: { permissionMode: 'readonly' } });
+      expect(sm.updateSession).not.toHaveBeenCalled();
+      expect(readRelationPermissionMode()).toBe('readonly');
     });
 
     it('switches mode (admin)', async () => {
@@ -313,7 +345,8 @@ describe('execMenuUpdate', () => {
       const { handler } = createHandler({ sessionManager: sm });
       const result = await handler.execMenuUpdate('/perm', 'noask', 'aun', 'chat1', 'user1');
       expect(result).toEqual({ data: { mode: 'noask' } });
-      expect(sm.updateSession).toHaveBeenCalledWith('sess-1', { metadata: { permissionMode: 'noask' } });
+      expect(sm.updateSession).not.toHaveBeenCalled();
+      expect(readRelationPermissionMode()).toBe('noask');
     });
 
     it('handles /perm readonly through the chat command path', async () => {
@@ -321,7 +354,8 @@ describe('execMenuUpdate', () => {
       const result = await handler.handle('/perm readonly', 'aun', 'chat1', undefined, 'user1') as any;
       expect(result.kind).toBe('command.result');
       expect(result.text).toContain('readonly');
-      expect(sm.updateSession).toHaveBeenCalledWith('sess-1', { metadata: { permissionMode: 'readonly' } });
+      expect(sm.updateSession).not.toHaveBeenCalled();
+      expect(readRelationPermissionMode()).toBe('readonly');
     });
 
     it('handles /perm readonly through the chat command path for admin', async () => {
@@ -330,7 +364,8 @@ describe('execMenuUpdate', () => {
       const result = await handler.handle('/perm readonly', 'aun', 'chat1', undefined, 'user1') as any;
       expect(result.kind).toBe('command.result');
       expect(result.text).toContain('readonly');
-      expect(sm.updateSession).toHaveBeenCalledWith('sess-1', { metadata: { permissionMode: 'readonly' } });
+      expect(sm.updateSession).not.toHaveBeenCalled();
+      expect(readRelationPermissionMode()).toBe('readonly');
     });
 
     it('rejects invalid mode', async () => {
@@ -339,8 +374,8 @@ describe('execMenuUpdate', () => {
       expect(result.code).toBe('INVALID_VALUE');
     });
 
-    it('rejects guest', async () => {
-      const sm = createMockSessionManager({ resolveIdentity: vi.fn().mockReturnValue({ role: 'guest' }) });
+    it('rejects visitor', async () => {
+      const sm = createMockSessionManager({ resolveIdentity: vi.fn().mockReturnValue({ role: 'visitor' }) });
       const { handler } = createHandler({ sessionManager: sm });
       const result = await handler.execMenuUpdate('/perm', 'bypass', 'aun', 'chat1', 'user1') as any;
       expect(result.code).toBe('NO_PERMISSION');
@@ -359,7 +394,7 @@ describe('execMenuUpdate', () => {
       const { handler, sm } = createHandler();
       const result = await handler.execMenuUpdate('/chatmode', 'proactive', 'aun', 'chat1', 'user1');
       expect(result).toEqual({ data: { mode: 'proactive' } });
-      expect(sm.updateSession).toHaveBeenCalledWith('sess-1', { sessionMode: 'proactive' });
+      expect(sm.updateSession).toHaveBeenCalledWith('sess-1', { chatMode: 'proactive' });
     });
 
     it('rejects invalid mode', async () => {
@@ -385,7 +420,7 @@ describe('execMenuUpdate', () => {
         getActiveSession: vi.fn().mockResolvedValue({
           id: 'sess-1', chatType: 'group', sessionMode: 'interactive', metadata: {},
         }),
-        resolveIdentity: vi.fn().mockReturnValue({ role: 'guest' }),
+        resolveIdentity: vi.fn().mockReturnValue({ role: 'visitor' }),
       });
       const { handler } = createHandler({ sessionManager: sm });
       const result = await handler.execMenuUpdate('/chatmode', 'proactive', 'aun', 'chat1', 'user1') as any;
@@ -438,9 +473,9 @@ describe('execMenuUpdate', () => {
       const setShowActivities = vi.fn();
       const agentRegistry = { getShowActivities: vi.fn(), setShowActivities, resolveByChannel: vi.fn().mockReturnValue(null) };
       const { handler } = createHandler({ agentRegistry });
-      const result = await handler.execMenuUpdate('/activity', 'dm', 'aun', 'chat1', 'user1');
-      expect(result).toEqual({ data: { mode: 'dm-only' } });
-      expect(setShowActivities).toHaveBeenCalledWith('aun', 'dm-only');
+      const result = await handler.execMenuUpdate('/activity', 'none', 'aun', 'chat1', 'user1');
+      expect(result).toEqual({ data: { mode: 'none' } });
+      expect(setShowActivities).toHaveBeenCalledWith('aun', 'none');
     });
 
     it('rejects invalid mode', async () => {
@@ -451,7 +486,7 @@ describe('execMenuUpdate', () => {
     });
 
     it('rejects non-owner', async () => {
-      const sm = createMockSessionManager({ resolveIdentity: vi.fn().mockReturnValue({ role: 'guest' }) });
+      const sm = createMockSessionManager({ resolveIdentity: vi.fn().mockReturnValue({ role: 'visitor' }) });
       const agentRegistry = { getShowActivities: vi.fn(), setShowActivities: vi.fn(), resolveByChannel: vi.fn().mockReturnValue(null) };
       const { handler } = createHandler({ sessionManager: sm, agentRegistry });
       const result = await handler.execMenuUpdate('/activity', 'none', 'aun', 'chat1', 'user1') as any;
@@ -656,7 +691,7 @@ describe('execMenuAction', () => {
       expect(sm.renameSession).not.toHaveBeenCalled();
     });
 
-    it('forbids group guest renaming a main session', async () => {
+    it('forbids group visitor renaming a main session', async () => {
       const session = {
         id: 'sess-1', channel: 'aun', channelId: 'chat1',
         projectPath: '/tmp/test', agentId: 'claude',
@@ -669,12 +704,12 @@ describe('execMenuAction', () => {
         getActiveSession: vi.fn().mockResolvedValue(session),
         getActiveSessionSync: vi.fn().mockReturnValue(session),
         listSessions: vi.fn().mockResolvedValue([session]),
-        resolveIdentity: vi.fn().mockReturnValue({ role: 'guest', mode: 'interactive' }),
+        resolveIdentity: vi.fn().mockReturnValue({ role: 'visitor', mode: 'interactive' }),
         renameSession: vi.fn().mockResolvedValue(true),
       });
       const { handler } = createHandler({ sessionManager: sm });
 
-      const result = await handler.execMenuAction('/session', 'rename', { name: '新群会话' }, 'aun', 'chat1', 'guest1') as any;
+      const result = await handler.execMenuAction('/session', 'rename', { name: '新群会话' }, 'aun', 'chat1', 'visitor1') as any;
 
       expect(result.code).toBe('NO_PERMISSION');
       expect(sm.renameSession).not.toHaveBeenCalled();
@@ -836,7 +871,7 @@ describe('execMenuAction', () => {
       expect(sm.renameSession).not.toHaveBeenCalled();
     });
 
-    it('forbids group guest deleting topic', async () => {
+    it('forbids group visitor deleting topic', async () => {
       const topic = {
         id: 'topic-sess', channel: 'aun', channelId: 'chat1',
         projectPath: '/tmp/test', agentId: 'claude',
@@ -848,15 +883,15 @@ describe('execMenuAction', () => {
       };
       const sm = createMockSessionManager({
         getThreadSession: vi.fn().mockResolvedValue(topic),
-        resolveIdentity: vi.fn().mockReturnValue({ role: 'guest', mode: 'interactive' }),
+        resolveIdentity: vi.fn().mockReturnValue({ role: 'visitor', mode: 'interactive' }),
       });
       const { handler } = createHandler({ sessionManager: sm });
-      const result = await handler.execMenuAction('/topic', 'delete', { target: 'thread-1' }, 'aun', 'chat1', 'guest1', undefined, 'group') as any;
+      const result = await handler.execMenuAction('/topic', 'delete', { target: 'thread-1' }, 'aun', 'chat1', 'visitor1', undefined, 'group') as any;
       expect(result.code).toBe('FORBIDDEN');
       expect(sm.unbindSession).not.toHaveBeenCalled();
     });
 
-    it('forbids group guest renaming topic', async () => {
+    it('forbids group visitor renaming topic', async () => {
       const topic = {
         id: 'topic-sess', channel: 'aun', channelId: 'chat1',
         projectPath: '/tmp/test', agentId: 'claude',
@@ -868,11 +903,11 @@ describe('execMenuAction', () => {
       };
       const sm = createMockSessionManager({
         getThreadSession: vi.fn().mockResolvedValue(topic),
-        resolveIdentity: vi.fn().mockReturnValue({ role: 'guest', mode: 'interactive' }),
+        resolveIdentity: vi.fn().mockReturnValue({ role: 'visitor', mode: 'interactive' }),
         renameSession: vi.fn().mockResolvedValue(true),
       });
       const { handler } = createHandler({ sessionManager: sm });
-      const result = await handler.execMenuAction('/topic', 'rename', { target: 'thread-1', name: '新话题' }, 'aun', 'chat1', 'guest1', undefined, 'group') as any;
+      const result = await handler.execMenuAction('/topic', 'rename', { target: 'thread-1', name: '新话题' }, 'aun', 'chat1', 'visitor1', undefined, 'group') as any;
       expect(result.code).toBe('FORBIDDEN');
       expect(sm.renameSession).not.toHaveBeenCalled();
     });
@@ -892,19 +927,19 @@ describe('execMenuAction', () => {
         threadId: 'thread-1',
         name: '群话题',
         chatType: 'group', sessionMode: 'proactive',
-        metadata: { peerId: 'guest1' },
+        metadata: { peerId: 'visitor1' },
         createdAt: Date.now(), updatedAt: Date.now(),
       };
       const sm = createMockSessionManager({
         getActiveSession: vi.fn().mockResolvedValue(active),
         getActiveSessionSync: vi.fn().mockReturnValue(active),
         getThreadSession: vi.fn().mockResolvedValue(topic),
-        resolveIdentity: vi.fn().mockReturnValue({ role: 'guest', mode: 'interactive' }),
+        resolveIdentity: vi.fn().mockReturnValue({ role: 'visitor', mode: 'interactive' }),
         renameSession: vi.fn().mockResolvedValue(true),
       });
       const { handler } = createHandler({ sessionManager: sm });
 
-      const result = await handler.execMenuAction('/topic', 'rename', { target: 'thread-1', name: '新群话题' }, 'aun', 'chat1', 'guest1') as any;
+      const result = await handler.execMenuAction('/topic', 'rename', { target: 'thread-1', name: '新群话题' }, 'aun', 'chat1', 'visitor1') as any;
 
       expect(result.code).toBe('FORBIDDEN');
       expect(sm.renameSession).not.toHaveBeenCalled();
@@ -1047,8 +1082,8 @@ describe('getSubMenuItems — selected field', () => {
     const auto = items?.find(i => i.value === 'auto');
     const bypass = items?.find(i => i.value === 'bypass');
     const readonly = items?.find(i => i.value === 'readonly');
-    expect(auto?.selected).toBe(true);
-    expect(bypass?.selected).toBe(false);
+    expect(auto?.selected).toBe(false);
+    expect(bypass?.selected).toBe(true);
     expect(readonly).toBeDefined();
   });
 

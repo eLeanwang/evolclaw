@@ -2529,12 +2529,12 @@ tr.ag-disabled .ag-name { color: var(--dim); }
   color: #065f46;
 }
 
-.role-guest {
+.role-visitor {
   background: #f3f4f6;
   color: #4b5563;
 }
 
-.role-anonymous {
+.role-none {
   background: #fef2f2;
   color: #991b1b;
 }
@@ -2595,12 +2595,12 @@ tr.ag-disabled .ag-name { color: var(--dim); }
   font-size: 13px;
 }
 
-.role-guest {
+.role-visitor {
   background: #f3f4f6;
   color: #374151;
 }
 
-.role-anonymous {
+.role-none {
   background: #fee2e2;
   color: #991b1b;
 }
@@ -2627,12 +2627,12 @@ tr.ag-disabled .ag-name { color: var(--dim); }
   color: #d1fae5;
 }
 
-[data-theme="dark"] .role-guest {
+[data-theme="dark"] .role-visitor {
   background: #374151;
   color: #f3f4f6;
 }
 
-[data-theme="dark"] .role-anonymous {
+[data-theme="dark"] .role-none {
   background: #7f1d1d;
   color: #fee2e2;
 }
@@ -2701,8 +2701,8 @@ tr.ag-disabled .ag-name { color: var(--dim); }
 .role-card.role-owner { border-color: #fef3c7; }
 .role-card.role-admin { border-color: #dbeafe; }
 .role-card.role-member { border-color: #d1fae5; }
-.role-card.role-guest { border-color: #f3f4f6; }
-.role-card.role-anonymous { border-color: #fee2e2; }
+.role-card.role-visitor { border-color: #f3f4f6; }
+.role-card.role-none { border-color: #fee2e2; }
 
 .role-card-header {
   display: flex;
@@ -3032,8 +3032,8 @@ tr.ag-disabled .ag-name { color: var(--dim); }
 [data-theme="dark"] .role-card.role-owner { border-color: #78350f; }
 [data-theme="dark"] .role-card.role-admin { border-color: #1e3a8a; }
 [data-theme="dark"] .role-card.role-member { border-color: #064e3b; }
-[data-theme="dark"] .role-card.role-guest { border-color: #374151; }
-[data-theme="dark"] .role-card.role-anonymous { border-color: #7f1d1d; }
+[data-theme="dark"] .role-card.role-visitor { border-color: #374151; }
+[data-theme="dark"] .role-card.role-none { border-color: #7f1d1d; }
 /* Role Edit Form Styles */
 .role-edit-form {
   display: flex;

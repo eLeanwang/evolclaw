@@ -5,7 +5,6 @@ import { agentPersonalDir } from '../paths.js';
 import { fileCache } from './daemon-file-cache.js';
 import { ConfigTarget, read as cfgRead, write as cfgWrite, ensureFile as cfgEnsure, resolveEffective } from '../config/config-manager.js';
 import { withLifecycleForWrite } from '../config/lifecycle.js';
-import { listRoleAssignments, setPrivateRoleAssignment } from '../config/role-assignments.js';
 import type {
   AgentConfig,
   AgentLifecycle,
@@ -156,22 +155,19 @@ export class EvolAgent {
 
   /**
    * Check if a user has owner role for this agent (private scope).
-   * Uses the role-assignments system.
    */
   isOwner(_channelKey: string, userId: string): boolean {
     if (this.merged.owners?.includes(userId)) return true;
-    const assignments = listRoleAssignments(this.aid, { scope: 'private', role: 'owner', peerId: userId });
-    return assignments.length > 0;
+    return false;
   }
 
   /**
    * Check if a user has admin role for this agent (private scope).
-   * Uses the role-assignments system.
+   * Uses static owners/admins from agent config.
    */
   isAdmin(_channelKey: string, userId: string): boolean {
     if (this.isOwner(_channelKey, userId)) return true;
-    const assignments = listRoleAssignments(this.aid, { scope: 'private', role: 'admin', peerId: userId });
-    return assignments.length > 0;
+    return this.merged.admins?.includes(userId) ?? false;
   }
 
   /**
@@ -179,17 +175,18 @@ export class EvolAgent {
    * Returns the peerId of the first owner assignment.
    */
   getOwner(_channelKey: string): string | undefined {
-    if (this.merged.owners?.[0]) return this.merged.owners[0];
-    const owners = listRoleAssignments(this.aid, { scope: 'private', role: 'owner' });
-    return owners[0]?.peerId;
+    return this.merged.owners?.[0];
   }
 
   /**
    * Set a user as owner for this agent (private scope).
-   * Creates a role assignment in the role-assignments system.
    */
   setOwner(_channelKey: string, userId: string): void {
-    setPrivateRoleAssignment(this.aid, userId, 'owner');
+    const owners = new Set(this.merged.owners ?? []);
+    owners.add(userId);
+    const nextOwners = [...owners];
+    this.merged.owners = nextOwners;
+    this.updateAgentConfig(b => { b.owners = nextOwners; });
   }
 
   // ── Baseagent 字段写入 ────────────────────────────

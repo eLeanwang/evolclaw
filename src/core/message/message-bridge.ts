@@ -6,8 +6,7 @@ import { buildEnvelope } from './message-utils.js';
 import { chatDirPath } from '../session/session-fs-store.js';
 import { tryParseChannelKey } from '../channel-loader.js';
 import { resolvePaths } from '../../paths.js';
-import { listStaticAgentOwners, resolvePeerRoleDetail, roleToSessionIdentity, type ResolvedPeerRole } from '../../config/peer-role-resolver.js';
-import { hasRoleAssignment, setPrivateRoleAssignment } from '../../config/role-assignments.js';
+import { addStaticAgentOwner, hasStaticAgentOwner, resolvePeerRoleDetail, roleToSessionIdentity, type ResolvedPeerRole } from '../../config/peer-role-resolver.js';
 import type { SessionManager } from '../session/session-manager.js';
 import type { IMessageProcessor } from './message-processor-interface.js';
 import type { MessageQueue } from './message-queue.js';
@@ -296,7 +295,7 @@ export class MessageBridge {
             interruptible: isInterrupt,
             interruptSamePeer: !isInterrupt,  // 群聊：同人连发且队列无他人时打断
             agentName: enqueueAgentName,
-            role: !isInterrupt ? (session.identity?.role ?? 'anonymous') : undefined,
+            role: !isInterrupt ? (session.identity?.role ?? 'none') : undefined,
             sessionKeyField: session.sessionKey,
             selfAID,  // ← 传递 selfAID，用于队列隔离
           });
@@ -541,9 +540,8 @@ export class MessageBridge {
 
   /** 首次交互自动绑定 owner —— 通过 channel-routed self-agent 完成 */
   private async autoBindOwner(selfAid: string, channelKey: string, userId: string): Promise<void> {
-    if (listStaticAgentOwners(selfAid).length > 0) return;
-    if (hasRoleAssignment(selfAid, { scope: 'private', role: 'owner' })) return;
-    setPrivateRoleAssignment(selfAid, userId, 'owner', { note: 'auto-bound first inbound peer' });
+    if (hasStaticAgentOwner(selfAid)) return;
+    addStaticAgentOwner(selfAid, userId);
     logger.info(`[Owner] Auto-bound ${channelKey} owner: ${userId}`);
     this.eventBus.publish({ type: 'channel:owner-bound', channel: channelKey, userId });
   }
@@ -559,11 +557,11 @@ export class MessageBridge {
   }): ResolvedPeerRole {
     if (!ctx.selfAid || !ctx.actorId || !ctx.conversationId) {
       return {
-        effectiveRole: 'anonymous',
-        source: 'default',
+        effectiveRole: null,
+        source: 'none',
         isAuthenticated: false,
         allowAccess: false,
-        roleExists: true,
+        roleExists: false,
       };
     }
     return resolvePeerRoleDetail({

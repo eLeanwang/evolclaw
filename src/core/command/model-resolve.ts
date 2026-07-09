@@ -42,7 +42,7 @@ export function resolveCommandModelResolution(opts: {
   const scope: ScopeSelector = {
     self: opts.selfAid || undefined,
     peerKey,
-    role: opts.session?.identity?.role || opts.role || 'anonymous',
+    role: opts.session?.identity?.role || opts.role || 'none',
   };
 
   let resolved: ResolvedModel | undefined;

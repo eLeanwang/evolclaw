@@ -115,7 +115,7 @@ function explicitOrDerivedRole(args: readonly string[], sel: ScopeSelector): str
       actorId: peer.channelId,
       conversationId: peer.channelId,
     });
-    return detail.effectiveRole;
+    return detail.effectiveRole ?? undefined;
   } catch {
     return undefined;
   }
@@ -278,7 +278,7 @@ async function cmdList(args: string[], formatJson: boolean): Promise<void> {
   const cat = await getCatalog(sel.self, ba);
   const resolved = resolveEffectiveModel(effectiveSel, ba);
   const allowedModelIds = role
-    ? filterModelsForRole(role, ba, cat.models.map(m => m.id))
+    ? filterModelsForRole(role, ba, cat.models.map(m => m.id), undefined, sel.self)
     : null;
   const models = allowedModelIds
     ? allowedModelIds.map(id => cat.models.find(m => m.id === id) ?? { id })
@@ -414,6 +414,7 @@ async function cmdUse(args: string[], formatJson: boolean): Promise<void> {
       baseagent: ba,
       requestedModel: modelId,
       models: cat.models.map(m => m.id),
+      selfAid: sel.self,
     });
     if (!decision.ok) fail(formatJson, decision.code || 'MODEL_NOT_ALLOWED', decision.message || `model not allowed: ${modelId}`);
   }

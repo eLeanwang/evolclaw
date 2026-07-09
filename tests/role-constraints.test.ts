@@ -17,8 +17,8 @@ describe('Role Constraints', () => {
   });
 
   describe('permissionMode constraint', () => {
-    it('should prevent guest from using bypass', () => {
-      const result = mergeWithRoleConstraints('guest', {
+    it('should prevent visitor from using bypass', () => {
+      const result = mergeWithRoleConstraints('visitor', {
         permissionMode: 'bypass'
       });
 
@@ -58,7 +58,7 @@ describe('Role Constraints', () => {
     });
 
     it('should allow if relation config matches role default', () => {
-      const result = mergeWithRoleConstraints('guest', {
+      const result = mergeWithRoleConstraints('visitor', {
         permissionMode: 'readonly'
       });
 
@@ -68,8 +68,8 @@ describe('Role Constraints', () => {
   });
 
   describe('model whitelist constraint', () => {
-    it('should prevent guest from using opus', () => {
-      const result = mergeWithRoleConstraints('guest', {
+    it('should prevent visitor from using opus', () => {
+      const result = mergeWithRoleConstraints('visitor', {
         'baseagents.claude.model': 'claude-opus-4-8'
       });
 
@@ -79,8 +79,8 @@ describe('Role Constraints', () => {
       expect(result.effectiveConfig.baseagents?.claude?.model).toBe('claude-haiku-4-5-20251001');
     });
 
-    it('should prevent guest from using sonnet', () => {
-      const result = mergeWithRoleConstraints('guest', {
+    it('should prevent visitor from using sonnet', () => {
+      const result = mergeWithRoleConstraints('visitor', {
         'baseagents.claude.model': 'claude-sonnet-4-6'
       });
 
@@ -88,8 +88,8 @@ describe('Role Constraints', () => {
       expect(result.violations[0].reason).toBe('override_not_allowed');
     });
 
-    it('should allow guest to use haiku', () => {
-      const result = mergeWithRoleConstraints('guest', {
+    it('should allow visitor to use haiku', () => {
+      const result = mergeWithRoleConstraints('visitor', {
         'baseagents.claude.model': 'claude-haiku-4-5-20251001'
       });
 
@@ -170,8 +170,8 @@ describe('Role Constraints', () => {
       expect(result.effectiveConfig.dispatch).toBe('mention');
     });
 
-    it('should prevent guest from changing dispatch', () => {
-      const result = mergeWithRoleConstraints('guest', {
+    it('should prevent visitor from changing dispatch', () => {
+      const result = mergeWithRoleConstraints('visitor', {
         dispatch: 'broadcast'
       });
 
@@ -206,8 +206,8 @@ describe('Role Constraints', () => {
   });
 
   describe('chatmode constraint', () => {
-    it('should prevent guest from overriding chatmode', () => {
-      const result = mergeWithRoleConstraints('guest', {
+    it('should prevent visitor from overriding chatmode', () => {
+      const result = mergeWithRoleConstraints('visitor', {
         chatmode: {
           private: 'interactive',
           group: 'proactive'
@@ -244,7 +244,7 @@ describe('Role Constraints', () => {
 
   describe('multiple violations', () => {
     it('should record all violations', () => {
-      const result = mergeWithRoleConstraints('guest', {
+      const result = mergeWithRoleConstraints('visitor', {
         permissionMode: 'bypass',
         'baseagents.claude.model': 'claude-opus-4-8',
         dispatch: 'broadcast',
@@ -260,7 +260,7 @@ describe('Role Constraints', () => {
     });
 
     it('should apply defaults for all violated fields', () => {
-      const result = mergeWithRoleConstraints('guest', {
+      const result = mergeWithRoleConstraints('visitor', {
         permissionMode: 'bypass',
         'baseagents.claude.model': 'claude-opus-4-8'
       });
@@ -306,16 +306,16 @@ describe('Role Constraints', () => {
       expect(isModelAllowedForRole('member', 'claude-haiku-4-5-20251001')).toBe(true);
     });
 
-    it('should check guest can only use haiku', () => {
-      expect(isModelAllowedForRole('guest', 'claude-opus-4-8')).toBe(false);
-      expect(isModelAllowedForRole('guest', 'claude-sonnet-4-6')).toBe(false);
-      expect(isModelAllowedForRole('guest', 'claude-haiku-4-5-20251001')).toBe(true);
+    it('should check visitor can only use haiku', () => {
+      expect(isModelAllowedForRole('visitor', 'claude-opus-4-8')).toBe(false);
+      expect(isModelAllowedForRole('visitor', 'claude-sonnet-4-6')).toBe(false);
+      expect(isModelAllowedForRole('visitor', 'claude-haiku-4-5-20251001')).toBe(true);
     });
 
-    it('should treat unknown roles as anonymous', () => {
+    it('should reject unknown roles', () => {
       expect(isModelAllowedForRole('unknown-role', 'claude-opus-4-8')).toBe(false);
       expect(isModelAllowedForRole('unknown-role', 'claude-sonnet-4-6')).toBe(false);
-      expect(isModelAllowedForRole('unknown-role', 'claude-haiku-4-5-20251001')).toBe(true);
+      expect(isModelAllowedForRole('unknown-role', 'claude-haiku-4-5-20251001')).toBe(false);
     });
   });
 
@@ -329,15 +329,14 @@ describe('Role Constraints', () => {
   });
 
   describe('unknown role fallback', () => {
-    it('should fallback to anonymous for unknown role', () => {
+    it('should fail closed for unknown role', () => {
       const result = mergeWithRoleConstraints('unknown-role', {
         'baseagents.claude.model': 'claude-opus-4-8'
       });
 
-      // anonymous cannot override the default haiku model.
       expect(result.valid).toBe(false);
       expect(result.violations[0].reason).toBe('override_not_allowed');
-      expect(result.effectiveConfig.baseagents?.claude?.model).toBe('claude-haiku-4-5-20251001');
+      expect(result.effectiveConfig).toEqual({});
     });
   });
 

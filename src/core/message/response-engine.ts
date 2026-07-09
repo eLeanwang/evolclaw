@@ -31,8 +31,7 @@ import { buildEnvelope, sendInteractionPayload } from './message-utils.js';
 export { buildEnvelope, sendInteractionPayload } from './message-utils.js';
 import { resolveEffectiveModel, resolvePermissionMode } from '../model/config-scope.js';
 import { resolveEffective } from '../../config/config-manager.js';
-import { getFirstRoleAssignment } from '../../config/role-assignments.js';
-import { checkRoleAccess } from '../../config/peer-role-resolver.js';
+import { checkRoleAccess, getFirstStaticAgentOwner } from '../../config/peer-role-resolver.js';
 import { insertUsageEvent, insertContextBreakdown, insertModelCalls } from '../../stats/writer.js';
 import { normalizeUsage } from '../../stats/normalizer.js';
 import { resolvePrices } from '../../stats/price-resolver.js';
@@ -642,9 +641,15 @@ export class ResponseEngine implements IMessageProcessor {
     // message.channel 现在存实例名（channelName），可直接用于精确路由
     const { session, absoluteProjectPath } = await this.resolveSession(message);
 
+    const accessChannelKey = this.messageChannelKey(message, session);
+    const accessChannelInfo = this.resolveChannelInfo(accessChannelKey);
+    const accessAdapter = accessChannelInfo?.adapter as unknown as { _selfAid?: () => string | undefined } | undefined;
+    const accessAdapterSelfAid = typeof accessAdapter?._selfAid === 'function' ? accessAdapter._selfAid() : undefined;
+    const selfAidForAccess = accessAdapterSelfAid || message.selfAID || session.selfAID || undefined;
+
     // ── 角色访问控制检查：读取该用户角色的 allowAccess 配置，false 则拦截并回复权限不足 ──
-    const userRole = session.identity?.role || 'anonymous';
-    if (!checkRoleAccess(userRole)) {
+    const userRole = session.identity?.role || 'none';
+    if (!checkRoleAccess(userRole, selfAidForAccess)) {
       logger.warn(`[ResponseEngine] Access denied: role=${userRole} peerKey=${message.channelId} session=${session.id}`);
       const channelKey = session.metadata?.channelKey || message.channel;
       const channelInfo = this.resolveChannelInfo(channelKey);
@@ -695,7 +700,7 @@ export class ResponseEngine implements IMessageProcessor {
     const { policy } = channelInfo;
     const streamKey = session.id;
     const chatType = message.chatType || 'private';
-    const identityRole = session.identity?.role || 'anonymous';
+    const identityRole = session.identity?.role || 'none';
     const monitorEnabled = this.globalSettings.idleMonitor?.enabled !== false;
     // 按 session.baseagent 选择 agent 后端（idle-kill 路径需要 interrupt）
     let agent: AgentRunnerFull;
@@ -834,7 +839,7 @@ export class ResponseEngine implements IMessageProcessor {
 
     const { adapter, options, policy } = channelInfo;
     const chatType = message.chatType || 'private';
-    const identityRole = session.identity?.role || 'anonymous';
+    const identityRole = session.identity?.role || 'none';
     let agent: AgentRunnerFull;
     try {
       agent = this.getAgent(channelKey, session.baseagent, session.selfAID || message.selfAID);
@@ -884,7 +889,7 @@ export class ResponseEngine implements IMessageProcessor {
     const peerKey = (currentChannelType && peerKeyId)
       ? formatPeerKey(currentChannelType, peerKeyId)
       : undefined;
-    const peerRole = session.identity?.role || 'anonymous';
+    const peerRole = session.identity?.role || 'none';
     const effectiveAgentConfig = (() => {
       try {
         return resolveEffective({ self: selfAid || undefined, peerKey, role: peerRole }, { cache: true });
@@ -1257,7 +1262,7 @@ export class ResponseEngine implements IMessageProcessor {
         if (!skipEvolclawModel) {
           try {
             const resolved = resolveEffectiveModel(
-              { self: selfAid || undefined, peerKey, role: session.identity?.role || 'anonymous' },
+              { self: selfAid || undefined, peerKey, role: session.identity?.role || 'none' },
               normalizedBaseagent.canonical,
             );
             if (resolved.model || resolved.effort) {
@@ -1418,7 +1423,7 @@ export class ResponseEngine implements IMessageProcessor {
             : [{
                 peerId: message.peerId, peerName: peerName || undefined,
                 peerType: message.peerType,
-                peerRole: message.batchRole || session.identity?.role || 'anonymous',
+                peerRole: message.batchRole || session.identity?.role || 'none',
                 sameDevice: message.sameDevice, sameNetwork: message.sameNetwork, sameEgressIp: message.sameEgressIp,
                 encrypted: message.encrypted,
                 content: message.content, timestamp: message.timestamp,
@@ -1749,7 +1754,7 @@ export class ResponseEngine implements IMessageProcessor {
                 const targetChannelKey = targetInfo.adapter.channelKey || targetAdapterName;
                 const targetAgent = this.agentRegistry?.resolveByChannel(targetChannelKey);
                 const ownerPeerId = targetAgent
-                  ? getFirstRoleAssignment(targetAgent.aid, { scope: 'private', role: 'owner' })?.peerId
+                  ? getFirstStaticAgentOwner(targetAgent.aid)
                   : undefined;
                 targetChannelId = ownerPeerId ? (this.sessionManager.getOwnerChatId(targetChannelType, ownerPeerId) ?? '') : '';
                 if (!targetChannelId) {
@@ -1871,7 +1876,7 @@ export class ResponseEngine implements IMessageProcessor {
           // 系统级 subtype 仍累计错误计数，供 /status 诊断使用
           if (isInfraError(rawSubtype, streamResult.terminalReason)) {
             const chatType = message.chatType || 'private';
-            const identityRole = session.identity?.role || 'anonymous';
+            const identityRole = session.identity?.role || 'none';
             const { policy } = channelInfo;
             if (policy.accumulateErrors(chatType, identityRole)) {
               await this.sessionManager.recordError(session.id, errorType, errorSummary);
