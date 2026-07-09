@@ -98,7 +98,7 @@
     },
     "show_activities": {
       "type": "string",
-      "enum": ["all", "none"],
+      "enum": ["all", "text", "none"],
       "description": "中间活动可见性（技术用户显示，普通用户隐藏）",
       "x-merge": "scalar"
     },

@@ -97,7 +97,7 @@ describe('integration: ec config CLI', () => {
     process.env.EVOLCLAW_SESSION_ID = 'sess-1';
     // v3 当前实现：所有字段都在 agent-config（H），托管环境统一禁止写入
     // TODO: 未来应迁移到字段级权限控制
-    const r = await runJson(['set', 'show_activities', 'false', '--self', AID]);
+    const r = await runJson(['set', 'show_activities', 'none', '--self', AID]);
     expect(r.ok).toBe(false);
     expect(r.code).toBe('FORBIDDEN_H_WRITE');
   });
@@ -129,7 +129,7 @@ describe('integration: ec config CLI', () => {
   });
 
   it('snapshot → history → restore 周期', async () => {
-    await runJson(['set', 'show_activities', 'false', '--self', AID]);
+    await runJson(['set', 'show_activities', 'none', '--self', AID]);
     const snap = await runJson(['snapshot']);
     expect(snap.ok).toBe(true);
     const hist = await runJson(['history']);

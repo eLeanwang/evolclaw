@@ -37,11 +37,11 @@ readonly: true — 禁止修改项目文件，如需生成文件请写入 .evolc
 # 不需要响应时：给出简短静默理由，然后直接结束，不调用发送命令。
 {{/}}
 # 决定响应后：
-{{?proactivePreTool1stMsgChk!=false}}
-#   - 第一时间发消息说明意图，不要闷头干
+{{?proactiveFirstSendRequired}}
+#   - 首次调用任何非发送工具前，必须先用发送命令向{{proactiveSendTargetLabel}}说明意图
 {{/}}
-{{?proactiveToolUseReminder!=false}}
-#   - 超过 10 次工具调用需再次汇报情况
+{{?proactiveToolReportRequired}}
+#   - 每 {{proactiveToolReportInterval}} 次非发送工具调用后，必须先用发送命令汇报当前进展和下一步，否则后续非发送工具会被拒绝
 {{/}}
 # 命令速查：
 {{?chatType=group}}

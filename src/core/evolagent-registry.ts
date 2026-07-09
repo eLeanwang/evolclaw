@@ -17,6 +17,7 @@ import type {
   EffectiveAgentConfig,
   DefaultsConfig,
   ChannelInstance,
+  ShowActivitiesMode,
 } from '../types.js';
 
 // 鈹€鈹€ Channel Fingerprint 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
@@ -91,7 +92,7 @@ export interface ReloadHooks {
  */
 export interface GlobalConfigWriter {
   setOwner(channelName: string, userId: string): void;
-  setShowActivities?(channelName: string, mode: 'all' | 'none'): void;
+  setShowActivities?(channelName: string, mode: ShowActivitiesMode): void;
 }
 
 // 鈹€鈹€ Registry 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
@@ -206,11 +207,11 @@ export class EvolAgentRegistry {
     agent.setOwner(channelKey, userId);
   }
 
-  getShowActivities(channelKey: string): 'all' | 'none' {
+  getShowActivities(channelKey: string): ShowActivitiesMode {
     return this.resolveByChannel(channelKey)?.getShowActivities(channelKey) ?? 'all';
   }
 
-  setShowActivities(channelKey: string, mode: 'all' | 'none'): void {
+  setShowActivities(channelKey: string, mode: ShowActivitiesMode): void {
     const agent = this.resolveByChannel(channelKey);
     if (!agent) {
       logger.warn(`[EvolAgentRegistry] setShowActivities: channel "${channelKey}" not found`);

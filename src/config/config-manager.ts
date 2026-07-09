@@ -180,6 +180,7 @@ export function read<T = any>(target: ConfigTarget, sel?: Selector, opts: ReadOp
 function normalizeAgentConfigForRead<T extends Record<string, any>>(value: T, aid?: string): T {
   const config = normalizeAgentLifecycle(value) as T;
   const mutable = config as Record<string, any>;
+  normalizeShowActivitiesCompat(mutable);
 
   // AID 鏍￠獙锛堝鏋滄彁渚涗簡 aid锛?
   if (aid && mutable.aid && mutable.aid !== aid) {
@@ -228,6 +229,7 @@ export interface WriteOpts {
 
 function normalizeAgentConfigForWrite<T extends Record<string, any>>(value: T): T {
   const mutable = { ...value } as Record<string, any>;
+  normalizeShowActivitiesCompat(mutable);
 
   // AID 鏍煎紡鏍￠獙
   if (mutable.aid && !isValidAid(mutable.aid)) {
@@ -366,7 +368,18 @@ function roleExistsInAgentPolicy(role: string, selfAid: string): boolean {
     && Object.prototype.hasOwnProperty.call(agent.roles.definitions, role);
 }
 
-/** 鍐欏叆锛氣憼 schema 鏍￠獙 鈶?ensureFile 鐩綍 鈶?鍘熷瓙鍐欏叆銆傚揩鐓х敱璋冪敤鏂?鍚姩娴佺▼缁熺銆?*/
+function normalizeRelationConfigForWrite<T extends Record<string, any>>(value: T): T {
+  const mutable = { ...value } as Record<string, any>;
+  normalizeShowActivitiesCompat(mutable);
+  return mutable as T;
+}
+
+function normalizeShowActivitiesCompat(value: Record<string, any>): void {
+  if (value.show_activities === true) value.show_activities = 'all';
+  else if (value.show_activities === false) value.show_activities = 'none';
+}
+
+/** Write config with schema validation and atomic persistence. */
 export function write<T = any>(target: ConfigTarget, value: T, sel?: Selector, opts: WriteOpts = {}): void {
   const schema = loadSchema(TARGET_SCHEMA[target]);
   const withVer = ensureSchemaVersion(value as any, schema.version);
@@ -376,7 +389,9 @@ export function write<T = any>(target: ConfigTarget, value: T, sel?: Selector, o
   // Agent config 鍐欏叆瑙勮寖鍖栵紙aid 鏍￠獙銆乸rojects 瀛楁娓呯悊锛?
   const normalized = target === ConfigTarget.Agent
     ? normalizeAgentConfigForWrite(migrated as any) as any
-    : migrated;
+    : target === ConfigTarget.Relation
+      ? normalizeRelationConfigForWrite(migrated as any) as any
+      : migrated;
 
   validateRoleConfigForTarget(target, normalized as any, sel);
 
@@ -689,6 +704,7 @@ function normalizeEffectiveCompatibility<T extends EffectiveAgentConfig>(effecti
   if ((effective as any).dispatch === 'all' || (effective as any).dispatch === 'none') {
     (effective as any).dispatch = 'broadcast';
   }
+  normalizeShowActivitiesCompat(effective as any);
   const behavior: Record<string, unknown> = {};
   for (const field of EFFECTIVE_BEHAVIOR_FIELDS) {
     if ((effective as any)[field] !== undefined) behavior[field] = (effective as any)[field];

@@ -14,6 +14,7 @@ import {
 import { sessionToFile, fileToSession } from './session-mapper.js';
 import { formatSessionKey, DEFAULT_THREAD_ID } from './session-key.js';
 import { tryParseChannelKey } from '../channel-loader.js';
+import { resolveChatModeForPeer, type ChatMode, type ChatmodeDefaults } from '../message/peer-mode.js';
 import path from 'path';
 import fs from 'fs';
 import os from 'os';
@@ -35,7 +36,7 @@ export type ChatModeDefaultsProvider = (
   channel: string,
   chatType: string,
   peerType?: string
-) => { private?: 'interactive' | 'proactive'; group?: 'interactive' | 'proactive'; nothuman?: 'interactive' | 'proactive' } | undefined;
+) => ChatmodeDefaults | undefined;
 
 export class SessionManager {
   private sessionsDir: string;
@@ -63,20 +64,10 @@ export class SessionManager {
     this.identityResolver = resolver;
   }
 
-  private resolveDefaultChatMode(channel: string, chatType?: string, peerType?: string): 'interactive' | 'proactive' {
+  private resolveDefaultChatMode(channel: string, chatType?: string, peerType?: string): ChatMode {
     const ct = chatType || 'private';
     const configured = this.chatModeDefaultsProvider?.(channel, ct, peerType);
-
-    // 群聊强制 proactive
-    if (ct === 'group') return 'proactive';
-
-    // 'system' 类型（触发器等）用 interactive
-    if (peerType === 'system') return 'interactive';
-
-    // Agent-to-Agent 强制 proactive（避免无限循环）
-    if (peerType && peerType !== 'human') return configured?.nothuman ?? 'proactive';
-
-    return configured?.private ?? 'interactive';
+    return resolveChatModeForPeer({ chatType: ct, peerType, configured });
   }
 
   registerFileAdapter(adapter: SessionFileAdapter): void {

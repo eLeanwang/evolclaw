@@ -8,7 +8,7 @@
 
 - 用户要求“稍后/每天/每小时/定时/周期性”执行任务
 - 需要无人值守巡检、升级检查、日报、仓库同步
-- 需要基于系统事件触发时，先读 `triggers/event-catalog.md`
+- 需要基于系统事件触发时，先读 `evolclaw/event.md`
 - 需要一次性立即排队执行时，使用 `--once`
 
 不要用 trigger 代替当前会话内的即时动作；一次性马上执行直接处理当前请求。
@@ -55,7 +55,7 @@ CLI flag 模式必须显式指定 `--target-channel` 和 `--target-channel-id`�
 
 这些来源互斥，只能指定一个。`--cron` 表达式必须加引号，避免被 shell 拆成多个参数。`--every` 是固定间隔，`--cron` 是日历调度。`--once` 创建后立即进入一次 run，完成后自动禁用。
 
-`--event` 基于 EventBus 事件触发，事件模式支持精确事件名、命名空间前缀和全量：`message:received`、`message:*`、`*`。flag 模式只支持设置 `eventPattern`；需要按 payload 字段过滤时，使用 V4 JSON 的 `source.filter.match`，再通过 `--file` 导入。事件清单、payload 字段和过滤操作见 `$KITS_DOCS/triggers/event-catalog.md`。
+`--event` 基于 EventBus 事件触发，事件模式支持精确事件名、命名空间前缀和全量：`message:received`、`message:*`、`*`。flag 模式只支持设置 `eventPattern`；需要按 payload 字段过滤时，使用 V4 JSON 的 `source.filter.match`，再通过 `--file` 导入。事件清单、payload 字段和过滤操作见 `$KITS_DOCS/evolclaw/event.md`。
 
 ## 执行类型
 
@@ -470,6 +470,6 @@ ec trigger delete --agent <aid> auto-updater
 
 ## 相关文档
 
-- event source 可监听事件：`$KITS_DOCS/triggers/event-catalog.md`
+- event source 可监听事件：`$KITS_DOCS/evolclaw/event.md`
 - trigger V4 执行与反馈设计：`$PACKAGE_ROOT/docs/trigger-v4-execution-feedback-design.md`
 - limits / disable / delete 语义：`$PACKAGE_ROOT/docs/trigger-limits-feature-v2.md`

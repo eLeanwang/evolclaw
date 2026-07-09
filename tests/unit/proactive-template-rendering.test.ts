@@ -17,6 +17,10 @@ describe('Proactive Mode Template Rendering', () => {
         selfAid: 'alice.agentid.pub',
         groupId: 'group123',
         peerId: 'bob.agentid.pub',
+        proactiveFirstSendRequired: true,
+        proactiveToolReportRequired: true,
+        proactiveToolReportInterval: 10,
+        proactiveSendTargetLabel: '群里',
       };
 
       const rendered = renderTemplate(sessionTemplate, vars);
@@ -24,7 +28,8 @@ describe('Proactive Mode Template Rendering', () => {
       expect(rendered).toContain('proactive 模式');
       expect(rendered).toContain('ec group send alice.agentid.pub group123');
       expect(rendered).not.toContain('ec msg send');
-      expect(rendered).toContain('第一时间发消息说明意图');
+      expect(rendered).toContain('首次调用任何非发送工具前');
+      expect(rendered).toContain('向群里说明意图');
     });
 
     it('should include mention option for group', () => {
@@ -48,6 +53,8 @@ describe('Proactive Mode Template Rendering', () => {
         chatType: 'private',
         selfAid: 'alice.agentid.pub',
         peerId: 'bob.agentid.pub',
+        proactiveFirstSendRequired: true,
+        proactiveSendTargetLabel: '对方',
       };
 
       const rendered = renderTemplate(sessionTemplate, vars);
@@ -121,46 +128,51 @@ describe('Proactive Mode Template Rendering', () => {
   });
 
   describe('10-tool-call reminder', () => {
-    it('should include the 10-tool-call reminder in all proactive modes', () => {
+    it('should include the tool-call report reminder when enabled by vars', () => {
       const vars = {
         chatMode: 'proactive',
         chatType: 'private',
         selfAid: 'alice.agentid.pub',
         peerId: 'bob.agentid.pub',
+        proactiveToolReportRequired: true,
+        proactiveToolReportInterval: 10,
       };
 
       const rendered = renderTemplate(sessionTemplate, vars);
 
-      expect(rendered).toContain('超过 10 次工具调用需再次汇报情况');
+      expect(rendered).toContain('每 10 次非发送工具调用后');
     });
   });
 
   describe('proactive behavior switches', () => {
-    it('should keep proactive instructions enabled when switches are omitted', () => {
+    it('should render proactive policy instructions from computed vars', () => {
       const rendered = renderTemplate(sessionTemplate, {
         chatMode: 'proactive',
         chatType: 'private',
         selfAid: 'alice.agentid.pub',
         peerId: 'bob.agentid.pub',
+        proactiveFirstSendRequired: true,
+        proactiveToolReportRequired: true,
+        proactiveToolReportInterval: 10,
+        proactiveSendTargetLabel: '对方',
       });
 
-      expect(rendered).toContain('第一时间发消息说明意图');
-      expect(rendered).toContain('超过 10 次工具调用需再次汇报情况');
+      expect(rendered).toContain('首次调用任何非发送工具前');
+      expect(rendered).toContain('每 10 次非发送工具调用后');
     });
 
-    it('should hide first-send and tool-count instructions when switches are off', () => {
+    it('should hide first-send and tool-count instructions when computed vars are false', () => {
       const rendered = renderTemplate(sessionTemplate, {
         chatMode: 'proactive',
         chatType: 'private',
         selfAid: 'alice.agentid.pub',
         peerId: 'bob.agentid.pub',
-        proactivePreTool1stMsgChk: false,
-        proactiveToolUseReminder: false,
+        proactiveFirstSendRequired: false,
+        proactiveToolReportRequired: false,
       });
 
-      expect(rendered).not.toContain('第一时间发消息说明意图');
-      expect(rendered).not.toContain('不要闷头干');
-      expect(rendered).not.toContain('超过 10 次工具调用需再次汇报情况');
+      expect(rendered).not.toContain('首次调用任何非发送工具前');
+      expect(rendered).not.toContain('非发送工具调用后');
     });
   });
 

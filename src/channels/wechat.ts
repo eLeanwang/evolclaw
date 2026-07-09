@@ -868,7 +868,7 @@ export class WechatChannel {
 
 // Plugin implementation
 import type { ChannelPlugin, ChannelInstance, ChannelBuildContext, BridgeHookContext } from '../core/channel-loader.js';
-import { resolveShowActivities, showActivitiesPolicy } from '../core/channel-loader.js';
+import { middleOutputModePolicy, resolveShowActivities, showActivitiesPolicy } from '../core/channel-loader.js';
 import type { MessageBridge } from '../core/message/message-bridge.js';
 import type { WechatChannelInstance as WechatInst, ThoughtItem } from '../types.js';
 
@@ -922,6 +922,7 @@ export class WechatChannelPlugin implements ChannelPlugin {
       canImportCliSession: (_: string, identity: string) => identity === 'owner' || identity === 'admin',
       messagePrefix: () => '',
       showMiddleResult: (chatType: string, identity: string) => showActivitiesPolicy(mode, chatType, identity),
+      middleOutputMode: (chatType: string, identity: string) => middleOutputModePolicy(mode, chatType, identity),
       showIdleMonitor: (chatType: string, identity: string) => showActivitiesPolicy(mode, chatType, identity),
       accumulateErrors: () => true,
     };

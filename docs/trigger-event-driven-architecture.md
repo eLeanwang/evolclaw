@@ -481,7 +481,7 @@ type StateBusEvent =
 ```
 
 **事件白名单维护**：
-- 所有事件在 `$KITS_DOCS/triggers/event-catalog.md` 维护清单
+- 所有事件在 `$KITS_DOCS/evolclaw/event.md` 维护清单
 - 每个事件注明：事件名、载荷字段、触发时机、典型用途
 - 用户写 trigger 时参考此清单
 - 事件目录应从 `src/core/event-bus.ts` 的 `GatewayEvent` 联合类型生成或人工同步校验，避免文档字段和代码字段漂移
@@ -1239,7 +1239,7 @@ interface TriggerFeedbackDispatchInput {
 2. 引入安全表达式引擎（JSONLogic）用于 `filter.where`
 3. CLI 支持用户自定义状态：`evolclaw state set/get <key> <value>`
 4. 状态条件完善：`crossed`/`stable`/`transition` 操作符
-5. 事件目录文档化：`$KITS_DOCS/triggers/event-catalog.md`
+5. 事件目录文档化：`$KITS_DOCS/evolclaw/event.md`
 
 **交付时间**：根据用户反馈决定优先级
 
@@ -1254,7 +1254,7 @@ interface TriggerFeedbackDispatchInput {
 | **过滤器安全性** | 第一期只支持 `match`（结构化），暂不开放 `where` | 避免 eval 安全问题，后续按需引入 JSONLogic |
 | **状态命名空间** | `session.*` / `peer.*` / `agent.*` / `channel.*` / `custom.*` | 清晰分层，按模块注册访问器 |
 | **状态持久化** | session/agent/channel 内存，peer/custom 久化 | 按状态生命周期区分 |
-| **事件白名单** | 文档维护 `event-catalog.md` | 用户可发现，避免猜测事件名 |
+| **事件白名单** | 文档维护 `evolclaw/event.md` | 用户可发现，避免猜测事件名 |
 | **语法糖 vs 完整配置** | 提供 `type: state` 语法糖，底层展开成 event | 用户友好，底层统一 |
 
 ---
@@ -1375,7 +1375,7 @@ evolclaw trigger debug --states
 1. **用户手册**：
    - `docs/triggers/event-triggers.md` — 事件触发器使用指南
    - `docs/triggers/state-triggers.md` — 状态触发器使用指南
-   - `docs/triggers/event-catalog.md` — 事件目录（白名单）
+   - `docs/evolclaw/event.md` — 事件目录（白名单）
    - `docs/triggers/filter-syntax.md` — 过滤器语法参考
 
 2. **开发文档**：

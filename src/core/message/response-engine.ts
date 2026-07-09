@@ -22,7 +22,7 @@ import { logger } from '../../utils/logger.js';
 import { getErrorMessage, classifyError, ErrorType, ERROR_PREFIX, isInfraError, prefixErrorType, isRetryableError, isContextTooLongText } from '../../utils/error-utils.js';
 import { EventBus } from '../event-bus.js';
 import { isEvolclawSendCommandForSession, summarizeToolInput } from '../permission.js';
-import type { Message, Session, ChannelAdapter, ChannelOptions, ChannelPolicy, CommandHandler as CommandHandlerFn, ReplyContext, AgentContext, EvolAgentHandle, EvolAgentRegistryHandle, GlobalSettings, OutboundEnvelope, OutboundPayload, InteractionRequest, InteractionKind, ActionInteraction, CommandCard, ProactiveBehaviorBlock } from '../../types.js';
+import type { Message, Session, ChannelAdapter, ChannelOptions, ChannelPolicy, CommandHandler as CommandHandlerFn, ReplyContext, AgentContext, EvolAgentHandle, EvolAgentRegistryHandle, GlobalSettings, OutboundEnvelope, OutboundPayload, InteractionRequest, InteractionKind, ActionInteraction, CommandCard, ProactiveBehaviorBlock, ShowActivitiesMode } from '../../types.js';
 import { getPackageRoot, resolveRoot, resolvePaths } from '../../paths.js';
 import { renderKitSections, type KitRenderContext } from '../../eck/kit-renderer.js';
 import { renderMessageBody, type RenderMessageResult } from '../../eck/message-renderer.js';
@@ -35,6 +35,7 @@ import { renderActionAsText, renderCommandCardAsText } from '../interaction-rout
 import { formatPeerKey } from '../relation/peer-identity.js';
 import type { IMessageProcessor } from './message-processor-interface.js';
 import { buildEnvelope, sendInteractionPayload } from './message-utils.js';
+import { isSystemOrServicePeer, resolveChatModeForPeer } from './peer-mode.js';
 
 // Re-export 工具函数（向后兼容，让其他模块可以从 response-engine 导入）
 export { buildEnvelope, sendInteractionPayload } from './message-utils.js';
@@ -51,6 +52,10 @@ import { ResponseModeCoordinator, type ResolvedInbound } from '../../response-sy
 import { ResponseModeRegistry } from '../../response-system/registry.js';
 import { registerBuiltinModes } from '../../response-system/modes/index.js';
 import type { ProcessContext, ToolUseContext, CompleteContext, AfterProcessContext, RunConfig } from '../../response-system/types.js';
+
+function isShowActivitiesMode(value: unknown): value is ShowActivitiesMode {
+  return value === 'all' || value === 'text' || value === 'none';
+}
 
 type StreamRunResult = {
   isError: boolean;
@@ -77,8 +82,13 @@ type ProactiveRuntimeState = {
   toolCount: number;
   lastQueueReminderLen: number;
   chatType: string;
+  peerType?: string;
   preTool1stMsgChk: boolean;
   toolUseReminder: boolean;
+  firstSendRequired: boolean;
+  toolReportRequired: boolean;
+  toolReportInterval: number;
+  toolReportPending: boolean;
 };
 
 type ContextRecoveryOptions = {
@@ -373,12 +383,7 @@ export class ResponseEngine implements IMessageProcessor {
     channelKey: string,
     channelId: string,
   ): 'interactive' | 'proactive' {
-    const field = session.chatType === 'group'
-      ? 'group'
-      : ((session.metadata as any)?.peerType && (session.metadata as any).peerType !== 'human')
-        ? 'nothuman'
-        : 'private';
-    const fallback = field === 'private' ? 'interactive' : 'proactive';
+    const peerType = (session.metadata as any)?.peerType;
     try {
       const self = session.selfAID || this.agentRegistry?.resolveByChannel(channelKey)?.aid;
       const channelType = session.channelType || channelKey.split('#')[0] || channelKey;
@@ -390,10 +395,10 @@ export class ResponseEngine implements IMessageProcessor {
         self: self || undefined,
         peerKey,
         role: session.identity?.role,
-      }, { cache: true }).chatmode?.[field];
-      return configured === 'interactive' || configured === 'proactive' ? configured : fallback;
+      }, { cache: true }).chatmode;
+      return resolveChatModeForPeer({ chatType: session.chatType, peerType, configured });
     } catch {
-      return fallback;
+      return resolveChatModeForPeer({ chatType: session.chatType, peerType });
     }
   }
 
@@ -841,9 +846,11 @@ export class ResponseEngine implements IMessageProcessor {
       throw error;
     }
 
-    // 计算是否抑制中间输出（工具活动 + 流式文本）
+    // 计算是否抑制中间输出（工具活动 + 流式文本）。具体三态在 chatMode/effective config
+    // 解析完成后赋值；闭包让后续事件处理路径保持兼容。
+    const outputState: { middleOutputMode: ShowActivitiesMode } = { middleOutputMode: 'all' };
     const shouldSuppress = (): boolean => {
-      return !policy.showMiddleResult(chatType, identityRole);
+      return outputState.middleOutputMode === 'none';
     };
     this.shouldSuppressActivities = shouldSuppress();
 
@@ -898,7 +905,7 @@ export class ResponseEngine implements IMessageProcessor {
 
     try {
       await Promise.race([
-        this._processMessageInternal(message, session, absoluteProjectPath, resetTimer, shouldSuppress, () => lastIdleSec),
+        this._processMessageInternal(message, session, absoluteProjectPath, resetTimer, shouldSuppress, () => lastIdleSec, outputState),
         timeoutPromise
       ]);
     } catch (error: any) {
@@ -943,7 +950,7 @@ export class ResponseEngine implements IMessageProcessor {
   }
 
   /** 自动安全模式已禁用：仅保留错误计数，不再自动切换状态 */
-  private async _processMessageInternal(message: Message, session: Session, absoluteProjectPath: string, resetTimer: (eventType?: string, toolName?: string) => void, shouldSuppress: () => boolean, getLastIdleSec?: () => number): Promise<void> {
+  private async _processMessageInternal(message: Message, session: Session, absoluteProjectPath: string, resetTimer: (eventType?: string, toolName?: string) => void, shouldSuppress: () => boolean, getLastIdleSec?: () => number, outputState: { middleOutputMode: ShowActivitiesMode } = { middleOutputMode: 'all' }): Promise<void> {
     const messageId = `${message.channel}_${message.channelId}_${message.timestamp || Date.now()}`;
     const channelKey = this.messageChannelKey(message, session);
     const channelInfo = this.resolveChannelInfo(channelKey);
@@ -1027,19 +1034,16 @@ export class ResponseEngine implements IMessageProcessor {
 
     // ─── 响应模式解析（插件化机制中枢）───
     // trigger override 绝对优先；否则由 Coordinator 解析（response_modes > chatmode 配置兜底）。
-    const chatModeFallback = (() => {
-      const peerType = message.peerType ?? (session.metadata as any)?.peerType;
-      const key = chatType === 'group'
-        ? 'group'
-        : peerType && peerType !== 'human'
-          ? 'nothuman'
-          : 'private';
-      const configured = effectiveAgentConfig?.chatmode?.[key];
-      if (configured === 'interactive' || configured === 'proactive') return configured;
-      return key === 'private' ? 'interactive' : 'proactive';
-    })();
-    const resolvedMode = message.triggerMeta?.chatModeOverride
-      ? null  // trigger 强制覆盖，不走插件解析
+    const peerType = message.peerType ?? (session.metadata as any)?.peerType;
+    const systemOrServicePeer = isSystemOrServicePeer(peerType);
+    const triggerChatModeOverride = systemOrServicePeer ? undefined : message.triggerMeta?.chatModeOverride;
+    const chatModeFallback = resolveChatModeForPeer({
+      chatType,
+      peerType,
+      configured: effectiveAgentConfig?.chatmode,
+    });
+    const resolvedMode = triggerChatModeOverride || systemOrServicePeer
+      ? null  // trigger 强制覆盖或 system/service 强制 interactive 时，不走插件解析
       : this.responseCoordinator.resolveMode(
           chatType as 'private' | 'group',
           peerKey,
@@ -1071,12 +1075,31 @@ export class ResponseEngine implements IMessageProcessor {
       logger.info('[ResponseSystem] selected mode=override/fallback source=trigger-or-resolve-failed chatType=' + chatType + ' peerKey=' + (peerKey ?? 'none') + ' fallback=' + chatModeFallback);
     }
 
-    // 最终 chatMode：trigger override > 插件解析结果 > fallback
-    const effectiveChatMode = message.triggerMeta?.chatModeOverride
+    // 最终 chatMode：system/service 运行时约束 > trigger override > 插件解析结果 > fallback
+    const effectiveChatMode = systemOrServicePeer
+      ? 'interactive'
+      : triggerChatModeOverride
       ?? resolvedMode?.mode.id
       ?? chatModeFallback;
     const chatmode = effectiveChatMode;
     const isProactive = effectiveChatMode === 'proactive';
+    const legacyMiddleOutputMode = (): ShowActivitiesMode => {
+      const mode = policy.middleOutputMode?.(chatType, identityRole, peerType);
+      if (isShowActivitiesMode(mode)) return mode;
+      return policy.showMiddleResult(chatType, identityRole) ? 'all' : 'none';
+    };
+    const configuredMiddleOutputMode = isShowActivitiesMode(message.triggerMeta?.showActivitiesOverride)
+      ? message.triggerMeta.showActivitiesOverride
+      : isShowActivitiesMode(effectiveAgentConfig?.show_activities)
+        ? effectiveAgentConfig.show_activities
+        : legacyMiddleOutputMode();
+    const middleOutputMode: ShowActivitiesMode = isProactive
+      ? 'all'
+      : systemOrServicePeer
+        ? 'none'
+        : configuredMiddleOutputMode;
+    outputState.middleOutputMode = middleOutputMode;
+    this.shouldSuppressActivities = shouldSuppress();
 
     // 诊断日志：记录 inbound message_id 和生成的 task_id 的对应关系
     logger.info(`[ResponseEngine] Task created: inboundMsgId=${message.messageId ?? 'none'} taskId=${taskId} sessionId=${session.id} chatmode=${chatmode} mode=${resolvedMode?.mode.id ?? 'override/fallback'}`);
@@ -1097,6 +1120,7 @@ export class ResponseEngine implements IMessageProcessor {
       session,
       message: {
         messageId: message.messageId, peerId: message.peerId, content: message.content,
+        peerType: message.peerType || (session.metadata as any)?.peerType,
         chatType: chatType as 'private' | 'group', isMentioned: message.isMentioned,
         mentionAids: message.mentionAids, source: message.source,
       },
@@ -1116,7 +1140,14 @@ export class ResponseEngine implements IMessageProcessor {
     snapshot.set(session.id, taskId, {
       chatMode: effectiveChatMode,
       proactiveState: proactive
-        ? { preTool1stMsgChk: proactive.preTool1stMsgChk, toolUseReminder: proactive.toolUseReminder, chatType: proactive.chatType }
+        ? {
+          preTool1stMsgChk: proactive.preTool1stMsgChk,
+          toolUseReminder: proactive.toolUseReminder,
+          firstSendRequired: proactive.firstSendRequired,
+          toolReportRequired: proactive.toolReportRequired,
+          chatType: proactive.chatType,
+          peerType: proactive.peerType,
+        }
         : null,
     });
 
@@ -1223,7 +1254,8 @@ export class ResponseEngine implements IMessageProcessor {
         adapter,
         envelope,
         flushDelay: (options?.flushDelay ?? this.agentRegistry?.resolveByChannel(channelKey)?.config?.flush_delay ?? 3) * 1000,
-        suppressActivities: shouldSuppress(),
+        suppressActivityItems: isProactive ? false : middleOutputMode !== 'all',
+        suppressIntermediateText: isProactive ? false : middleOutputMode === 'none',
         fileMarkerPattern: options?.fileMarkerPattern,
         diagEnabled: this.globalSettings.debug?.flusherDiag,
         send: async (payload) => {
@@ -1328,12 +1360,9 @@ export class ResponseEngine implements IMessageProcessor {
             const result = pluginHook(toolName, toolInput);
 
             if (result?.block) {
-              // 拦截事件（首工具非表态）
+              // 拦截事件（首工具非表态 / 工具进展汇报未完成）
               snapshot.set(session.id, taskId, { policyHook: { triggered: true, blocked: true, toolName } });
-              const st = modeState.get('proactive');
-              const cmdHint = st?.chatType === 'group' ? 'ec group send' : 'ec msg send';
-              const target = st?.chatType === 'group' ? '群里' : '对方';
-              const errorMsg = `⚠️ proactive 模式违规：收到消息后首次工具调用必须是 ${cmdHint} 向${target}表态，不要闷头干。请重新执行正确的命令。`;
+              const errorMsg = `⚠️ proactive 模式违规：${result.reason ?? '请先发送必要说明'}。请重新执行正确的命令。`;
               agent.injectUserMessage?.(session.id, errorMsg);
               return result;
             }
@@ -1507,7 +1536,7 @@ export class ResponseEngine implements IMessageProcessor {
             peerKey,
             peerName: peerName || undefined,
             peerRole,
-            peerType: message.peerType || undefined,
+            peerType: message.peerType || (session.metadata as any)?.peerType || undefined,
             sameDevice: message.sameDevice ?? false,
             sameNetwork: message.sameNetwork ?? false,
             sameEgressIp: message.sameEgressIp ?? false,
@@ -1544,6 +1573,10 @@ export class ResponseEngine implements IMessageProcessor {
             chatMode: isProactive ? 'proactive' : 'interactive',
             proactivePreTool1stMsgChk: proactive?.preTool1stMsgChk ?? true,
             proactiveToolUseReminder: proactive?.toolUseReminder ?? true,
+            proactiveFirstSendRequired: proactive?.firstSendRequired ?? false,
+            proactiveToolReportRequired: proactive?.toolReportRequired ?? false,
+            proactiveToolReportInterval: proactive?.toolReportInterval ?? 10,
+            proactiveSendTargetLabel: chatType === 'group' ? '群里' : '对方',
             readonly: effectivePermissionMode === 'readonly',
             baseAgent: normalizedBaseagent.canonical,
             baseAgentName: normalizedBaseagent.displayName,

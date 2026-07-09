@@ -7,7 +7,7 @@ import os from 'os';
 import { logger, localTimestamp } from '../utils/logger.js';
 import { LogWriter } from '../utils/log-writer.js';
 import type { ChannelPlugin, ChannelInstance, ChannelBuildContext, BridgeHookContext } from '../core/channel-loader.js';
-import { resolveShowActivities, showActivitiesPolicy } from '../core/channel-loader.js';
+import { middleOutputModePolicy, resolveShowActivities, showActivitiesPolicy } from '../core/channel-loader.js';
 import { DEFAULT_FLUSH_DELAY_SECONDS } from '../core/defaults.js';
 import type { MessageBridge } from '../core/message/message-bridge.js';
 import type { ReplyContext, AunChannelInstance as AunInst, AidConnectionState, AidStatus, AidKickDetail, InteractionResponse, ActionInteraction, CommandCard, InboundMessage } from '../types.js';
@@ -3985,6 +3985,7 @@ export class AUNChannelPlugin implements ChannelPlugin {
       canImportCliSession: (_: string, identity: string) => identity === 'owner' || identity === 'admin',
       messagePrefix: (chatType: string, peerName?: string) => (chatType === 'group' && peerName) ? `[${peerName}] ` : '',
       showMiddleResult: (chatType: string, identity: string) => showActivitiesPolicy(mode, chatType, identity),
+      middleOutputMode: (chatType: string, identity: string) => middleOutputModePolicy(mode, chatType, identity),
       showIdleMonitor: (chatType: string, identity: string) => showActivitiesPolicy(mode, chatType, identity),
       accumulateErrors: () => true,
     };

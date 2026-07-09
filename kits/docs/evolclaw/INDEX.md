@@ -50,6 +50,7 @@
 | `ec config` | 配置体系底层入口（读写/快照/回滚） | 看配置/改配置/查字段/校验/快照/回滚/历史/启动记录 | `config.md` |
 | `ec stats` | Token 用量与费用统计 | 用量/费用/统计/预算/token/cost | `stats.md` |
 | `ec trigger` | 定时与事件触发器管理 | 触发器/定时任务/cron/提醒/定时检查/自动执行/巡检/禁用 trigger/删除 trigger | `trigger.md` |
+| `ec trigger event` | EventBus 事件目录 | 事件触发/事件目录/EventBus/source.type=event/filter.match | `event.md` |
 
 ## 开发者工具（非 agent 会话能力）
 

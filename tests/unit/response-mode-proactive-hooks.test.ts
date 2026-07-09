@@ -19,8 +19,8 @@ function modeWithCtx(modeConfig: any = {}): ProactiveMode {
   return mode;
 }
 
-const inbound = (chatType: 'private' | 'group', source?: string): InboundMessage =>
-  ({ peerId: 'p1', content: 'hi', chatType, source });
+const inbound = (chatType: 'private' | 'group', source?: string, peerType?: string): InboundMessage =>
+  ({ peerId: 'p1', content: 'hi', chatType, source, peerType });
 
 function procCtx(message: InboundMessage, state: Map<string, any>, isSendCommand = (_: string, __: any) => false, modeConfig: any = {}): ProcessContext {
   return { session: {} as any, message, modeConfig, state, isSendCommand, logger };
@@ -34,24 +34,26 @@ describe('ProactiveMode.beforeProcess (迁移点1: runtimeState)', () => {
     expect(state.get('proactive')).toMatchObject({
       firstToolDone: false, toolCount: 0, chatType: 'group',
       preTool1stMsgChk: true, toolUseReminder: false,
+      firstSendRequired: true, toolReportRequired: false,
     });
   });
 
   it('defaults preTool1stMsgChk/toolUseReminder to true', () => {
     const mode = modeWithCtx();
     const state = new Map();
-    mode.beforeProcess(procCtx(inbound('private'), state, undefined, {}));
+    mode.beforeProcess(procCtx(inbound('private', undefined, 'human'), state, undefined, {}));
     expect(state.get('proactive').preTool1stMsgChk).toBe(true);
     expect(state.get('proactive').toolUseReminder).toBe(true);
+    expect(state.get('proactive').firstSendRequired).toBe(true);
   });
 });
 
 describe('ProactiveMode.configureRun (迁移点2: policyHook 首工具表态)', () => {
-  it('no policyHook when preTool1stMsgChk false', () => {
+  it('no policyHook when first-send and tool-report policies are both off', () => {
     const mode = modeWithCtx();
     const state = new Map();
-    mode.beforeProcess(procCtx(inbound('private'), state, undefined, { pre_tool_1stmsgchk: false }));
-    const cfg = mode.configureRun(procCtx(inbound('private'), state, undefined, { pre_tool_1stmsgchk: false }));
+    mode.beforeProcess(procCtx(inbound('private', undefined, 'human'), state, undefined, { pre_tool_1stmsgchk: false, tool_use_reminder: false }));
+    const cfg = mode.configureRun(procCtx(inbound('private', undefined, 'human'), state, undefined, { pre_tool_1stmsgchk: false, tool_use_reminder: false }));
     expect(cfg).toBeUndefined();
   });
 
@@ -64,35 +66,78 @@ describe('ProactiveMode.configureRun (迁移点2: policyHook 首工具表态)', 
     const result = cfg.policyHook!('Bash', {});
     expect(result?.block).toBe(true);
     expect(result?.reason).toContain('ec group send');
-    expect(state.get('proactive').firstToolDone).toBe(true);
+    expect(state.get('proactive').firstToolDone).toBe(false);
   });
 
   it('first send-command tool is allowed', () => {
     const mode = modeWithCtx();
     const state = new Map();
-    const ctx = procCtx(inbound('private'), state, (name) => name === 'EcSend', { pre_tool_1stmsgchk: true });
+    const ctx = procCtx(inbound('private', undefined, 'human'), state, (name) => name === 'EcSend', { pre_tool_1stmsgchk: true });
     mode.beforeProcess(ctx);
     const cfg = mode.configureRun(ctx)!;
     expect(cfg.policyHook!('EcSend', {})).toBeUndefined();
     expect(state.get('proactive').firstToolDone).toBe(true);
   });
 
-  it('second tool not blocked (firstToolDone already set)', () => {
+  it('does not enforce first-send when only tool-report policy is enabled', () => {
     const mode = modeWithCtx();
     const state = new Map();
-    const ctx = procCtx(inbound('private'), state, () => false, { pre_tool_1stmsgchk: true });
+    const ctx = procCtx(inbound('private', undefined, 'human'), state, () => false, { pre_tool_1stmsgchk: false, tool_use_reminder: true });
     mode.beforeProcess(ctx);
     const cfg = mode.configureRun(ctx)!;
-    cfg.policyHook!('Bash', {});      // first → blocked, sets firstToolDone
-    expect(cfg.policyHook!('Bash', {})).toBeUndefined(); // second → pass
+    expect(cfg.policyHook!('Bash', {})).toBeUndefined();
+  });
+
+  it('keeps blocking non-send tools until a send command succeeds', () => {
+    const mode = modeWithCtx();
+    const state = new Map();
+    const ctx = procCtx(inbound('private', undefined, 'human'), state, (name) => name === 'EcSend', { pre_tool_1stmsgchk: true });
+    mode.beforeProcess(ctx);
+    const cfg = mode.configureRun(ctx)!;
+    expect(cfg.policyHook!('Bash', {})?.block).toBe(true);
+    expect(state.get('proactive').firstToolDone).toBe(false);
+    expect(cfg.policyHook!('Bash', {})?.block).toBe(true);
+    expect(cfg.policyHook!('EcSend', {})).toBeUndefined();
+    expect(state.get('proactive').firstToolDone).toBe(true);
+    expect(cfg.policyHook!('Bash', {})).toBeUndefined();
   });
 
   it('trigger source exempt from first-tool enforcement', () => {
     const mode = modeWithCtx();
     const state = new Map();
-    const ctx = procCtx(inbound('private', 'trigger'), state, () => false, { pre_tool_1stmsgchk: true });
+    const ctx = procCtx(inbound('group', 'trigger', 'human'), state, () => false, { pre_tool_1stmsgchk: true });
+    mode.beforeProcess(ctx);
+    expect(mode.configureRun(ctx)).toBeUndefined();
+  });
+
+  it('private non-human peers are exempt from first-tool enforcement', () => {
+    const mode = modeWithCtx();
+    for (const peerType of ['ai', 'system', 'unknown', undefined]) {
+      const state = new Map();
+      const ctx = procCtx(inbound('private', undefined, peerType), state, () => false, { pre_tool_1stmsgchk: true });
+      mode.beforeProcess(ctx);
+      expect(mode.configureRun(ctx)).toBeUndefined();
+    }
+  });
+
+  it('blocks non-send tools while a progress report is pending', () => {
+    const mode = modeWithCtx();
+    const state = new Map();
+    const ctx = procCtx(inbound('group'), state, (name) => name === 'EcSend', {});
     mode.beforeProcess(ctx);
     const cfg = mode.configureRun(ctx)!;
+
+    expect(cfg.policyHook!('EcSend', {})).toBeUndefined();
+    for (let i = 0; i < 10; i++) {
+      mode.onToolUse({ session: {} as any, state, toolName: 'Bash', toolInput: {}, injectToModel: () => {}, getQueueLength: () => 0, isSendCommand: () => false, logger });
+    }
+
+    expect(state.get('proactive').toolReportPending).toBe(true);
+    const blocked = cfg.policyHook!('Bash', {});
+    expect(blocked?.block).toBe(true);
+    expect(blocked?.reason).toContain('工具调用已达到 10 次');
+    expect(cfg.policyHook!('EcSend', {})).toBeUndefined();
+    expect(state.get('proactive').toolReportPending).toBe(false);
     expect(cfg.policyHook!('Bash', {})).toBeUndefined();
   });
 });
@@ -133,13 +178,45 @@ describe('ProactiveMode.onToolUse (迁移点4: 工具汇报提醒)', () => {
       mode.onToolUse({ session: {} as any, state, toolName: 'Bash', toolInput: {}, injectToModel: (t) => injected.push(t), getQueueLength: () => 0, isSendCommand: () => false, logger });
     }
     expect(state.get('proactive').toolCount).toBe(10);
-    expect(injected.some(m => m.includes('工具调用已超过 10 次'))).toBe(true);
+    expect(state.get('proactive').toolReportPending).toBe(true);
+    expect(injected.some(m => m.includes('工具调用已达到 10 次'))).toBe(true);
+  });
+
+  it('repeats tool report reminders every interval', () => {
+    const mode = modeWithCtx();
+    const state = new Map();
+    const ctx = procCtx(inbound('group'), state, (name) => name === 'EcSend', {});
+    mode.beforeProcess(ctx);
+    const cfg = mode.configureRun(ctx)!;
+    cfg.policyHook!('EcSend', {});
+    const injected: string[] = [];
+    for (let i = 0; i < 10; i++) {
+      mode.onToolUse({ session: {} as any, state, toolName: 'Bash', toolInput: {}, injectToModel: (t) => injected.push(t), getQueueLength: () => 0, isSendCommand: () => false, logger });
+    }
+    cfg.policyHook!('EcSend', {});
+    for (let i = 0; i < 10; i++) {
+      mode.onToolUse({ session: {} as any, state, toolName: 'Bash', toolInput: {}, injectToModel: (t) => injected.push(t), getQueueLength: () => 0, isSendCommand: () => false, logger });
+    }
+    expect(injected.some(m => m.includes('工具调用已达到 10 次'))).toBe(true);
+    expect(injected.some(m => m.includes('工具调用已达到 20 次'))).toBe(true);
+  });
+
+  it('keeps queue reminders but skips tool reports for private non-human peers', () => {
+    const mode = modeWithCtx();
+    const state = new Map();
+    mode.beforeProcess(procCtx(inbound('private', undefined, 'ai'), state, undefined, {}));
+    const injected: string[] = [];
+    for (let i = 0; i < 10; i++) {
+      mode.onToolUse({ session: {} as any, state, toolName: 'Bash', toolInput: {}, injectToModel: (t) => injected.push(t), getQueueLength: () => (i === 0 ? 2 : 0), isSendCommand: () => false, logger });
+    }
+    expect(injected.some(m => m.includes('2 条消息未读'))).toBe(true);
+    expect(injected.some(m => m.includes('工具调用已达到'))).toBe(false);
   });
 
   it('send commands not counted', () => {
     const mode = modeWithCtx();
     const state = new Map();
-    mode.beforeProcess(procCtx(inbound('private'), state, undefined, {}));
+    mode.beforeProcess(procCtx(inbound('private', undefined, 'human'), state, undefined, {}));
     mode.onToolUse({ session: {} as any, state, toolName: 'EcSend', toolInput: {}, injectToModel: () => {}, getQueueLength: () => 0, isSendCommand: (n) => n === 'EcSend', logger });
     expect(state.get('proactive').toolCount).toBe(0);
   });
