@@ -69,6 +69,20 @@ describe('SessionManager chatmode defaults', () => {
       'aun',
       'system',
     );
+    const systemGroup = await manager.getOrCreateSession(
+      'aun#bot.agentid.pub#main',
+      'system-group-peer',
+      'H:/tmp/project',
+      undefined,
+      undefined,
+      undefined,
+      'system',
+      'group',
+      'claude',
+      'bot.agentid.pub',
+      'aun',
+      'system',
+    );
     const bot = await manager.getOrCreateSession(
       'aun#bot.agentid.pub#main',
       'bot-peer',
@@ -86,6 +100,7 @@ describe('SessionManager chatmode defaults', () => {
 
     expect(group.chatMode).toBe('proactive');
     expect(system.chatMode).toBe('interactive');
+    expect(systemGroup.chatMode).toBe('interactive');
     expect(bot.chatMode).toBe('interactive');
   });
 });

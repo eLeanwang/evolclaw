@@ -175,6 +175,10 @@ function rejectDeprecatedFlags(flags: Map<string, string | true>): string | unde
   if (flags.has('script')) return '--script 已废弃，请使用 --exec script --script-path';
   if (flags.has('runtime')) return '--runtime 已废弃，请使用 --script-runtime';
   if (flags.has('channel') || flags.has('channelid')) return '--channel/--channelid 已废弃，请使用 --target-channel/--target-channel-id';
+  if (flags.has('chatmode')) return '--chatmode 不支持；trigger chatmode 由运行时按 peerType 强制决定';
+  if (flags.has('activity') || flags.has('show-activities') || flags.has('showActivities')) {
+    return '--activity/--show-activities 不支持；trigger 中间输出由运行时按 peerType 强制决定';
+  }
   return undefined;
 }
 

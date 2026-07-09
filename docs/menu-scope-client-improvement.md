@@ -14,8 +14,8 @@
 
 | scope | 含义 | 落盘位置 | 适用 UI |
 |---|---|---|---|
-| `agent` | 当前/指定 agent 的默认行为配置 | `agents/<aid>/behavior.json` | 控制面、ECWeb、Agent 设置页 |
-| `relation` | 指定对端/群关系覆盖配置 | `agents/<aid>/relations/<peerKey>/behavior.json` | 对话详情页、群详情页、关系覆盖高级设置 |
+| `agent` | 当前/指定 agent 的默认行为配置 | `agents/<aid>/config.json` | 控制面、ECWeb、Agent 设置页 |
+| `relation` | 指定对端/群关系覆盖配置 | `agents/<aid>/relations/<peerKey>/config.json` | 对话详情页、群详情页、关系覆盖高级设置 |
 
 默认值：`args.scope` 省略时等价于 `agent`。
 
@@ -114,8 +114,8 @@
 
 | scope | 问题 | 示例 |
 |---|---|---|
-| `agent` | 写到哪个 agent 的默认行为配置？ | `agents/bot.agentid.pub/behavior.json` |
-| `relation` | 写到这个 agent 与哪个对端/群的覆盖配置？ | `agents/bot.agentid.pub/relations/aun#group-1/behavior.json` |
+| `agent` | 写到哪个 agent 的默认行为配置？ | `agents/bot.agentid.pub/config.json` |
+| `relation` | 写到这个 agent 与哪个对端/群的覆盖配置？ | `agents/bot.agentid.pub/relations/aun#group-1/config.json` |
 
 `关系/角色` 是权限解析上下文：
 
@@ -272,6 +272,16 @@ Relation 级 model 更新：
 | `private` | 私聊 human 对端 | `interactive` |
 | `group` | 群聊 | `proactive` |
 | `nothuman` | system / agent 等非 human 对端 | `proactive` |
+
+`args.field` 省略时，服务端按当前上下文推导目标字段：
+
+| 当前上下文 | 默认字段 |
+|---|---|
+| 群聊 `chatType=group` | `chatmode.group` |
+| 私聊且 `peerType` 存在并且不是 `human` | `chatmode.nothuman` |
+| 其它私聊或无会话上下文 | `chatmode.private` |
+
+控制面 / ECWeb 没有稳定会话上下文时，建议显式传 `args.field`，尤其是要编辑非 human 对端默认值时传 `field="nothuman"`。
 
 Agent 级更新：
 

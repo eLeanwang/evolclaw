@@ -11,7 +11,7 @@ export interface FeishuChannelConfig {
   appSecret: string;
   flushDelay?: number;  // flush 间隔(秒)，默认使用全局值
   debounce?: number;    // 入站消息去抖间隔(秒)，覆盖全局 debounce
-  showActivities?: 'all' | 'none';  // 覆盖全局 showActivities
+  showActivities?: ShowActivitiesMode;  // 覆盖全局 showActivities
 }
 
 export interface FeishuChannelInstanceConfig extends FeishuChannelConfig {
@@ -25,7 +25,7 @@ export interface WechatChannelConfig {
   token?: string;
   flushDelay?: number;  // flush 间隔(秒)，默认 3
   debounce?: number;    // 入站消息去抖间隔(秒)，覆盖全局 debounce
-  showActivities?: 'all' | 'none';  // 覆盖全局 showActivities
+  showActivities?: ShowActivitiesMode;  // 覆盖全局 showActivities
 }
 
 export interface WechatChannelInstanceConfig extends WechatChannelConfig {
@@ -55,7 +55,7 @@ export interface DingtalkChannelConfig {
   clientSecret: string;
   flushDelay?: number;
   debounce?: number;
-  showActivities?: 'all' | 'none';
+  showActivities?: ShowActivitiesMode;
   requireMention?: boolean;       // default true — group chats require @mention
   freeResponseChats?: string[];   // conversationId whitelist (skip @mention gate)
 }
@@ -71,7 +71,7 @@ export interface QQBotChannelConfig {
   clientSecret: string;
   flushDelay?: number;
   debounce?: number;
-  showActivities?: 'all' | 'none';
+  showActivities?: ShowActivitiesMode;
 }
 
 export interface QQBotChannelInstanceConfig extends QQBotChannelConfig {
@@ -85,7 +85,7 @@ export interface WecomChannelConfig {
   secret: string;
   flushDelay?: number;
   debounce?: number;
-  showActivities?: 'all' | 'none';
+  showActivities?: ShowActivitiesMode;
 }
 
 export interface WecomChannelInstanceConfig extends WecomChannelConfig {
@@ -161,7 +161,7 @@ export interface Config {
     safeModeThreshold?: number;
     timeout?: number;
   };
-  showActivities?: 'all' | 'none';
+  showActivities?: ShowActivitiesMode;
   flushDelay?: number;
   debounce?: number;
   chatmode?: {
@@ -345,10 +345,11 @@ export interface Message {
     boundSessionId?: string;
     pendingThread?: boolean;
     rootMessageId?: string;
-    chatModeOverride?: 'proactive';
+    chatModeOverride?: 'interactive' | 'proactive';
     modelOverride?: string;
     effortOverride?: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
     permissionModeOverride?: PermissionMode;
+    showActivitiesOverride?: ShowActivitiesMode;
   };
 }
 
@@ -486,7 +487,7 @@ export interface ChannelOptions {
   fileMarkerPattern?: RegExp;       // Feishu: /\[SEND_FILE:([^\]]+)\]/g
   supportsImages?: boolean;         // Feishu: true, AUN: false
   flushDelay?: number;              // 渠道级 flush 间隔(秒)，覆盖全局 config.flushDelay
-  showActivities?: 'all' | 'none';  // 覆盖全局 showActivities
+  showActivities?: ShowActivitiesMode;  // 覆盖全局 showActivities
 }
 
 // 渠道策略接口
@@ -498,6 +499,7 @@ export interface ChannelPolicy {
   canImportCliSession(chatType: string, identity: string): boolean;
   messagePrefix(chatType: string, peerName?: string): string;
   showMiddleResult(chatType: string, identity: string): boolean;
+  middleOutputMode?(chatType: string, identity: string, peerType?: string): ShowActivitiesMode;
   showIdleMonitor(chatType: string, identity: string): boolean;
   accumulateErrors(chatType: string, identity: string): boolean;
 }
@@ -591,8 +593,8 @@ export interface EvolAgentHandle {
   readonly config: EffectiveAgentConfig;
   lastActivity?: number;
   getContext(channelName: string, chatType: string, globalChatmode?: { private?: 'interactive' | 'proactive'; group?: 'interactive' | 'proactive' }): AgentContext;
-  getShowActivities(channelName: string): 'all' | 'none';
-  setShowActivities(channelName: string, mode: 'all' | 'none'): void;
+  getShowActivities(channelName: string): ShowActivitiesMode;
+  setShowActivities(channelName: string, mode: ShowActivitiesMode): void;
   setActiveBaseagent(value: string | undefined): void;
   setLifecycle(value: AgentLifecycle): void;
   setBaseagentModel(value: string | undefined, baseagentName?: string): void;
@@ -616,8 +618,8 @@ export interface EvolAgentRegistryHandle {
   reload?(name: string, hooks: unknown): Promise<void>;
   stopAgent?(name: string, hooks: unknown): Promise<void>;
   startAgent?(name: string, hooks: unknown): Promise<void>;
-  getShowActivities(channelName: string): 'all' | 'none';
-  setShowActivities(channelName: string, mode: 'all' | 'none'): void;
+  getShowActivities(channelName: string): ShowActivitiesMode;
+  setShowActivities(channelName: string, mode: ShowActivitiesMode): void;
   invalidateAgentDisplayCache?(aid: string): void;
 }
 
@@ -787,7 +789,7 @@ export interface DebugBlock {
   upmsg?: boolean;
 }
 
-export type ShowActivitiesMode = 'all' | 'none';
+export type ShowActivitiesMode = 'all' | 'text' | 'none';
 
 export interface ProactiveBehaviorBlock {
   /** proactive 下首个工具调用是否必须先通过 send/file 表态。 */

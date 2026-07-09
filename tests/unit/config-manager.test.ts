@@ -74,10 +74,10 @@ describe('typed merge（三三规则）', () => {
   it('scalar 高优先级胜', () => {
     const fields = loadSchema('agent-config').fields;
     const merged = mergeLayers<any>([
-      { show_activities: true, flush_delay: 3 },
-      { show_activities: false },
+      { show_activities: 'all', flush_delay: 3 },
+      { show_activities: 'none' },
     ], fields);
-    expect(merged.show_activities).toBe(false);
+    expect(merged.show_activities).toBe('none');
     expect(merged.flush_delay).toBe(3);
   });
 });

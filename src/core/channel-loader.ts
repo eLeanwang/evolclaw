@@ -6,7 +6,7 @@
  * The main service (index.ts) handles registration and message flow wiring.
  */
 
-import type { ChannelAdapter, ChannelPolicy, ChannelOptions, DebugBlock } from '../types.js';
+import type { ChannelAdapter, ChannelPolicy, ChannelOptions, DebugBlock, ShowActivitiesMode } from '../types.js';
 import type { ChannelInstance as ChannelInstanceConfig } from '../types.js';
 import type { EvolAgent } from './evolagent.js';
 import type { MessageBridge } from './message/message-bridge.js';
@@ -66,8 +66,6 @@ export interface ConnectAllOptions {
 
 // ── Shared helpers for plugins ─────────────────────────────────────────────
 
-type ShowActivitiesMode = 'all' | 'none';
-
 /** Resolve showActivities for a single instance (instance overrides default). */
 export function resolveShowActivities(inst: ChannelInstanceConfig): ShowActivitiesMode {
   return (inst as any).showActivities ?? 'all';
@@ -75,16 +73,24 @@ export function resolveShowActivities(inst: ChannelInstanceConfig): ShowActiviti
 
 /**
  * showMiddleResult / showIdleMonitor 策略。
- * show_activities 收敛为 all|none，只对私聊有意义：
- *   none → 不显示；all → 仅私聊显示（群聊强制 proactive，本就不发中间活动）。
+ * show_activities 只对 interactive 私聊中间输出有意义：
+ *   all → 文本 + activity；text → 仅文本；none → 全部静默。
  */
+export function middleOutputModePolicy(
+  mode: ShowActivitiesMode,
+  chatType: string,
+  _identity: string,
+): ShowActivitiesMode {
+  if (chatType !== 'private') return 'none';
+  return mode;
+}
+
 export function showActivitiesPolicy(
   mode: ShowActivitiesMode,
   chatType: string,
   _identity: string,
 ): boolean {
-  if (mode === 'none') return false;
-  return chatType === 'private';
+  return middleOutputModePolicy(mode, chatType, _identity) !== 'none';
 }
 
 // ── ChannelLoader ──────────────────────────────────────────────────────────

@@ -38,6 +38,7 @@ import { parseCliIntent, rawCliIntent, withDefaultRelationContext } from './cli-
 import { authorizeCommand } from './command-permission.js';
 import { auditCommandAuthorization, hashArgv } from './command-audit.js';
 import type { CommandAuthorizationContext, CommandIntent, CommandScope } from '../../types.js';
+import { chatmodeFieldForPeer } from '../message/peer-mode.js';
 
 /**
  * 获取 baseagent CLI 的版本号（claude/gemini/codex）。
@@ -477,7 +478,7 @@ function menuChatmodeField(args: Record<string, any> | undefined, session: Sessi
     if (key === 'private' || key === 'group' || key === 'nothuman') return key;
     return { error: `无效 chatmode 字段: ${raw}，可选: private / group / nothuman`, code: 'INVALID_FIELD' };
   }
-  return ((session?.chatType ?? explicitChatType) === 'group') ? 'group' : 'private';
+  return chatmodeFieldForPeer(session?.chatType ?? explicitChatType, (session?.metadata as any)?.peerType);
 }
 
 function defaultChatmodeForField(field: MenuChatmodeField): MenuChatmodeValue {
@@ -1179,6 +1180,7 @@ export function getMenuItems(this: any, role: string, chatType: string = 'privat
         { cmd: '/check', label: '检查 EvolAgent 实例健康', desc: '检查各 EvolAgent 实例、后端与消息通道的健康状态' },
         { cmd: '/activity', label: '控制中间输出显示', desc: '设置工具调用过程的可见范围', next: { type: 'select', items: [
           { value: 'all', label: '全部显示', desc: '所有用户均可见中间输出' },
+          { value: 'text', label: '仅文字进展', desc: '显示文字进展，隐藏工具活动' },
           { value: 'none', label: '不显示', desc: '关闭所有中间输出' },
         ] } },
         ...(isControlScope && isOwner ? [
@@ -1392,6 +1394,7 @@ export async function getSubMenuItems(this: any, cmd: string, channel: string, c
     const currentMode = this.agentRegistry?.getShowActivities?.(channel) ?? 'all';
     return [
       { value: 'all', label: '私聊显示', selected: currentMode === 'all' },
+      { value: 'text', label: '仅文字进展', selected: currentMode === 'text' },
       { value: 'none', label: '全部静默', selected: currentMode === 'none' },
     ];
   }
@@ -2223,9 +2226,9 @@ export async function execMenuUpdate(this: any,
   }
 
   if (cmdBase === '/activity') {
-    const modeMap: Record<string, string> = { all: 'all', none: 'none' };
+    const modeMap: Record<string, string> = { all: 'all', text: 'text', none: 'none' };
     const newMode = modeMap[arg];
-    if (!newMode) return { error: `无效模式: ${arg}，可选: all / none`, code: 'INVALID_VALUE' };
+    if (!newMode) return { error: `无效模式: ${arg}，可选: all / text / none`, code: 'INVALID_VALUE' };
     if (identity.role !== 'owner') return { error: '中间输出模式切换仅限 owner', code: 'NO_PERMISSION' };
     if (!this.agentRegistry?.setShowActivities) return { error: '找不到通道所属 agent，无法持久化', code: 'EXEC_FAILED' };
     this.agentRegistry.setShowActivities(channel, newMode as any);

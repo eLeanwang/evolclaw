@@ -1,4 +1,4 @@
-# ec trigger event - EventBus 事件目录
+# Trigger Event Catalog
 
 本目录用于编写 `source.type = "event"` 的 trigger 时按需查阅。最终事实源是
 `$PACKAGE_ROOT/src/core/event-bus.ts` 的 `GatewayEvent` 类型；本文只做面向 trigger

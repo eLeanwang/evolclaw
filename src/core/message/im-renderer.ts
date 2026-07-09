@@ -43,8 +43,12 @@ export interface IMRendererOptions {
   envelope: OutboundEnvelope;
   /** interactive 模式聚合窗口（毫秒） */
   flushDelay?: number;
-  /** 是否抑制中间过程（activity）。true=抑制 */
+  /** @deprecated Use suppressActivityItems + suppressIntermediateText. */
   suppressActivities?: boolean;
+  /** 是否抑制 interactive activity.batch / status.progress。 */
+  suppressActivityItems?: boolean;
+  /** 是否抑制 interactive result.text(isFinal:false)。 */
+  suppressIntermediateText?: boolean;
   /** 文件标记 pattern，flush 时从文本中过滤 */
   fileMarkerPattern?: RegExp;
   /** 诊断日志开关 */
@@ -82,9 +86,18 @@ export class IMRenderer {
       diag(this.instanceId, 'created', {
         chatmode: opts.envelope.chatmode,
         flushDelay: opts.flushDelay,
-        suppress: opts.suppressActivities,
+        suppressActivityItems: this.suppressActivityItems(),
+        suppressIntermediateText: this.suppressIntermediateText(),
       });
     }
+  }
+
+  private suppressActivityItems(): boolean {
+    return this.opts.suppressActivityItems ?? this.opts.suppressActivities ?? false;
+  }
+
+  private suppressIntermediateText(): boolean {
+    return this.opts.suppressIntermediateText ?? this.opts.suppressActivities ?? false;
   }
 
   // ── 公开接口 ──
@@ -140,6 +153,10 @@ export class IMRenderer {
   async flushText(): Promise<void> {
     if (this.opts.envelope.chatmode === 'proactive') return;
     if (this.textBuffer.length === 0) return;
+    if (this.suppressIntermediateText()) {
+      this.itemsQueue = this.itemsQueue.filter(it => it.kind !== 'text');
+      return;
+    }
 
     if (this.timer) {
       clearTimeout(this.timer);
@@ -234,7 +251,7 @@ export class IMRenderer {
   addToolCall(name: string, input: Record<string, unknown> | undefined, callId?: string, descText?: string, turn?: number, outputTokens?: number): void {
     if (this.opts.envelope.chatmode === 'proactive') return;
     this.emitProgress('tool_call', outputTokens, turn, { toolName: name, callId });
-    if (this.opts.suppressActivities) return;
+    if (this.suppressActivityItems()) return;
     this.itemsQueue.push({
       kind: 'tool_call',
       call_id: callId || this.synthCallId(),
@@ -251,7 +268,7 @@ export class IMRenderer {
   addToolResult(name: string, ok: boolean, result?: unknown, error?: string, callId?: string, durationMs?: number, descText?: string): void {
     if (this.opts.envelope.chatmode === 'proactive') return;
     this.emitProgress('tool_result', undefined, undefined, { toolName: name, callId, ok, durationMs });
-    if (this.opts.suppressActivities) return;
+    if (this.suppressActivityItems()) return;
     this.itemsQueue.push({
       kind: 'tool_result',
       call_id: callId || this.synthCallId(),
@@ -270,7 +287,7 @@ export class IMRenderer {
   /** 添加进度提示 */
   addProgress(text: string, opts: { state?: 'processing' | 'waiting'; toolUses?: number; durationMs?: number } = {}): void {
     if (this.opts.envelope.chatmode === 'proactive') return;
-    if (this.opts.suppressActivities) return;
+    if (this.suppressActivityItems()) return;
     this.emitProgress('progress', undefined, undefined, {
       text,
       state: opts.state,
@@ -291,6 +308,7 @@ export class IMRenderer {
       this.emitProactiveItem(item);
       return;
     }
+    if (this.suppressActivityItems()) return;
 
     this.itemsQueue.push(item);
     this.messageTimestamps.push(Date.now());
@@ -311,7 +329,7 @@ export class IMRenderer {
    */
   private static readonly PROACTIVE_NOTICE_ALLOW = new Set(['context-too-long', 'process-exit']);
 
-  /** 添加系统提示 / 通知。force=true 时绕过 suppressActivities（用于 compact/retry/error 等操作反馈） */
+  /** 添加系统提示 / 通知。force=true 仅跳过入队门禁；最终 flush 仍遵守 activity 抑制。 */
   addNotice(text: string, severity: 'info' | 'warn', subtype?: string, force = false): void {
     // proactive 模式：只放行真·终态错误，机务噪音（压缩/重试）和 emit 已覆盖的 subtype 均不发。
     if (this.opts.envelope.chatmode === 'proactive') {
@@ -319,7 +337,7 @@ export class IMRenderer {
       this.emitProactiveItem({ kind: 'notice', text, severity, subtype });
       return;
     }
-    if (this.opts.suppressActivities && !force) return;
+    if (this.suppressActivityItems() && !force) return;
     this.itemsQueue.push({ kind: 'notice', text, severity, subtype });
     this.messageTimestamps.push(Date.now());
     this.scheduleFlush();
@@ -390,6 +408,7 @@ export class IMRenderer {
 
     // 移除已 flush 的 non-text items，保留 text items
     this.itemsQueue = this.itemsQueue.filter(it => it.kind === 'text');
+    if (this.suppressActivityItems()) return;
 
     const payload: OutboundPayload = { kind: 'activity.batch', items: nonThinking };
     if (this.diagEnabled) diag(this.instanceId, 'flushActivitiesOnly', { itemCount: nonThinking.length });
@@ -462,7 +481,7 @@ export class IMRenderer {
     }
 
     // 1. interactive 模式下：不发 text items（由 result.text 统一发送最终文本）
-    let itemsForBatch = items.filter(it => it.kind !== 'text');
+    let itemsForBatch = this.suppressActivityItems() ? [] : items.filter(it => it.kind !== 'text');
 
     if (itemsForBatch.length > 0) {
       const payload: OutboundPayload = { kind: 'activity.batch', items: itemsForBatch };
@@ -483,6 +502,7 @@ export class IMRenderer {
     //   tool_use 才被 flushText 带出，并与其后的文本合并成一条（用户侧表现为：
     //   第一条文本等待一分多钟后才和第二条凑成一条发出）。定时器到期即发，根除滞留。
     if (!isFinal && this.textBuffer.length > 0) {
+      if (this.suppressIntermediateText()) return;
       const text = this.textBuffer;
       this.textBuffer = '';
       const payload: OutboundPayload = { kind: 'result.text', text, isFinal: false };
@@ -516,6 +536,7 @@ export class IMRenderer {
     turn?: number,
     extra?: { toolName?: string; callId?: string; ok?: boolean; durationMs?: number; text?: string; state?: 'processing' | 'waiting'; toolUses?: number },
   ): void {
+    if (this.suppressActivityItems()) return;
     const payload: OutboundPayload = {
       kind: 'status.progress',
       metadata: {

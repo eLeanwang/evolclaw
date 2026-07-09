@@ -32,6 +32,7 @@ import { tryParseChannelKey } from '../channel-loader.js';
 import { displaySessionTitle } from '../session/session-title.js';
 import { isQuickCommand } from './slash-gate.js';
 import { handleSlashCommand } from './slash-handler.js';
+import { resolveChatModeForPeer } from '../message/peer-mode.js';
 import {
   execMenuAction as menuExecMenuAction,
   execMenuForEcweb as menuExecMenuForEcweb,
@@ -1789,12 +1790,7 @@ export class CommandHandler {
   }
 
   private resolveEffectiveChatmodeForSession(session: Session): 'interactive' | 'proactive' {
-    const field = session.chatType === 'group'
-      ? 'group'
-      : ((session.metadata as any)?.peerType && (session.metadata as any).peerType !== 'human')
-        ? 'nothuman'
-        : 'private';
-    const fallback = field === 'private' ? 'interactive' : 'proactive';
+    const peerType = (session.metadata as any)?.peerType;
     try {
       const self = session.selfAID || this.getOwningAgent(session.channel)?.aid;
       const channelType = session.channelType || this.resolveChannelType(session.channel);
@@ -1806,10 +1802,10 @@ export class CommandHandler {
         self: self || undefined,
         peerKey,
         role: session.identity?.role,
-      }, { cache: true }).chatmode?.[field];
-      return configured === 'interactive' || configured === 'proactive' ? configured : fallback;
+      }, { cache: true }).chatmode;
+      return resolveChatModeForPeer({ chatType: session.chatType, peerType, configured });
     } catch {
-      return fallback;
+      return resolveChatModeForPeer({ chatType: session.chatType, peerType });
     }
   }
 

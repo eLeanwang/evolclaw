@@ -92,9 +92,37 @@ function readTestAgentConfig(): any {
   return JSON.parse(fs.readFileSync(testAgentConfigPath(), 'utf-8'));
 }
 
+function relationConfigPathByKey(peerKey: string): string {
+  return path.join(tmpRoot, 'agents', TEST_AID, 'relations', peerKey, 'config.json');
+}
+
+function readRelationConfigByKey(peerKey: string): any {
+  return JSON.parse(fs.readFileSync(relationConfigPathByKey(peerKey), 'utf-8'));
+}
+
 function writeTestAgentConfig(patch: Record<string, any>): void {
   fs.writeFileSync(testAgentConfigPath(), JSON.stringify({ ...readTestAgentConfig(), ...patch }));
 }
+
+function createPrivateNonHumanSession(overrides: Record<string, any> = {}) {
+  const metadata = {
+    permissionMode: 'auto',
+    peerId: 'agent-peer',
+    peerType: 'agent',
+    ...(overrides.metadata ?? {}),
+  };
+  return {
+    id: 'sess-agent-peer', channel: 'aun', channelId: 'chat1',
+    projectPath: '/tmp/test', agentId: 'claude',
+    baseagent: 'claude', selfAID: TEST_AID, channelType: 'aun',
+    agentSessionId: 'agent-sess-123',
+    chatType: 'private', sessionMode: 'proactive',
+    createdAt: Date.now(), updatedAt: Date.now(),
+    ...overrides,
+    metadata,
+  };
+}
+
 function createMockSessionManager(overrides: Record<string, any> = {}) {
   return {
     getOrCreateSession: vi.fn().mockResolvedValue(null),
@@ -242,6 +270,25 @@ describe('execMenuQuery', () => {
       const { handler } = createHandler();
       const result = await handler.execMenuQuery('/chatmode', 'aun', 'chat1', 'user1');
       expect(result).toEqual({ data: { mode: 'interactive', scope: 'relation', field: 'chatmode.private', self: TEST_AID, peerKey: formatPeerKey('aun', 'user1') } });
+    });
+
+    it('uses relation chatmode.nothuman for non-human private peers', async () => {
+      const session = createPrivateNonHumanSession();
+      const sm = createMockSessionManager({
+        getActiveSession: vi.fn().mockResolvedValue(session),
+        getActiveSessionSync: vi.fn().mockReturnValue(session),
+      });
+      const { handler } = createHandler({ sessionManager: sm });
+      const result = await handler.execMenuQuery('/chatmode', 'aun', 'chat1', 'agent-peer');
+      expect(result).toEqual({
+        data: {
+          mode: 'proactive',
+          scope: 'relation',
+          field: 'chatmode.nothuman',
+          self: TEST_AID,
+          peerKey: 'aun#agent-peer',
+        },
+      });
     });
 
     it('falls back to agent config when no session', async () => {
@@ -496,6 +543,60 @@ describe('execMenuUpdate', () => {
       const result = await handler.execMenuUpdate('/chatmode', 'proactive', 'aun', 'chat1', 'user1');
       expect(result).toEqual({ data: { mode: 'proactive', scope: 'relation', field: 'chatmode.private', self: TEST_AID, peerKey: formatPeerKey('aun', 'user1') } });
       expect(readRelationConfig().chatmode.private).toBe('proactive');
+    });
+
+    it('writes relation chatmode.nothuman for non-human private peers by default', async () => {
+      const session = createPrivateNonHumanSession();
+      const sm = createMockSessionManager({
+        getActiveSession: vi.fn().mockResolvedValue(session),
+        getActiveSessionSync: vi.fn().mockReturnValue(session),
+      });
+      const { handler } = createHandler({ sessionManager: sm });
+      const result = await handler.execMenuUpdate('/chatmode', 'interactive', 'aun', 'chat1', 'agent-peer');
+      expect(result).toEqual({
+        data: {
+          mode: 'interactive',
+          scope: 'relation',
+          field: 'chatmode.nothuman',
+          self: TEST_AID,
+          peerKey: 'aun#agent-peer',
+        },
+      });
+      expect(readRelationConfigByKey('aun#agent-peer').chatmode.nothuman).toBe('interactive');
+      expect(readTestAgentConfig().chatmode.nothuman).toBeUndefined();
+    });
+
+    it('writes agent chatmode.nothuman when scope is agent', async () => {
+      const session = createPrivateNonHumanSession();
+      const sm = createMockSessionManager({
+        getActiveSession: vi.fn().mockResolvedValue(session),
+        getActiveSessionSync: vi.fn().mockReturnValue(session),
+      });
+      const { handler } = createHandler({ sessionManager: sm });
+      const result = await handler.execMenuUpdate('/chatmode', 'interactive', 'aun', 'chat1', 'agent-peer', undefined, false, { scope: 'agent' });
+      expect(result).toEqual({ data: { mode: 'interactive', scope: 'agent', field: 'chatmode.nothuman', self: TEST_AID } });
+      expect(readTestAgentConfig().chatmode.nothuman).toBe('interactive');
+    });
+
+    it('writes relation chatmode.nothuman for non-human private peers', async () => {
+      const session = createPrivateNonHumanSession();
+      const sm = createMockSessionManager({
+        getActiveSession: vi.fn().mockResolvedValue(session),
+        getActiveSessionSync: vi.fn().mockReturnValue(session),
+      });
+      const { handler } = createHandler({ sessionManager: sm });
+      const result = await handler.execMenuUpdate('/chatmode', 'interactive', 'aun', 'chat1', 'agent-peer', undefined, false, { scope: 'relation' });
+      expect(result).toEqual({
+        data: {
+          mode: 'interactive',
+          scope: 'relation',
+          field: 'chatmode.nothuman',
+          self: TEST_AID,
+          peerKey: 'aun#agent-peer',
+        },
+      });
+      expect(readRelationConfigByKey('aun#agent-peer').chatmode.nothuman).toBe('interactive');
+      expect(readTestAgentConfig().chatmode.nothuman).toBeUndefined();
     });
 
     it('rejects invalid mode', async () => {

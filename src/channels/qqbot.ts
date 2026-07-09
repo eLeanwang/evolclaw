@@ -2,7 +2,7 @@ import { logger } from '../utils/logger.js';
 import { markdownToPlainText } from '../utils/rich-content-renderer.js';
 import { requireOptional } from '../utils/npm-ops.js';
 import type { ChannelPlugin, ChannelInstance, ChannelBuildContext } from '../core/channel-loader.js';
-import { resolveShowActivities, showActivitiesPolicy } from '../core/channel-loader.js';
+import { middleOutputModePolicy, resolveShowActivities, showActivitiesPolicy } from '../core/channel-loader.js';
 import type { MessageBridge } from '../core/message/message-bridge.js';
 import type { QQBotChannelInstance as QQBotInst, ThoughtItem } from '../types.js';
 import { formatItemsAsText } from '../core/message/items-formatter.js';
@@ -435,6 +435,7 @@ export class QQBotChannelPlugin implements ChannelPlugin {
       canImportCliSession: (_: string, identity: string) => identity === 'owner' || identity === 'admin',
       messagePrefix: (chatType: string, peerName?: string) => (chatType === 'group' && peerName) ? `[${peerName}] ` : '',
       showMiddleResult: (chatType: string, identity: string) => showActivitiesPolicy(mode, chatType, identity),
+      middleOutputMode: (chatType: string, identity: string) => middleOutputModePolicy(mode, chatType, identity),
       showIdleMonitor: (chatType: string, identity: string) => showActivitiesPolicy(mode, chatType, identity),
       accumulateErrors: () => true,
     };

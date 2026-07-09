@@ -144,7 +144,8 @@
       "x-merge": "scalar"
     },
     "show_activities": {
-      "type": "boolean",
+      "type": "string",
+      "enum": ["all", "text", "none"],
       "description": "中间活动可见性",
       "x-merge": "scalar"
     },

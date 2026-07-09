@@ -28,6 +28,7 @@ import { formatPeerKey } from '../relation/peer-identity.js';
 import { modelMatches, resolveCommandModelResolution } from './model-resolve.js';
 import { filterModelsForRole, validateModelSelectionForRole } from '../model/model-permission.js';
 import { displaySessionTitle } from '../session/session-title.js';
+import { chatmodeFieldForPeer } from '../message/peer-mode.js';
 import {
   guardIdleCommand,
   guardKnownCommand,
@@ -62,9 +63,7 @@ function defaultSlashChatmode(field: SlashChatmodeField): SlashChatmodeValue {
 }
 
 function slashChatmodeField(session: Session | null | undefined, chatType?: string): SlashChatmodeField {
-  if ((session?.chatType ?? chatType) === 'group') return 'group';
-  const peerType = (session?.metadata as any)?.peerType;
-  return peerType && peerType !== 'human' ? 'nothuman' : 'private';
+  return chatmodeFieldForPeer(session?.chatType ?? chatType, (session?.metadata as any)?.peerType);
 }
 
 function resolveSlashChatmodeTarget(this: any, params: {
@@ -621,7 +620,7 @@ export async function handleSlashCommand(this: any,
       '  /effort [level] - 查看或切换推理强度',
       '',
       '💬 聊天设置：',
-      '  /activity [all|none] - 查看/控制中间输出显示模式',
+      '  /activity [all|text|none] - 查看/控制中间输出显示模式',
       '  /chatmode [interactive|proactive] - 查看/切换会话模式（被动响应或主动推进）',
       '  /dispatch [mention|broadcast] - 查看/切换群聊分发模式（仅@响应或广播响应，仅群聊）',
       '',
@@ -690,7 +689,7 @@ export async function handleSlashCommand(this: any,
     cmds.push({ command: '/stop', description: '中断当前任务', category: '运维', roles: ['admin', 'owner'] });
     cmds.push({ command: '/check', description: '检查 EvolAgent 实例健康', category: '运维', roles: ['visitor', 'member', 'admin', 'owner'] });
     if (isAdmin) {
-      cmds.push({ command: '/activity', args: '[all|none]', description: '查看/控制中间输出显示模式', category: '聊天设置', roles: ['admin', 'owner'] });
+      cmds.push({ command: '/activity', args: '[all|text|none]', description: '查看/控制中间输出显示模式', category: '聊天设置', roles: ['admin', 'owner'] });
     }
     if (isDaemonOwner) {
       cmds.push({ command: '/restart', description: '重启服务', category: '运维', roles: ['daemon-owner'] });
@@ -1690,17 +1689,19 @@ export async function handleSlashCommand(this: any,
       return { kind: 'command.error' as const, text: '❌ 当前会话为 proactive 模式，不支持 activity 配置（流式输出已全部静默）' };
     }
 
-    const modeMap: Record<string, 'all' | 'none'> = {
+    const modeMap: Record<string, 'all' | 'text' | 'none'> = {
       all: 'all',
+      text: 'text',
       none: 'none',
     };
 
     const currentMode = this.agentRegistry?.getShowActivities?.(channel) ?? 'all';
 
-    // 模式描述列表（用于 body 和文本降级）。show_activities 收敛为 all|none：
-    // all = 私聊显示中间输出；none = 全部静默（群聊本就强制 proactive、不发活动）。
+    // 模式描述列表（用于 body 和文本降级）。
+    // all = 文本 + activity；text = 仅文字进展；none = 全部静默。
     const modeDescriptions: { key: string; configVal: string; label: string }[] = [
       { key: 'all', configVal: 'all', label: '私聊显示' },
+      { key: 'text', configVal: 'text', label: '仅文字进展' },
       { key: 'none', configVal: 'none', label: '全部静默' },
     ];
 
@@ -1740,14 +1741,14 @@ export async function handleSlashCommand(this: any,
         return `  ${prefix} ${m.key} — ${m.label}`;
       }).join('\n');
       if (isOwner) {
-        return { kind: 'command.result' as const, text: `中间输出: ${currentMode}  用法: /activity <all|none>` };
+        return { kind: 'command.result' as const, text: `中间输出: ${currentMode}  用法: /activity <all|text|none>` };
       }
       return { kind: 'command.result' as const, text: `中间输出: ${currentMode}` };
     }
 
     const newMode = modeMap[activityArg];
     if (!newMode) {
-      return { kind: 'command.error' as const, text: `❌ 无效参数: ${activityArg}\n可选: all / none` };
+      return { kind: 'command.error' as const, text: `❌ 无效参数: ${activityArg}\n可选: all / text / none` };
     }
 
     const label = modeDescriptions.find(m => m.configVal === newMode)?.label || newMode;
