@@ -40,15 +40,18 @@ export function insertUsageEvent(
     db.exec('BEGIN');
     db.prepare(`
       INSERT INTO usage_events
-        (ts, agent_aid, peer_key, peer_type, session_id, model, billing_fn,
+        (ts, agent_aid, peer_key, usage_subject_key, role, peer_type, session_id, model, billing_fn,
          input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
          cache_hit_tokens, cache_miss_tokens, image_tokens, total_context_tokens,
          turns, duration_ms, context_window_pct,
          cost_official_usd, cost_official_cny, cost_gateway_usd, cost_gateway_cny)
       VALUES
-        (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
-      event.ts, event.agent_aid, event.peer_key, event.peer_type ?? null,
+      event.ts, event.agent_aid, event.peer_key,
+      event.usage_subject_key ?? event.peer_key ?? '',
+      event.role ?? '',
+      event.peer_type ?? null,
       event.session_id ?? null, event.model, event.billing_fn,
       event.input_tokens, event.output_tokens,
       event.cache_creation_tokens, event.cache_read_tokens,

@@ -129,6 +129,10 @@ const COMMAND_STRING_ARRAY_CONSTRAINTS = new Set([
   'envAllowlist',
 ]);
 const COMMAND_INTEGER_CONSTRAINTS = new Set(['timeoutMs', 'outputLimitBytes']);
+const ROLE_USAGE_COST_BASIS = new Set(['gateway', 'official']);
+const ROLE_USAGE_SCOPES = new Set(['subject', 'role']);
+const ROLE_USAGE_RESET_MODES = new Set(['never', 'daily', 'weekly', 'monthly']);
+const ROLE_USAGE_CURRENCIES = new Set(['CNY', 'USD']);
 
 type SelectionMode = 'pattern' | 'explicit' | 'mixed';
 
@@ -373,6 +377,55 @@ function validateCommandPermissions(value: any): { ok: boolean; errors: string[]
   return { ok: errors.length === 0, errors };
 }
 
+function validateRoleUsageLimits(value: any): { ok: boolean; errors: string[] } {
+  const errors: string[] = [];
+  if (value === undefined) return { ok: true, errors };
+  if (!isRecord(value)) {
+    return { ok: false, errors: ['usageLimits must be an object'] };
+  }
+  if (value.enabled !== undefined && typeof value.enabled !== 'boolean') {
+    errors.push('usageLimits.enabled must be a boolean');
+  }
+  if (value.resetMode !== undefined && !ROLE_USAGE_RESET_MODES.has(String(value.resetMode))) {
+    errors.push('usageLimits.resetMode must be never, daily, weekly, or monthly');
+  }
+  if (value.currency !== undefined && !ROLE_USAGE_CURRENCIES.has(String(value.currency))) {
+    errors.push('usageLimits.currency must be CNY or USD');
+  }
+  const amount = value.limitAmount;
+  if (amount !== undefined && amount !== null) {
+    if (typeof amount !== 'number' || !Number.isFinite(amount) || amount < 0) {
+      errors.push('usageLimits.limitAmount must be a non-negative number or null');
+    }
+  }
+  if (value.costBasis !== undefined && !ROLE_USAGE_COST_BASIS.has(String(value.costBasis))) {
+    errors.push('usageLimits.costBasis must be gateway or official');
+  }
+  if (value.scope !== undefined && !ROLE_USAGE_SCOPES.has(String(value.scope))) {
+    errors.push('usageLimits.scope must be subject or role');
+  }
+  return { ok: errors.length === 0, errors };
+}
+
+function normalizeRoleUsageLimits(value: any): any {
+  if (value === undefined) return undefined;
+  const out: any = {};
+  if (typeof value.enabled === 'boolean') out.enabled = value.enabled;
+  if (ROLE_USAGE_RESET_MODES.has(String(value.resetMode))) out.resetMode = String(value.resetMode);
+  if (ROLE_USAGE_CURRENCIES.has(String(value.currency))) out.currency = String(value.currency);
+  const amount = value.limitAmount;
+  if (amount === null) out.limitAmount = null;
+  else if (typeof amount === 'number' && Number.isFinite(amount) && amount >= 0) out.limitAmount = amount;
+  if (ROLE_USAGE_COST_BASIS.has(String(value.costBasis))) out.costBasis = String(value.costBasis);
+  if (ROLE_USAGE_SCOPES.has(String(value.scope))) out.scope = String(value.scope);
+  return out;
+}
+
+function normalizeRoleDefinitionForSave(roleDef: any): any {
+  if (!isRecord(roleDef) || roleDef.usageLimits === undefined) return roleDef;
+  return { ...roleDef, usageLimits: normalizeRoleUsageLimits(roleDef.usageLimits) };
+}
+
 function getModelPermission(roleDef: any): any {
   const permissions = roleDef?.permissions;
   if (!permissions || typeof permissions !== 'object') return {};
@@ -593,6 +646,11 @@ export async function handleRoleDefinitionsApi(req: any, res: any, auth: RoleWri
               sendJson(res, 400, { error: `Invalid command permissions for role ${roleName}`, errors: commandValidation.errors });
               return;
             }
+            const usageValidation = validateRoleUsageLimits((roleDef as any)?.usageLimits);
+            if (!usageValidation.ok) {
+              sendJson(res, 400, { error: `Invalid usage limits for role ${roleName}`, errors: usageValidation.errors });
+              return;
+            }
           }
         }
 
@@ -607,7 +665,7 @@ export async function handleRoleDefinitionsApi(req: any, res: any, auth: RoleWri
           if (incoming.roles && typeof incoming.roles === 'object') {
             const nextDefinitions: Record<string, any> = {};
             for (const [roleName, roleDef] of Object.entries(incoming.roles)) {
-              nextDefinitions[roleName] = roleDef;
+              nextDefinitions[roleName] = normalizeRoleDefinitionForSave(roleDef);
             }
             roles.definitions = nextDefinitions;
           }
@@ -624,7 +682,7 @@ export async function handleRoleDefinitionsApi(req: any, res: any, auth: RoleWri
     if (req.method === 'POST' && urlPath === '/api/role-definitions') {
       try {
         const data = await readJsonBody(req);
-        const { name, description, permissions, commandPermissions } = data;
+        const { name, description, permissions, commandPermissions, usageLimits } = data;
 
         const nameError = validateRoleDefinitionName(name);
         if (nameError) {
@@ -653,6 +711,14 @@ export async function handleRoleDefinitionsApi(req: any, res: any, auth: RoleWri
         if (!commandValidation.ok) {
           sendJson(res, 400, { error: 'Invalid command permissions', errors: commandValidation.errors });
           return;
+        }
+        const usageValidation = validateRoleUsageLimits(usageLimits);
+        if (!usageValidation.ok) {
+          sendJson(res, 400, { error: 'Invalid usage limits', errors: usageValidation.errors });
+          return;
+        }
+        if (usageLimits !== undefined) {
+          (newRole as any).usageLimits = normalizeRoleUsageLimits(usageLimits);
         }
 
         updateAgentRoles(modules, aid!, (roles: any) => {
@@ -843,6 +909,15 @@ export async function handleRoleDefinitionsApi(req: any, res: any, auth: RoleWri
             return;
           }
           nextRole.commandPermissions = updates.commandPermissions;
+        }
+
+        if (Object.prototype.hasOwnProperty.call(updates, 'usageLimits')) {
+          const usageValidation = validateRoleUsageLimits(updates.usageLimits);
+          if (!usageValidation.ok) {
+            sendJson(res, 400, { error: 'Invalid usage limits', errors: usageValidation.errors });
+            return;
+          }
+          nextRole.usageLimits = normalizeRoleUsageLimits(updates.usageLimits);
         }
 
         const validation = await validateRoleModelPermission(nextRole);

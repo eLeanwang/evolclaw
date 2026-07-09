@@ -27,6 +27,14 @@ export function getBuiltinUserRoleDefinitions(): Record<string, RoleDefinition> 
     member: {
       description: 'Trusted user with own-scope access',
       allowAccess: true,
+      usageLimits: {
+        enabled: true,
+        resetMode: 'daily',
+        currency: 'CNY',
+        limitAmount: 50,
+        costBasis: 'gateway',
+        scope: 'subject',
+      },
       permissions: {
         permissionMode: { default: 'auto', allowOverride: false },
         'baseagents.claude.model': {
@@ -60,6 +68,14 @@ export function getBuiltinUserRoleDefinitions(): Record<string, RoleDefinition> 
     visitor: {
       description: 'Low-trust visitor with minimal own-scope access',
       allowAccess: true,
+      usageLimits: {
+        enabled: true,
+        resetMode: 'daily',
+        currency: 'CNY',
+        limitAmount: 5,
+        costBasis: 'gateway',
+        scope: 'subject',
+      },
       permissions: {
         permissionMode: { default: 'readonly', allowOverride: false },
         'baseagents.claude.model': {

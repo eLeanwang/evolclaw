@@ -644,6 +644,28 @@ const translations = {
     'roleDefs.resetConfirm': '确定要将 {role} 重置为默认配置吗？',
     'roleDefs.saveSuccess': '保存成功',
     'roleDefs.saveFailed': '保存失败',
+    'roleDefs.usage.title': '用量限制',
+    'roleDefs.usage.enabled': '启用用量硬限制',
+    'roleDefs.usage.resetMode': '重置模式',
+    'roleDefs.usage.currency': '计价单位',
+    'roleDefs.usage.limitAmount': '额度',
+    'roleDefs.usage.costBasis': '计费口径',
+    'roleDefs.usage.scope': '限制范围',
+    'roleDefs.usage.preview': '用量限制',
+    'roleDefs.usage.reset.never': '不重置',
+    'roleDefs.usage.reset.daily': '每日重置',
+    'roleDefs.usage.reset.weekly': '每周重置',
+    'roleDefs.usage.reset.monthly': '每月重置',
+    'roleDefs.usage.currency.CNY': '人民币 (CNY)',
+    'roleDefs.usage.currency.USD': '美元 (USD)',
+    'roleDefs.usage.cost.gateway': '网关实付',
+    'roleDefs.usage.cost.official': '官方定价',
+    'roleDefs.usage.scope.subject': '按用户单独限制',
+    'roleDefs.usage.scope.role': '按角色共享限制',
+    'roleDefs.usage.disabled': '已关闭',
+    'roleDefs.usage.unlimited': '不限制',
+    'roleDefs.usage.optional': '可选',
+    'roleDefs.usage.error.nonNegative': '{label} 必须是非负数字。',
 
     // Role permission values
     'roleDefs.effort.low': '低 (low)',
@@ -1314,6 +1336,28 @@ const translations = {
     'roleDefs.resetConfirm': 'Reset {role} to default configuration?',
     'roleDefs.saveSuccess': 'Saved successfully',
     'roleDefs.saveFailed': 'Save failed',
+    'roleDefs.usage.title': 'Usage Limits',
+    'roleDefs.usage.enabled': 'Enable usage hard limit',
+    'roleDefs.usage.resetMode': 'Reset mode',
+    'roleDefs.usage.currency': 'Pricing unit',
+    'roleDefs.usage.limitAmount': 'Limit amount',
+    'roleDefs.usage.costBasis': 'Cost basis',
+    'roleDefs.usage.scope': 'Scope',
+    'roleDefs.usage.preview': 'Usage limit',
+    'roleDefs.usage.reset.never': 'No reset',
+    'roleDefs.usage.reset.daily': 'Daily reset',
+    'roleDefs.usage.reset.weekly': 'Weekly reset',
+    'roleDefs.usage.reset.monthly': 'Monthly reset',
+    'roleDefs.usage.currency.CNY': 'Chinese yuan (CNY)',
+    'roleDefs.usage.currency.USD': 'US dollar (USD)',
+    'roleDefs.usage.cost.gateway': 'Gateway cost',
+    'roleDefs.usage.cost.official': 'Official price',
+    'roleDefs.usage.scope.subject': 'Per user',
+    'roleDefs.usage.scope.role': 'Shared role',
+    'roleDefs.usage.disabled': 'disabled',
+    'roleDefs.usage.unlimited': 'unlimited',
+    'roleDefs.usage.optional': 'optional',
+    'roleDefs.usage.error.nonNegative': '{label} must be a non-negative number.',
 
     // Role permission values
     'roleDefs.effort.low': 'Low (low)',
@@ -7711,6 +7755,139 @@ function collectCommandPermissions(container, fallback = {}) {
   return { ok: true, value: commandPermissions };
 }
 
+function normalizeRoleUsageLimitsClient(usageLimits) {
+  const fallback = state.roleDefinitions?.roles?.member?.usageLimits || {
+    enabled: true,
+    resetMode: 'daily',
+    currency: 'CNY',
+    limitAmount: 50,
+    costBasis: 'gateway',
+    scope: 'subject',
+  };
+  const limits = usageLimits && typeof usageLimits === 'object' && !Array.isArray(usageLimits)
+    ? usageLimits
+    : fallback;
+  return {
+    enabled: limits.enabled !== false,
+    resetMode: ['never', 'daily', 'weekly', 'monthly'].includes(limits.resetMode) ? limits.resetMode : 'daily',
+    currency: ['CNY', 'USD'].includes(limits.currency) ? limits.currency : 'CNY',
+    limitAmount: typeof limits.limitAmount === 'number' ? limits.limitAmount : null,
+    costBasis: limits.costBasis === 'official' ? 'official' : 'gateway',
+    scope: limits.scope === 'role' ? 'role' : 'subject',
+  };
+}
+
+function formatRoleUsageLimitSummary(roleDef) {
+  const limits = normalizeRoleUsageLimitsClient(roleDef?.usageLimits);
+  if (!limits.enabled) return t('roleDefs.usage.disabled');
+  const resetLabels = {
+    never: t('roleDefs.usage.reset.never'),
+    daily: t('roleDefs.usage.reset.daily'),
+    weekly: t('roleDefs.usage.reset.weekly'),
+    monthly: t('roleDefs.usage.reset.monthly'),
+  };
+  const costBasisLabels = {
+    gateway: t('roleDefs.usage.cost.gateway'),
+    official: t('roleDefs.usage.cost.official'),
+  };
+  const parts = [];
+  if (limits.limitAmount != null) parts.push(`${limits.currency} ${limits.limitAmount}`);
+  return parts.length
+    ? `${resetLabels[limits.resetMode]}: ${parts.join(' / ')} (${costBasisLabels[limits.costBasis]})`
+    : t('roleDefs.usage.unlimited');
+}
+
+function renderRoleUsageLimitsEditor(roleDef) {
+  const limits = normalizeRoleUsageLimitsClient(roleDef?.usageLimits);
+  return `
+    <div class="form-section usage-limits-section" data-usage-limits>
+      <h4>${t('roleDefs.usage.title')}</h4>
+      <label class="cli-constraint-option">
+        <input type="checkbox"
+               data-usage-field="enabled"
+               ${limits.enabled ? 'checked' : ''}>
+        <span>${t('roleDefs.usage.enabled')}</span>
+      </label>
+      <div class="cli-advanced-grid">
+        <label class="cli-field-row">
+          <span>${t('roleDefs.usage.resetMode')}</span>
+          <select class="form-select" data-usage-field="resetMode">
+            <option value="never" ${limits.resetMode === 'never' ? 'selected' : ''}>${t('roleDefs.usage.reset.never')}</option>
+            <option value="daily" ${limits.resetMode === 'daily' ? 'selected' : ''}>${t('roleDefs.usage.reset.daily')}</option>
+            <option value="weekly" ${limits.resetMode === 'weekly' ? 'selected' : ''}>${t('roleDefs.usage.reset.weekly')}</option>
+            <option value="monthly" ${limits.resetMode === 'monthly' ? 'selected' : ''}>${t('roleDefs.usage.reset.monthly')}</option>
+          </select>
+        </label>
+        <label class="cli-field-row">
+          <span>${t('roleDefs.usage.currency')}</span>
+          <select class="form-select" data-usage-field="currency">
+            <option value="CNY" ${limits.currency === 'CNY' ? 'selected' : ''}>${t('roleDefs.usage.currency.CNY')}</option>
+            <option value="USD" ${limits.currency === 'USD' ? 'selected' : ''}>${t('roleDefs.usage.currency.USD')}</option>
+          </select>
+        </label>
+        <label class="cli-field-row">
+          <span>${t('roleDefs.usage.limitAmount')}</span>
+          <input type="number"
+                 min="0"
+                 step="0.0001"
+                 class="form-input"
+                 data-usage-field="limitAmount"
+                 value="${limits.limitAmount == null ? '' : esc(String(limits.limitAmount))}"
+                 placeholder="50">
+        </label>
+        <label class="cli-field-row">
+          <span>${t('roleDefs.usage.costBasis')}</span>
+          <select class="form-select" data-usage-field="costBasis">
+            <option value="gateway" ${limits.costBasis === 'gateway' ? 'selected' : ''}>${t('roleDefs.usage.cost.gateway')}</option>
+            <option value="official" ${limits.costBasis === 'official' ? 'selected' : ''}>${t('roleDefs.usage.cost.official')}</option>
+          </select>
+        </label>
+        <label class="cli-field-row">
+          <span>${t('roleDefs.usage.scope')}</span>
+          <select class="form-select" data-usage-field="scope">
+            <option value="subject" ${limits.scope === 'subject' ? 'selected' : ''}>${t('roleDefs.usage.scope.subject')}</option>
+            <option value="role" ${limits.scope === 'role' ? 'selected' : ''}>${t('roleDefs.usage.scope.role')}</option>
+          </select>
+        </label>
+      </div>
+    </div>
+  `;
+}
+
+function collectRoleUsageLimits(container) {
+  const section = container.querySelector('[data-usage-limits]');
+  if (!section) return undefined;
+  const enabled = !!section.querySelector('[data-usage-field="enabled"]')?.checked;
+  const resetModeRaw = section.querySelector('[data-usage-field="resetMode"]')?.value || 'daily';
+  const resetMode = ['never', 'daily', 'weekly', 'monthly'].includes(resetModeRaw) ? resetModeRaw : 'daily';
+  const currencyRaw = section.querySelector('[data-usage-field="currency"]')?.value || 'CNY';
+  const currency = ['CNY', 'USD'].includes(currencyRaw) ? currencyRaw : 'CNY';
+  const limitAmountRaw = section.querySelector('[data-usage-field="limitAmount"]')?.value.trim() || '';
+  const parseAmount = (raw, label) => {
+    if (!raw) return { ok: true, value: null };
+    const value = Number(raw);
+    if (!Number.isFinite(value) || value < 0) {
+      return { ok: false, error: t('roleDefs.usage.error.nonNegative').replace('{label}', label) };
+    }
+    return { ok: true, value };
+  };
+  const limitAmount = parseAmount(limitAmountRaw, t('roleDefs.usage.limitAmount'));
+  if (!limitAmount.ok) return { ok: false, error: limitAmount.error };
+  const costBasis = section.querySelector('[data-usage-field="costBasis"]')?.value === 'official' ? 'official' : 'gateway';
+  const scope = section.querySelector('[data-usage-field="scope"]')?.value === 'role' ? 'role' : 'subject';
+  return {
+    ok: true,
+    value: {
+      enabled,
+      resetMode,
+      currency,
+      limitAmount: limitAmount.value,
+      costBasis,
+      scope,
+    }
+  };
+}
+
 function createRoleCard(roleName, roleDef) {
   const card = document.createElement('div');
   card.className = `role-card role-${roleName}`;
@@ -7744,6 +7921,10 @@ function createRoleCard(roleName, roleDef) {
       <div class="role-preview-item">
         <span class="label">CLI rules:</span>
         <span class="value">${commandStats.total} (${commandStats.allow} allow / ${commandStats.deny} deny)</span>
+      </div>
+      <div class="role-preview-item">
+        <span class="label">${t('roleDefs.usage.preview')}:</span>
+        <span class="value">${esc(formatRoleUsageLimitSummary(roleDef))}</span>
       </div>
       <div class="role-preview-item">
         <span class="label">Dangerous:</span>
@@ -8270,7 +8451,8 @@ async function showNewRoleModal() {
       'category:write-own': { allow: true },
       'model.*': { allow: true, scopes: ['relation', 'agent'], constraints: { ownPeerOnly: true, ownAgentOnly: true } },
       'cli.exec.raw': { allow: false, dangerous: true }
-    }
+    },
+    usageLimits: { enabled: true, resetMode: 'daily', currency: 'CNY', limitAmount: 50, costBasis: 'gateway', scope: 'subject' }
   };
   const operations = await loadRoleOperationsForEditor();
 
@@ -8300,6 +8482,8 @@ async function showNewRoleModal() {
         </select>
         <small style="color: var(--dim);">${currentLang === 'zh-CN' ? '拒绝时，该角色用户访问将收到"暂无权限"提示' : 'When denied, users with this role will receive "no permission" message'}</small>
       </div>
+
+      ${renderRoleUsageLimitsEditor(defaultDef)}
 
       <div class="role-editor-tabs" role="tablist">
         <button type="button" class="role-editor-tab active" data-role-tab="fields">Field Permissions</button>
@@ -8533,6 +8717,8 @@ async function showRoleEditModal(roleName, roleDef) {
     </div>
   `;
 
+  formHtml += renderRoleUsageLimitsEditor(roleDef);
+
   formHtml += `
     <div class="role-editor-tabs" role="tablist">
       <button type="button" class="role-editor-tab active" data-role-tab="fields">Field Permissions</button>
@@ -8744,6 +8930,9 @@ async function showRoleDetailsModal(roleName, roleDef) {
       <h4>${t('roleDefs.description')}</h4>
       <p>${esc(roleDef.description)}</p>
 
+      <h4>${t('roleDefs.usage.title')}</h4>
+      <pre>${JSON.stringify(normalizeRoleUsageLimitsClient(roleDef.usageLimits), null, 2)}</pre>
+
       <h4>Field Permissions</h4>
       <pre>${JSON.stringify(roleDef.permissions || {}, null, 2)}</pre>
 
@@ -8882,7 +9071,8 @@ async function saveRoleDefinition() {
         'category:write-own': { allow: true },
         'model.*': { allow: true, scopes: ['relation', 'agent'], constraints: { ownPeerOnly: true, ownAgentOnly: true } },
         'cli.exec.raw': { allow: false, dangerous: true }
-      }
+      },
+      usageLimits: { enabled: true, resetMode: 'daily', currency: 'CNY', limitAmount: 50, costBasis: 'gateway', scope: 'subject' }
     })
     : (state.roleDefinitions?.roles[actualRoleName] || {});
 
@@ -8967,11 +9157,18 @@ async function saveRoleDefinition() {
     return;
   }
 
+  const usageLimitsResult = collectRoleUsageLimits(body);
+  if (usageLimitsResult && !usageLimitsResult.ok) {
+    alert(usageLimitsResult.error);
+    return;
+  }
+
   const updates = {
     description,
     allowAccess,
     permissions,
-    commandPermissions: commandPermissionsResult.value
+    commandPermissions: commandPermissionsResult.value,
+    usageLimits: usageLimitsResult?.value
   };
 
   try {

@@ -34,6 +34,12 @@ export function getDbPath(evolclawHome: string): string {
   return path.join(getStatsDir(evolclawHome), 'usage.db');
 }
 
+export function closeStatsDb(): void {
+  if (!_db) return;
+  try { _db.close(); } catch {}
+  _db = null;
+}
+
 /** 获取写者单例（daemon 调用）。首次调用时建表。 */
 export function getDb(evolclawHome: string): any | null {
   if (_db) return _db;
@@ -77,6 +83,8 @@ function _initTables(db: any): void {
       ts                    INTEGER NOT NULL,
       agent_aid             TEXT    NOT NULL,
       peer_key              TEXT    NOT NULL,
+      usage_subject_key     TEXT    NOT NULL DEFAULT '',
+      role                  TEXT    NOT NULL DEFAULT '',
       peer_type             TEXT,
       session_id            TEXT,
       model                 TEXT    NOT NULL,
@@ -100,6 +108,7 @@ function _initTables(db: any): void {
     CREATE INDEX IF NOT EXISTS idx_ue_ts         ON usage_events(ts);
     CREATE INDEX IF NOT EXISTS idx_ue_agent_ts   ON usage_events(agent_aid, ts);
     CREATE INDEX IF NOT EXISTS idx_ue_peer_ts    ON usage_events(agent_aid, peer_key, ts);
+    CREATE INDEX IF NOT EXISTS idx_ue_role_budget ON usage_events(agent_aid, role, usage_subject_key, ts);
     CREATE INDEX IF NOT EXISTS idx_ue_model_ts   ON usage_events(model, ts);
     CREATE INDEX IF NOT EXISTS idx_ue_session_ts ON usage_events(session_id, ts);
 
@@ -222,6 +231,19 @@ function _initTables(db: any): void {
     }
   } catch (e) {
     logger.warn(`[StatsDB] Cost column migration failed (non-fatal): ${e}`);
+  }
+
+  try {
+    const cols = db.prepare(`PRAGMA table_info(usage_events)`).all() as Array<{ name: string }>;
+    if (!cols.some(c => c.name === 'usage_subject_key')) {
+      db.exec(`ALTER TABLE usage_events ADD COLUMN usage_subject_key TEXT NOT NULL DEFAULT ''`);
+    }
+    if (!cols.some(c => c.name === 'role')) {
+      db.exec(`ALTER TABLE usage_events ADD COLUMN role TEXT NOT NULL DEFAULT ''`);
+    }
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_ue_role_budget ON usage_events(agent_aid, role, usage_subject_key, ts)`);
+  } catch (e) {
+    logger.warn(`[StatsDB] usage_events role budget migration failed: ${e}`);
   }
 
   // 轻量迁移：旧库的 usage_daily 可能缺 peer_type 列（无 migration 机制，CREATE IF NOT EXISTS

@@ -42,6 +42,10 @@ import type {
 } from '../types.js';
 
 const USER_ROLE_NAME_RE = /^[a-z0-9_-]+$/;
+const ROLE_USAGE_COST_BASIS = new Set(['gateway', 'official']);
+const ROLE_USAGE_SCOPES = new Set(['subject', 'role']);
+const ROLE_USAGE_RESET_MODES = new Set(['never', 'daily', 'weekly', 'monthly']);
+const ROLE_USAGE_CURRENCIES = new Set(['CNY', 'USD']);
 
 export enum ConfigTarget {
   Process = 'process',                  // evolclaw.json锛堢嫭绔嬶級
@@ -271,6 +275,7 @@ function validateAgentRolePolicy(value: Record<string, any>): void {
     if (!isValidUserRoleNameLocal(roleName)) {
       throw new ConfigError('VALIDATION_ERROR', `Invalid user role definition: ${roleName}`);
     }
+    validateRoleUsageLimits((definitions as Record<string, any>)[roleName]?.usageLimits, `roles.definitions.${roleName}.usageLimits`);
     validRoleNames.add(roleName);
   }
 
@@ -283,6 +288,35 @@ function validateAgentRolePolicy(value: Record<string, any>): void {
     if (typeof role !== 'string' || !validRoleNames.has(role)) {
       throw new ConfigError('VALIDATION_ERROR', `Invalid default role for ${key}: ${String(role)}`);
     }
+  }
+}
+
+function validateRoleUsageLimits(value: unknown, field: string): void {
+  if (value === undefined) return;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new ConfigError('VALIDATION_ERROR', `${field} must be an object`);
+  }
+  const limits = value as Record<string, unknown>;
+  if (limits.enabled !== undefined && typeof limits.enabled !== 'boolean') {
+    throw new ConfigError('VALIDATION_ERROR', `${field}.enabled must be a boolean`);
+  }
+  if (limits.resetMode !== undefined && !ROLE_USAGE_RESET_MODES.has(String(limits.resetMode))) {
+    throw new ConfigError('VALIDATION_ERROR', `${field}.resetMode must be never, daily, weekly, or monthly`);
+  }
+  if (limits.currency !== undefined && !ROLE_USAGE_CURRENCIES.has(String(limits.currency))) {
+    throw new ConfigError('VALIDATION_ERROR', `${field}.currency must be CNY or USD`);
+  }
+  const amount = limits.limitAmount;
+  if (amount !== undefined && amount !== null) {
+    if (typeof amount !== 'number' || !Number.isFinite(amount) || amount < 0) {
+      throw new ConfigError('VALIDATION_ERROR', `${field}.limitAmount must be a non-negative number or null`);
+    }
+  }
+  if (limits.costBasis !== undefined && !ROLE_USAGE_COST_BASIS.has(String(limits.costBasis))) {
+    throw new ConfigError('VALIDATION_ERROR', `${field}.costBasis must be gateway or official`);
+  }
+  if (limits.scope !== undefined && !ROLE_USAGE_SCOPES.has(String(limits.scope))) {
+    throw new ConfigError('VALIDATION_ERROR', `${field}.scope must be subject or role`);
   }
 }
 
