@@ -120,7 +120,8 @@ export class GeminiRunner implements AgentRunnerFull, ModelSwitcher {
     images?: Array<{ data: string; mimeType?: string }>,
     systemPromptAppend?: string,
     sessionManager?: any,
-    modelOverride?: { model?: string; effort?: string; permissionMode?: string }
+    modelOverride?: { model?: string; effort?: string; permissionMode?: string },
+    runtimeEnv?: Record<string, string>
   ): Promise<AsyncIterable<AgentEvent>> {
     let geminiSessionId = initialAgentSessionId || this.activeSessions.get(sessionId);
     // per-call 权限模式/模型：优先 override，缺省回落实例级（多会话并发互不污染）
@@ -177,6 +178,7 @@ export class GeminiRunner implements AgentRunnerFull, ModelSwitcher {
     const env: Record<string, string> = {
       ...process.env as Record<string, string>,
       EVOLCLAW_SESSION_ID: sessionId,
+      ...(runtimeEnv ?? {}),
     };
     if (this.resolved.apiKey) {
       env.GOOGLE_API_KEY = this.resolved.apiKey;

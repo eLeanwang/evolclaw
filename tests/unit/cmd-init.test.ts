@@ -18,8 +18,10 @@ import path from 'path';
 // 控制 AID 生成走网络——mock 掉，保持单测 hermetic。
 // 默认抛错（模拟无网降级），个别用例覆写为成功。
 const generateControlAidMock = vi.hoisted(() => vi.fn());
+const resolveControlIssuerMock = vi.hoisted(() => vi.fn(() => 'agentid.pub'));
 vi.mock('../../src/aun/aid/control-aid.js', () => ({
   generateControlAid: generateControlAidMock,
+  resolveControlIssuer: resolveControlIssuerMock,
 }));
 
 import { cmdInit } from '../../src/cli/init.js';
@@ -39,6 +41,7 @@ describe('cmdInit (non-interactive)', () => {
     logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
     errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     generateControlAidMock.mockReset();
+    resolveControlIssuerMock.mockClear();
     // 默认：模拟无网（Gateway 不可达）→ tail 降级，不写 aid
     generateControlAidMock.mockRejectedValue(new Error('Gateway 不可达'));
   });
@@ -133,4 +136,3 @@ describe('cmdInit (non-interactive)', () => {
     expect(loadEvolclawConfig().aid).toBe('ec99999.agentid.pub');
   });
 });
-

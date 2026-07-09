@@ -115,14 +115,6 @@ describe('/rewind command', () => {
   // ── Precondition checks ──
 
   describe('preconditions', () => {
-    // /rewind 当前实现总是 ensureSession → getOrCreateSession 兜底创建，
-    // "没有活跃会话"已不是可达分支，测试设想不符当前架构
-    it.skip('should reject when no active session (NO LONGER REACHABLE)', async () => {
-      sessionManager.getActiveSession.mockResolvedValue(null);
-      const result = await cmdHandler.handle('/rewind', 'feishu', 'chat1', undefined, 'owner1');
-      expect((result as any)?.text || "").toContain('没有活跃会话');
-    });
-
     it('should reject for non-claude agent', async () => {
       sessionManager.getActiveSession.mockResolvedValue({
         id: 'sess-1', channel: 'feishu', channelId: 'chat1',

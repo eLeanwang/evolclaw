@@ -1,0 +1,651 @@
+{
+  // 规范类型：Agent 级配置文件示例
+  // 目标路径：{evolclaw_home}/agents/{aid}/config.json
+  //
+  // 本文件按 docs/config/01-overview.md 的 agent-config 形态书写：
+  // - 顶层就是 agent config，不再包一层 agentConfig
+  // - relation 级配置不混入本文件，另见：
+  //   docs/lwj/relation-config私聊权限示例.jsonc
+  //   docs/lwj/relation-config群权限示例.jsonc
+  //
+  // 注意：
+  // - roles.defaultRoles / roles.definitions 是目标权限体系扩展字段。
+  // - 当前 schema 中 roles 主要是 role → {baseagents, permissionMode} 的行为覆盖；
+  //   落地本模板时需要同步扩展 agent-config schema。
+
+  "$schema_version": 2,
+  "aid": "bot.aid.pub",
+  "enabled": true,
+  "initialized": true,
+
+  "owners": ["owner.aid.pub"],
+  "admins": ["admin.aid.pub"],
+
+  "channels": [
+    {
+      "type": "aun",
+      "name": "aun",
+      "enabled": true,
+      "aid": "bot.aid.pub"
+    }
+  ],
+
+  "active_baseagent": "claude",
+  "baseagents": {
+    "claude": {
+      "model": "claude-sonnet-4-6",
+      "effort": "medium"
+    },
+    "codex": {
+      "model": "gpt-5",
+      "effort": "medium"
+    },
+    "gemini": {
+      "model": "gemini-2.5-pro"
+    }
+  },
+
+  "permissionMode": "auto",
+  "chatmode": {
+    "private": "interactive",
+    "group": "proactive",
+    "nothuman": "proactive"
+  },
+  "dispatch": "mention",
+  "show_activities": "all",
+  "flush_delay": 3,
+  "debounce": 0,
+  "enable_rich_content": false,
+
+  "roles": {
+    // null 表示没有默认角色；无角色时不再降级 anonymous，而是直接拒绝访问。
+    "defaultRoles": {
+      "private": null,
+      "group": "visitor"
+    },
+
+    "definitions": {
+      // 内置用户角色只保留 member 与 visitor；无角色不是一种角色定义。
+      "visitor": {
+        "description": "访客，低信任只读和有限自身范围能力",
+        "allowAccess": true,
+        "permissions": {
+          "permissionMode": {
+            "default": "readonly",
+            "allowOverride": false,
+            "allowedValues": ["readonly"]
+          },
+          "active_baseagent": {
+            "default": "claude",
+            "allowOverride": false,
+            "allowedValues": ["claude"]
+          },
+          "baseagents.claude.model": {
+            "default": "claude-haiku-4-5-20251001",
+            "allowOverride": false,
+            "allowedModels": ["claude-haiku-*"]
+          },
+          "baseagents.claude.effort": {
+            "default": "low",
+            "allowOverride": false,
+            "allowedValues": ["low"]
+          },
+          "chatmode.private": {
+            "default": "proactive",
+            "allowOverride": false,
+            "allowedValues": ["interactive", "proactive"]
+          },
+          "chatmode.group": {
+            "default": "proactive",
+            "allowOverride": false,
+            "allowedValues": ["interactive", "proactive"]
+          },
+          "chatmode.nothuman": {
+            "default": "proactive",
+            "allowOverride": false,
+            "allowedValues": ["interactive", "proactive"]
+          },
+          "dispatch": {
+            "default": "mention",
+            "allowOverride": false,
+            "allowedValues": ["mention"]
+          },
+          "show_activities": {
+            "default": "none",
+            "allowOverride": false,
+            "allowedValues": ["none"]
+          },
+          "flush_delay": {
+            "default": 5,
+            "allowOverride": false,
+            "allowedValues": [5]
+          },
+          "debounce": {
+            "default": 0,
+            "allowOverride": false,
+            "allowedValues": [0]
+          },
+          "enable_rich_content": {
+            "default": false,
+            "allowOverride": false,
+            "allowedValues": [false]
+          }
+        },
+        "commandPermissions": {
+          "model.list": {
+            "allow": true,
+            "scopes": ["relation"],
+            "constraints": {
+              "ownPeerOnly": true,
+              "ownAgentOnly": true,
+              "privateOnly": true
+            }
+          },
+          "model.current": {
+            "allow": true,
+            "scopes": ["relation"],
+            "constraints": {
+              "ownPeerOnly": true,
+              "ownAgentOnly": true,
+              "privateOnly": true
+            }
+          },
+          "model.use": {
+            "allow": true,
+            "scopes": ["relation"],
+            "constraints": {
+              "ownPeerOnly": true,
+              "ownAgentOnly": true,
+              "privateOnly": true,
+              "requireFieldOverride": "baseagents.claude.model"
+            }
+          },
+          "session.list": {
+            "allow": true,
+            "scopes": ["relation"],
+            "constraints": {
+              "ownPeerOnly": true,
+              "privateOnly": true
+            }
+          },
+          "ec.msg.send": {
+            "allow": true,
+            "scopes": ["relation"],
+            "constraints": {
+              "ownPeerOnly": true,
+              "privateOnly": true
+            }
+          },
+          "file.list": { "allow": false },
+          "file.fetch": { "allow": false },
+          "ec.msg.file": { "allow": false },
+          "ec.group.*": { "allow": false },
+          "ec.ctl.*": { "allow": false },
+          "session.create": { "allow": false },
+          "session.rename": { "allow": false },
+          "session.delete": { "allow": false },
+          "trigger.*": { "allow": false },
+          "stats.*": { "allow": false },
+          "role.assign": { "allow": false },
+          "role.revoke": { "allow": false },
+          "config.*": { "allow": false },
+          "agent.*": { "allow": false },
+          "system.*": { "allow": false },
+          "storage.*": { "allow": false },
+          "aid.*": { "allow": false },
+          "gateway.*": { "allow": false },
+          "cli.exec.raw": { "allow": false, "dangerous": true },
+          "shell.exec": { "allow": false, "dangerous": true },
+          "rce.exec": { "allow": false, "dangerous": true },
+          "dangerous:*": { "allow": false, "dangerous": true },
+          "*": { "allow": false }
+        }
+      },
+
+      "reviewer": {
+        "description": "只读审阅者，可查看自身范围和指定文档目录",
+        "allowAccess": true,
+        "permissions": {
+          "permissionMode": {
+            "default": "readonly",
+            "allowOverride": false,
+            "allowedValues": ["readonly"]
+          },
+          "active_baseagent": {
+            "default": "claude",
+            "allowOverride": false,
+            "allowedValues": ["claude"]
+          },
+          "baseagents.claude.model": {
+            "default": "claude-haiku-4-5-20251001",
+            "allowOverride": false,
+            "allowedModels": ["claude-haiku-*"]
+          },
+          "baseagents.claude.effort": {
+            "default": "low",
+            "allowOverride": false,
+            "allowedValues": ["low"]
+          },
+          "chatmode.private": {
+            "default": "proactive",
+            "allowOverride": false,
+            "allowedValues": ["interactive", "proactive"]
+          },
+          "chatmode.group": {
+            "default": "proactive",
+            "allowOverride": false,
+            "allowedValues": ["interactive", "proactive"]
+          },
+          "chatmode.nothuman": {
+            "default": "proactive",
+            "allowOverride": false,
+            "allowedValues": ["interactive", "proactive"]
+          },
+          "dispatch": {
+            "default": "mention",
+            "allowOverride": false,
+            "allowedValues": ["mention"]
+          },
+          "show_activities": {
+            "default": "none",
+            "allowOverride": false,
+            "allowedValues": ["none"]
+          },
+          "flush_delay": {
+            "default": 5,
+            "allowOverride": false,
+            "allowedValues": [5]
+          },
+          "debounce": {
+            "default": 0,
+            "allowOverride": false,
+            "allowedValues": [0]
+          },
+          "enable_rich_content": {
+            "default": false,
+            "allowOverride": false,
+            "allowedValues": [false]
+          }
+        },
+        "commandPermissions": {
+          "category:read": { "allow": true },
+          "model.list": {
+            "allow": true,
+            "scopes": ["relation"],
+            "constraints": {
+              "ownPeerOnly": true,
+              "ownAgentOnly": true
+            }
+          },
+          "model.current": {
+            "allow": true,
+            "scopes": ["relation"],
+            "constraints": {
+              "ownPeerOnly": true,
+              "ownAgentOnly": true
+            }
+          },
+          "session.list": {
+            "allow": true,
+            "scopes": ["relation"],
+            "constraints": {
+              "ownPeerOnly": true
+            }
+          },
+          "file.list": {
+            "allow": true,
+            "scopes": ["filesystem"],
+            "constraints": {
+              "allowedPrefixes": [
+                "{projectPath}/docs/",
+                "{projectPath}/README.md"
+              ]
+            }
+          },
+          "file.fetch": {
+            "allow": true,
+            "scopes": ["filesystem"],
+            "constraints": {
+              "allowedPrefixes": [
+                "{projectPath}/docs/",
+                "{projectPath}/README.md"
+              ]
+            }
+          },
+          "ec.msg.send": { "allow": false },
+          "ec.msg.file": { "allow": false },
+          "ec.group.*": { "allow": false },
+          "ec.ctl.*": { "allow": false },
+          "role.assign": { "allow": false },
+          "role.revoke": { "allow": false },
+          "config.*": { "allow": false },
+          "agent.*": { "allow": false },
+          "system.*": { "allow": false },
+          "storage.*": { "allow": false },
+          "aid.*": { "allow": false },
+          "gateway.*": { "allow": false },
+          "cli.exec.raw": { "allow": false, "dangerous": true },
+          "shell.exec": { "allow": false, "dangerous": true },
+          "rce.exec": { "allow": false, "dangerous": true },
+          "dangerous:*": { "allow": false, "dangerous": true },
+          "*": { "allow": false }
+        }
+      },
+
+      "member": {
+        "description": "可信成员，自身范围读写和有限文件读取",
+        "allowAccess": true,
+        "permissions": {
+          "permissionMode": {
+            "default": "auto",
+            "allowOverride": false,
+            "allowedValues": ["auto"]
+          },
+          "active_baseagent": {
+            "default": "claude",
+            "allowOverride": false,
+            "allowedValues": ["claude"]
+          },
+          "baseagents.claude.model": {
+            "default": "claude-sonnet-4-6",
+            "allowOverride": true,
+            "allowedModels": ["claude-sonnet-*", "claude-haiku-*"]
+          },
+          "baseagents.claude.effort": {
+            "default": "medium",
+            "allowOverride": true,
+            "allowedValues": ["low", "medium", "high"]
+          },
+          "chatmode.private": {
+            "default": "interactive",
+            "allowOverride": true,
+            "allowedValues": ["interactive", "proactive"]
+          },
+          "chatmode.group": {
+            "default": "proactive",
+            "allowOverride": true,
+            "allowedValues": ["interactive", "proactive"]
+          },
+          "chatmode.nothuman": {
+            "default": "proactive",
+            "allowOverride": true,
+            "allowedValues": ["interactive", "proactive"]
+          },
+          "dispatch": {
+            "default": "mention",
+            "allowOverride": false,
+            "allowedValues": ["mention"]
+          },
+          "show_activities": {
+            "default": "all",
+            "allowOverride": true,
+            "allowedValues": ["all", "none"]
+          },
+          "flush_delay": {
+            "default": 3,
+            "allowOverride": true,
+            "allowedValues": [0, 1, 3, 5, 10]
+          },
+          "debounce": {
+            "default": 0,
+            "allowOverride": true,
+            "allowedValues": [0, 1, 2, 3, 5, 10]
+          },
+          "enable_rich_content": {
+            "default": false,
+            "allowOverride": true,
+            "allowedValues": [true, false]
+          }
+        },
+        "commandPermissions": {
+          "category:read": { "allow": true },
+          "category:write-own": { "allow": true },
+          "model.*": {
+            "allow": true,
+            "scopes": ["relation", "agent"],
+            "constraints": {
+              "ownPeerOnly": true,
+              "ownAgentOnly": true
+            }
+          },
+          "file.list": {
+            "allow": true,
+            "scopes": ["filesystem"],
+            "constraints": {
+              "allowedPrefixes": ["{projectPath}/"]
+            }
+          },
+          "file.fetch": {
+            "allow": true,
+            "scopes": ["filesystem"],
+            "constraints": {
+              "allowedPrefixes": [
+                "{projectPath}/docs/",
+                "{projectPath}/README.md"
+              ]
+            }
+          },
+          "ec.msg.send": {
+            "allow": true,
+            "constraints": { "ownPeerOnly": true }
+          },
+          "ec.msg.file": {
+            "allow": true,
+            "constraints": { "ownPeerOnly": true }
+          },
+          "ec.group.send": {
+            "allow": true,
+            "constraints": { "groupOnly": true }
+          },
+          "ec.group.file": {
+            "allow": true,
+            "constraints": { "groupOnly": true }
+          },
+          "ec.ctl.*": { "allow": false },
+          "session.list": {
+            "allow": true,
+            "scopes": ["relation"],
+            "constraints": { "ownPeerOnly": true }
+          },
+          "session.create": {
+            "allow": true,
+            "scopes": ["relation"],
+            "constraints": { "ownPeerOnly": true }
+          },
+          "session.rename": {
+            "allow": true,
+            "scopes": ["relation"],
+            "constraints": { "ownPeerOnly": true }
+          },
+          "session.delete": { "allow": false },
+          "trigger.list": {
+            "allow": true,
+            "scopes": ["relation"],
+            "constraints": { "ownPeerOnly": true }
+          },
+          "trigger.create": { "allow": false },
+          "trigger.update": { "allow": false },
+          "trigger.delete": { "allow": false, "dangerous": true },
+          "stats.summary": {
+            "allow": true,
+            "scopes": ["relation"],
+            "constraints": { "ownPeerOnly": true }
+          },
+          "stats.session": {
+            "allow": true,
+            "scopes": ["relation"],
+            "constraints": { "ownPeerOnly": true }
+          },
+          "stats.context": {
+            "allow": true,
+            "scopes": ["relation"],
+            "constraints": { "ownPeerOnly": true }
+          },
+          "stats.peers": { "allow": false },
+          "stats.groups": { "allow": false },
+          "stats.sqlReadonly": { "allow": false, "dangerous": true },
+          "stats.rebuild": { "allow": false, "dangerous": true },
+          "role.assign": { "allow": false },
+          "role.revoke": { "allow": false },
+          "config.*": { "allow": false },
+          "agent.*": { "allow": false },
+          "system.*": { "allow": false },
+          "storage.*": { "allow": false },
+          "aid.*": { "allow": false },
+          "gateway.*": { "allow": false },
+          "cli.exec.raw": { "allow": false, "dangerous": true },
+          "shell.exec": { "allow": false, "dangerous": true },
+          "rce.exec": { "allow": false, "dangerous": true },
+          "dangerous:*": { "allow": false, "dangerous": true }
+        }
+      },
+
+      "developer": {
+        "description": "受信开发者，允许更宽的项目读权限和受控协作，但仍不是管理身份",
+        "allowAccess": true,
+        "permissions": {
+          "permissionMode": {
+            "default": "request",
+            "allowOverride": false,
+            "allowedValues": ["request"]
+          },
+          "active_baseagent": {
+            "default": "claude",
+            "allowOverride": true,
+            "allowedValues": ["claude", "codex", "gemini"]
+          },
+          "baseagents.claude.model": {
+            "default": "claude-sonnet-4-6",
+            "allowOverride": true,
+            "allowedModels": ["claude-opus-*", "claude-sonnet-*", "claude-haiku-*"]
+          },
+          "baseagents.claude.effort": {
+            "default": "high",
+            "allowOverride": true,
+            "allowedValues": ["low", "medium", "high"]
+          },
+          "chatmode.private": {
+            "default": "interactive",
+            "allowOverride": true,
+            "allowedValues": ["interactive", "proactive"]
+          },
+          "chatmode.group": {
+            "default": "proactive",
+            "allowOverride": true,
+            "allowedValues": ["interactive", "proactive"]
+          },
+          "chatmode.nothuman": {
+            "default": "proactive",
+            "allowOverride": true,
+            "allowedValues": ["interactive", "proactive"]
+          },
+          "dispatch": {
+            "default": "mention",
+            "allowOverride": true,
+            "allowedValues": ["mention", "broadcast"]
+          },
+          "show_activities": {
+            "default": "all",
+            "allowOverride": true,
+            "allowedValues": ["all", "none"]
+          },
+          "flush_delay": {
+            "default": 3,
+            "allowOverride": true,
+            "allowedValues": [0, 1, 3, 5, 10]
+          },
+          "debounce": {
+            "default": 0,
+            "allowOverride": true,
+            "allowedValues": [0, 1, 2, 3, 5, 10]
+          },
+          "enable_rich_content": {
+            "default": true,
+            "allowOverride": true,
+            "allowedValues": [true, false]
+          }
+        },
+        "commandPermissions": {
+          "model.*": {
+            "allow": true,
+            "scopes": ["relation", "agent"],
+            "constraints": {
+              "ownPeerOnly": true,
+              "ownAgentOnly": true
+            }
+          },
+          "file.list": {
+            "allow": true,
+            "scopes": ["filesystem"],
+            "constraints": {
+              "allowedPrefixes": ["{projectPath}/"]
+            }
+          },
+          "file.fetch": {
+            "allow": true,
+            "scopes": ["filesystem"],
+            "constraints": {
+              "allowedPrefixes": ["{projectPath}/"]
+            }
+          },
+          "ec.msg.*": {
+            "allow": true,
+            "constraints": { "ownPeerOnly": true }
+          },
+          "ec.group.*": {
+            "allow": true,
+            "constraints": { "groupOnly": true }
+          },
+          "ec.ctl.*": { "allow": false },
+          "session.*": {
+            "allow": true,
+            "scopes": ["relation"],
+            "constraints": { "ownPeerOnly": true }
+          },
+          "trigger.list": {
+            "allow": true,
+            "scopes": ["relation", "agent"],
+            "constraints": {
+              "ownPeerOnly": true,
+              "ownAgentOnly": true
+            }
+          },
+          "trigger.create": {
+            "allow": true,
+            "scopes": ["agent"],
+            "constraints": { "ownAgentOnly": true }
+          },
+          "trigger.update": {
+            "allow": true,
+            "scopes": ["agent"],
+            "constraints": { "ownAgentOnly": true }
+          },
+          "trigger.delete": { "allow": false, "dangerous": true },
+          "stats.summary": { "allow": true },
+          "stats.session": {
+            "allow": true,
+            "scopes": ["relation"],
+            "constraints": { "ownPeerOnly": true }
+          },
+          "stats.context": {
+            "allow": true,
+            "scopes": ["relation"],
+            "constraints": { "ownPeerOnly": true }
+          },
+          "role.assign": { "allow": false },
+          "role.revoke": { "allow": false },
+          "config.write": { "allow": false, "dangerous": true },
+          "agent.*": { "allow": false },
+          "system.*": { "allow": false },
+          "storage.*": { "allow": false },
+          "aid.*": { "allow": false },
+          "gateway.*": { "allow": false },
+          "cli.exec.raw": { "allow": false, "dangerous": true },
+          "shell.exec": { "allow": false, "dangerous": true },
+          "rce.exec": { "allow": false, "dangerous": true },
+          "dangerous:*": { "allow": false, "dangerous": true }
+        }
+      }
+    }
+  }
+}

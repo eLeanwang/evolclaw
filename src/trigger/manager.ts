@@ -170,7 +170,7 @@ export class TriggerDefinitionManager {
     const definition = normalizeTriggerDefinition(definitionRaw);
     const files: TriggerCreateFile[] = [];
 
-    if (definition.execution.mode === 'script') {
+    if (definition.execution.type === 'script') {
       const scriptAbs = resolveScriptPath(sourceDir, definition.execution.script!.path);
       const rel = path.relative(sourceDir, scriptAbs).replace(/\\/g, '/');
       files.push({
@@ -225,7 +225,7 @@ export class TriggerDefinitionManager {
   }
 
   private validateScriptFile(definition: TriggerDefinition, dir: string): void {
-    if (definition.execution.mode !== 'script') return;
+    if (definition.execution.type !== 'script') return;
     const scriptAbs = resolveScriptPath(dir, definition.execution.script!.path);
     if (!fs.existsSync(scriptAbs)) {
       throw new Error(`script file not found: ${definition.execution.script!.path}`);
@@ -258,13 +258,24 @@ function mergeOrigin(
   existing: TriggerDefinition['origin'],
   incoming: unknown,
 ): TriggerDefinition['origin'] {
-  if (existing?.channel && existing.peerId) return existing;
+  if (existing?.channelKey && existing.channelId) return existing;
   if (!isRecord(incoming)) return existing;
-  const channel = optionalString(incoming.channel) ?? existing?.channel;
+  const channelKey = optionalString(incoming.channelKey) ?? existing?.channelKey;
+  const channelId = optionalString(incoming.channelId) ?? existing?.channelId;
+  const session = incoming.session === 'thread' || existing?.session === 'thread' ? 'thread' : 'main';
+  const threadId = optionalString(incoming.threadId) ?? existing?.threadId;
   const peerId = optionalString(incoming.peerId) ?? existing?.peerId;
   const sessionKey = optionalString(incoming.sessionKey) ?? existing?.sessionKey;
-  if (!channel && !peerId && !sessionKey) return undefined;
-  return { channel, peerId, sessionKey };
+  if (!channelKey && !channelId && !peerId && !sessionKey) return undefined;
+  if (!channelKey || !channelId) return existing;
+  return {
+    channelKey,
+    channelId,
+    session,
+    ...(session === 'thread' && threadId ? { threadId } : {}),
+    peerId,
+    sessionKey,
+  };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

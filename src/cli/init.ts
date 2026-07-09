@@ -149,9 +149,9 @@ export async function cmdInit(options?: {
 
   // ── 3. 非交互式分支 ──
   if (options?.nonInteractive) {
-    if (initialized && !options.force) {
-      // 已初始化（evolclaw.json + aid）且未 --force：不重写 defaults，但仍落到共享 tail（幂等补全）
-      console.log(`配置已存在: ${p.evolclawJson}（加 --force 可覆盖）`);
+    if (defaultsExisted && !options.force) {
+      // defaults 已存在且未 --force：不重写 defaults，但仍落到共享 tail（幂等补全控制 AID/owners）。
+      console.log(`配置已存在: ${defaultsPath}（加 --force 可覆盖）`);
     } else {
       let chosen: Baseagent;
       if (options.baseagent) {

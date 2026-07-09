@@ -90,7 +90,7 @@ export class SessionManager {
   }
 
   resolveIdentity(channel: string, userId?: string): SessionIdentity {
-    return this.identityResolver?.(channel, userId) ?? { role: 'anonymous', mode: 'interactive' };
+    return this.identityResolver?.(channel, userId) ?? { role: 'none', mode: 'interactive' };
   }
 
   async updateIdentity(sessionId: string, identity: SessionIdentity): Promise<void> {
@@ -645,9 +645,7 @@ export class SessionManager {
     const sessionMetadata: any = { ...(metadata || {}) };
     const newIdentity = identity ?? this.resolveIdentity(channel, userId);
 
-    if (!baseagent) {
-      throw new Error('[SessionManager] getOrCreateSession: baseagent is empty');
-    }
+    const resolvedBaseagent = baseagent || 'claude';
     const session: Session = {
       id: generateSessionId(),
       channel,
@@ -656,7 +654,7 @@ export class SessionManager {
       selfAID,
       projectPath: defaultProjectPath,
       threadId: '',
-      baseagent,
+      baseagent: resolvedBaseagent,
       sessionKey: formatSessionKey(channelType, channelId, DEFAULT_THREAD_ID),
       chatType: chatType || 'private',
       chatMode: this.resolveDefaultChatMode(channel, chatType || 'private', peerType),

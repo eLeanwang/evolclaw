@@ -7,7 +7,7 @@
  *   - resolveOutbound：对某个出站 payload 运行 handleOutbound 得到发送决策
  *
  * 设计原则（无缝迁移）：
- *   - 解析优先级：response_modes 配置 > session.chatMode（兼容现状）> 系统兜底
+ *   - 解析优先级：response_modes 配置 > chatmode effective config > 系统兜底
  *   - 响应模式成为「响应决策的源头」，下游 message-processor 的执行流程原样保留
  *   - 异常不降级（D6）：解析/决策失败时回落到安全默认，记 WARN
  */
@@ -62,7 +62,7 @@ export class ResponseModeCoordinator {
    * @param chatType 会话类型
    * @param peerKey 对端标识（override 查找）
    * @param rmConfig response_modes 配置
-   * @param chatModeFallback 现有 session.chatMode（config 未设时回落）
+   * @param chatModeFallback chatmode effective config（response_modes 未设时回落）
    * @param contextDeps 构建 context 所需依赖
    */
   resolveMode(
@@ -91,7 +91,7 @@ export class ResponseModeCoordinator {
    * 解析会话的入站响应模式 + 运行 handleInbound。
    *
    * @param message 入站消息（含 chatType，用于解析）
-   * @param chatModeFallback 现有 session.chatMode（兼容回落：config 未设时用它）
+   * @param chatModeFallback chatmode effective config（response_modes 未设时回落）
    */
   async resolveInbound(
     message: InboundMessage,
@@ -102,10 +102,10 @@ export class ResponseModeCoordinator {
       const chatType = message.chatType ?? 'private';
       const rmConfig = deps.agentConfig.response_modes;
 
-      // 解析模式：config 优先；config 未命中时用 session.chatMode 回落（兼容现状）
+      // 解析模式：response_modes 优先；未命中时用 chatmode effective config 回落。
       let resolved = this.resolver.resolve(chatType, deps.peerKey, rmConfig);
-      if (resolved.source !== 'override' && chatModeFallback && this.registry.has(chatModeFallback)) {
-        // config 没指定 → 用现有 session.chatMode（interactive/proactive）
+      if (resolved.source === 'fallback' && chatModeFallback && this.registry.has(chatModeFallback)) {
+        // response_modes 未指定 → 使用 chatmode effective config（interactive/proactive）
         const mode = this.registry.get(chatModeFallback)!;
         resolved = { mode, config: rmConfig?.configs?.[chatModeFallback] ?? {}, source: 'session' };
       }

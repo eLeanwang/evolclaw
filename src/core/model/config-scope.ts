@@ -21,7 +21,7 @@ import {
   ConfigTarget, read, write, ensureFile, resolveEffective,
   type Selector,
 } from '../../config/config-manager.js';
-import type { AgentConfig, RelationConfig, EffectiveAgentConfig, RoleOverride } from '../../types.js';
+import type { AgentConfig, RelationConfig, EffectiveAgentConfig, RoleDefinition } from '../../types.js';
 
 export type ModelScope = 'global' | 'agent' | 'role' | 'relation';
 
@@ -121,9 +121,15 @@ export function readScope(scope: ModelScope, sel: ScopeSelector, ba: string): Mo
       }
       case 'role': {
         const b = sel.self ? read<AgentConfig>(ConfigTarget.Agent, { self: sel.self }, { cache: true }) : null;
-        const ov = (b?.roles || {})[sel.role!] as RoleOverride | undefined;
-        const c = ((ov?.baseagents || {}) as any)[ba] || {};
-        return { model: c.model, effort: c[ef], permissionMode: ov?.permissionMode };
+        const def = b?.roles?.definitions?.[sel.role!];
+        const model = def?.permissions?.[`baseagents.${ba}.model`]?.default;
+        const effort = def?.permissions?.[`baseagents.${ba}.${ef}`]?.default;
+        const permissionMode = def?.permissions?.permissionMode?.default;
+        return {
+          model: typeof model === 'string' ? model : undefined,
+          effort: typeof effort === 'string' ? effort : undefined,
+          permissionMode: typeof permissionMode === 'string' ? permissionMode : undefined,
+        };
       }
       case 'relation': {
         const b = (sel.self && sel.peerKey)
@@ -165,9 +171,14 @@ export function writeScope(
     const target = ConfigTarget.Agent;
     const cur = (read<AgentConfig>(target, { self: sel.self }) as AgentConfig) || {};
     cur.roles = cur.roles || {};
-    const ov: RoleOverride = (cur.roles[sel.role!] = cur.roles[sel.role!] || {});
-    ov.baseagents = ov.baseagents || {};
-    applyBaPatchTo(ov.baseagents as any, ba, ef, patch);
+    cur.roles.definitions = cur.roles.definitions || {};
+    const roleName = sel.role!;
+    const def: RoleDefinition = (cur.roles.definitions[roleName] = cur.roles.definitions[roleName] || {
+      description: `Custom policy for ${roleName}`,
+      permissions: {},
+    });
+    writeRoleModelPermission(def, `baseagents.${ba}.model`, patch.model);
+    writeRoleModelPermission(def, `baseagents.${ba}.${ef}`, patch.effort);
     ensureFile(target, { self: sel.self });
     write(target, cur, { self: sel.self });
     return;
@@ -195,6 +206,23 @@ function applyBaPatchTo(block: Record<string, any>, ba: string, ef: string, patc
   else if (patch.effort !== undefined) sub[ef] = patch.effort;
 }
 
+function writeRoleModelPermission(def: RoleDefinition, field: string, value: string | null | undefined): void {
+  if (value === undefined) return;
+  def.permissions = def.permissions || {};
+  if (value === null) {
+    delete def.permissions[field];
+    return;
+  }
+  const existing = def.permissions[field];
+  def.permissions[field] = {
+    default: value,
+    allowOverride: existing?.allowOverride ?? true,
+    ...(existing?.allowedModels ? { allowedModels: existing.allowedModels } : {}),
+    ...(existing?.allowedValues ? { allowedValues: existing.allowedValues } : {}),
+    ...(existing?.reason ? { reason: existing.reason } : {}),
+  };
+}
+
 /** 写关系级 permissionMode（供 /perm 命令使用）。null 删除字段。 */
 export function writeRelationPermissionMode(self: string, peerKey: string, mode: string | null): void {
   const target = ConfigTarget.Relation;
@@ -217,7 +245,11 @@ export function clearScope(scope: ModelScope, sel: ScopeSelector, ba: string): v
 // ── permissionMode 解析 ────────────────────────────────────────────────────
 
 const BUILTIN_PERMISSION_BY_ROLE: Record<string, string> = {
-  owner: 'bypass', admin: 'bypass', guest: 'readonly', anonymous: 'readonly',
+  owner: 'bypass',
+  admin: 'request',
+  member: 'auto',
+  visitor: 'readonly',
+  none: 'readonly',
 };
 const FALLBACK_PERMISSION_MODE = 'auto';
 

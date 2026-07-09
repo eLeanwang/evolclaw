@@ -63,11 +63,20 @@ ec group resume <from> <group-id>
 # 查看群规则
 ec group rules <from> <group-id>
 
-# 更新群规则
+# 更新入群规则
 ec group rules <from> <group-id> --mode open|approval|invite_only|closed [--question "<question>"] [--max-pending <N>]
+
+# 查看已发布群规则文件 /rules.md
+ec group rules <from> <group-id> get
+
+# 上传并发布群规则文件
+ec group rules <from> <group-id> set <file>
+
+# 发布当前群空间 /rules.md
+ec group rules <from> <group-id> publish
 ```
 
-新建群尚未显式设置规则时，`ec group rules` 显示空对象 `{}`。
+新建群尚未显式设置入群规则时，`ec group rules` 显示空对象 `{}`。群规则文件通过 `get/set/publish` 管理，底层 `ec fs cp` 只改文件，不会自动发布为有效规则。
 
 搜索公开群、公开信息查询、群统计等高级能力当前未封装为 `ec group` 子命令。
 

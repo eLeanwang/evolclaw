@@ -1,277 +1,184 @@
-/**
- * Role Constraints - 角色约束合并器
- *
- * 应用角色约束合并配置，检查模型白名单和字段覆盖权限。
- * 核心功能：
- * 1. 根据角色定义应用字段约束
- * 2. 检查模型白名单（支持通配符）
- * 3. 检查值白名单
- * 4. 记录违规信息
- */
+import { agentConfig as agentConfigPath } from '../paths.js';
+import { atomicReadJson } from '../utils/atomic-write.js';
+import { getBuiltinRolesConfig, getManagementRoleDefinition, isManagementRole } from './builtin-roles.js';
+import type { AgentConfig, ConstraintCheckResult, ConstraintViolation, RoleDefinition } from '../types.js';
 
-import { getRoleDefinition, getFieldPermission } from './roles.js';
-import type { ConstraintViolation, ConstraintCheckResult } from '../types.js';
-
-/**
- * 应用角色约束合并配置
- *
- * @param role 用户角色
- * @param relationConfig 关系级配置
- * @returns 约束检查结果
- */
 export function mergeWithRoleConstraints(
   role: string,
-  relationConfig: Record<string, any>
+  relationConfig: Record<string, any>,
+  selfAid?: string,
 ): ConstraintCheckResult {
-  const roleDef = getRoleDefinition(role);
-
+  const roleDef = getRoleDefinitionForConstraints(role, selfAid);
   if (!roleDef) {
-    // 未定义的角色，降级到 anonymous 级别
-    console.warn(`[role-constraints] Unknown role: ${role}, fallback to anonymous`);
-    const result = mergeWithRoleConstraints('anonymous', relationConfig);
-    // 更新违规记录中的 role 为原始角色
-    result.violations.forEach(v => v.role = role);
-    return result;
+    return {
+      valid: false,
+      violations: [{
+        field: '*',
+        reason: 'override_not_allowed',
+        attempted: role,
+        allowed: null,
+        role,
+      }],
+      effectiveConfig: {},
+    };
   }
 
   const violations: ConstraintViolation[] = [];
   const effectiveConfig: Record<string, any> = {};
 
-  // 遍历角色定义的所有字段
-  for (const [field, permission] of Object.entries(roleDef.permissions)) {
-    // 从 relationConfig 中获取值（支持扁平键和嵌套对象）
-    let relationValue = relationConfig[field];
-
-    // 如果扁平键没找到，尝试从嵌套对象中提取
-    if (relationValue === undefined && field.includes('.')) {
-      relationValue = getNestedValue(relationConfig, field);
-    }
+  for (const [field, permission] of Object.entries(roleDef.permissions || {})) {
+    const relationValue = getFieldValue(relationConfig, field);
 
     if (!permission.allowOverride) {
-      // 不允许覆盖，强制使用角色默认值
       if (relationValue !== undefined && !deepEqual(relationValue, permission.default)) {
         violations.push({
           field,
           reason: 'override_not_allowed',
           attempted: relationValue,
           allowed: permission.default,
-          role
+          role,
         });
       }
-      if (field.includes('.')) {
-        setNestedValue(effectiveConfig, field, permission.default);
-      } else {
-        effectiveConfig[field] = permission.default;
-      }
-    } else {
-      // 允许覆盖，但需要检查约束
-      if (relationValue !== undefined) {
-        // 检查模型白名单
-        if (field.includes('.model') && permission.allowedModels) {
-          if (!isModelAllowedByPatterns(relationValue, permission.allowedModels)) {
-            violations.push({
-              field,
-              reason: 'model_not_allowed',
-              attempted: relationValue,
-              allowed: permission.allowedModels,
-              role
-            });
-            if (field.includes('.')) {
-              setNestedValue(effectiveConfig, field, permission.default);
-            } else {
-              effectiveConfig[field] = permission.default;
-            }
-          } else {
-            if (field.includes('.')) {
-              setNestedValue(effectiveConfig, field, relationValue);
-            } else {
-              effectiveConfig[field] = relationValue;
-            }
-          }
-        }
-        // 检查值白名单
-        else if (permission.allowedValues && permission.allowedValues.length > 0) {
-          if (!permission.allowedValues.includes(relationValue)) {
-            violations.push({
-              field,
-              reason: 'value_not_allowed',
-              attempted: relationValue,
-              allowed: permission.allowedValues,
-              role
-            });
-            if (field.includes('.')) {
-              setNestedValue(effectiveConfig, field, permission.default);
-            } else {
-              effectiveConfig[field] = permission.default;
-            }
-          } else {
-            if (field.includes('.')) {
-              setNestedValue(effectiveConfig, field, relationValue);
-            } else {
-              effectiveConfig[field] = relationValue;
-            }
-          }
-        }
-        // 无约束，直接使用
-        else {
-          if (field.includes('.')) {
-            setNestedValue(effectiveConfig, field, relationValue);
-          } else {
-            effectiveConfig[field] = relationValue;
-          }
-        }
-      } else {
-        // 关系级未配置，使用角色默认值
-        if (field.includes('.')) {
-          setNestedValue(effectiveConfig, field, permission.default);
-        } else {
-          effectiveConfig[field] = permission.default;
-        }
-      }
+      setValue(effectiveConfig, field, permission.default);
+      continue;
     }
+
+    if (relationValue === undefined) {
+      setValue(effectiveConfig, field, permission.default);
+      continue;
+    }
+
+    if (field.includes('.model') && permission.allowedModels) {
+      if (!isModelAllowedByPatterns(relationValue, permission.allowedModels)) {
+        violations.push({
+          field,
+          reason: 'model_not_allowed',
+          attempted: relationValue,
+          allowed: permission.allowedModels,
+          role,
+        });
+        setValue(effectiveConfig, field, permission.default);
+      } else {
+        setValue(effectiveConfig, field, relationValue);
+      }
+      continue;
+    }
+
+    if (permission.allowedValues && permission.allowedValues.length > 0) {
+      if (!permission.allowedValues.includes(relationValue)) {
+        violations.push({
+          field,
+          reason: 'value_not_allowed',
+          attempted: relationValue,
+          allowed: permission.allowedValues,
+          role,
+        });
+        setValue(effectiveConfig, field, permission.default);
+      } else {
+        setValue(effectiveConfig, field, relationValue);
+      }
+      continue;
+    }
+
+    setValue(effectiveConfig, field, relationValue);
   }
 
-  // 处理角色定义中没有的字段（保留，但发出警告）
-  for (const field of Object.keys(relationConfig)) {
-    if (!roleDef.permissions[field]) {
-      console.warn(`[role-constraints] Field ${field} not defined in role ${role}, keeping as-is`);
-      if (field.includes('.')) {
-        setNestedValue(effectiveConfig, field, relationConfig[field]);
-      } else {
-        effectiveConfig[field] = relationConfig[field];
-      }
-    }
+  for (const field of Object.keys(relationConfig || {})) {
+    if (roleDef.permissions?.[field]) continue;
+    setValue(effectiveConfig, field, relationConfig[field]);
   }
 
   return {
     valid: violations.length === 0,
     violations,
-    effectiveConfig
+    effectiveConfig,
   };
 }
 
-/**
- * 检查模型是否在角色的允许列表内
- *
- * @param role 角色名称
- * @param model 模型名称
- * @returns 是否允许
- */
-export function isModelAllowedForRole(role: string, model: string, baseagent = 'claude'): boolean {
-  const effectiveRole = getRoleDefinition(role) ? role : 'anonymous';
-  const perm = getFieldPermission(effectiveRole, `baseagents.${baseagent}.model`)
-    ?? (baseagent === 'claude' ? getFieldPermission('anonymous', 'baseagents.claude.model') : null);
+export function isModelAllowedForRole(role: string, model: string, baseagent = 'claude', selfAid?: string): boolean {
+  const roleDef = getRoleDefinitionForConstraints(role, selfAid);
+  const perm = roleDef?.permissions?.[`baseagents.${baseagent}.model`] ?? null;
   if (!perm || !perm.allowedModels) {
     return baseagent !== 'claude';
   }
   return isModelAllowedByPatterns(model, perm.allowedModels);
 }
 
-/**
- * 检查模型是否在白名单内
- * 支持通配符模式，如 "claude-sonnet-*"
- *
- * @param model 模型名称
- * @param allowedModels 允许的模型列表
- * @returns 是否允许
- */
-export function isModelAllowedByPatterns(model: string, allowedModels: string[]): boolean {
-  if (allowedModels.includes('*')) {
-    return true;
-  }
+function getRoleDefinitionForConstraints(role: string, selfAid?: string): RoleDefinition | null {
+  if (isManagementRole(role)) return getManagementRoleDefinition(role);
+  const definitions = {
+    ...getBuiltinRolesConfig().roles,
+    ...(selfAid ? readAgentRoleDefinitions(selfAid) : {}),
+  };
+  return definitions[role] || null;
+}
 
+function readAgentRoleDefinitions(selfAid: string): Record<string, RoleDefinition> {
+  try {
+    const agent = atomicReadJson<AgentConfig>(agentConfigPath(selfAid));
+    return agent?.roles?.definitions ?? {};
+  } catch {
+    return {};
+  }
+}
+
+export function isModelAllowedByPatterns(model: string, allowedModels: string[]): boolean {
+  if (allowedModels.includes('*')) return true;
   for (const pattern of allowedModels) {
     if (pattern.endsWith('*')) {
-      // 前缀匹配，如 "claude-sonnet-*"
-      const prefix = pattern.slice(0, -1);
-      if (model.startsWith(prefix)) {
-        return true;
-      }
-    } else {
-      // 精确匹配
-      if (model === pattern) {
-        return true;
-      }
+      if (model.startsWith(pattern.slice(0, -1))) return true;
+    } else if (model === pattern) {
+      return true;
     }
   }
-
   return false;
 }
 
-/**
- * 获取嵌套对象的值
- *
- * @param obj 对象
- * @param path 路径（点分隔）
- * @returns 值，不存在返回 undefined
- */
+function setValue(obj: Record<string, any>, field: string, value: any): void {
+  if (field.includes('.')) {
+    setNestedValue(obj, field, value);
+  } else {
+    obj[field] = value;
+  }
+}
+
 function getNestedValue(obj: any, path: string): any {
   const parts = path.split('.');
   let current = obj;
   for (const part of parts) {
-    if (current == null || typeof current !== 'object') {
-      return undefined;
-    }
+    if (current == null || typeof current !== 'object') return undefined;
     current = current[part];
   }
   return current;
 }
 
-/**
- * 设置嵌套对象的值
- *
- * @param obj 对象
- * @param path 路径（点分隔）
- * @param value 值
- */
+function getFieldValue(obj: Record<string, any>, field: string): any {
+  if (Object.prototype.hasOwnProperty.call(obj, field)) return obj[field];
+  return field.includes('.') ? getNestedValue(obj, field) : undefined;
+}
+
 function setNestedValue(obj: any, path: string, value: any): void {
   const parts = path.split('.');
   let current = obj;
-
   for (let i = 0; i < parts.length - 1; i++) {
     const part = parts[i];
-    if (!current[part] || typeof current[part] !== 'object') {
-      current[part] = {};
-    }
+    if (!current[part] || typeof current[part] !== 'object') current[part] = {};
     current = current[part];
   }
-
   current[parts[parts.length - 1]] = value;
 }
 
-/**
- * 深度相等比较
- *
- * @param a 值 A
- * @param b 值 B
- * @returns 是否相等
- */
 function deepEqual(a: any, b: any): boolean {
   if (a === b) return true;
   if (a == null || b == null) return false;
   if (typeof a !== typeof b) return false;
-
-  if (typeof a === 'object') {
-    if (Array.isArray(a) !== Array.isArray(b)) return false;
-
-    if (Array.isArray(a)) {
-      if (a.length !== b.length) return false;
-      for (let i = 0; i < a.length; i++) {
-        if (!deepEqual(a[i], b[i])) return false;
-      }
-      return true;
-    }
-
-    const keysA = Object.keys(a);
-    const keysB = Object.keys(b);
-    if (keysA.length !== keysB.length) return false;
-
-    for (const key of keysA) {
-      if (!keysB.includes(key)) return false;
-      if (!deepEqual(a[key], b[key])) return false;
-    }
-    return true;
+  if (typeof a !== 'object') return false;
+  if (Array.isArray(a) !== Array.isArray(b)) return false;
+  if (Array.isArray(a)) {
+    return a.length === b.length && a.every((item, index) => deepEqual(item, b[index]));
   }
-
-  return false;
+  const keysA = Object.keys(a);
+  const keysB = Object.keys(b);
+  return keysA.length === keysB.length
+    && keysA.every(key => Object.prototype.hasOwnProperty.call(b, key) && deepEqual(a[key], b[key]));
 }

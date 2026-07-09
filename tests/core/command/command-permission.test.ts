@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { authorizeCommand } from '../../../src/core/command/command-permission.js';
+import { authorizeCommand, USER_PLANE_CAPABILITY_CEILING } from '../../../src/core/command/command-permission.js';
 import { ConfigTarget, write } from '../../../src/config/config-manager.js';
 import { clearRolesCache } from '../../../src/config/roles.js';
 import type { CommandAuthorizationContext } from '../../../src/types.js';
@@ -9,7 +9,7 @@ describe('Command Permission', () => {
     clearRolesCache();
   });
 
-  describe('Guest role permissions', () => {
+  describe('Visitor role permissions', () => {
     const baseContext: CommandAuthorizationContext = {
       intent: {
         operation: 'model.list',
@@ -23,22 +23,22 @@ describe('Command Permission', () => {
       chatType: 'private',
       selfAid: 'agent1',
       peerKey: 'aun::user1',
-      role: 'guest',
+      role: 'visitor',
       isDaemonOwner: false,
       fromControlChannel: false,
       source: 'menu.cli',
     };
 
-    it('should allow guest to execute model.list with proper constraints', () => {
+    it('should allow visitor to execute model.list with proper constraints', () => {
       const decision = authorizeCommand(baseContext);
       expect(decision.allow).toBe(true);
       if (decision.allow) {
         expect(decision.operation).toBe('model.list');
-        expect(decision.role).toBe('guest');
+        expect(decision.role).toBe('visitor');
       }
     });
 
-    it('should allow guest model.current', () => {
+    it('should allow visitor model.current', () => {
       const ctx: CommandAuthorizationContext = {
         ...baseContext,
         intent: {
@@ -50,7 +50,7 @@ describe('Command Permission', () => {
       expect(decision.allow).toBe(true);
     });
 
-    it('should deny guest model.use because field override is not allowed', () => {
+    it('should deny visitor model.use because field override is not allowed', () => {
       const ctx: CommandAuthorizationContext = {
         ...baseContext,
         intent: {
@@ -66,7 +66,7 @@ describe('Command Permission', () => {
       }
     });
 
-    it('should deny guest cli.exec.raw', () => {
+    it('should deny visitor cli.exec.raw', () => {
       const ctx: CommandAuthorizationContext = {
         ...baseContext,
         intent: {
@@ -84,7 +84,7 @@ describe('Command Permission', () => {
       }
     });
 
-    it('should deny guest when ownPeerOnly constraint fails', () => {
+    it('should deny visitor when ownPeerOnly constraint fails', () => {
       const ctx: CommandAuthorizationContext = {
         ...baseContext,
         actorId: 'other-user',
@@ -100,7 +100,7 @@ describe('Command Permission', () => {
       }
     });
 
-    it('should deny guest when ownAgentOnly constraint fails', () => {
+    it('should deny visitor when ownAgentOnly constraint fails', () => {
       const ctx: CommandAuthorizationContext = {
         ...baseContext,
         selfAid: 'agent2',
@@ -116,19 +116,23 @@ describe('Command Permission', () => {
       }
     });
 
-    it('should deny guest in group chat (privateOnly)', () => {
+    it('should allow visitor group send when groupOnly constraint matches', () => {
       const ctx: CommandAuthorizationContext = {
         ...baseContext,
         chatType: 'group',
+        intent: {
+          operation: 'ec.group.send',
+          scope: 'relation',
+          source: 'agent-tool',
+          args: {},
+        },
+        source: 'agent-tool',
       };
       const decision = authorizeCommand(ctx);
-      expect(decision.allow).toBe(false);
-      if (!decision.allow) {
-        expect(decision.code).toBe('ARGUMENT_MISMATCH');
-      }
+      expect(decision.allow).toBe(true);
     });
 
-    it('should deny guest model.list when cli scope falls back to agent', () => {
+    it('should deny visitor model.list when cli scope falls back to agent', () => {
       const ctx: CommandAuthorizationContext = {
         ...baseContext,
         intent: {
@@ -314,7 +318,7 @@ describe('Command Permission', () => {
     });
   });
 
-  describe('Anonymous role permissions', () => {
+  describe('No role permissions', () => {
     const anonContext: CommandAuthorizationContext = {
       intent: {
         operation: 'model.list',
@@ -322,13 +326,13 @@ describe('Command Permission', () => {
         source: 'menu.cli',
         args: {},
       },
-      role: 'anonymous',
+      role: 'none',
       isDaemonOwner: false,
       fromControlChannel: false,
       source: 'menu.cli',
     };
 
-    it('should deny anonymous all operations', () => {
+    it('should deny none all operations', () => {
       const decision = authorizeCommand(anonContext);
       expect(decision.allow).toBe(false);
       if (!decision.allow) {
@@ -347,7 +351,7 @@ describe('Command Permission', () => {
           source: 'menu.cli',
           args: {},
         },
-        role: 'guest',
+        role: 'visitor',
         isDaemonOwner: false,
         fromControlChannel: false,
         chatType: 'private',
@@ -369,11 +373,11 @@ describe('Command Permission', () => {
       const ctx: CommandAuthorizationContext = {
         intent: {
           operation: 'model.list',
-          scope: 'process', // guest's model.list only allows 'relation'
+          scope: 'process', // visitor's model.list only allows 'relation'
           source: 'menu.cli',
           args: {},
         },
-        role: 'guest',
+        role: 'visitor',
         isDaemonOwner: false,
         fromControlChannel: false,
         source: 'menu.cli',
@@ -438,7 +442,7 @@ describe('Command Permission', () => {
         selfAid: 'agent1',
         role: 'owner',
         source: 'ecweb',
-      });
+      }, { self: 'agent1' });
       expect(ownerDecision.allow).toBe(true);
 
       const memberDecision = authorizeCommand({
@@ -446,13 +450,13 @@ describe('Command Permission', () => {
           operation: 'role.assign',
           scope: 'agent',
           source: 'ecweb',
-          args: { targetRole: 'guest' },
+          args: { targetRole: 'visitor' },
         },
         actorId: 'member.aid.pub',
         selfAid: 'agent1',
         role: 'member',
         source: 'ecweb',
-      });
+      }, { self: 'agent1' });
       expect(memberDecision.allow).toBe(false);
       if (!memberDecision.allow) {
         expect(memberDecision.code).toBe('NOT_ALLOWED');
@@ -460,57 +464,27 @@ describe('Command Permission', () => {
     });
 
     it('should enforce configured config key and prefix constraints', () => {
-      write(ConfigTarget.Roles, {
-        $schema_version: 4,
-        defaultRoles: { private: 'anonymous', group: 'guest' },
+      write(ConfigTarget.Agent, {
+        aid: 'agent1.agentid.pub',
+        channels: [],
         roles: {
-          constrained: {
-            description: 'constraint test role',
-            allowAccess: true,
-            permissions: {},
-            commandPermissions: {
-              'config.write': {
-                allow: true,
-                dangerous: true,
-                scopes: ['process'],
-                constraints: { allowedConfigKeys: ['debug.logLevel'] },
-              },
-              'file.fetch': {
-                allow: true,
-                scopes: ['filesystem'],
-                constraints: { allowedPrefixes: ['/safe/'] },
+          definitions: {
+            constrained: {
+              description: 'constraint test role',
+              allowAccess: true,
+              permissions: {},
+              commandPermissions: {
+                'file.fetch': {
+                  allow: true,
+                  scopes: ['filesystem'],
+                  constraints: { allowedPrefixes: ['/safe/'] },
+                },
               },
             },
           },
         },
-      });
+      }, { self: 'agent1.agentid.pub' });
       clearRolesCache();
-
-      expect(authorizeCommand({
-        intent: {
-          operation: 'config.write',
-          scope: 'process',
-          source: 'menu',
-          args: { key: 'debug.logLevel' },
-        },
-        role: 'constrained',
-        source: 'menu',
-      }).allow).toBe(true);
-
-      const badKeyDecision = authorizeCommand({
-        intent: {
-          operation: 'config.write',
-          scope: 'process',
-          source: 'menu',
-          args: { key: 'owners' },
-        },
-        role: 'constrained',
-        source: 'menu',
-      });
-      expect(badKeyDecision.allow).toBe(false);
-      if (!badKeyDecision.allow) {
-        expect(badKeyDecision.code).toBe('ARGUMENT_MISMATCH');
-      }
 
       expect(authorizeCommand({
         intent: {
@@ -519,6 +493,7 @@ describe('Command Permission', () => {
           source: 'menu',
           args: { filePath: '/safe/report.txt' },
         },
+        selfAid: 'agent1.agentid.pub',
         role: 'constrained',
         source: 'menu',
       }).allow).toBe(true);
@@ -530,6 +505,7 @@ describe('Command Permission', () => {
           source: 'menu',
           args: { filePath: '/etc/passwd' },
         },
+        selfAid: 'agent1.agentid.pub',
         role: 'constrained',
         source: 'menu',
       });
@@ -539,25 +515,104 @@ describe('Command Permission', () => {
       }
     });
 
-    it('should enforce requireExplicitDangerousGrant when declared on a permission', () => {
-      write(ConfigTarget.Roles, {
-        $schema_version: 4,
-        defaultRoles: { private: 'anonymous', group: 'guest' },
+    it('should allow user roles only within USER_PLANE_CAPABILITY_CEILING', () => {
+      expect(USER_PLANE_CAPABILITY_CEILING.allowOperations.has('session.rename')).toBe(true);
+      expect(USER_PLANE_CAPABILITY_CEILING.allowOperations.has('session.delete')).toBe(false);
+
+      write(ConfigTarget.Agent, {
+        aid: 'ceiling.agentid.pub',
+        channels: [],
         roles: {
-          sensitive: {
-            description: 'explicit grant test role',
-            allowAccess: true,
-            permissions: {},
-            commandPermissions: {
-              'role.assign': {
-                allow: true,
-                scopes: ['agent'],
-                constraints: { requireExplicitDangerousGrant: true },
+          definitions: {
+            broad: {
+              description: 'broad user role',
+              allowAccess: true,
+              permissions: {},
+              commandPermissions: {
+                'session.rename': { allow: true, scopes: ['relation'] },
+                'session.delete': { allow: true, scopes: ['relation'] },
+                'system.status': { allow: true, scopes: ['process'] },
+                'agent.show': { allow: true, scopes: ['agent'] },
+                'aid.lookupRemote': { allow: true, scopes: ['control'] },
               },
             },
           },
         },
+      }, { self: 'ceiling.agentid.pub' });
+      clearRolesCache();
+
+      expect(authorizeCommand({
+        intent: {
+          operation: 'session.rename',
+          scope: 'relation',
+          source: 'slash',
+          args: {},
+        },
+        selfAid: 'ceiling.agentid.pub',
+        role: 'broad',
+        source: 'slash',
+      }).allow).toBe(true);
+
+      for (const intent of [
+        { operation: 'session.delete', scope: 'relation', source: 'slash' },
+        { operation: 'system.status', scope: 'process', source: 'slash' },
+        { operation: 'agent.show', scope: 'agent', source: 'menu.cli' },
+        { operation: 'aid.lookupRemote', scope: 'control', source: 'menu.cli' },
+      ] as const) {
+        const decision = authorizeCommand({
+          intent: {
+            ...intent,
+            args: {},
+          },
+          selfAid: 'ceiling.agentid.pub',
+          role: 'broad',
+          source: intent.source,
+        });
+        expect(decision.allow).toBe(false);
+        if (!decision.allow) {
+          expect(decision.code).toBe('NOT_ALLOWED');
+          expect(decision.reason).toContain('outside the user permission plane');
+        }
+      }
+    });
+
+    it('should not apply user-plane ceiling to management roles', () => {
+      const decision = authorizeCommand({
+        intent: {
+          operation: 'system.status',
+          scope: 'process',
+          source: 'slash',
+          args: {},
+        },
+        role: 'owner',
+        isDaemonOwner: false,
+        source: 'slash',
       });
+
+      expect(decision.allow).toBe(true);
+    });
+
+    it('should keep role assignment outside the user permission plane', () => {
+      write(ConfigTarget.Agent, {
+        aid: 'agent1.agentid.pub',
+        channels: [],
+        roles: {
+          definitions: {
+            sensitive: {
+              description: 'explicit grant test role',
+              allowAccess: true,
+              permissions: {},
+              commandPermissions: {
+                'role.assign': {
+                  allow: true,
+                  scopes: ['agent'],
+                  constraints: { requireExplicitDangerousGrant: true },
+                },
+              },
+            },
+          },
+        },
+      }, { self: 'agent1.agentid.pub' });
       clearRolesCache();
 
       const decision = authorizeCommand({
@@ -565,14 +620,15 @@ describe('Command Permission', () => {
           operation: 'role.assign',
           scope: 'agent',
           source: 'ecweb',
-          args: { targetRole: 'guest' },
+          args: { targetRole: 'visitor' },
         },
+        selfAid: 'agent1.agentid.pub',
         role: 'sensitive',
         source: 'ecweb',
       });
       expect(decision.allow).toBe(false);
       if (!decision.allow) {
-        expect(decision.code).toBe('DANGEROUS_NOT_GRANTED');
+        expect(decision.code).toBe('NOT_ALLOWED');
       }
     });
   });

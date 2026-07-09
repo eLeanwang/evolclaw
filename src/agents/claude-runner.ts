@@ -328,7 +328,7 @@ export class AgentRunner {
     }
   }
 
-  private getAgentEnv(): Record<string, string | undefined> {
+  private getAgentEnv(runtimeEnv?: Record<string, string>): Record<string, string | undefined> {
     // SDK 0.3.x 起，CLI 在以 root 运行时会拒绝 --dangerously-skip-permissions
     // （bypassPermissions 模式映射而来），报错 "cannot be used with root/sudo privileges"
     // 并以 code 1 退出。IS_SANDBOX=1 是 CLI 提供的 root 守卫豁免开关。
@@ -342,6 +342,7 @@ export class AgentRunner {
       ...(isRoot ? { IS_SANDBOX: '1' } : {}),
       ...(this.baseUrl ? { ANTHROPIC_BASE_URL: this.baseUrl } : {}),
       ...(this.currentEvolclawSessionId ? { EVOLCLAW_SESSION_ID: this.currentEvolclawSessionId } : {}),
+      ...(runtimeEnv ?? {}),
     };
   }
 
@@ -1170,7 +1171,7 @@ export class AgentRunner {
     }
   }
 
-  async runQuery(sessionId: string, prompt: string, projectPath: string, initialClaudeSessionId?: string, images?: ImageData[], systemPromptAppend?: string, sessionManager?: any, modelOverride?: { model?: string; effort?: string; permissionMode?: string }): Promise<AsyncIterable<AgentEvent>> {
+  async runQuery(sessionId: string, prompt: string, projectPath: string, initialClaudeSessionId?: string, images?: ImageData[], systemPromptAppend?: string, sessionManager?: any, modelOverride?: { model?: string; effort?: string; permissionMode?: string }, runtimeEnv?: Record<string, string>): Promise<AsyncIterable<AgentEvent>> {
     // 记录当前 evolclaw session ID，用于 Agent ctl 环境变量注入
     this.currentEvolclawSessionId = sessionId;
 
@@ -1288,7 +1289,7 @@ export class AgentRunner {
           chatType: session?.identity?.chatType,
           selfAid: session?.identity?.self,
           peerKey: session?.identity?.peerKey,
-          role: session?.identity?.role || 'anonymous',
+          role: session?.identity?.role || 'none',
           isDaemonOwner: false, // claude-runner 在会话内执行，不是 daemon owner 操作
           fromControlChannel: permCtx?.channel?.startsWith('control#') || false,
         };
@@ -1551,7 +1552,7 @@ export class AgentRunner {
           logger.debug(`[Claude-stderr] ${trimmed}`);
         }
       },
-      env: this.getAgentEnv()
+      env: this.getAgentEnv(runtimeEnv)
     };
 
     const createQuery = (promptInput: string | MessageStream, resumeSessionId?: string, resumeAt?: string) => {

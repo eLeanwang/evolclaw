@@ -10,7 +10,6 @@ import {
   write,
 } from '../src/config/config-manager.js';
 import { collectConfigFiles } from '../src/config/snapshot.js';
-import { setPrivateRoleAssignment } from '../src/config/role-assignments.js';
 
 /**
  * v3 配置系统测试

@@ -1,0 +1,87 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "agent-config.schema.3.json",
+  "title": "AgentConfig (agents/{aid}/config.json)",
+  "x-logical-name": "agent-config",
+  "x-permission": "H",
+  "x-scope": "agent",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["aid", "channels"],
+  "properties": {
+    "$schema_version": { "type": "number", "default": 3, "x-merge": "scalar" },
+    "aid": { "type": "string", "x-merge": "scalar" },
+    "enabled": { "type": "boolean", "x-merge": "scalar" },
+    "lifecycle": { "type": "string", "enum": ["created", "bootstrapping", "active"], "x-merge": "scalar" },
+    "initialized": { "type": "boolean", "x-merge": "scalar" },
+    "owners": {
+      "type": "array",
+      "items": { "type": "string" },
+      "uniqueItems": true,
+      "x-merge": "list"
+    },
+    "admins": {
+      "type": "array",
+      "items": { "type": "string" },
+      "uniqueItems": true,
+      "x-merge": "list"
+    },
+    "channels": { "type": "array", "items": { "type": "object" }, "x-merge": "list" },
+    "aun": { "type": "object", "x-merge": "dict" },
+    "models": { "type": "object", "x-merge": "dict" },
+    "active_baseagent": { "type": "string", "x-merge": "scalar" },
+    "baseagents": { "type": "object", "x-merge": "dict" },
+    "projects": { "type": "object", "x-merge": "dict" },
+    "capabilities": { "type": "object", "x-merge": "dict" },
+    "debug": { "type": "object", "x-merge": "dict" },
+    "observable": { "type": "boolean", "x-merge": "scalar" },
+    "chatmode": { "type": "object", "x-merge": "dict" },
+    "response_modes": { "type": "object", "x-merge": "dict" },
+    "flush_delay": { "type": "number", "x-merge": "scalar" },
+    "debounce": { "type": "number", "x-merge": "scalar" },
+    "dispatch": { "type": "string", "enum": ["mention", "broadcast"], "x-merge": "scalar" },
+    "show_activities": { "type": "string", "enum": ["all", "none"], "x-merge": "scalar" },
+    "proactive": { "type": "object", "x-merge": "dict" },
+    "group_venue_sync": { "type": "object", "x-merge": "dict" },
+    "render": { "type": "object", "x-merge": "dict" },
+    "enable_rich_content": { "type": "boolean", "x-merge": "scalar" },
+    "permissionMode": {
+      "type": "string",
+      "enum": ["auto", "bypass", "readonly", "request", "edit", "plan", "noask"],
+      "x-merge": "scalar"
+    },
+    "roles": {
+      "type": "object",
+      "x-merge": "dict",
+      "additionalProperties": false,
+      "properties": {
+        "defaultRoles": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "private": { "type": ["string", "null"], "pattern": "^[a-z0-9_-]+$" },
+            "group": { "type": ["string", "null"], "pattern": "^[a-z0-9_-]+$" }
+          }
+        },
+        "definitions": {
+          "type": "object",
+          "propertyNames": {
+            "pattern": "^(?!owner$)(?!admin$)[a-z0-9_-]+$"
+          },
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["description", "permissions"],
+            "properties": {
+              "description": { "type": "string" },
+              "allowAccess": { "type": "boolean" },
+              "permissions": { "type": "object" },
+              "commandPermissions": { "type": "object" }
+            }
+          }
+        }
+      }
+    },
+    "extra_backup": { "type": "array", "items": { "type": "object" }, "x-merge": "list" }
+  }
+}

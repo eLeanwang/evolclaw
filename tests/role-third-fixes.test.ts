@@ -28,7 +28,7 @@ describe('resolveEffective role constraints', () => {
     expect(effective.baseagents?.claude?.model).toBe('claude-opus-4-8');
   });
 
-  it('constrains guest relation behavior when role is explicit', () => {
+  it('constrains visitor relation behavior when role is explicit', () => {
     // v3: RelationBehavior → Relation
     write(
       ConfigTarget.Relation,
@@ -40,7 +40,7 @@ describe('resolveEffective role constraints', () => {
       { self: aid, peerKey },
     );
 
-    const effective = resolveEffective({ self: aid, peerKey, role: 'guest' });
+    const effective = resolveEffective({ self: aid, peerKey, role: 'visitor' });
     expect(effective.permissionMode).toBe('readonly');
     expect(effective.dispatch).toBe('mention');
     expect(effective.baseagents?.claude?.model).toBe('claude-haiku-4-5-20251001');
@@ -65,7 +65,7 @@ describe('resolveEffective role constraints', () => {
   });
 
   it('applies all builtin role defaults consistently', () => {
-    const roles = ['owner', 'admin', 'member', 'guest', 'anonymous'] as const;
+    const roles = ['owner', 'admin', 'member', 'visitor', 'none'] as const;
     const results = roles.map(role => ({
       role,
       effective: resolveEffective({ self: aid, peerKey, role }),
@@ -75,6 +75,6 @@ describe('resolveEffective role constraints', () => {
     expect(results[1].effective.permissionMode).toBe('request');
     expect(results[2].effective.permissionMode).toBe('auto');
     expect(results[3].effective.permissionMode).toBe('readonly');
-    expect(results[4].effective.permissionMode).toBe('readonly');
+    expect(results[4].effective.permissionMode).toBeUndefined();
   });
 });

@@ -1,0 +1,49 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "relation-config.schema.2.json",
+  "title": "RelationConfig (agents/{aid}/relations/{peerKey}/config.json)",
+  "x-logical-name": "relation-config",
+  "x-permission": "H",
+  "x-scope": "relation",
+  "type": "object",
+  "additionalProperties": true,
+  "properties": {
+    "$schema_version": { "type": "number", "default": 2, "x-merge": "scalar" },
+    "models": { "type": "object", "x-merge": "dict" },
+    "baseagents": { "type": "object", "x-merge": "dict" },
+    "chatmode": { "type": "object", "x-merge": "dict" },
+    "response_modes": { "type": "object", "x-merge": "dict" },
+    "flush_delay": { "type": "number", "x-merge": "scalar" },
+    "debounce": { "type": "number", "x-merge": "scalar" },
+    "dispatch": { "type": "string", "enum": ["mention", "broadcast"], "x-merge": "scalar" },
+    "show_activities": { "type": "string", "enum": ["all", "none"], "x-merge": "scalar" },
+    "enable_rich_content": { "type": "boolean", "x-merge": "scalar" },
+    "proactive": { "type": "object", "x-merge": "dict" },
+    "group_venue_sync": { "type": "object", "x-merge": "dict" },
+    "render": { "type": "object", "x-merge": "dict" },
+    "permissionMode": {
+      "type": "string",
+      "enum": ["auto", "bypass", "readonly", "request", "edit", "plan", "noask"],
+      "x-merge": "scalar"
+    },
+    "roles": {
+      "type": "object",
+      "x-merge": "dict",
+      "additionalProperties": false,
+      "properties": {
+        "assigned": {
+          "type": ["string", "null"],
+          "pattern": "^(?!owner$)(?!admin$)[a-z0-9_-]+$"
+        },
+        "members": {
+          "type": "object",
+          "additionalProperties": {
+            "type": ["string", "null"],
+            "pattern": "^(?!owner$)(?!admin$)[a-z0-9_-]+$"
+          }
+        }
+      }
+    },
+    "extra_backup": { "type": "array", "items": { "type": "object" }, "x-merge": "list" }
+  }
+}

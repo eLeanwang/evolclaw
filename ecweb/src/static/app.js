@@ -628,8 +628,8 @@ const translations = {
     'roleDefs.owner': '所有者',
     'roleDefs.admin': '管理员',
     'roleDefs.member': '成员',
-    'roleDefs.guest': '访客',
-    'roleDefs.anonymous': '匿名',
+    'roleDefs.visitor': '访客',
+    'roleDefs.none': '无角色',
     'roleDefs.viewDetails': '查看详情',
     'roleDefs.edit': '编辑',
     'roleDefs.reset': '重置',
@@ -1298,8 +1298,8 @@ const translations = {
     'roleDefs.owner': 'Owner',
     'roleDefs.admin': 'Admin',
     'roleDefs.member': 'Member',
-    'roleDefs.guest': 'Guest',
-    'roleDefs.anonymous': 'Anonymous',
+    'roleDefs.visitor': 'Visitor',
+    'roleDefs.none': 'None',
     'roleDefs.viewDetails': 'View Details',
     'roleDefs.edit': 'Edit',
     'roleDefs.reset': 'Reset',
@@ -1401,6 +1401,17 @@ function toggleLang() {
 // 部署下都正确（proxy-server 用首段路径选服务，前缀不能丢）。
 const BASE = location.pathname.replace(/[^/]*$/, '');
 const apiUrl = (p) => BASE + p.replace(/^\/+/, '');
+let roleDefinitionsCurrentAgent = null;
+
+function roleDefinitionsParams() {
+  return roleDefinitionsCurrentAgent ? { aid: roleDefinitionsCurrentAgent } : {};
+}
+
+function roleDefinitionsApi(path) {
+  const aid = roleDefinitionsCurrentAgent || state.roleDefinitions?.aid || '';
+  const suffix = aid ? `${path.includes('?') ? '&' : '?'}aid=${encodeURIComponent(aid)}` : '';
+  return apiUrl(path + suffix);
+}
 
 // ── 配对 ──
 async function pair(code) {
@@ -1640,7 +1651,7 @@ function switchView(view) {
   else if (view === 'monitor') subscribe('monitor', { range: monRange });
   else if (view === 'gateway') subscribe('gateway', {});
   else if (view === 'usage') refreshUsageView();
-  else if (view === 'roleDefinitions') subscribe('roleDefinitions', {});
+  else if (view === 'roleDefinitions') subscribe('roleDefinitions', roleDefinitionsParams());
   else if (view === 'roles') subscribe('roles', {});
   else subscribe('agents', {});
   if (state[view]) renderView(view);
@@ -2899,11 +2910,22 @@ function agentChannelStatusClass(status) {
   return 'unknown';
 }
 
+function agentChannelId(type, name) {
+  return `${String(type || '')}\u0000${String(name || '')}`;
+}
+
+function agentChannelInputId(row) {
+  const raw = agentChannelId(row.type, row.name);
+  let hash = 0;
+  for (let i = 0; i < raw.length; i++) hash = ((hash * 31) + raw.charCodeAt(i)) >>> 0;
+  return `ag-channel-owner-${hash.toString(36)}`;
+}
+
 function agentChannelRow(type, item, idx) {
   if (typeof item === 'string') {
     const parts = item.split(/[\/#]/);
     const itemType = parts[0] || type || 'channel';
-    const itemName = parts.slice(1).join('/') || item;
+    const itemName = parts.length >= 3 ? parts[parts.length - 1] : (parts.slice(1).join('/') || item);
     return {
       type: itemType,
       name: itemName,
@@ -2911,15 +2933,19 @@ function agentChannelRow(type, item, idx) {
       status: 'unknown',
       runtimeName: item,
       key: item,
+      editable: false,
     };
   }
   if (item && typeof item === 'object') {
+    const rowType = String(item.type || item.channelType || type || 'channel');
+    const rowName = String(item.name || item.instName || item.instanceName || item.channel || item.id || `${type || 'channel'}-${idx + 1}`);
     return {
-      type: String(item.type || item.channelType || type || 'channel'),
-      name: String(item.name || item.instName || item.instanceName || item.channel || item.id || `${type || 'channel'}-${idx + 1}`),
+      type: rowType,
+      name: rowName,
       owners: agentChannelOwners(item),
       status: agentChannelStatus(item),
       key: String(item.name || item.instName || item.id || `${type || 'channel'}-${idx}`),
+      editable: rowType !== 'aun',
     };
   }
   return null;
@@ -2955,8 +2981,8 @@ function agentRuntimeChannelRow(channel, idx) {
   const parts = raw.split(/[\/#]/);
   const type = parts[0] || 'channel';
   const rawName = parts[parts.length - 1] || raw;
-  const name = parts.length >= 3 ? `${parts.slice(1, -1).join('/')}/${rawName}` : (parts.slice(1).join('/') || raw);
-  return { type, name, rawName, owners: [], status: 'active', runtimeName: raw, key: raw || `${type}-${idx}` };
+  const name = parts.length >= 3 ? rawName : (parts.slice(1).join('/') || raw);
+  return { type, name, rawName, owners: [], status: 'active', runtimeName: raw, key: raw || `${type}-${idx}`, editable: false };
 }
 
 function agentChannelMatches(configRow, runtimeRow) {
@@ -2969,21 +2995,25 @@ function agentChannelMatches(configRow, runtimeRow) {
 function agentMergeChannelRows(configRows, runtimeRows) {
   const rows = [];
   const usedConfig = new Set();
+  const seenRuntime = new Set();
   for (const runtimeRow of runtimeRows) {
+    seenRuntime.add(agentChannelId(runtimeRow.type, runtimeRow.name));
     const idx = configRows.findIndex((row, i) => !usedConfig.has(i) && agentChannelMatches(row, runtimeRow));
     if (idx >= 0) {
       usedConfig.add(idx);
       rows.push({
         ...runtimeRow,
+        name: configRows[idx].name,
         owners: configRows[idx].owners,
         status: configRows[idx].status === 'unknown' ? runtimeRow.status : configRows[idx].status,
+        editable: configRows[idx].editable,
       });
     } else {
       rows.push(runtimeRow);
     }
   }
   configRows.forEach((row, idx) => {
-    if (!usedConfig.has(idx)) rows.push(row);
+    if (!usedConfig.has(idx) && !seenRuntime.has(agentChannelId(row.type, row.name))) rows.push(row);
   });
   return rows;
 }
@@ -3004,7 +3034,7 @@ function agentChannelsToRows(data) {
 
 function agentChannelsHtml(data) {
   const safe = agentSafeConfig(data);
-  const rows = agentChannelsToRows(data);
+  const rows = agentChannelsToRows(data).filter(row => String(row.type || '') !== 'aun');
   const fallbackOwners = Array.isArray(safe.owners)
     ? safe.owners.map(String)
     : (Array.isArray(data?.config?.owners) ? data.config.owners.map(String) : []);
@@ -3015,9 +3045,20 @@ function agentChannelsHtml(data) {
     const owners = displayOwners.length ? displayOwners.map(String).join(', ') : t('agents.channels.noOwners');
     const statusLabel = agentChannelStatusLabel(row.status);
     const statusClass = agentChannelStatusClass(row.status);
+    const inputId = agentChannelInputId(row);
+    const ownerValue = displayOwners.join(', ');
+    const ownerControl = row.editable
+      ? `<div class="ag-edit-channel-owner-control" data-channel-owner-control="1">` +
+          `<button class="ag-edit-channel-owners-value" type="button" title="${esc(displayOwners.join(', '))}">${esc(owners)}</button>` +
+          `<input id="${esc(inputId)}" class="ag-edit-channel-owners-input" type="text" autocomplete="off" spellcheck="false" value="${esc(ownerValue)}" data-channel-owner="1" data-channel-type="${esc(row.type)}" data-channel-name="${esc(row.name)}" data-original-owners="${esc(JSON.stringify(row.owners.map(String)))}" placeholder="${esc(t('agents.channels.noOwners'))}">` +
+        `</div>`
+      : `<span class="ag-edit-channel-owners" title="${esc(displayOwners.join(', '))}">${esc(owners)}</span>`;
     html += `<div class="ag-edit-channel" title="${esc(row.type + '/' + row.name)}">` +
-      `<span class="ag-edit-channel-type">${esc(row.type)}</span>` +
-      `<span class="ag-edit-channel-owners" title="${esc(displayOwners.join(', '))}">${esc(owners)}</span>` +
+      `<div class="ag-edit-channel-main">` +
+        `<span class="ag-edit-channel-type">${esc(row.type)}</span>` +
+        `<span class="ag-edit-channel-name">${esc(row.name)}</span>` +
+      `</div>` +
+      ownerControl +
       `<span class="ag-edit-channel-status ${esc(statusClass)}">${esc(statusLabel)}</span>` +
       `</div>`;
   }
@@ -3398,12 +3439,80 @@ function openAgentCreateDrawer() {
 }
 
 function readAgentEditValues(root) {
+  const channelOwners = [];
+  root.querySelectorAll('[data-channel-owner="1"]').forEach(el => {
+    let original = [];
+    try {
+      const parsed = JSON.parse(el.dataset.originalOwners || '[]');
+      if (Array.isArray(parsed)) original = parsed.map(String);
+    } catch {}
+    const owners = agentOwnersFromText(el.value || '');
+    if (!sameStringArray(owners, original)) {
+      channelOwners.push({
+        type: el.dataset.channelType || '',
+        name: el.dataset.channelName || '',
+        owners,
+      });
+    }
+  });
   return {
     owners: agentOwnersFromText(root.querySelector('#ag-edit-owners')?.value || ''),
+    channelOwners,
     activeBaseagent: root.querySelector('#ag-edit-active')?.value || 'claude',
     model: root.querySelector('#ag-edit-model')?.value.trim() || '',
     effort: root.querySelector('#ag-edit-effort')?.value.trim() || '',
   };
+}
+
+function agentChannelOwnerDisplayText(input) {
+  const owners = agentOwnersFromText(input?.value || '');
+  return owners.length ? owners.join(', ') : t('agents.channels.noOwners');
+}
+
+function closeAgentChannelOwnerEditor(control) {
+  if (!control || !control.classList.contains('editing')) return;
+  const input = control.querySelector('[data-channel-owner="1"]');
+  const value = control.querySelector('.ag-edit-channel-owners-value');
+  if (value && input) {
+    value.textContent = agentChannelOwnerDisplayText(input);
+    value.title = agentOwnersFromText(input.value || '').join(', ');
+  }
+  control.classList.remove('editing');
+}
+
+function closeAllAgentChannelOwnerEditors(root, except) {
+  root.querySelectorAll('[data-channel-owner-control="1"].editing').forEach(control => {
+    if (control !== except) closeAgentChannelOwnerEditor(control);
+  });
+}
+
+function openAgentChannelOwnerEditor(control) {
+  if (!control) return;
+  closeAllAgentChannelOwnerEditors(control.closest('.ag-edit-backdrop') || document, control);
+  control.classList.add('editing');
+  const input = control.querySelector('[data-channel-owner="1"]');
+  if (input) {
+    input.focus();
+    input.select();
+  }
+}
+
+function bindAgentChannelOwnerEditors(ctx) {
+  const root = ctx.backdrop;
+  root.querySelectorAll('[data-channel-owner-control="1"]').forEach(control => {
+    const open = () => openAgentChannelOwnerEditor(control);
+    control.querySelector('.ag-edit-channel-owners-value')?.addEventListener('click', open);
+    control.querySelector('[data-channel-owner="1"]')?.addEventListener('keydown', e => {
+      if (e.key === 'Enter' || e.key === 'Escape') {
+        e.preventDefault();
+        closeAgentChannelOwnerEditor(control);
+      }
+    });
+  });
+  root.addEventListener('click', e => {
+    if (e.target.closest('[data-channel-owner-control="1"]')) return;
+    closeAllAgentChannelOwnerEditors(root);
+  });
 }
 
 function collectAgentEditPatch(ctx) {
@@ -3411,6 +3520,7 @@ function collectAgentEditPatch(ctx) {
   const configPatch = {};
 
   if (!sameStringArray(values.owners, ctx.original.owners)) configPatch.owners = values.owners;
+  if (values.channelOwners.length > 0) configPatch.channelOwners = values.channelOwners;
   if (values.activeBaseagent !== ctx.original.activeBaseagent) {
     if (Array.isArray(ctx.availableBaseagents) && ctx.availableBaseagents.length && !ctx.availableBaseagents.includes(values.activeBaseagent)) {
       return { error: tf('agents.edit.error.baseagentReadonly', { baseagent: values.activeBaseagent }) };
@@ -3702,6 +3812,7 @@ function openAgentConfigDrawer(aid, data) {
     ctx.optionLoadToken = token;
     syncAgentEffortOptions(ctx, baseagent, backdrop.querySelector('#ag-edit-model')?.value || '', effort, token);
   });
+  bindAgentChannelOwnerEditors(ctx);
   document.addEventListener('keydown', ctx.onKeydown);
   syncAgentBaseagentFields(ctx);
   syncAgentBaseagentOptions(ctx);
@@ -6672,10 +6783,14 @@ function renderAgentPeerRelations(data, aid) {
 
 function roleSourceLabel(source) {
   const labels = {
-    assignment: 'Explicit',
+    'relation-assigned': 'Explicit',
+    'group-member': 'Member override',
     'private-inherited': 'Private role',
     'group-default': 'Group role',
     default: 'Default',
+    none: 'None',
+    'agent-config-owner': 'Owner',
+    'agent-config-admin': 'Admin',
   };
   return labels[source] || source || '-';
 }
@@ -6688,7 +6803,24 @@ function peerTypeText(peerType) {
 }
 
 function roleClass(role) {
-  return String(role || 'anonymous').replace(/[^a-z0-9_-]/gi, '-');
+  return String(role || 'none').replace(/[^a-z0-9_-]/gi, '-');
+}
+
+function displayRole(role) {
+  return role || 'none';
+}
+
+function assignedRoleFor(scope, item) {
+  if (!item) return '';
+  if (scope === 'private') return item.source === 'relation-assigned' ? (item.assignment?.role || item.role || '') : '';
+  if (scope === 'group') return item.source === 'relation-assigned' ? (item.assignment?.role || item.role || '') : '';
+  return item.source === 'group-member' ? (item.assignment?.role || item.role || '') : '';
+}
+
+function assignableRolesForAgent(agentAid) {
+  const agent = (state.roles?.agents || []).find(item => item.aid === agentAid);
+  const roles = agent?.roles || Object.keys(state.roleDefinitions?.roles || {});
+  return Array.from(new Set(roles)).filter(role => role !== 'owner' && role !== 'admin');
 }
 
 function memberMatchesSearch(member) {
@@ -6759,14 +6891,14 @@ function renderRelationsTable(data, filterAid = null) {
 function renderPrivateConversationRow(tbody, conv) {
   const peerId = conv.peerId || conv.peerAid || conv.peerKey || conv.conversationId;
   const name = conv.peerName || conv.name || shortAid(peerId);
-  const assignedRole = conv.source === 'assignment' ? (conv.assignment?.role || conv.role || '') : '';
+  const assignedRole = assignedRoleFor('private', conv);
   const row = tbody.insertRow();
   row.innerHTML = `
     <td><span class="chat-tag chat-tag-private">${esc(t('roles.chatType.private') || 'Private')}</span></td>
     <td><strong>${esc(name)}</strong></td>
     <td><code>${esc(peerId)}</code></td>
     <td>${esc(peerTypeText(conv.peerType))}</td>
-    <td><span class="role-badge role-${esc(roleClass(conv.role))}">${esc(conv.role || 'anonymous')}</span></td>
+    <td><span class="role-badge role-${esc(roleClass(conv.role))}">${esc(displayRole(conv.role))}</span></td>
     <td><span class="role-source">${esc(roleSourceLabel(conv.source))}</span></td>
     <td>
       <button class="edit-peer-role-btn"
@@ -6787,7 +6919,7 @@ function renderGroupConversationRow(tbody, conv) {
   const groupKey = `${conv.self}::${groupId}`;
   const members = (conv.members || []).filter(member => memberMatchesSearch(member));
   const expanded = rolesExpandedGroups.has(groupKey) || (!!rolesSearchTerm && members.length > 0);
-  const assignedRole = conv.source === 'assignment' ? (conv.assignment?.role || conv.role || '') : '';
+  const assignedRole = assignedRoleFor('group', conv);
   const row = tbody.insertRow();
   row.className = 'group-conversation-row';
   row.innerHTML = `
@@ -6798,7 +6930,7 @@ function renderGroupConversationRow(tbody, conv) {
     <td><strong>${esc(conv.groupName || conv.name || groupId)}</strong></td>
     <td><code>${esc(groupId)}</code></td>
     <td>-</td>
-    <td><span class="role-badge role-${esc(roleClass(conv.role))}">${esc(conv.role || 'guest')}</span></td>
+    <td><span class="role-badge role-${esc(roleClass(conv.role))}">${esc(displayRole(conv.role))}</span></td>
     <td><span class="role-source">${esc(roleSourceLabel(conv.source))}</span></td>
     <td>
       <button class="edit-peer-role-btn"
@@ -6827,7 +6959,7 @@ function renderGroupMemberRow(tbody, conv, member) {
   const groupId = conv.groupId || conv.conversationId;
   const peerId = member.peerId || member.peerAid || member.peerKey;
   const name = member.peerName || shortAid(peerId);
-  const assignedRole = member.source === 'assignment' ? (member.assignment?.role || member.role || '') : '';
+  const assignedRole = assignedRoleFor('group-member', member);
   const row = tbody.insertRow();
   row.className = 'group-member-row';
   row.innerHTML = `
@@ -6835,7 +6967,7 @@ function renderGroupMemberRow(tbody, conv, member) {
     <td><span class="group-member-indent">${esc(name)}</span></td>
     <td><code>${esc(peerId)}</code></td>
     <td>${esc(peerTypeText(member.peerType))}</td>
-    <td><span class="role-badge role-${esc(roleClass(member.role))}">${esc(member.role || 'guest')}</span></td>
+    <td><span class="role-badge role-${esc(roleClass(member.role))}">${esc(displayRole(member.role))}</span></td>
     <td><span class="role-source">${esc(roleSourceLabel(member.source))}</span></td>
     <td>
       <button class="edit-peer-role-btn"
@@ -6969,9 +7101,7 @@ function openPeerRoleModal(options) {
   const { agentAid, scope, peerId, groupId, effectiveRole, assignedRole, label } = options;
   if (title) title.textContent = `${t('roles.editPeerRole') || 'Edit Peer Role'}: ${label || peerId || groupId}`;
 
-  const builtinRoles = ['owner', 'admin', 'member', 'guest', 'anonymous'];
-  const definedRoles = state.roleDefinitions?.roles ? Object.keys(state.roleDefinitions.roles) : [];
-  const roles = Array.from(new Set([...builtinRoles, ...definedRoles]));
+  const roles = assignableRolesForAgent(agentAid);
   body.innerHTML = `
     <div style="margin-bottom: 16px;">
       <label style="display: block; margin-bottom: 8px; font-weight: 500;">
@@ -6983,7 +7113,7 @@ function openPeerRoleModal(options) {
       </select>
     </div>
     <p style="font-size: 12px; color: var(--dim); margin-top: 12px;">
-      ${t('roles.editHint') || 'Role changes will update role-assignments.'}
+      ${t('roles.editHint') || 'Role changes update relation config roles.'}
     </p>
   `;
 
@@ -7043,16 +7173,16 @@ const ROLE_ICONS = {
   owner: '👑',
   admin: '🛡️',
   member: '👥',
-  guest: '👤',
-  anonymous: '🚫'
+  visitor: '👤',
+  none: '-'
 };
 
 const ROLE_NAMES = {
   owner: 'roleDefs.owner',
   admin: 'roleDefs.admin',
   member: 'roleDefs.member',
-  guest: 'roleDefs.guest',
-  anonymous: 'roleDefs.anonymous'
+  visitor: 'roleDefs.visitor',
+  none: 'roleDefs.none'
 };
 
 function renderRoleDefinitions(data) {
@@ -7069,6 +7199,8 @@ function renderRoleDefinitions(data) {
     grid.innerHTML = '<div class="role-error">❌ 未收到角色定义数据</div>';
     return;
   }
+
+  if (data.aid) roleDefinitionsCurrentAgent = data.aid;
 
   if (!data.roles) {
     console.warn('[roleDefinitions] Data received but no roles field:', data);
@@ -7103,37 +7235,54 @@ function renderDefaultRoleSelector(data) {
   if (!container) return;
 
   const defaults = {
-    private: data.defaultRoles?.private || 'anonymous',
-    group: data.defaultRoles?.group || 'guest',
+    private: data.defaultRoles?.private || '',
+    group: data.defaultRoles?.group || '',
   };
 
   const roleOptions = Object.keys(data.roles || {}).map(roleName =>
     `<option value="${esc(roleName)}">${esc(ROLE_NAMES[roleName] ? t(ROLE_NAMES[roleName]) : roleName)}</option>`
   ).join('');
+  const noneOption = `<option value="">${esc(t('roleDefs.none') || 'None')}</option>`;
+  const agentOptions = (data.agents || []).map(agent => {
+    const label = agent.displayName || agent.name || agent.aid;
+    return `<option value="${esc(agent.aid)}">${esc(label)}</option>`;
+  }).join('');
 
   container.innerHTML = `
     <label class="role-default-label">
+      <span>Agent:</span>
+      <select id="role-definitions-agent-select" class="form-select">${agentOptions}</select>
+    </label>
+    <label class="role-default-label">
       <span>${currentLang === 'zh-CN' ? '私聊默认角色:' : 'Private default role:'}</span>
-      <select id="default-private-role-select" class="form-select">${roleOptions}</select>
+      <select id="default-private-role-select" class="form-select">${noneOption}${roleOptions}</select>
     </label>
     <label class="role-default-label">
       <span>${currentLang === 'zh-CN' ? '群聊默认角色:' : 'Group default role:'}</span>
-      <select id="default-group-role-select" class="form-select">${roleOptions}</select>
+      <select id="default-group-role-select" class="form-select">${noneOption}${roleOptions}</select>
     </label>
     <small style="color: var(--dim);">${currentLang === 'zh-CN' ? '私聊和群聊使用独立的默认角色。' : 'Private and group conversations use separate fallback roles.'}</small>
   `;
 
   const privateSelect = $('#default-private-role-select');
   const groupSelect = $('#default-group-role-select');
+  const agentSelect = $('#role-definitions-agent-select');
   if (!privateSelect || !groupSelect) return;
+  if (agentSelect) {
+    agentSelect.value = data.aid || '';
+    agentSelect.onchange = () => {
+      roleDefinitionsCurrentAgent = agentSelect.value || null;
+      subscribe('roleDefinitions', roleDefinitionsParams());
+    };
+  }
   privateSelect.value = defaults.private;
   groupSelect.value = defaults.group;
 
   const save = async () => {
-    const next = { private: privateSelect.value, group: groupSelect.value };
+    const next = { private: privateSelect.value || null, group: groupSelect.value || null };
     try {
       const token = localStorage.getItem(TOKEN_KEY);
-      const writeRes = await fetch(apiUrl('api/role-definitions'), {
+      const writeRes = await fetch(roleDefinitionsApi('api/role-definitions'), {
         method: 'PUT',
         headers: {
           'Content-Type': 'application/json',
@@ -7573,7 +7722,7 @@ function createRoleCard(roleName, roleDef) {
   const commandStats = getCommandPermissionStats(roleDef.commandPermissions);
 
   // 判断是否为内置角色
-  const builtinRoles = ['owner', 'admin', 'member', 'guest', 'anonymous'];
+  const builtinRoles = ['member', 'visitor'];
   const isBuiltin = builtinRoles.includes(roleName);
 
   card.innerHTML = `
@@ -7655,7 +7804,7 @@ function initRoleDefinitionsTab() {
 
       try {
         const token = localStorage.getItem(TOKEN_KEY);
-        const res = await fetch(apiUrl(`api/role-definitions/${roleName}/reset`), {
+        const res = await fetch(roleDefinitionsApi(`api/role-definitions/${roleName}/reset`), {
           method: 'POST',
           headers: { 'Authorization': `Bearer ${token}` }
         });
@@ -7677,11 +7826,11 @@ function initRoleDefinitionsTab() {
     if (btn) {
       const roleName = btn.dataset.role;
 
-      if (!confirm(`确定要删除角色 "${roleName}" 吗？\n\n注意：内置角色（owner/admin/member/guest/anonymous）不能删除。`)) return;
+      if (!confirm(`确定要删除角色 "${roleName}" 吗？\n\n注意：内置/管理角色（owner/admin/member/visitor）不能删除。`)) return;
 
       try {
         const token = localStorage.getItem(TOKEN_KEY);
-        const res = await fetch(apiUrl(`api/role-definitions/${roleName}`), {
+        const res = await fetch(roleDefinitionsApi(`api/role-definitions/${roleName}`), {
           method: 'DELETE',
           headers: { 'Authorization': `Bearer ${token}` }
         });
@@ -7833,7 +7982,7 @@ function renderRoleModelPermissionSection(roleDef) {
 
 async function fetchRoleModelPermissionData(roleName) {
   const token = localStorage.getItem(TOKEN_KEY);
-  const res = await fetch(apiUrl(`api/role-definitions/${encodeURIComponent(roleName)}/configurable-models`), {
+  const res = await fetch(roleDefinitionsApi(`api/role-definitions/${encodeURIComponent(roleName)}/configurable-models`), {
     headers: { 'Authorization': `Bearer ${token}` }
   });
   if (!res.ok) throw new Error('Failed to load role model permissions');
@@ -7996,7 +8145,7 @@ async function updateRoleModelPreview(section, roleName) {
   section._previewTimer = setTimeout(async () => {
     try {
       const token = localStorage.getItem(TOKEN_KEY);
-      const res = await fetch(apiUrl(`api/role-definitions/${encodeURIComponent(roleName)}/preview-models`), {
+      const res = await fetch(roleDefinitionsApi(`api/role-definitions/${encodeURIComponent(roleName)}/preview-models`), {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -8705,7 +8854,7 @@ async function saveRoleDefinition() {
     }
 
     // 检查是否与内置角色重名
-    const builtinRoles = ['owner', 'admin', 'member', 'guest', 'anonymous'];
+    const builtinRoles = ['owner', 'admin', 'member', 'visitor'];
     if (builtinRoles.includes(actualRoleName)) {
       alert('角色名称不能与内置角色重名');
       nameInput?.focus();
@@ -8828,7 +8977,7 @@ async function saveRoleDefinition() {
   try {
     const token = localStorage.getItem(TOKEN_KEY);
     const method = isNew ? 'POST' : 'PUT';
-    const url = isNew ? apiUrl('api/role-definitions') : apiUrl(`api/role-definitions/${encodeURIComponent(actualRoleName)}`);
+    const url = isNew ? roleDefinitionsApi('api/role-definitions') : roleDefinitionsApi(`api/role-definitions/${encodeURIComponent(actualRoleName)}`);
 
     const res = await fetch(url, {
       method,
@@ -8851,7 +9000,7 @@ async function saveRoleDefinition() {
     toast(t('roleDefs.saveSuccess'));
     const modal = $('#role-edit-modal');
     if (modal) modal.style.display = 'none';
-    subscribe('roleDefinitions', {});
+    subscribe('roleDefinitions', roleDefinitionsParams());
   } catch (e) {
     toast(e.message || String(e), true);
   }

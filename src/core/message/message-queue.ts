@@ -310,8 +310,8 @@ export class MessageQueue {
 
   private highestRole(items: Array<QueuedMessage | QueuedMessagePart>): SessionIdentity['role'] | undefined {
     const rank: Record<SessionIdentity['role'], number> = {
-      anonymous: 0,
-      guest: 1,
+      none: 0,
+      visitor: 1,
       member: 2,
       admin: 3,
       owner: 4,

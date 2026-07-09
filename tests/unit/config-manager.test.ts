@@ -74,10 +74,10 @@ describe('typed merge（三三规则）', () => {
   it('scalar 高优先级胜', () => {
     const fields = loadSchema('agent-config').fields;
     const merged = mergeLayers<any>([
-      { show_activities: 'all', flush_delay: 3 },
-      { show_activities: 'none' },
+      { show_activities: true, flush_delay: 3 },
+      { show_activities: false },
     ], fields);
-    expect(merged.show_activities).toBe('none');
+    expect(merged.show_activities).toBe(false);
     expect(merged.flush_delay).toBe(3);
   });
 });
@@ -135,7 +135,7 @@ describe('ConfigManager CRUD (v3 unified config.json)', () => {
       owners: ['owner.aid.pub'],
       projects: { defaultPath: '/workspace' },
       // 行为参数
-      show_activities: 'none',
+      show_activities: false,
       chatmode: { private: 'proactive' },
       dispatch: 'broadcast',
       baseagents: { claude: { model: 'sonnet' } },
@@ -144,7 +144,7 @@ describe('ConfigManager CRUD (v3 unified config.json)', () => {
     expect(fs.existsSync(agentConfig(AID))).toBe(true);
 
     const config = read<any>(ConfigTarget.Agent, { self: AID });
-    expect(config.show_activities).toBe('none');
+    expect(config.show_activities).toBe(false);
     expect(config.owners).toContain('owner.aid.pub');
     expect(config.baseagents.claude.model).toBe('sonnet');
   });
@@ -207,13 +207,22 @@ describe('resolveEffective (v3 覆盖链: defaults → agent → relation)', () 
       $schema_version: 2,
       aid: AID,
       channels: [],
-      roles: { vip: { baseagents: { claude: { model: 'vip-model' } } } },
+      roles: {
+        definitions: {
+          vip: {
+            description: 'VIP collaborator',
+            permissions: {
+              'baseagents.claude.model': { default: 'vip-model', allowOverride: true },
+            },
+          },
+        },
+      },
     }, { self: AID });
 
     const eff = resolveEffective({ self: AID });
     // v3: roles 块保留在配置中（用于角色寻址）
     expect(eff.roles).toBeDefined();
-    expect(eff.roles?.vip).toBeDefined();
+    expect(eff.roles?.definitions?.vip).toBeDefined();
   });
 });
 

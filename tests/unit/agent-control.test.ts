@@ -66,7 +66,7 @@ describe('execAgentAction create (accepted-return)', () => {
     await new Promise(r => setImmediate(r));
     await new Promise(r => setImmediate(r));
     const setKeys = (cliAgent.agentSet as any).mock.calls.map((c: any[]) => c[1]);
-    expect(setKeys).toContain('models.default');
+    expect(setKeys).toContain('baseagents.claude.model');
     expect(setKeys).toContain('chatmode');
   });
 });

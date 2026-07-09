@@ -6,26 +6,13 @@ vi.mock('../../src/config-store.js', () => ({
   saveAgent: vi.fn(),
 }));
 
-vi.mock('../../src/config/role-assignments.js', () => ({
-  listRoleAssignments: vi.fn((aid: string, filter: any = {}) => {
-    if (aid !== 'evolai.agentid.pub') return [];
-    if (filter.scope === 'private' && filter.role === 'owner' && filter.peerId === 'legacy-owner.agentid.pub') {
-      return [{ scope: 'private', role: 'owner', peerId: 'legacy-owner.agentid.pub' }];
-    }
-    if (filter.scope === 'private' && filter.role === 'owner' && !filter.peerId) {
-      return [{ scope: 'private', role: 'owner', peerId: 'legacy-owner.agentid.pub' }];
-    }
-    return [];
-  }),
-  setPrivateRoleAssignment: vi.fn(),
-}));
-
-function makeAgent(owners?: string[]): EvolAgent {
+function makeAgent(owners?: string[], admins?: string[]): EvolAgent {
   const raw: AgentConfig = {
     $schema_version: 2,
     aid: 'evolai.agentid.pub',
     enabled: true,
     owners,
+    admins,
     channels: [],
   };
   const merged: EffectiveAgentConfig = {
@@ -33,6 +20,7 @@ function makeAgent(owners?: string[]): EvolAgent {
     aid: 'evolai.agentid.pub',
     enabled: true,
     owners,
+    admins,
     channels: [],
   };
   return new EvolAgent(raw, merged);
@@ -52,10 +40,10 @@ describe('EvolAgent static owners', () => {
     expect(agent.isAdmin(channelKey, 'root.agentid.pub')).toBe(true);
   });
 
-  it('keeps role-assignment owners as compatibility fallback', () => {
-    const agent = makeAgent();
-    expect(agent.isOwner(channelKey, 'legacy-owner.agentid.pub')).toBe(true);
-    expect(agent.getOwner(channelKey)).toBe('legacy-owner.agentid.pub');
+  it('treats configured admins as admins but not owners', () => {
+    const agent = makeAgent([], ['ops.agentid.pub']);
+    expect(agent.isAdmin(channelKey, 'ops.agentid.pub')).toBe(true);
+    expect(agent.isOwner(channelKey, 'ops.agentid.pub')).toBe(false);
   });
 
   it('prefers static owner for getOwner', () => {

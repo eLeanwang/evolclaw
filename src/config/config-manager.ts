@@ -1,14 +1,14 @@
-/**
- * ConfigManager —— 所有配置文件读写/合并的统一归口（全项目唯一合并实现点）。
+﻿/**
+ * ConfigManager 鈥斺€?鎵€鏈夐厤缃枃浠惰鍐?鍚堝苟鐨勭粺涓€褰掑彛锛堝叏椤圭洰鍞竴鍚堝苟瀹炵幇鐐癸級銆?
  *
- * 不允许散落的 fs.readFileSync 直接操作配置文件。
+ * 涓嶅厑璁告暎钀界殑 fs.readFileSync 鐩存帴鎿嶄綔閰嶇疆鏂囦欢銆?
  *
- * v3 设计（2026-06-19）：
- * - 覆盖链：defaults.json → agent/config.json → relation/config.json
- * - 所有参数统一在 config.json，不再有 behavior.json
- * - 进程级 evolclaw.json：独立，不参与覆盖链
+ * v3 璁捐锛?026-06-19锛夛細
+ * - 瑕嗙洊閾撅細defaults.json 鈫?agent/config.json 鈫?relation/config.json
+ * - 鎵€鏈夊弬鏁扮粺涓€鍦?config.json锛屼笉鍐嶆湁 behavior.json
+ * - 杩涚▼绾?evolclaw.json锛氱嫭绔嬶紝涓嶅弬涓庤鐩栭摼
  *
- * 详见 docs/config/01-overview.md
+ * 璇﹁ docs/config/01-overview.md
  */
 
 import fs from 'fs';
@@ -16,11 +16,9 @@ import path from 'path';
 import {
   resolvePaths,
   agentConfig as agentConfigPath,
-  agentRoleAssignmentsConfig,
   agentRelationConfig,
   agentDir,
   agentRelationsDir,
-  rolesConfig,
 } from '../paths.js';
 import { atomicReadJson, atomicWriteJson } from '../utils/atomic-write.js';
 import { fileCache } from '../core/daemon-file-cache.js';
@@ -34,29 +32,22 @@ import {
 import { mergeLayers, expandVars, buildEnvResolver, type EnvScope } from './merge.js';
 import { normalizeAgentLifecycle } from './lifecycle.js';
 import { mergeWithRoleConstraints } from './role-constraints.js';
-import { mergeRolesConfig, diffRolesConfig } from './roles-merge.js';
-import { getBuiltinRolesConfig } from './builtin-roles.js';
-import { clearRolesCache } from './roles-cache.js';
-import {
-  normalizeRelationBehaviorForAssignedRole,
-  syncNoOverrideRoleModelsForAllAgents,
-} from './role-model-sync.js';
+import { getBuiltinRolesConfig, isReservedRoleName } from './builtin-roles.js';
 import type {
   ProcessConfig,
   DefaultsConfig,
   AgentConfig,
   RelationConfig,
   EffectiveAgentConfig,
-  RolesConfig,
 } from '../types.js';
 
+const USER_ROLE_NAME_RE = /^[a-z0-9_-]+$/;
+
 export enum ConfigTarget {
-  Process = 'process',                  // evolclaw.json（独立）
+  Process = 'process',                  // evolclaw.json锛堢嫭绔嬶級
   Defaults = 'defaults',                // agents/defaults.json
   Agent = 'agent',                      // agents/{aid}/config.json
   Relation = 'relation',                // agents/{aid}/relations/{peerKey}/config.json
-  Roles = 'roles',                      // roles.json（全局角色定义，overlay 模型）
-  RoleAssignments = 'role-assignments',  // agents/{aid}/role-assignments.json
 }
 
 export interface Selector {
@@ -70,8 +61,6 @@ const TARGET_SCHEMA: Record<ConfigTarget, LogicalSchemaName> = {
   [ConfigTarget.Defaults]: 'defaults',
   [ConfigTarget.Agent]: 'agent-config',
   [ConfigTarget.Relation]: 'relation-config',
-  [ConfigTarget.Roles]: 'roles',
-  [ConfigTarget.RoleAssignments]: 'role-assignments',
 };
 
 export class ConfigError extends Error {
@@ -82,28 +71,28 @@ export class ConfigError extends Error {
 }
 
 let _initialized = false;
-/** ConfigManager 初始化（预留扩展点）。幂等。 */
+/** ConfigManager 鍒濆鍖栵紙棰勭暀鎵╁睍鐐癸級銆傚箓绛夈€?*/
 export function initConfigManager(): void {
   if (_initialized) return;
-  // 初始化逻辑（如需要）
+  // 鍒濆鍖栭€昏緫锛堝闇€瑕侊級
   _initialized = true;
 }
 
 /**
- * 启动时检查 schema 版本（daemon 启动时调用）。
- * 扫描所有配置文件，如有版本不匹配则警告一次。
+ * 鍚姩鏃舵鏌?schema 鐗堟湰锛坉aemon 鍚姩鏃惰皟鐢級銆?
+ * 鎵弿鎵€鏈夐厤缃枃浠讹紝濡傛湁鐗堟湰涓嶅尮閰嶅垯璀﹀憡涓€娆°€?
  */
 export function checkSchemaVersionsOnStartup(selfAid?: string): void {
   schemaVersionWarningsEnabled = true;
   const p = resolvePaths();
 
-  // 检查 process 层
+  // 妫€鏌?process 灞?
   try { read(ConfigTarget.Process); } catch {}
 
-  // 检查 defaults 层
+  // 妫€鏌?defaults 灞?
   try { read(ConfigTarget.Defaults); } catch {}
 
-  // 检查 agent 层（如果提供了 AID）
+  // 妫€鏌?agent 灞傦紙濡傛灉鎻愪緵浜?AID锛?
   if (selfAid) {
     try { read(ConfigTarget.Agent, { self: selfAid }); } catch {}
   }
@@ -111,24 +100,20 @@ export function checkSchemaVersionsOnStartup(selfAid?: string): void {
   schemaVersionWarningsEnabled = false;
 }
 
-// Schema 版本警告控制：只在启动时检查一次
+// Schema 鐗堟湰璀﹀憡鎺у埗锛氬彧鍦ㄥ惎鍔ㄦ椂妫€鏌ヤ竴娆?
 let schemaVersionWarningsEnabled = false;
 
 function configWarn(...args: unknown[]): void {
   console.warn(...args);
 }
 
-// ── 路径解析 ──────────────────────────────────────────────────────────────
+// 鈹€鈹€ 璺緞瑙ｆ瀽 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
 function targetPath(target: ConfigTarget, sel?: Selector): string {
   const p = resolvePaths();
   switch (target) {
     case ConfigTarget.Process: return p.evolclawJson;
     case ConfigTarget.Defaults: return p.defaultsConfig;
-    case ConfigTarget.Roles: return rolesConfig();
-    case ConfigTarget.RoleAssignments:
-      requireSelf(sel, target);
-      return agentRoleAssignmentsConfig(sel!.self!);
     case ConfigTarget.Agent:
       requireSelf(sel, target);
       return agentConfigPath(sel!.self!);
@@ -139,13 +124,13 @@ function targetPath(target: ConfigTarget, sel?: Selector): string {
 }
 
 function requireSelf(sel: Selector | undefined, target: ConfigTarget): void {
-  if (!sel?.self) throw new ConfigError('SELF_REQUIRED', `${target} 需要 selector.self`);
+  if (!sel?.self) throw new ConfigError('SELF_REQUIRED', `${target} 闇€瑕?selector.self`);
 }
 function requirePeer(sel: Selector | undefined, target: ConfigTarget): void {
-  if (!sel?.self || !sel?.peerKey) throw new ConfigError('PEER_REQUIRED', `${target} 需要 selector.self + peerKey`);
+  if (!sel?.self || !sel?.peerKey) throw new ConfigError('PEER_REQUIRED', `${target} 闇€瑕?selector.self + peerKey`);
 }
 
-// ── env 作用域 ──────────────────────────────────────────────────────────────
+// 鈹€鈹€ env 浣滅敤鍩?鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
 function envScopeFor(sel?: Selector): EnvScope {
   const root = resolvePaths().root;
@@ -155,16 +140,16 @@ function envScopeFor(sel?: Selector): EnvScope {
   return scope;
 }
 
-// ── read ──────────────────────────────────────────────────────────────────
+// 鈹€鈹€ read 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
 export interface ReadOpts {
-  /** 是否展开 ${VAR}（仅运行时内部消费路径置 true；CLI 读路径默认 false）。 */
+  /** 鏄惁灞曞紑 ${VAR}锛堜粎杩愯鏃跺唴閮ㄦ秷璐硅矾寰勭疆 true锛汣LI 璇昏矾寰勯粯璁?false锛夈€?*/
   expand?: boolean;
-  /** 是否走 mtime 门控缓存（daemon 热路径）。CLI 子进程留默认 false。 */
+  /** 鏄惁璧?mtime 闂ㄦ帶缂撳瓨锛坉aemon 鐑矾寰勶級銆侰LI 瀛愯繘绋嬬暀榛樿 false銆?*/
   cache?: boolean;
 }
 
-/** 读单个配置文件，返回强类型对象；不存在返回 null（不自动创建）。未知字段保留但不校验。 */
+/** 璇诲崟涓厤缃枃浠讹紝杩斿洖寮虹被鍨嬪璞★紱涓嶅瓨鍦ㄨ繑鍥?null锛堜笉鑷姩鍒涘缓锛夈€傛湭鐭ュ瓧娈典繚鐣欎絾涓嶆牎楠屻€?*/
 export function read<T = any>(target: ConfigTarget, sel?: Selector, opts: ReadOpts = {}): T | null {
   const file = targetPath(target, sel);
   let raw: T | null;
@@ -178,7 +163,7 @@ export function read<T = any>(target: ConfigTarget, sel?: Selector, opts: ReadOp
     raw = atomicReadJson<T>(file);
   }
   if (raw === null) return null;
-  // schema 版本迁移（read 时若 $schema_version < current）
+  // schema 鐗堟湰杩佺Щ锛坮ead 鏃惰嫢 $schema_version < current锛?
   const migrated = migrateIfNeeded(target, raw, file);
   const normalized = target === ConfigTarget.Agent
     ? normalizeAgentConfigForRead(migrated as any, sel?.self) as T
@@ -192,7 +177,7 @@ function normalizeAgentConfigForRead<T extends Record<string, any>>(value: T, ai
   const config = normalizeAgentLifecycle(value) as T;
   const mutable = config as Record<string, any>;
 
-  // AID 校验（如果提供了 aid）
+  // AID 鏍￠獙锛堝鏋滄彁渚涗簡 aid锛?
   if (aid && mutable.aid && mutable.aid !== aid) {
     const filePath = targetPath(ConfigTarget.Agent, { self: aid });
     throw new ConfigError(
@@ -210,7 +195,7 @@ function normalizeAgentConfigForRead<T extends Record<string, any>>(value: T, ai
     delete mutable.agents;
   }
 
-  // 清理 projects.defaultPath 尾部斜杠
+  // 娓呯悊 projects.defaultPath 灏鹃儴鏂滄潬
   if (mutable.projects?.defaultPath && typeof mutable.projects.defaultPath === 'string') {
     mutable.projects.defaultPath = mutable.projects.defaultPath.replace(/[/\\]+$/, '');
   }
@@ -228,17 +213,17 @@ function groupFor(target: ConfigTarget, sel?: Selector): string {
   return 'config';
 }
 
-// ── write ───────────────────────────────────────────────────────────────────
+// 鈹€鈹€ write 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
 export interface WriteOpts {
-  /** 跳过 schema 校验（迁移内部写回用）。 */
+  /** 璺宠繃 schema 鏍￠獙锛堣縼绉诲唴閮ㄥ啓鍥炵敤锛夈€?*/
   skipValidate?: boolean;
 }
 
 function normalizeAgentConfigForWrite<T extends Record<string, any>>(value: T): T {
   const mutable = { ...value } as Record<string, any>;
 
-  // AID 格式校验
+  // AID 鏍煎紡鏍￠獙
   if (mutable.aid && !isValidAid(mutable.aid)) {
     throw new ConfigError(
       'VALIDATION_ERROR',
@@ -246,7 +231,7 @@ function normalizeAgentConfigForWrite<T extends Record<string, any>>(value: T): 
     );
   }
 
-  // 规范化 projects 字段：只保留 rootPath 和 defaultPath
+  // 瑙勮寖鍖?projects 瀛楁锛氬彧淇濈暀 rootPath 鍜?defaultPath
   if (mutable.projects && typeof mutable.projects === 'object') {
     const projects = mutable.projects as Record<string, any>;
     const normalized: Record<string, any> = {};
@@ -262,45 +247,128 @@ function normalizeAgentConfigForWrite<T extends Record<string, any>>(value: T): 
   return mutable as T;
 }
 
-/** 写入：① schema 校验 ② ensureFile 目录 ③ 原子写入。快照由调用方/启动流程统筹。 */
+function validateRoleConfigForTarget(target: ConfigTarget, value: Record<string, any>, sel?: Selector): void {
+  if (!value || typeof value !== 'object') return;
+  if (target === ConfigTarget.Agent) {
+    validateAgentRolePolicy(value);
+    return;
+  }
+  if (target === ConfigTarget.Relation) {
+    validateRelationRoleAssignments(value, sel);
+  }
+}
+
+function validateAgentRolePolicy(value: Record<string, any>): void {
+  const policy = value.roles;
+  if (!policy || typeof policy !== 'object') return;
+
+  const definitions = policy.definitions && typeof policy.definitions === 'object'
+    ? policy.definitions as Record<string, unknown>
+    : {};
+  const validRoleNames = new Set(Object.keys(getBuiltinRolesConfig().roles));
+
+  for (const roleName of Object.keys(definitions)) {
+    if (!isValidUserRoleNameLocal(roleName)) {
+      throw new ConfigError('VALIDATION_ERROR', `Invalid user role definition: ${roleName}`);
+    }
+    validRoleNames.add(roleName);
+  }
+
+  const defaults = policy.defaultRoles && typeof policy.defaultRoles === 'object'
+    ? policy.defaultRoles as Record<string, unknown>
+    : {};
+  for (const key of ['private', 'group']) {
+    const role = defaults[key];
+    if (role === undefined || role === null) continue;
+    if (typeof role !== 'string' || !validRoleNames.has(role)) {
+      throw new ConfigError('VALIDATION_ERROR', `Invalid default role for ${key}: ${String(role)}`);
+    }
+  }
+}
+
+function validateRelationRoleAssignments(value: Record<string, any>, sel?: Selector): void {
+  const roles = value.roles;
+  if (!roles || typeof roles !== 'object') return;
+  const selfAid = sel?.self;
+
+  const assigned = roles.assigned;
+  if (assigned !== undefined && assigned !== null) {
+    validateAssignedUserRole(assigned, selfAid, 'roles.assigned');
+  }
+
+  const members = roles.members;
+  if (!members || typeof members !== 'object') return;
+  for (const [aid, role] of Object.entries(members)) {
+    if (!aid || typeof aid !== 'string') {
+      throw new ConfigError('VALIDATION_ERROR', `Invalid roles.members key: ${String(aid)}`);
+    }
+    if (role === null) continue;
+    validateAssignedUserRole(role, selfAid, `roles.members.${aid}`);
+  }
+}
+
+function validateAssignedUserRole(role: unknown, selfAid: string | undefined, field: string): void {
+  if (typeof role !== 'string' || !isValidUserRoleNameLocal(role) || isReservedRoleName(role)) {
+    throw new ConfigError('VALIDATION_ERROR', `${field} must be a user role, got ${String(role)}`);
+  }
+  if (selfAid && !roleExistsInAgentPolicy(role, selfAid)) {
+    throw new ConfigError('VALIDATION_ERROR', `${field} references unknown role: ${role}`);
+  }
+}
+
+function isValidUserRoleNameLocal(role: unknown): role is string {
+  return typeof role === 'string'
+    && USER_ROLE_NAME_RE.test(role)
+    && !isReservedRoleName(role);
+}
+
+function roleExistsInAgentPolicy(role: string, selfAid: string): boolean {
+  if (!isValidUserRoleNameLocal(role)) return false;
+  if (Object.prototype.hasOwnProperty.call(getBuiltinRolesConfig().roles, role)) return true;
+  const agent = read<AgentConfig>(ConfigTarget.Agent, { self: selfAid }, { cache: true });
+  return !!agent?.roles?.definitions
+    && Object.prototype.hasOwnProperty.call(agent.roles.definitions, role);
+}
+
+/** 鍐欏叆锛氣憼 schema 鏍￠獙 鈶?ensureFile 鐩綍 鈶?鍘熷瓙鍐欏叆銆傚揩鐓х敱璋冪敤鏂?鍚姩娴佺▼缁熺銆?*/
 export function write<T = any>(target: ConfigTarget, value: T, sel?: Selector, opts: WriteOpts = {}): void {
   const schema = loadSchema(TARGET_SCHEMA[target]);
   const withVer = ensureSchemaVersion(value as any, schema.version);
   const file = targetPath(target, sel);
-  const migrated = target === ConfigTarget.Roles
-    ? migrateIfNeeded(target, withVer, file)
-    : withVer;
+  const migrated = withVer;
 
-  // Agent config 写入规范化（aid 校验、projects 字段清理）
+  // Agent config 鍐欏叆瑙勮寖鍖栵紙aid 鏍￠獙銆乸rojects 瀛楁娓呯悊锛?
   const normalized = target === ConfigTarget.Agent
     ? normalizeAgentConfigForWrite(migrated as any) as any
     : migrated;
 
-  // 1. Schema 校验
+  validateRoleConfigForTarget(target, normalized as any, sel);
+
+  // 1. Schema 鏍￠獙
   if (!opts.skipValidate) {
     validateOrThrow(schema, normalized, target);
   }
 
-  // 2. 角色约束校验（仅对 Relation）
+  // 2. 瑙掕壊绾︽潫鏍￠獙锛堜粎瀵?Relation锛?
   if (target === ConfigTarget.Relation && sel?.self && sel?.peerKey) {
     try {
       const validation = validateConfigWrite(target, normalized as any, sel);
       if (!validation.valid) {
         console.warn(`[config-manager] Role constraint violations on write:`,
           validation.violations.map(v => `${v.field}: ${v.reason}`));
-        // 注意：当前为警告模式，不阻止写入
-        // 未来可以通过环境变量启用严格模式：
+        // 娉ㄦ剰锛氬綋鍓嶄负璀﹀憡妯″紡锛屼笉闃绘鍐欏叆
+        // 鏈潵鍙互閫氳繃鐜鍙橀噺鍚敤涓ユ牸妯″紡锛?
         // if (process.env.EVOLCLAW_STRICT_ROLE_MODE === 'true') {
         //   throw new ConfigError('ROLE_VIOLATION', 'Config violates role constraints');
         // }
       }
     } catch (err) {
       console.warn('[config-manager] Failed to validate role constraints on write:', err);
-      // 验证失败不阻止写入，只记录警告
+      // 楠岃瘉澶辫触涓嶉樆姝㈠啓鍏ワ紝鍙褰曡鍛?
     }
   }
 
-  // 3. 写入文件
+  // 3. 鍐欏叆鏂囦欢
   fs.mkdirSync(path.dirname(file), { recursive: true });
   atomicWriteJson(file, normalized);
   if (fileCacheAvailable()) fileCache.invalidate(file);
@@ -311,33 +379,6 @@ function ensureSchemaVersion(value: any, version: number): any {
     return { $schema_version: version, ...value };
   }
   return value;
-}
-
-// ── roles（overlay 模型）─────────────────────────────────────────────────────
-//
-// roles.json 存的是相对内置基线的 diff（overlay）。读取时与 getBuiltinRolesConfig()
-// 深合并（per-FieldPermission），写入时算 diff 只落改动。跨进程一致性靠 read 的
-// 'mtime' 缓存策略（ecweb 写后 daemon statSync 自动感知）。
-
-/**
- * 读取并合并 roles 配置：内置基线 + 用户 overlay。
- * - 内置新增字段自动补全；用户未改字段跟随内置最新；用户改过的保留；自定义角色保留。
- */
-export function resolveRoles(opts: ReadOpts = {}): RolesConfig {
-  const base = getBuiltinRolesConfig();
-  const overlay = read<RolesConfig>(ConfigTarget.Roles, undefined, opts);
-  return mergeRolesConfig(base, overlay);
-}
-
-/**
- * 写入 roles 配置：传入完整视图，内部算 diff 后只落改动。
- * 自动 schema 校验 + 原子写 + fileCache 失效 + 清本进程 ROLES_CACHE。
- */
-export function writeRoles(full: RolesConfig, opts: WriteOpts = {}): void {
-  const diff = diffRolesConfig(getBuiltinRolesConfig(), full);
-  write(ConfigTarget.Roles, diff, undefined, opts);
-  clearRolesCache();
-  syncNoOverrideRoleModelsForAllAgents(full); // v3: 传入 roles 参数
 }
 
 function validateOrThrow(schema: SchemaEntry, value: unknown, target: ConfigTarget): void {
@@ -351,13 +392,13 @@ function validateOrThrow(schema: SchemaEntry, value: unknown, target: ConfigTarg
         return `${e.instancePath || '/'} ${e.message}${extra}`;
       })
       .join('; ');
-    throw new ConfigError('SCHEMA_INVALID', `${target} 配置不合 schema(${schema.logicalName}.v${schema.version}): ${errs}`);
+    throw new ConfigError('SCHEMA_INVALID', `${target} 閰嶇疆涓嶅悎 schema(${schema.logicalName}.v${schema.version}): ${errs}`);
   }
 }
 
 /**
- * 纯 schema 校验（不写盘、无副作用）。返回错误信息数组，空数组=通过。
- * 供 config-store.validateAgentConfig 等只校验不落盘的场景使用。
+ * 绾?schema 鏍￠獙锛堜笉鍐欑洏銆佹棤鍓綔鐢級銆傝繑鍥為敊璇俊鎭暟缁勶紝绌烘暟缁?閫氳繃銆?
+ * 渚?config-store.validateAgentConfig 绛夊彧鏍￠獙涓嶈惤鐩樼殑鍦烘櫙浣跨敤銆?
  */
 export function validateConfig(target: ConfigTarget, value: unknown): string[] {
   const schema = loadSchema(TARGET_SCHEMA[target]);
@@ -376,9 +417,9 @@ function fileCacheAvailable(): boolean {
   try { return !!fileCache; } catch { return false; }
 }
 
-// ── ensureFile ───────────────────────────────────────────────────────────────
+// 鈹€鈹€ ensureFile 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
-/** 按 schema 的 required/default 生成骨架并写入（幂等：已存在不覆盖）。 */
+/** 鎸?schema 鐨?required/default 鐢熸垚楠ㄦ灦骞跺啓鍏ワ紙骞傜瓑锛氬凡瀛樺湪涓嶈鐩栵級銆?*/
 export function ensureFile(target: ConfigTarget, sel?: Selector): void {
   const file = targetPath(target, sel);
   if (fs.existsSync(file)) return;
@@ -398,125 +439,20 @@ export function ensureFile(target: ConfigTarget, sel?: Selector): void {
   atomicWriteJson(file, skeleton);
 }
 
-// ── schema 版本迁移 ──────────────────────────────────────────────────────────
+// 鈹€鈹€ schema 鐗堟湰杩佺Щ 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 //
-// 同步路径只做"版本号判断 + 标记"；真正逐版本迁移函数是 .ts（动态 import 异步）。
-// 当前所有 schema 均为 v1，无迁移函数——此处仅在版本落后时 warn，留 seam。
+// 鍚屾璺緞鍙仛"鐗堟湰鍙峰垽鏂?+ 鏍囪"锛涚湡姝ｉ€愮増鏈縼绉诲嚱鏁版槸 .ts锛堝姩鎬?import 寮傛锛夈€?
+// 褰撳墠鎵€鏈?schema 鍧囦负 v1锛屾棤杩佺Щ鍑芥暟鈥斺€旀澶勪粎鍦ㄧ増鏈惤鍚庢椂 warn锛岀暀 seam銆?
 
 function migrateIfNeeded<T>(target: ConfigTarget, raw: T, file: string): T {
-  // roles：格式迁移（全量 → overlay），与版本号无关
-  if (target === ConfigTarget.Roles) {
-    let migrated = migrateRolesToOverlay(raw as any, file) as T;
-    // v1 → v2 → v3 → v4 schema 版本迁移
-    const have = (migrated as any)?.$schema_version;
-    if (typeof have === 'number' && have < 4) {
-      if (have < 3) {
-        migrated = migrateRolesToV3(migrated as any, file) as T;
-      }
-      migrated = migrateRolesToV4(migrated as any, file) as T;
-      try {
-        atomicWriteJson(file, migrated as any);
-        if (fileCacheAvailable()) fileCache.invalidate(file);
-      } catch (err) {
-        configWarn(`[config] roles.json migration write-back failed:`, err);
-      }
-    }
-    return migrated;
-  }
-
   const logical = TARGET_SCHEMA[target];
   const cur = currentVersion(logical);
   const have = (raw as any)?.$schema_version;
   if (typeof have === 'number' && have < cur && schemaVersionWarningsEnabled) {
-    // P0：迁移函数尚未存在（全 v1）。留 seam：未来在此 require migrations/{logical}.{N}-to-{N+1}.
-    configWarn(`[config] ${file}: $schema_version ${have} < current ${cur} for "${logical}" — migration pending (seam)`);
+    // P0锛氳縼绉诲嚱鏁板皻鏈瓨鍦紙鍏?v1锛夈€傜暀 seam锛氭湭鏉ュ湪姝?require migrations/{logical}.{N}-to-{N+1}.
+    configWarn(`[config] ${file}: $schema_version ${have} < current ${cur} for "${logical}" 鈥?migration pending (seam)`);
   }
   return raw;
-}
-
-/**
- * roles.json 格式迁移：旧的全量格式 → overlay（diff）格式。
- *
- * 启发式检测全量：某内置 role 的 permission 字段数 ≥ 内置该 role 字段数的 80% → 判为全量。
- * 全量则与内置 diff，备份原文件后写回精简 overlay。已是 overlay 则原样返回。
- * 直接 atomicWriteJson 写回（绕过 ConfigManager.write 避免递归）。
- */
-function migrateRolesToOverlay(raw: RolesConfig, file: string): RolesConfig {
-  if (!raw || !raw.roles) return raw;
-
-  const builtin = getBuiltinRolesConfig();
-  let looksFull = false;
-  for (const roleName of Object.keys(builtin.roles)) {
-    const userRole = raw.roles[roleName];
-    const builtinRole = builtin.roles[roleName];
-    if (userRole?.permissions && builtinRole?.permissions) {
-      const userCount = Object.keys(userRole.permissions).length;
-      const builtinCount = Object.keys(builtinRole.permissions).length;
-      if (builtinCount > 0 && userCount >= builtinCount * 0.8) {
-        looksFull = true;
-        break;
-      }
-    }
-  }
-
-  if (!looksFull) return raw;
-
-  const overlay = diffRolesConfig(builtin, raw);
-
-  // 备份原全量文件
-  try {
-    const backup = `${file}.pre-overlay.${Date.now()}`;
-    fs.copyFileSync(file, backup);
-    configWarn(`[config] roles.json 全量→overlay 迁移：备份 ${backup}`);
-  } catch (err) {
-    configWarn(`[config] roles.json 迁移备份失败:`, err);
-  }
-
-  // 直接写回 overlay（绕过 write 避免递归触发 migrateIfNeeded）
-  try {
-    atomicWriteJson(file, overlay);
-    if (fileCacheAvailable()) fileCache.invalidate(file);
-    configWarn(`[config] roles.json 已转为 overlay 格式（${Object.keys(overlay.roles).length} 个角色含改动）`);
-  } catch (err) {
-    configWarn(`[config] roles.json overlay 写回失败:`, err);
-  }
-
-  return overlay;
-}
-
-/**
- * roles v1 → v2 schema 迁移：添加 defaultRole (top-level) 和 allowAccess (per-role)。
- * v1 缺失这两个字段，v2 schema 为其提供默认值：defaultRole='anonymous'，allowAccess 按角色（anonymous=false 其他=true）。
- * 迁移策略：overlay 里只存用户改动，未改的字段继承内置。所以只需升 $schema_version，字段留空让合并时从 builtin 补全。
- */
-function migrateRolesToV3(raw: any, file: string): RolesConfig {
-  configWarn(`[config] roles.json -> v3 migration: ${file}`);
-  const migrated: RolesConfig = {
-    ...raw,
-    $schema_version: 3,
-    defaultRoles: {
-      private: raw.defaultRoles?.private || 'anonymous',
-      group: raw.defaultRoles?.group || 'guest',
-    },
-  };
-  delete (migrated as any).defaultRole;
-  return migrated;
-}
-
-/**
- * roles v3 → v4 schema 迁移：添加 commandPermissions 支持。
- * v3 没有 commandPermissions 字段，v4 schema 为每个角色添加命令权限配置。
- * 迁移策略：overlay 里只存用户改动，未改的字段继承内置。所以只需升 $schema_version，
- * commandPermissions 留空让合并时从 builtin 补全。
- */
-function migrateRolesToV4(raw: any, file: string): RolesConfig {
-  configWarn(`[config] roles.json -> v4 migration: ${file}`);
-  const migrated: RolesConfig = {
-    ...raw,
-    $schema_version: 4,
-  };
-  // commandPermissions 字段留空，让 mergeRolesConfig 从内置基线补全
-  return migrated;
 }
 
 export function resolveAgentConfig(sel: { self?: string; peerKey?: string }, opts: ReadOpts = {}): AgentConfig {
@@ -527,28 +463,35 @@ export function resolveAgentConfig(sel: { self?: string; peerKey?: string }, opt
   const layers: Array<Partial<AgentConfig> | null> = [
     stripStaticOwnerField(read<DefaultsConfig>(ConfigTarget.Defaults, undefined, opts) as any),
     agentConfig,
-    stripStaticOwnerField(relationConfig),
+    stripRelationRoleField(stripStaticOwnerField(relationConfig)),
   ];
   const merged = mergeLayers<AgentConfig>(layers, fields);
   return merged;
 }
 
 function stripStaticOwnerField<T extends Record<string, any>>(config: T | null): T | null {
-  if (!config || !Object.prototype.hasOwnProperty.call(config, 'owners')) return config;
-  const { owners: _owners, ...rest } = config;
+  if (!config) return config;
+  if (!Object.prototype.hasOwnProperty.call(config, 'owners') && !Object.prototype.hasOwnProperty.call(config, 'admins')) return config;
+  const { owners: _owners, admins: _admins, ...rest } = config;
   return rest as T;
 }
 
-// ── effective（合并视图）────────────────────────────────────────────────────
+function stripRelationRoleField<T extends Record<string, any>>(config: T | null): T | null {
+  if (!config || !Object.prototype.hasOwnProperty.call(config, 'roles')) return config;
+  const { roles: _roles, ...rest } = config;
+  return rest as T;
+}
+
+// 鈹€鈹€ effective锛堝悎骞惰鍥撅級鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
 /**
- * 深度合并辅助函数
- * 用于合并角色约束结果，避免覆盖嵌套对象
+ * 娣卞害鍚堝苟杈呭姪鍑芥暟
+ * 鐢ㄤ簬鍚堝苟瑙掕壊绾︽潫缁撴灉锛岄伩鍏嶈鐩栧祵濂楀璞?
  */
 function deepMerge(target: any, source: any): any {
   if (!source || typeof source !== 'object') return target;
   if (!target || typeof target !== 'object') return source;
-  if (Array.isArray(source)) return source; // 数组直接替换
+  if (Array.isArray(source)) return source; // 鏁扮粍鐩存帴鏇挎崲
 
   const result = { ...target };
 
@@ -566,8 +509,8 @@ function deepMerge(target: any, source: any): any {
 }
 
 /**
- * 合并视图：合并覆盖链（defaults → agent/config → relation/config），
- * 然后应用角色约束（如有）。v3 设计所有参数统一在 config.json。
+ * 鍚堝苟瑙嗗浘锛氬悎骞惰鐩栭摼锛坉efaults 鈫?agent/config 鈫?relation/config锛夛紝
+ * 鐒跺悗搴旂敤瑙掕壊绾︽潫锛堝鏈夛級銆倂3 璁捐鎵€鏈夊弬鏁扮粺涓€鍦?config.json銆?
  */
 export function resolveEffective(sel: Selector, opts: ReadOpts = {}): EffectiveAgentConfig {
   const config = resolveAgentConfig(sel, opts);
@@ -578,6 +521,7 @@ export function resolveEffective(sel: Selector, opts: ReadOpts = {}): EffectiveA
     lifecycle: config.lifecycle,
     initialized: config.initialized,
     owners: config.owners,
+    admins: config.admins,
     aun: config.aun,
     channels: config.channels ?? [],
     models: config.models,
@@ -602,15 +546,15 @@ export function resolveEffective(sel: Selector, opts: ReadOpts = {}): EffectiveA
     roles: config.roles,
   };
 
-  // v3 设计：直接返回 effective，然后应用角色约束（如有）
+  // v3 璁捐锛氱洿鎺ヨ繑鍥?effective锛岀劧鍚庡簲鐢ㄨ鑹茬害鏉燂紙濡傛湁锛?
   let result = effective;
 
-  // 如果有 peerKey，应用角色约束（优先使用 sel.role）
+  // 濡傛灉鏈?peerKey锛屽簲鐢ㄨ鑹茬害鏉燂紙浼樺厛浣跨敤 sel.role锛?
   if (sel.self && sel.peerKey && sel.role) {
     try {
       const role = sel.role;
 
-      // 提取行为字段作为 relationConfig
+      // 鎻愬彇琛屼负瀛楁浣滀负 relationConfig
       const behaviorFields: Record<string, any> = {};
       const behaviorFieldNames = [
         'permissionMode',
@@ -629,7 +573,7 @@ export function resolveEffective(sel: Selector, opts: ReadOpts = {}): EffectiveA
 
       for (const field of behaviorFieldNames) {
         if (field.includes('.')) {
-          // 嵌套字段，提取为扁平键
+          // 宓屽瀛楁锛屾彁鍙栦负鎵佸钩閿?
           const parts = field.split('.');
           let value = result as any;
           for (const part of parts) {
@@ -644,26 +588,26 @@ export function resolveEffective(sel: Selector, opts: ReadOpts = {}): EffectiveA
             behaviorFields[field] = value;
           }
         } else {
-          // 顶层字段
+          // 椤跺眰瀛楁
           if ((result as any)[field] !== undefined) {
             behaviorFields[field] = (result as any)[field];
           }
         }
       }
 
-      // 应用角色约束
-      const constrained = mergeWithRoleConstraints(role, behaviorFields);
+      // 搴旂敤瑙掕壊绾︽潫
+      const constrained = mergeWithRoleConstraints(role, behaviorFields, sel.self);
 
       if (!constrained.valid) {
         console.warn(`[config-manager] Role constraint violations for ${sel.peerKey} (${role}):`,
           constrained.violations.map(v => `${v.field}: ${v.reason}`));
       }
 
-      // 将约束后的配置深度合并回 result（避免覆盖嵌套对象）
+      // 灏嗙害鏉熷悗鐨勯厤缃繁搴﹀悎骞跺洖 result锛堥伩鍏嶈鐩栧祵濂楀璞★級
       result = deepMerge(result, constrained.effectiveConfig);
     } catch (err) {
       console.warn('[config-manager] Failed to apply role constraints:', err);
-      // 失败时继续，不阻塞配置解析
+      // 澶辫触鏃剁户缁紝涓嶉樆濉為厤缃В鏋?
     }
   }
 
@@ -671,20 +615,20 @@ export function resolveEffective(sel: Selector, opts: ReadOpts = {}): EffectiveA
 }
 
 /**
- * 配置写入前的角色约束校验
- * 仅对 Relation 进行角色约束检查
+ * 閰嶇疆鍐欏叆鍓嶇殑瑙掕壊绾︽潫鏍￠獙
+ * 浠呭 Relation 杩涜瑙掕壊绾︽潫妫€鏌?
  *
- * @param target 配置目标
- * @param config 待写入配置
- * @param sel 选择器
- * @returns 约束检查结果
+ * @param target 閰嶇疆鐩爣
+ * @param config 寰呭啓鍏ラ厤缃?
+ * @param sel 閫夋嫨鍣?
+ * @returns 绾︽潫妫€鏌ョ粨鏋?
  */
 export function validateConfigWrite(
   target: ConfigTarget,
   config: Record<string, any>,
   sel: Selector
 ): { valid: boolean; violations: any[]; effectiveConfig: any } {
-  // v3 设计：只对 Relation 进行角色约束检查
+  // v3 璁捐锛氬彧瀵?Relation 杩涜瑙掕壊绾︽潫妫€鏌?
   if (target !== ConfigTarget.Relation) {
     return { valid: true, violations: [], effectiveConfig: config };
   }
@@ -694,11 +638,12 @@ export function validateConfigWrite(
   }
 
   try {
-    const role = sel.role || 'guest';
-    return mergeWithRoleConstraints(role, config);
+    if (!sel.role) return { valid: true, violations: [], effectiveConfig: config };
+    const { roles: _roles, ...behaviorConfig } = config;
+    return mergeWithRoleConstraints(sel.role, behaviorConfig, sel.self);
   } catch (err) {
     console.warn('[config-manager] Failed to validate config write:', err);
-    // 验证失败时，允许写入但记录警告
+    // 楠岃瘉澶辫触鏃讹紝鍏佽鍐欏叆浣嗚褰曡鍛?
     return { valid: true, violations: [], effectiveConfig: config };
   }
 }
@@ -707,10 +652,17 @@ function normalizeEffectiveCompatibility<T extends EffectiveAgentConfig>(effecti
   if ((effective as any).dispatch === 'all' || (effective as any).dispatch === 'none') {
     (effective as any).dispatch = 'broadcast';
   }
+  const behavior: Record<string, unknown> = {};
+  for (const field of EFFECTIVE_BEHAVIOR_FIELDS) {
+    if ((effective as any)[field] !== undefined) behavior[field] = (effective as any)[field];
+  }
+  if (Object.keys(behavior).length > 0) {
+    (effective as any).behavior = behavior;
+  }
   return effective;
 }
 
-// ── 字段 → target 路由（按 schema 归属判定）──────────────────────────────────
+// 鈹€鈹€ 瀛楁 鈫?target 璺敱锛堟寜 schema 褰掑睘鍒ゅ畾锛夆攢鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
 export interface FieldRoute {
   field: string;
@@ -731,12 +683,25 @@ const BEHAVIOR_TOP_FIELDS = new Set([
   'dispatch',
   'show_activities',
   'proactive',
-  'group_venue_sync',
+  'render',
+  'enable_rich_content',
+  'permissionMode',
+]);
+
+const EFFECTIVE_BEHAVIOR_FIELDS = [
+  'active_baseagent',
+  'baseagents',
+  'chatmode',
+  'flush_delay',
+  'debounce',
+  'dispatch',
+  'show_activities',
+  'proactive',
   'render',
   'enable_rich_content',
   'permissionMode',
   'roles',
-]);
+];
 
 const BASEAGENT_BEHAVIOR_FIELDS = new Set([
   'model',
@@ -751,8 +716,8 @@ const BASEAGENT_BEHAVIOR_FIELDS = new Set([
 ]);
 
 /**
- * 给定 selector 作用域 + 顶层字段名，判定写入落点。
- * 兼容旧调用：仅按顶层字段路由。新写入请优先使用 routeFieldPath()。
+ * 缁欏畾 selector 浣滅敤鍩?+ 椤跺眰瀛楁鍚嶏紝鍒ゅ畾鍐欏叆钀界偣銆?
+ * 鍏煎鏃ц皟鐢細浠呮寜椤跺眰瀛楁璺敱銆傛柊鍐欏叆璇蜂紭鍏堜娇鐢?routeFieldPath()銆?
  */
 export function routeField(
   topField: string,
@@ -762,8 +727,8 @@ export function routeField(
 }
 
 /**
- * 给定 selector 作用域 + 完整字段路径，判定 canonical 写入落点。
- * v3 设计：所有参数统一在 config.json，按作用域路由到对应层级。
+ * 缁欏畾 selector 浣滅敤鍩?+ 瀹屾暣瀛楁璺緞锛屽垽瀹?canonical 鍐欏叆钀界偣銆?
+ * v3 璁捐锛氭墍鏈夊弬鏁扮粺涓€鍦?config.json锛屾寜浣滅敤鍩熻矾鐢卞埌瀵瑰簲灞傜骇銆?
  */
 export function routeFieldPath(
   fieldPath: string,
@@ -771,14 +736,19 @@ export function routeFieldPath(
 ): FieldRoute {
   const topField = fieldPath.split('.')[0];
   if (scope === 'process') return routeIn('evolclaw', ConfigTarget.Process, topField);
-  if (scope === 'defaults') return routeIn('defaults', ConfigTarget.Defaults, topField);
+  if (scope === 'defaults') {
+    if (isBehaviorFieldPath(fieldPath)) {
+      throw new ConfigError('DEFAULT_BEHAVIOR_REJECT', `--default 不支持行为字段: ${fieldPath}`);
+    }
+    return routeIn('defaults', ConfigTarget.Defaults, topField);
+  }
 
   if (isBehaviorFieldPath(fieldPath)) {
-    // v3 设计：行为字段按作用域路由到对应的 schema
+    // v3 璁捐锛氳涓哄瓧娈垫寜浣滅敤鍩熻矾鐢卞埌瀵瑰簲鐨?schema
     if (scope === 'agent') {
       return routeIn('agent-config', ConfigTarget.Agent, topField);
     }
-    // relation 作用域：行为字段在 relation-config 中
+    // relation 浣滅敤鍩燂細琛屼负瀛楁鍦?relation-config 涓?
     return routeIn('relation-config', ConfigTarget.Relation, topField);
   }
 
@@ -797,7 +767,7 @@ function isBehaviorFieldPath(fieldPath: string): boolean {
 }
 
 function routeIn(name: LogicalSchemaName, target: ConfigTarget, topField: string): FieldRoute {
-  // $schema_version 是元数据字段，特殊处理
+  // $schema_version 鏄厓鏁版嵁瀛楁锛岀壒娈婂鐞?
   if (topField === '$schema_version') {
     return {
       field: topField,
@@ -810,7 +780,7 @@ function routeIn(name: LogicalSchemaName, target: ConfigTarget, topField: string
   }
 
   const s = loadSchema(name);
-  if (!s.fields.has(topField)) throw new ConfigError('UNKNOWN_FIELD', `未知配置字段: ${topField}（${name}）`);
+  if (!s.fields.has(topField)) throw new ConfigError('UNKNOWN_FIELD', `Unknown config field: ${topField} (${name})`);
   return mkRoute(s, target, topField);
 }
 
@@ -819,7 +789,7 @@ function mkRoute(s: SchemaEntry, target: ConfigTarget, topField: string): FieldR
   return { field: topField, target, schema: s.logicalName, permission: s.permission, merge: spec.merge, enum: spec.enum };
 }
 
-/** 列出某作用域下所有可设字段（ec config fields 用）。 */
+/** 鍒楀嚭鏌愪綔鐢ㄥ煙涓嬫墍鏈夊彲璁惧瓧娈碉紙ec config fields 鐢級銆?*/
 export function listFields(scope: ConfigScope): FieldRoute[] {
   const out: FieldRoute[] = [];
   const add = (name: LogicalSchemaName, target: ConfigTarget) => {
@@ -839,23 +809,23 @@ export function listFields(scope: ConfigScope): FieldRoute[] {
 
 export { ConfigTarget as Target };
 
-// ── 来源追踪（Source Tracking）────────────────────────────────────────────────
+// 鈹€鈹€ 鏉ユ簮杩借釜锛圫ource Tracking锛夆攢鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
-/** 字段来源信息 */
+/** 瀛楁鏉ユ簮淇℃伅 */
 export interface FieldSource {
   target: ConfigTarget;
-  file: string;  // 相对于 root 的路径
+  file: string;  // 鐩稿浜?root 鐨勮矾寰?
 }
 
-/** 带来源的值 */
+/** 甯︽潵婧愮殑鍊?*/
 export interface ValueWithSource<T = any> {
   value: T;
   source: FieldSource;
 }
 
 /**
- * 读取单个字段并返回来源信息。
- * 沿覆盖链查找，返回第一个定义该字段的层级。
+ * 璇诲彇鍗曚釜瀛楁骞惰繑鍥炴潵婧愪俊鎭€?
+ * 娌胯鐩栭摼鏌ユ壘锛岃繑鍥炵涓€涓畾涔夎瀛楁鐨勫眰绾с€?
  */
 export function readFieldWithSource(
   field: string,
@@ -865,7 +835,7 @@ export function readFieldWithSource(
   const parts = field.split('.');
   const topField = parts[0];
 
-  // 按覆盖链顺序查找：relation → agent → defaults
+  // 鎸夎鐩栭摼椤哄簭鏌ユ壘锛歳elation 鈫?agent 鈫?defaults
   const targets: ConfigTarget[] = [];
   if (sel.peerKey) targets.push(ConfigTarget.Relation);
   if (sel.self) targets.push(ConfigTarget.Agent);
@@ -875,10 +845,10 @@ export function readFieldWithSource(
     const config = read<any>(target, sel, opts);
     if (!config) continue;
 
-    // 检查顶层字段是否存在
+    // 妫€鏌ラ《灞傚瓧娈垫槸鍚﹀瓨鍦?
     if (!(topField in config)) continue;
 
-    // 提取字段值（支持嵌套）
+    // 鎻愬彇瀛楁鍊硷紙鏀寔宓屽锛?
     let value = config[topField];
     for (let i = 1; i < parts.length; i++) {
       if (value && typeof value === 'object' && parts[i] in value) {
@@ -889,7 +859,7 @@ export function readFieldWithSource(
       }
     }
 
-    // 如果值存在，返回带来源
+    // 濡傛灉鍊煎瓨鍦紝杩斿洖甯︽潵婧?
     if (value !== undefined) {
       const file = path.relative(resolvePaths().root, targetPath(target, sel));
       return {
@@ -903,8 +873,8 @@ export function readFieldWithSource(
 }
 
 /**
- * 解析 effective 配置并标注每字段来源。
- * 返回一个对象，每个字段都带有 value 和 source。
+ * 瑙ｆ瀽 effective 閰嶇疆骞舵爣娉ㄦ瘡瀛楁鏉ユ簮銆?
+ * 杩斿洖涓€涓璞★紝姣忎釜瀛楁閮藉甫鏈?value 鍜?source銆?
  */
 export function resolveEffectiveWithSources(
   sel: Selector,
@@ -913,7 +883,7 @@ export function resolveEffectiveWithSources(
   const effective = resolveEffective(sel, opts);
   const result: Record<string, ValueWithSource> = {};
 
-  // 对每个顶层字段查找来源
+  // 瀵规瘡涓《灞傚瓧娈垫煡鎵炬潵婧?
   for (const [key, value] of Object.entries(effective)) {
     if (value === undefined) continue;
 
@@ -921,7 +891,7 @@ export function resolveEffectiveWithSources(
     if (withSource) {
       result[key] = withSource;
     } else {
-      // 如果找不到来源（可能是默认值），标记为 agent
+      // 濡傛灉鎵句笉鍒版潵婧愶紙鍙兘鏄粯璁ゅ€硷級锛屾爣璁颁负 agent
       const file = path.relative(resolvePaths().root, targetPath(ConfigTarget.Agent, sel));
       result[key] = {
         value,

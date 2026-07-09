@@ -1,24 +1,31 @@
 import { CronExpressionParser } from 'cron-parser';
-import type { TriggerScheduleType, TriggerSessionStrategy } from '../types.js';
-import type { TriggerEffort, TriggerPermissionMode } from './types.js';
+import type { TriggerScheduleType } from '../types.js';
+import type {
+  TriggerEffort,
+  TriggerExecutionThread,
+  TriggerExecutionType,
+  TriggerFeedbackStrategy,
+  TriggerPermissionMode,
+} from './types.js';
 
 export interface ParsedTriggerSet {
   scheduleType: TriggerScheduleType;
   scheduleValue: string;
-  timezone?: string;  // cron timezone
+  timezone?: string;
+  executionType: TriggerExecutionType;
+  feedbackStrategy: TriggerFeedbackStrategy;
   targetChannel?: string;
   targetChannelId?: string;
+  targetSession: 'main' | 'thread';
   targetThreadId?: string;
-  targetSessionStrategy: TriggerSessionStrategy;
   agentId?: string;
   name?: string;
-  prompt: string;
+  prompt?: string;
   scriptPath?: string;
   scriptRuntime?: string;
   scriptArgs?: unknown;
-  mode?: 'agent-runner' | 'direct-message';
-  onFailure?: 'notify' | 'silent';
-  onNoop?: 'notify' | 'silent';
+  scriptTimeoutMs?: number;
+  triggerThread?: TriggerExecutionThread;
   maxRuns?: number;
   maxDuration?: string;
   model?: string;
@@ -28,6 +35,35 @@ export interface ParsedTriggerSet {
 
 export type ParseResult =
   | { ok: true; value: ParsedTriggerSet }
+  | { ok: false; error: string };
+
+export interface ParsedTriggerUpdate {
+  scheduleType?: TriggerScheduleType;
+  scheduleValue?: string;
+  timezone?: string;
+  executionType?: TriggerExecutionType;
+  feedbackStrategy?: TriggerFeedbackStrategy;
+  targetChannel?: string;
+  targetChannelId?: string;
+  targetSession?: 'main' | 'thread';
+  targetThreadId?: string;
+  agentId?: string;
+  name?: string;
+  prompt?: string;
+  scriptPath?: string | null;
+  scriptRuntime?: string | null;
+  scriptArgs?: unknown;
+  scriptTimeoutMs?: number;
+  triggerThread?: TriggerExecutionThread;
+  maxRuns?: number;
+  maxDuration?: string;
+  model?: string;
+  effort?: TriggerEffort;
+  permissionMode?: TriggerPermissionMode;
+}
+
+export type UpdateParseResult =
+  | { ok: true; nameOrId: string; value: ParsedTriggerUpdate }
   | { ok: false; error: string };
 
 // Note: unquoted multi-word values (e.g. --prompt=hello world) are not supported.
@@ -40,11 +76,7 @@ function parseFlags(args: string): Map<string, string | true> {
   while ((m = re.exec(args)) !== null) {
     const key = m[1];
     const val = m[2] ?? m[3];
-    if (val === undefined) {
-      flags.set(key, true);
-    } else {
-      flags.set(key, val.replace(/^["']|["']$/g, ''));
-    }
+    flags.set(key, val === undefined ? true : val.replace(/^["']|["']$/g, ''));
   }
   return flags;
 }
@@ -77,7 +109,15 @@ function parsePositiveIntegerFlag(flags: Map<string, string | true>, name: strin
   const raw = flags.get(name);
   if (!raw || raw === true) return { ok: false, error: `${label} 不能为空` };
   if (!/^[1-9]\d*$/.test(raw)) return { ok: false, error: `${label} 必须是正整数` };
-  const value = Number(raw);
+  return { ok: true, value: Number(raw) };
+}
+
+function parseDurationFlag(flags: Map<string, string | true>, name: string, label: string): { ok: true; value?: number } | { ok: false; error: string } {
+  if (!flags.has(name)) return { ok: true };
+  const raw = flags.get(name);
+  if (!raw || raw === true) return { ok: false, error: `${label} 不能为空` };
+  const value = parseDuration(raw);
+  if (value === null) return { ok: false, error: `${label} 支持格式：30s、15m、2h、1d` };
   return { ok: true, value };
 }
 
@@ -128,439 +168,212 @@ function parseEffortFlag(flags: Map<string, string | true>): { ok: true; value?:
   return { ok: true, value: raw as TriggerEffort };
 }
 
-export interface ParsedTriggerUpdate {
-  scheduleType?: TriggerScheduleType;
-  scheduleValue?: string;
-  timezone?: string;  // cron timezone
-  nextFireAt?: number;  // Calculated by caller if schedule changed
-  targetChannel?: string;
-  targetChannelId?: string;
-  targetChannelType?: string;  // Recomputed by caller when targetChannel changes
-  targetThreadId?: string;
-  targetSessionStrategy?: TriggerSessionStrategy;
-  agentId?: string;
-  name?: string;
-  prompt?: string;
-  scriptPath?: string;
-  scriptRuntime?: string;
-  scriptArgs?: unknown;
-  mode?: 'agent-runner' | 'direct-message';
-  onFailure?: 'notify' | 'silent';
-  onNoop?: 'notify' | 'silent';
-  maxRuns?: number;
-  maxDuration?: string;
-  model?: string;
-  effort?: TriggerEffort;
-  permissionMode?: TriggerPermissionMode;
+function rejectDeprecatedFlags(flags: Map<string, string | true>): string | undefined {
+  if (flags.has('mode')) return '--mode 已废弃，请使用 --exec script|trigger-session|target-session';
+  if (flags.has('session')) return '--session 已废弃，请使用 --feedback/--target-session 或 --trigger-thread';
+  if (flags.has('thread')) return '--thread 已废弃，请使用 --target-thread-id';
+  if (flags.has('script')) return '--script 已废弃，请使用 --exec script --script-path';
+  if (flags.has('runtime')) return '--runtime 已废弃，请使用 --script-runtime';
+  if (flags.has('channel') || flags.has('channelid')) return '--channel/--channelid 已废弃，请使用 --target-channel/--target-channel-id';
+  return undefined;
 }
 
-export type UpdateParseResult =
-  | { ok: true; nameOrId: string; value: ParsedTriggerUpdate }
-  | { ok: false; error: string };
+function parseExecutionType(flags: Map<string, string | true>): { ok: true; value?: TriggerExecutionType } | { ok: false; error: string } {
+  if (!flags.has('exec')) return { ok: true };
+  const raw = flags.get('exec');
+  if (!raw || raw === true) return { ok: false, error: '--exec 不能为空' };
+  if (raw === 'script') return { ok: true, value: 'script' };
+  if (raw === 'trigger-session' || raw === 'trigger_session') return { ok: true, value: 'trigger_session' };
+  if (raw === 'target-session' || raw === 'target_session') return { ok: true, value: 'target_session' };
+  return { ok: false, error: '--exec 只接受 script、trigger-session 或 target-session' };
+}
 
-export function parseTriggerUpdate(args: string): UpdateParseResult {
-  // First token is the trigger name/id, rest is flags
-  const trimmed = args.trim();
-  if (!trimmed) {
-    return { ok: false, error: '用法：/trigger update <名称|ID> [--参数...]' };
-  }
+function parseFeedbackStrategy(flags: Map<string, string | true>): { ok: true; value?: TriggerFeedbackStrategy } | { ok: false; error: string } {
+  if (!flags.has('feedback')) return { ok: true };
+  const raw = flags.get('feedback');
+  if (!raw || raw === true) return { ok: false, error: '--feedback 不能为空' };
+  if (raw === 'origin' || raw === 'target' || raw === 'silent') return { ok: true, value: raw };
+  return { ok: false, error: '--feedback 只接受 origin、target 或 silent' };
+}
 
-  // Extract nameOrId: first non-flag token (could be quoted)
-  let nameOrId: string;
-  let rest: string;
-  if (trimmed.startsWith('"') || trimmed.startsWith("'")) {
-    const quote = trimmed[0];
-    const end = trimmed.indexOf(quote, 1);
-    if (end === -1) {
-      return { ok: false, error: '名称引号未闭合' };
-    }
-    nameOrId = trimmed.slice(1, end);
-    rest = trimmed.slice(end + 1).trim();
-  } else {
-    const spaceIdx = trimmed.indexOf(' ');
-    if (spaceIdx === -1) {
-      return { ok: false, error: '至少需要指定一个修改参数（如 --prompt、--delay、--event 等）' };
-    }
-    nameOrId = trimmed.slice(0, spaceIdx);
-    rest = trimmed.slice(spaceIdx + 1).trim();
-  }
+function parseTriggerThread(flags: Map<string, string | true>): { ok: true; value?: TriggerExecutionThread } | { ok: false; error: string } {
+  if (!flags.has('trigger-thread')) return { ok: true };
+  const raw = flags.get('trigger-thread');
+  if (!raw || raw === true) return { ok: false, error: '--trigger-thread 不能为空' };
+  if (raw === 'per-run') return { ok: true, value: 'per_run' };
+  if (raw === 'by-trigger') return { ok: true, value: 'by_trigger' };
+  if (raw === 'per_run' || raw === 'by_trigger') return { ok: true, value: raw };
+  return { ok: false, error: '--trigger-thread 只接受 per-run 或 by-trigger' };
+}
 
-  if (!rest) {
-    return { ok: false, error: '至少需要指定一个修改参数（如 --prompt、--delay、--event 等）' };
-  }
+function parseTargetSession(flags: Map<string, string | true>): { ok: true; value?: 'main' | 'thread' } | { ok: false; error: string } {
+  if (!flags.has('target-session')) return { ok: true };
+  const raw = flags.get('target-session');
+  if (!raw || raw === true) return { ok: false, error: '--target-session 不能为空' };
+  if (raw === 'main' || raw === 'thread') return { ok: true, value: raw };
+  return { ok: false, error: '--target-session 只接受 main 或 thread' };
+}
 
-  const flags = parseFlags(rest);
-  if (flags.size === 0) {
-    return { ok: false, error: '至少需要指定一个修改参数（如 --prompt、--delay、--event 等）' };
-  }
-
-  const result: ParsedTriggerUpdate = {};
-
-  // Parse schedule if provided (only one allowed)
+function parseSourceFlags(flags: Map<string, string | true>, opts: { update?: boolean } = {}): { ok: true; scheduleType?: TriggerScheduleType; scheduleValue?: string; timezone?: string } | { ok: false; error: string } {
+  const hasOnce = flags.has('once');
   const hasDelay = flags.has('delay');
   const hasAt = flags.has('at');
   const hasCron = flags.has('cron');
   const hasEvery = flags.has('every');
   const hasEvent = flags.has('event');
-  const timeCount = [hasDelay, hasAt, hasCron, hasEvery, hasEvent].filter(Boolean).length;
-  if (timeCount > 1) {
-    return { ok: false, error: '--delay、--at、--cron、--every、--event 互斥，只能指定一个' };
+  const count = [hasOnce, hasDelay, hasAt, hasCron, hasEvery, hasEvent].filter(Boolean).length;
+  if (!opts.update && count === 0) {
+    return { ok: false, error: '必须指定触发参数：--once | --delay <时长> | --at <ISO时间> | --cron <表达式> | --every <时长> | --event <事件模式>' };
   }
+  if (count > 1) return { ok: false, error: '--once、--delay、--at、--cron、--every、--event 互斥，只能指定一个' };
+  if (count === 0) return { ok: true };
+
+  if (hasOnce) return { ok: true, scheduleType: 'once', scheduleValue: '' };
   if (hasDelay) {
-    const raw = flags.get('delay') as string;
+    const raw = flags.get('delay');
+    if (!raw || raw === true) return { ok: false, error: '--delay 不能为空' };
     const ms = parseDuration(raw);
     if (ms === null) return { ok: false, error: `无法解析 --delay "${raw}"，支持格式：30s、15m、2h、1d` };
-    result.scheduleType = 'delay';
-    result.scheduleValue = String(ms);
-  } else if (hasAt) {
-    const raw = flags.get('at') as string;
+    return { ok: true, scheduleType: 'delay', scheduleValue: String(ms) };
+  }
+  if (hasAt) {
+    const raw = flags.get('at');
+    if (!raw || raw === true) return { ok: false, error: '--at 不能为空' };
     const ts = parseIsoDate(raw);
     if (ts === null) return { ok: false, error: `无法解析 --at "${raw}"，请使用 ISO 格式，如 2026-05-15T09:00` };
-    if (ts <= Date.now()) return { ok: false, error: `--at 时间已过期：${raw}` };
-    result.scheduleType = 'at';
-    result.scheduleValue = new Date(ts).toISOString();
-  } else if (hasCron) {
-    const raw = flags.get('cron') as string;
+    if (!opts.update && ts <= Date.now()) return { ok: false, error: `--at 时间已过期：${raw}` };
+    return { ok: true, scheduleType: 'at', scheduleValue: new Date(ts).toISOString() };
+  }
+  if (hasCron) {
+    const raw = flags.get('cron');
+    if (!raw || raw === true) return { ok: false, error: '--cron 不能为空' };
     if (!validateCronExpr(raw)) {
-      const truncated = /^[\d*/,-]+$/.test(raw) && /--cron\s+\S+\s+[*\d]/.test(args);
-      const hint = truncated ? '（看起来 cron 表达式被空格截断了，请用引号包裹，如 --cron \'*/15 * * * *\'）' : '（需 5 段：分 时 日 月 周，如 */15 * * * *）';
+      const truncated = /^[\d*/,-]+$/.test(raw) && /--cron\s+\S+\s+[*\d]/.test(String(raw));
+      const hint = truncated ? '（看起来 cron 表达式被空格截断了，请用引号包裹）' : '（需 5 段：分 时 日 月 周，如 */15 * * * *）';
       return { ok: false, error: `无效的 cron 表达式："${raw}" ${hint}` };
     }
-    result.scheduleType = 'cron';
-    result.scheduleValue = raw;
-  } else if (hasEvery) {
+    const timezone = flags.has('tz') ? flags.get('tz') : undefined;
+    if (timezone === true) return { ok: false, error: '--tz 不能为空' };
+    return { ok: true, scheduleType: 'cron', scheduleValue: raw, timezone: timezone as string | undefined };
+  }
+  if (hasEvery) {
     const raw = flags.get('every');
     if (!raw || raw === true) return { ok: false, error: '--every 不能为空' };
     const ms = parseDuration(raw);
     if (ms === null) return { ok: false, error: `无法解析 --every "${raw}"，支持格式：30s、15m、2h、1d` };
-    result.scheduleType = 'interval';
-    result.scheduleValue = String(ms);
-  } else if (hasEvent) {
-    const raw = flags.get('event');
-    if (!raw || raw === true) return { ok: false, error: '--event 不能为空' };
-    result.scheduleType = 'event';
-    result.scheduleValue = raw;
+    return { ok: true, scheduleType: 'interval', scheduleValue: String(ms) };
+  }
+  const raw = flags.get('event');
+  if (!raw || raw === true) return { ok: false, error: '--event 不能为空' };
+  return { ok: true, scheduleType: 'event', scheduleValue: raw };
+}
+
+function commonParsed(flags: Map<string, string | true>, opts: { update?: boolean } = {}) {
+  const deprecated = rejectDeprecatedFlags(flags);
+  if (deprecated) return { ok: false as const, error: deprecated };
+
+  const source = parseSourceFlags(flags, opts);
+  if (!source.ok) return source;
+
+  if (flags.has('tz') && source.scheduleType !== 'cron') {
+    return { ok: false as const, error: '--tz 只能和 --cron 一起使用' };
   }
 
-  // Parse optional fields
-  if (flags.has('prompt')) {
-    const prompt = flags.get('prompt');
-    if (!prompt || prompt === true) return { ok: false, error: '--prompt 不能为空' };
-    if (typeof prompt === 'string' && prompt.length > 4096) return { ok: false, error: '--prompt 超过 4096 字符限制' };
-    result.prompt = prompt as string;
-  }
+  const execution = parseExecutionType(flags);
+  if (!execution.ok) return execution;
 
-  if (flags.has('name')) {
-    const name = flags.get('name');
-    if (!name || name === true) return { ok: false, error: '--name 不能为空' };
-    result.name = name as string;
-  }
+  const feedback = parseFeedbackStrategy(flags);
+  if (!feedback.ok) return feedback;
 
-  if (flags.has('session')) {
-    const sv = flags.get('session') as string;
-    if (sv !== 'latest' && sv !== 'thread') return { ok: false, error: '--session 只接受 latest 或 thread' };
-    result.targetSessionStrategy = sv;
-  }
+  const triggerThread = parseTriggerThread(flags);
+  if (!triggerThread.ok) return triggerThread;
 
-  if (flags.has('agent')) {
-    const agent = flags.get('agent');
-    if (!agent || agent === true) return { ok: false, error: '--agent 不能为空' };
-    result.agentId = agent as string;
-  }
+  const targetSession = parseTargetSession(flags);
+  if (!targetSession.ok) return targetSession;
 
-  const hasChannel = flags.has('channel');
-  const hasChannelId = flags.has('channelid');
-  if (hasChannel !== hasChannelId) {
-    return { ok: false, error: '--channel 与 --channelid 必须同时指定或同时省略' };
-  }
-  if (hasChannel) {
-    result.targetChannel = flags.get('channel') as string;
-    result.targetChannelId = flags.get('channelid') as string;
-  }
-
-  if (flags.has('thread')) {
-    if (flags.has('session')) return { ok: false, error: '--thread 与 --session 互斥' };
-    result.targetThreadId = flags.get('thread') as string;
-  }
-
-  // Parse optional new fields
-  if (flags.has('tz')) {
-    result.timezone = flags.get('tz') as string;
-  }
-
-  if (flags.has('script')) {
-    const scriptPath = flags.get('script');
-    if (!scriptPath || scriptPath === true) return { ok: false, error: '--script 不能为空' };
-    result.scriptPath = scriptPath;
-  }
-
-  if (flags.has('runtime')) {
-    const runtime = flags.get('runtime') as string;
-    if (runtime !== 'node' && runtime !== 'python' && runtime !== 'bash') {
-      return { ok: false, error: '--runtime 只接受 node、python 或 bash' };
-    }
-    result.scriptRuntime = runtime;
-  }
-
-  if (flags.has('script-args')) {
-    const raw = flags.get('script-args') as string;
-    try {
-      result.scriptArgs = JSON.parse(raw);
-    } catch {
-      return { ok: false, error: '--script-args 必须是合法的 JSON' };
-    }
-  }
-
-  if (flags.has('mode')) {
-    const m = flags.get('mode') as string;
-    if (m !== 'agent' && m !== 'direct') {
-      return { ok: false, error: '--mode 只接受 agent 或 direct' };
-    }
-    result.mode = m === 'direct' ? 'direct-message' : 'agent-runner';
-  }
-
-  if (flags.has('on-fail')) {
-    const f = flags.get('on-fail') as string;
-    if (f !== 'notify' && f !== 'silent') {
-      return { ok: false, error: '--on-fail 只接受 notify 或 silent' };
-    }
-    result.onFailure = f;
-  }
-
-  if (flags.has('on-noop')) {
-    const n = flags.get('on-noop') as string;
-    if (n !== 'notify' && n !== 'silent') {
-      return { ok: false, error: '--on-noop 只接受 notify 或 silent' };
-    }
-    result.onNoop = n;
-  }
+  const scriptTimeout = parseDurationFlag(flags, 'script-timeout', '--script-timeout');
+  if (!scriptTimeout.ok) return scriptTimeout;
 
   const maxRuns = parsePositiveIntegerFlag(flags, 'max-runs', '--max-runs');
   if (!maxRuns.ok) return maxRuns;
-  if (maxRuns.value !== undefined) result.maxRuns = maxRuns.value;
 
   const maxDuration = parseLimitDurationFlag(flags, 'max-duration', '--max-duration');
   if (!maxDuration.ok) return maxDuration;
-  if (maxDuration.value !== undefined) result.maxDuration = maxDuration.value;
 
   const model = parseModelFlag(flags);
   if (!model.ok) return model;
-  if (model.value !== undefined) result.model = model.value;
 
   const effort = parseEffortFlag(flags);
   if (!effort.ok) return effort;
-  if (effort.value !== undefined) result.effort = effort.value;
 
   const permissionMode = parsePermissionModeFlag(flags);
   if (!permissionMode.ok) return permissionMode;
-  if (permissionMode.value !== undefined) result.permissionMode = permissionMode.value;
 
-  return { ok: true, nameOrId, value: result };
-}
-
-export function parseTriggerSet(args: string): ParseResult {
-  const flags = parseFlags(args);
-
-  const hasDelay = flags.has('delay');
-  const hasAt = flags.has('at');
-  const hasCron = flags.has('cron');
-  const hasEvery = flags.has('every');
-  const hasEvent = flags.has('event');
-  const timeCount = [hasDelay, hasAt, hasCron, hasEvery, hasEvent].filter(Boolean).length;
-
-  if (timeCount === 0) {
-    return { ok: false, error: '必须指定触发参数：--delay <时长> | --at <ISO时间> | --cron <表达式> | --every <时长> | --event <事件模式>' };
-  }
-  if (timeCount > 1) {
-    return { ok: false, error: '--delay、--at、--cron、--every、--event 互斥，只能指定一个' };
-  }
-
-  let scheduleType: TriggerScheduleType;
-  let scheduleValue: string;
-
-  if (hasDelay) {
-    const raw = flags.get('delay') as string;
-    const ms = parseDuration(raw);
-    if (ms === null) {
-      return { ok: false, error: `无法解析 --delay "${raw}"，支持格式：30s、15m、2h、1d` };
+  let scriptArgs: unknown;
+  if (flags.has('script-args')) {
+    const raw = flags.get('script-args');
+    if (!raw || raw === true) return { ok: false as const, error: '--script-args 不能为空' };
+    try {
+      scriptArgs = JSON.parse(raw);
+    } catch {
+      return { ok: false as const, error: '--script-args 必须是合法的 JSON' };
     }
-    scheduleType = 'delay';
-    scheduleValue = String(ms);
-  } else if (hasAt) {
-    const raw = flags.get('at') as string;
-    const ts = parseIsoDate(raw);
-    if (ts === null) {
-      return { ok: false, error: `无法解析 --at "${raw}"，请使用 ISO 格式，如 2026-05-15T09:00` };
-    }
-    if (ts <= Date.now()) {
-      return { ok: false, error: `--at 时间已过期：${raw}` };
-    }
-    scheduleType = 'at';
-    scheduleValue = new Date(ts).toISOString();
-  } else if (hasCron) {
-    const raw = flags.get('cron') as string;
-    if (!validateCronExpr(raw)) {
-      // Detect likely space-truncation: raw looks like one cron segment and args contains space-separated * or digits after it
-      const truncated = /^[\d*/,-]+$/.test(raw) && /--cron\s+\S+\s+[*\d]/.test(args);
-      const hint = truncated ? '（看起来 cron 表达式被空格截断了，请用引号包裹，如 --cron \'*/15 * * * *\'）' : '（需 5 段：分 时 日 月 周，如 */15 * * * *）';
-      return { ok: false, error: `无效的 cron 表达式："${raw}" ${hint}` };
-    }
-    scheduleType = 'cron';
-    scheduleValue = raw;
-  } else if (hasEvery) {
-    const raw = flags.get('every');
-    if (!raw || raw === true) {
-      return { ok: false, error: '--every 不能为空' };
-    }
-    const ms = parseDuration(raw);
-    if (ms === null) {
-      return { ok: false, error: `无法解析 --every "${raw}"，支持格式：30s、15m、2h、1d` };
-    }
-    scheduleType = 'interval';
-    scheduleValue = String(ms);
-  } else {
-    const raw = flags.get('event');
-    if (!raw || raw === true) {
-      return { ok: false, error: '--event 不能为空' };
-    }
-    scheduleType = 'event';
-    scheduleValue = raw;
   }
 
   const prompt = flags.get('prompt');
-  if (!prompt || prompt === true) {
-    return { ok: false, error: '--prompt 为必填项' };
-  }
-  if (typeof prompt === 'string' && prompt.length > 4096) {
-    return { ok: false, error: '--prompt 超过 4096 字符限制' };
-  }
+  if (prompt === true) return { ok: false as const, error: '--prompt 不能为空' };
+  if (typeof prompt === 'string' && prompt.length > 4096) return { ok: false as const, error: '--prompt 超过 4096 字符限制' };
 
-  const hasThread = flags.has('thread');
-  const hasSession = flags.has('session');
-  if (hasThread && hasSession) {
-    return { ok: false, error: '--thread 与 --session 互斥，只能指定一个' };
+  const scriptPath = flags.get('script-path');
+  if (scriptPath === true) return { ok: false as const, error: '--script-path 不能为空' };
+  const scriptRuntime = flags.get('script-runtime');
+  if (scriptRuntime === true) return { ok: false as const, error: '--script-runtime 不能为空' };
+  if (scriptRuntime !== undefined && scriptRuntime !== 'node' && scriptRuntime !== 'python' && scriptRuntime !== 'bash') {
+    return { ok: false as const, error: '--script-runtime 只接受 node、python 或 bash' };
   }
 
-  const hasChannel = flags.has('channel');
-  const hasChannelId = flags.has('channelid');
-  if (hasChannel !== hasChannelId) {
-    return { ok: false, error: '--channel 与 --channelid 必须同时指定或同时省略' };
+  const targetChannel = flags.get('target-channel');
+  if (targetChannel === true) return { ok: false as const, error: '--target-channel 不能为空' };
+  const targetChannelId = flags.get('target-channel-id');
+  if (targetChannelId === true) return { ok: false as const, error: '--target-channel-id 不能为空' };
+  const targetThreadId = flags.get('target-thread-id');
+  if (targetThreadId === true) return { ok: false as const, error: '--target-thread-id 不能为空' };
+
+  const hasTargetField = targetChannel !== undefined || targetChannelId !== undefined || targetSession.value !== undefined || targetThreadId !== undefined;
+  if ((targetChannel === undefined) !== (targetChannelId === undefined)) {
+    return { ok: false as const, error: '--target-channel 与 --target-channel-id 必须同时指定或同时省略' };
   }
 
-  let targetSessionStrategy: TriggerSessionStrategy = 'latest';
-  if (hasSession) {
-    const sv = flags.get('session') as string;
-    if (sv !== 'latest' && sv !== 'thread') {
-      return { ok: false, error: '--session 只接受 latest 或 thread' };
-    }
-    targetSessionStrategy = sv;
+  const inferredExecution = execution.value ?? (scriptPath ? 'script' : 'target_session');
+  if (inferredExecution === 'script') {
+    if (!scriptPath && !opts.update) return { ok: false as const, error: '--exec script 需要 --script-path' };
+    if (scriptPath && !scriptRuntime && !opts.update) return { ok: false as const, error: '--script-path 必须配合 --script-runtime 使用（node|python|bash）' };
+  } else if (!prompt && !opts.update) {
+    return { ok: false as const, error: '--prompt 为必填项' };
   }
 
-  // Parse optional timezone (only for cron)
-  let timezone: string | undefined;
-  if (flags.has('tz')) {
-    if (scheduleType !== 'cron') {
-      return { ok: false, error: '--tz 只能和 --cron 一起使用' };
-    }
-    timezone = flags.get('tz') as string;
-  }
-
-  // Parse optional script
-  let scriptPath: string | undefined;
-  let scriptRuntime: string | undefined;
-  let scriptArgs: unknown;
-  if (flags.has('script')) {
-    const sp = flags.get('script');
-    if (!sp || sp === true) {
-      return { ok: false, error: '--script 不能为空' };
-    }
-    scriptPath = sp;
-    if (!flags.has('runtime')) {
-      return { ok: false, error: '--script 必须配合 --runtime 使用（node|python|bash）' };
-    }
-    const rt = flags.get('runtime');
-    if (!rt || rt === true) {
-      return { ok: false, error: '--runtime 不能为空' };
-    }
-    if (rt !== 'node' && rt !== 'python' && rt !== 'bash') {
-      return { ok: false, error: '--runtime 只接受 node、python 或 bash' };
-    }
-    scriptRuntime = rt;
-    if (flags.has('script-args')) {
-      const raw = flags.get('script-args') as string;
-      try {
-        scriptArgs = JSON.parse(raw);
-      } catch {
-        return { ok: false, error: '--script-args 必须是合法的 JSON' };
-      }
-    }
-  } else if (flags.has('runtime')) {
-    return { ok: false, error: '--runtime 必须配合 --script 使用' };
-  }
-
-  // Parse optional mode
-  let mode: 'agent-runner' | 'direct-message' | undefined;
-  if (flags.has('mode')) {
-    const m = flags.get('mode') as string;
-    if (m !== 'agent' && m !== 'direct') {
-      return { ok: false, error: '--mode 只接受 agent 或 direct' };
-    }
-    mode = m === 'direct' ? 'direct-message' : 'agent-runner';
-  }
-
-  // Parse optional on-fail / on-noop
-  let onFailure: 'notify' | 'silent' | undefined;
-  if (flags.has('on-fail')) {
-    const f = flags.get('on-fail') as string;
-    if (f !== 'notify' && f !== 'silent') {
-      return { ok: false, error: '--on-fail 只接受 notify 或 silent' };
-    }
-    onFailure = f;
-  }
-
-  let onNoop: 'notify' | 'silent' | undefined;
-  if (flags.has('on-noop')) {
-    const n = flags.get('on-noop') as string;
-    if (n !== 'notify' && n !== 'silent') {
-      return { ok: false, error: '--on-noop 只接受 notify 或 silent' };
-    }
-    onNoop = n;
-  }
-
-  const maxRuns = parsePositiveIntegerFlag(flags, 'max-runs', '--max-runs');
-  if (!maxRuns.ok) return maxRuns;
-
-  const maxDuration = parseLimitDurationFlag(flags, 'max-duration', '--max-duration');
-  if (!maxDuration.ok) return maxDuration;
-
-  const model = parseModelFlag(flags);
-  if (!model.ok) return model;
-
-  const effort = parseEffortFlag(flags);
-  if (!effort.ok) return effort;
-
-  const permissionMode = parsePermissionModeFlag(flags);
-  if (!permissionMode.ok) return permissionMode;
+  const targetSessionValue = targetSession.value ?? (targetThreadId ? 'thread' : 'main');
+  const feedbackStrategy = feedback.value ?? (hasTargetField ? 'target' : 'origin');
 
   return {
-    ok: true,
+    ok: true as const,
     value: {
-      scheduleType,
-      scheduleValue,
-      timezone,
-      targetChannel: hasChannel ? (flags.get('channel') as string) : undefined,
-      targetChannelId: hasChannelId ? (flags.get('channelid') as string) : undefined,
-      targetThreadId: hasThread ? (flags.get('thread') as string) : undefined,
-      targetSessionStrategy,
-      agentId: flags.has('agent') ? (flags.get('agent') as string) : undefined,
-      name: flags.has('name') ? (flags.get('name') as string) : undefined,
-      prompt: prompt as string,
-      scriptPath,
-      scriptRuntime,
+      ...source,
+      executionType: execution.value,
+      inferredExecution,
+      feedbackStrategy,
+      targetChannel: targetChannel as string | undefined,
+      targetChannelId: targetChannelId as string | undefined,
+      targetSession: targetSessionValue,
+      targetThreadId: targetThreadId as string | undefined,
+      agentId: flags.has('agent') ? flags.get('agent') as string : undefined,
+      name: flags.has('name') ? flags.get('name') as string : undefined,
+      prompt: prompt as string | undefined,
+      scriptPath: scriptPath as string | undefined,
+      scriptRuntime: scriptRuntime as string | undefined,
       scriptArgs,
-      mode,
-      onFailure,
-      onNoop,
+      scriptTimeoutMs: scriptTimeout.value,
+      triggerThread: triggerThread.value,
       maxRuns: maxRuns.value,
       maxDuration: maxDuration.value,
       model: model.value,
@@ -568,4 +381,89 @@ export function parseTriggerSet(args: string): ParseResult {
       permissionMode: permissionMode.value,
     },
   };
+}
+
+export function parseTriggerSet(args: string): ParseResult {
+  const flags = parseFlags(args);
+  const parsed = commonParsed(flags);
+  if (!parsed.ok) return parsed;
+  const value = parsed.value;
+  return {
+    ok: true,
+    value: {
+      scheduleType: value.scheduleType!,
+      scheduleValue: value.scheduleValue ?? '',
+      timezone: value.timezone,
+      executionType: value.inferredExecution,
+      feedbackStrategy: value.feedbackStrategy,
+      targetChannel: value.targetChannel,
+      targetChannelId: value.targetChannelId,
+      targetSession: value.targetSession,
+      targetThreadId: value.targetThreadId,
+      agentId: value.agentId,
+      name: value.name,
+      prompt: value.prompt,
+      scriptPath: value.scriptPath,
+      scriptRuntime: value.scriptRuntime,
+      scriptArgs: value.scriptArgs,
+      scriptTimeoutMs: value.scriptTimeoutMs,
+      triggerThread: value.triggerThread,
+      maxRuns: value.maxRuns,
+      maxDuration: value.maxDuration,
+      model: value.model,
+      effort: value.effort,
+      permissionMode: value.permissionMode,
+    },
+  };
+}
+
+export function parseTriggerUpdate(args: string): UpdateParseResult {
+  const trimmed = args.trim();
+  if (!trimmed) return { ok: false, error: '用法：/trigger update <名称|ID> [--参数...]' };
+
+  let nameOrId: string;
+  let rest: string;
+  if (trimmed.startsWith('"') || trimmed.startsWith("'")) {
+    const quote = trimmed[0];
+    const end = trimmed.indexOf(quote, 1);
+    if (end === -1) return { ok: false, error: '名称引号未闭合' };
+    nameOrId = trimmed.slice(1, end);
+    rest = trimmed.slice(end + 1).trim();
+  } else {
+    const spaceIdx = trimmed.indexOf(' ');
+    if (spaceIdx === -1) return { ok: false, error: '至少需要指定一个修改参数（如 --prompt、--delay、--event 等）' };
+    nameOrId = trimmed.slice(0, spaceIdx);
+    rest = trimmed.slice(spaceIdx + 1).trim();
+  }
+  if (!rest) return { ok: false, error: '至少需要指定一个修改参数（如 --prompt、--delay、--event 等）' };
+
+  const flags = parseFlags(rest);
+  if (flags.size === 0) return { ok: false, error: '至少需要指定一个修改参数（如 --prompt、--delay、--event 等）' };
+  const parsed = commonParsed(flags, { update: true });
+  if (!parsed.ok) return parsed;
+  const value = parsed.value;
+  const update: ParsedTriggerUpdate = {};
+  if (value.scheduleType !== undefined) update.scheduleType = value.scheduleType;
+  if (value.scheduleValue !== undefined) update.scheduleValue = value.scheduleValue;
+  if (value.timezone !== undefined) update.timezone = value.timezone;
+  if (value.executionType !== undefined) update.executionType = value.inferredExecution;
+  if (flags.has('feedback')) update.feedbackStrategy = value.feedbackStrategy;
+  if (value.targetChannel !== undefined) update.targetChannel = value.targetChannel;
+  if (value.targetChannelId !== undefined) update.targetChannelId = value.targetChannelId;
+  if (flags.has('target-session') || value.targetThreadId !== undefined) update.targetSession = value.targetSession;
+  if (value.targetThreadId !== undefined) update.targetThreadId = value.targetThreadId;
+  if (value.agentId !== undefined) update.agentId = value.agentId;
+  if (value.name !== undefined) update.name = value.name;
+  if (value.prompt !== undefined) update.prompt = value.prompt;
+  if (value.scriptPath !== undefined) update.scriptPath = value.scriptPath;
+  if (value.scriptRuntime !== undefined) update.scriptRuntime = value.scriptRuntime;
+  if (value.scriptArgs !== undefined) update.scriptArgs = value.scriptArgs;
+  if (value.scriptTimeoutMs !== undefined) update.scriptTimeoutMs = value.scriptTimeoutMs;
+  if (value.triggerThread !== undefined) update.triggerThread = value.triggerThread;
+  if (value.maxRuns !== undefined) update.maxRuns = value.maxRuns;
+  if (value.maxDuration !== undefined) update.maxDuration = value.maxDuration;
+  if (value.model !== undefined) update.model = value.model;
+  if (value.effort !== undefined) update.effort = value.effort;
+  if (value.permissionMode !== undefined) update.permissionMode = value.permissionMode;
+  return { ok: true, nameOrId, value: update };
 }

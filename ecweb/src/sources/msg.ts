@@ -9,6 +9,7 @@ import fs from 'fs';
 import path from 'path';
 import { resolvePaths } from '../paths.js';
 import {
+  isHandoffStateMessage,
   readAllJsonlLines,
   readJsonFile,
 } from '../fs-utils.js';
@@ -235,7 +236,7 @@ function loadChats(): ChatRecord[] {
   for (const file of files) {
     const dirPath = path.dirname(file);
     const active = readJsonFile<any>(path.join(dirPath, 'active.json')) ?? {};
-    const messages = readAllJsonlLines<MessageLogEntry>(file);
+    const messages = readAllJsonlLines<MessageLogEntry>(file).filter(m => !isHandoffStateMessage(m));
     if (!messages.length) continue;
     const identity = normalizeChatIdentity(sessionsDir, dirPath, active, messages);
     const { channelType, channel, channelId, selfAID } = identity;

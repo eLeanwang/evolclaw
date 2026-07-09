@@ -1,16 +1,17 @@
 import { describe, expect, it, vi } from 'vitest';
 import { CommandHandler } from '../src/core/command/command-handler.js';
-import { setPrivateRoleAssignment } from '../src/config/role-assignments.js';
+import { ConfigTarget, write } from '../src/config/config-manager.js';
 import type { Session } from '../src/types.js';
 
 describe('ctl model permissions', () => {
   it('resolves current role assignments from ctl session context', async () => {
     const selfAid = 'ctl-owner.agentid.pub';
-    const peerId = 'guest-peer.agentid.pub';
-    setPrivateRoleAssignment(selfAid, peerId, 'guest');
+    const peerId = 'visitor-peer.agentid.pub';
+    write(ConfigTarget.Agent, { aid: selfAid, channels: [] }, { self: selfAid });
+    write(ConfigTarget.Relation, { roles: { assigned: 'visitor' } }, { self: selfAid, peerKey: `aun#${peerId}` });
 
     const session: Session = {
-      id: 'sess-guest',
+      id: 'sess-visitor',
       channel: `aun#${selfAid}#main`,
       channelType: 'aun',
       channelId: peerId,

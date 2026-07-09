@@ -363,7 +363,7 @@ export function CommandPermissionModal({
         {!isAllowed && (
           <Alert
             message="提示"
-            description="禁止执行时，建议在"权限说明"中解释原因，帮助用户理解限制"
+            description={'禁止执行时，建议在“权限说明”中解释原因，帮助用户理解限制'}
             type="info"
             icon={<InfoCircleOutlined />}
             showIcon

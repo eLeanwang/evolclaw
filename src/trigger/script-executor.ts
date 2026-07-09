@@ -17,7 +17,7 @@ export interface ScriptExecutionInput {
 
 export class TriggerScriptExecutor {
   async execute(input: ScriptExecutionInput): Promise<TriggerScriptResult> {
-    const script = input.trigger.execution.mode === 'script'
+    const script = input.trigger.execution.type === 'script'
       ? input.trigger.execution.script
       : undefined;
     if (!script) {

@@ -81,17 +81,18 @@ function printHelp(): void {
   template list|show <name> [--json]
 
 Flag 模式支持的参数（与 /trigger 命令一致）:
-  --delay <时长> | --at <ISO时间> | --cron <表达式> | --every <时长> | --event <事件模式>
+  --once | --delay <时长> | --at <ISO时间> | --cron <表达式> | --every <时长> | --event <事件模式>
+  --exec <script|trigger-session|target-session>
   --prompt <文本>
-  --script <路径> --runtime <node|python|bash>
-  --mode <agent|direct>
+  --script-path <路径> --script-runtime <node|python|bash>
+  --feedback target (flag 模式仅支持 target；origin/silent 请用 /trigger 或 --file)
   --model <模型>  --effort <low|medium|high|xhigh|max>
-  --on-fail <notify|silent>  --on-noop <notify|silent>
   --max-runs <次数>  --max-duration <时长: 30s|15m|2h|1d>
   --permission <auto|bypass|readonly|plan|edit|request|noask>
   --tz <时区> (仅 cron)
-  --channel <名称> --channelid <ID>
-  --session <latest|thread>
+  --target-channel <channelKey> --target-channel-id <ID>
+  --target-session <main|thread> [--target-thread-id <threadId>]
+  --trigger-thread <per-run|by-trigger>
   --name <名称>`);
 }
 
@@ -138,11 +139,12 @@ async function showTrigger(args: string[], json: boolean): Promise<void> {
     }
     console.log(`limit state: ${parts.join(', ')}`);
   }
-  if (t.execution.mode === 'script') console.log(`script: ${scriptCommandLabel(t.execution.script!)}`);
+  console.log(`execution: ${t.execution.type}`);
+  if (t.execution.type === 'script') console.log(`script: ${scriptCommandLabel(t.execution.script!)}`);
   console.log(`model: ${t.execution.model ?? 'inherit'}`);
   console.log(`effort: ${t.execution.effort ?? 'inherit'}`);
   console.log(`permission: ${t.execution.permissionMode ?? 'inherit'}`);
-  console.log(`feedback: reply=${t.feedback.onReply.kind}, noop=${t.feedback.onNoop.kind}, failure=${t.feedback.onFailure.kind}`);
+  console.log(`feedback: ${t.feedback.strategy}${t.feedback.target ? ` -> ${t.feedback.target.channelKey}/${t.feedback.target.channelId}/${t.feedback.target.session}` : ''}`);
   const active = Array.isArray(res.active) ? res.active : [];
   console.log(`active runs: ${active.length}`);
   const recent = Array.isArray(res.recentRuns) ? res.recentRuns : [];
@@ -183,36 +185,24 @@ async function createTrigger(args: string[], json: boolean): Promise<void> {
   if (!agentAid) {
     throw new Error('flag 模式需要 --agent <aid> 参数');
   }
-  if (!parsed.targetChannel || !parsed.targetChannelId) {
-    throw new Error('flag 模式需要显式指定 --channel <channelKey> --channelid <id>');
+  if (parsed.feedbackStrategy !== 'target') {
+    throw new Error('CLI flag 模式仅支持 --feedback target；origin/silent 请使用 /trigger 或 --file V4 JSON');
   }
-  // Build V3 definition directly. File mode still normalizes imported
-  // definitions, but persisted trigger definitions should be V3.
+  if (!parsed.targetChannel || !parsed.targetChannelId) {
+    throw new Error('CLI flag 模式需要显式指定 --target-channel <channelKey> --target-channel-id <id>');
+  }
   const now = Date.now();
-  const strategy = parsed.targetThreadId ? 'thread' : parsed.targetSessionStrategy;
-  const session = {
-    strategy: strategy === 'thread' ? 'thread' : 'isolated',
-    channelKey: parsed.targetChannel || '',
-    channelId: parsed.targetChannelId || '',
-    ...(parsed.targetThreadId && parsed.targetThreadId !== 'true' ? { threadId: parsed.targetThreadId } : {}),
-  };
+  if (parsed.targetSession === 'thread' && !parsed.targetThreadId) {
+    throw new Error('--target-session thread 需要 --target-thread-id');
+  }
   const script = parsed.scriptPath ? {
     path: parsed.scriptPath,
     runtime: parsed.scriptRuntime!,
     args: parsed.scriptArgs,
-    timeoutMs: 30_000,
+    timeoutMs: parsed.scriptTimeoutMs ?? 30_000,
   } : undefined;
-  const mode = parsed.mode === 'agent-runner' ? 'agent-session' : parsed.mode;
-  const target = {
-    channelKey: parsed.targetChannel,
-    channelId: parsed.targetChannelId,
-    delivery: script || mode === 'direct-message' ? 'direct' : 'inbound',
-    ...(session.threadId ? { threadId: session.threadId } : {}),
-  };
-  const onFailureMode = parsed.onFailure || 'notify';
-  const onNoopMode = parsed.onNoop || 'silent';
   const definition: any = {
-    $schema_version: 3,
+    $schema_version: 4,
     agentAid,
     name: parsed.name || `trigger-${now.toString(36)}`,
     enabled: hasFlag(args, '--enable'),
@@ -220,16 +210,24 @@ async function createTrigger(args: string[], json: boolean): Promise<void> {
     updatedAt: now,
     source: sourceFromParsed(parsed),
     execution: {
-      mode: script ? 'script' : 'agent',
+      type: parsed.executionType,
       ...(script ? { script } : { prompt: parsed.prompt }),
-      session,
       ...(parsed.model ? { model: parsed.model } : {}),
       ...(parsed.effort ? { effort: parsed.effort } : {}),
       ...(parsed.permissionMode ? { permissionMode: parsed.permissionMode } : {}),
+      ...(parsed.executionType === 'trigger_session' ? { thread: parsed.triggerThread ?? 'per_run' } : {}),
       onError: 'retry',
       noopSentinel: '[[NOOP]]',
     },
-    feedback: feedbackFromParsed(parsed, mode, script !== undefined, target),
+    feedback: {
+      strategy: 'target',
+      target: {
+        channelKey: parsed.targetChannel,
+        channelId: parsed.targetChannelId,
+        session: parsed.targetSession,
+        ...(parsed.targetSession === 'thread' ? { threadId: parsed.targetThreadId } : {}),
+      },
+    },
     reliability: { concurrency: 'forbid', missedPolicy: 'run_once', retry: { maxAttempts: 0, backoffMs: 30_000 } },
     limits: limitsFromParsed(parsed),
   };
@@ -245,6 +243,7 @@ async function createTrigger(args: string[], json: boolean): Promise<void> {
 }
 
 function sourceFromParsed(parsed: any): any {
+  if (parsed.scheduleType === 'once') return { type: 'once' };
   if (parsed.scheduleType === 'delay') return { type: 'delay', afterMs: Number(parsed.scheduleValue) };
   if (parsed.scheduleType === 'at') return { type: 'at', at: parsed.scheduleValue };
   if (parsed.scheduleType === 'cron') {
@@ -255,25 +254,6 @@ function sourceFromParsed(parsed: any): any {
   if (parsed.scheduleType === 'interval') return { type: 'interval', everyMs: Number(parsed.scheduleValue) };
   if (parsed.scheduleType === 'event') return { type: 'event', eventPattern: parsed.scheduleValue };
   throw new Error(`unsupported scheduleType: ${parsed.scheduleType}`);
-}
-
-function feedbackFromParsed(parsed: any, _mode: string | undefined, hasScript: boolean, target: any): any {
-  const onFailureMode = parsed.onFailure || 'notify';
-  const onNoopMode = parsed.onNoop || 'silent';
-
-  return {
-    onReply: {
-      kind: 'forward',
-      targets: [target],
-      template: hasScript ? (parsed.prompt || '{{reply.text}}') : undefined,
-    },
-    onNoop: onNoopMode === 'notify'
-      ? { kind: 'forward', targets: [target], template: '{{reply.text}}' }
-      : { kind: 'silent' },
-    onFailure: onFailureMode === 'notify'
-      ? { kind: 'forward', targets: [target], template: '❌ 触发器执行失败：{{error.message}}' }
-      : { kind: 'silent' },
-  };
 }
 
 function limitsFromParsed(parsed: { maxRuns?: number; maxDuration?: string }): any {
@@ -383,7 +363,7 @@ function loadDefinitionWithFiles(inputPath: string): { definition: TriggerDefini
   const jsonPath = stat.isDirectory() ? path.join(inputPath, 'trigger.json') : inputPath;
   const definition = normalizeTriggerDefinition(JSON.parse(fs.readFileSync(jsonPath, 'utf-8')));
   const files: TriggerCreateFile[] = [];
-  if (definition.execution.mode === 'script') {
+  if (definition.execution.type === 'script') {
     const scriptAbs = resolveScriptPath(baseDir, definition.execution.script!.path);
     const relativePath = path.relative(baseDir, scriptAbs).replace(/\\/g, '/');
     files.push({ relativePath, contentBase64: fs.readFileSync(scriptAbs).toString('base64') });
@@ -393,6 +373,7 @@ function loadDefinitionWithFiles(inputPath: string): { definition: TriggerDefini
 
 function sourceLabel(t: TriggerDefinition): string {
   switch (t.source.type) {
+    case 'once': return 'once';
     case 'delay': return `delay ${t.source.afterMs}ms`;
     case 'at': return `at ${t.source.at}`;
     case 'cron': return `cron ${t.source.expression}${t.source.timezone ? ` (${t.source.timezone})` : ''}`;

@@ -21,9 +21,7 @@ export type SessionEvent =
   | { type: 'session:renamed'; sessionId: string; oldName: string; newName: string }
   | { type: 'session:forked'; sessionId: string; sourceSessionId: string; name?: string }
   | { type: 'session:rewind'; sessionId: string; turnNum: number; mode: string }
-  | { type: 'session:imported'; sessionId: string; agentSessionId: string; projectPath: string }
-  | { type: 'session:chat-mode-changed'; sessionId: string; mode: string; timestamp?: number }
-  | { type: 'session:dispatch-mode-changed'; sessionId: string; mode: string; timestamp?: number };
+  | { type: 'session:imported'; sessionId: string; agentSessionId: string; projectPath: string };
 
 // ── 消息事件 ──
 export type MessageEvent =

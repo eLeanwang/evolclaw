@@ -1,14 +1,8 @@
-import {
-  getGroupMemberRoleAssignment,
-  getGroupRoleAssignment,
-  getPrivateRoleAssignment,
-  groupAssignmentKey,
-  groupMemberAssignmentKey,
-  privateAssignmentKey,
-} from './role-assignments.js';
-import { readRolesConfig } from './roles.js';
-import { ConfigTarget, read } from './config-manager.js';
-import type { AgentConfig, RoleAssignment } from '../types.js';
+import { formatPeerKey } from '../core/relation/peer-identity.js';
+import { ConfigTarget, read, write } from './config-manager.js';
+import { isManagementRole } from './builtin-roles.js';
+import { normalizeDefaultRole, roleExists, getRoleDefinition } from './roles.js';
+import type { AgentConfig, RelationConfig, RelationRolesConfig } from '../types.js';
 
 export interface PeerRoleContext {
   selfAid: string;
@@ -20,10 +14,17 @@ export interface PeerRoleContext {
 }
 
 export interface ResolvedPeerRole {
-  effectiveRole: string;
-  source: 'agent-config-owner' | 'assignment' | 'private-inherited' | 'group-default' | 'default';
+  effectiveRole: string | null;
+  source:
+    | 'agent-config-owner'
+    | 'agent-config-admin'
+    | 'relation-assigned'
+    | 'group-member'
+    | 'private-inherited'
+    | 'group-default'
+    | 'default'
+    | 'none';
   assignmentKey?: string;
-  assignment?: RoleAssignment;
   isAuthenticated: boolean;
   allowAccess: boolean;
   roleExists: boolean;
@@ -33,96 +34,131 @@ export function isAuthenticated(userId: string): boolean {
   return /^[a-z0-9_-]+\.(aid|agentid)\.pub$/i.test(userId);
 }
 
-function resultFor(
-  role: string,
-  source: ResolvedPeerRole['source'],
-  auth: boolean,
-  assignmentKeyValue?: string,
-  assignment?: RoleAssignment,
-): ResolvedPeerRole {
-  const rolesConfig = readRolesConfig();
-  const def = rolesConfig.roles[role];
-  return {
-    effectiveRole: def ? role : 'anonymous',
-    source: def ? source : 'default',
-    ...(assignmentKeyValue ? { assignmentKey: assignmentKeyValue } : {}),
-    ...(assignment ? { assignment } : {}),
-    isAuthenticated: auth,
-    allowAccess: def ? (def.allowAccess ?? true) : false,
-    roleExists: !!def,
-  };
-}
-
-function defaultRoleFor(chatType: 'private' | 'group'): string {
-  const rolesConfig = readRolesConfig();
-  return rolesConfig.defaultRoles?.[chatType] || (chatType === 'group' ? 'guest' : 'anonymous');
-}
-
 export function listStaticAgentOwners(aid: string): string[] {
-  if (!aid) return [];
-  try {
-    const config = read<AgentConfig>(ConfigTarget.Agent, { self: aid }, { cache: true });
-    if (!Array.isArray(config?.owners)) return [];
-    return Array.from(new Set(
-      config.owners
-        .map(owner => String(owner || '').trim())
-        .filter(Boolean)
-    ));
-  } catch {
-    return [];
-  }
+  return listAgentAids(aid, 'owners');
+}
+
+export function listStaticAgentAdmins(aid: string): string[] {
+  return listAgentAids(aid, 'admins');
+}
+
+export function getFirstStaticAgentOwner(aid: string): string | undefined {
+  return listStaticAgentOwners(aid)[0];
 }
 
 export function isStaticAgentOwner(aid: string, actorId: string): boolean {
-  if (!aid || !actorId) return false;
-  return listStaticAgentOwners(aid).includes(actorId);
+  return !!aid && !!actorId && listStaticAgentOwners(aid).includes(actorId);
+}
+
+export function isStaticAgentAdmin(aid: string, actorId: string): boolean {
+  return !!aid && !!actorId && listStaticAgentAdmins(aid).includes(actorId);
+}
+
+export function addStaticAgentOwner(aid: string, ownerAid: string): void {
+  if (!aid || !ownerAid) return;
+  const config = read<AgentConfig>(ConfigTarget.Agent, { self: aid }) ?? { $schema_version: 3, aid, channels: [] };
+  const owners = new Set((config.owners ?? []).filter(Boolean));
+  owners.add(ownerAid);
+  write(ConfigTarget.Agent, { ...config, aid, owners: [...owners] }, { self: aid });
+}
+
+export function hasStaticAgentOwner(aid: string): boolean {
+  return listStaticAgentOwners(aid).length > 0;
 }
 
 export function resolvePeerRoleDetail(ctx: PeerRoleContext): ResolvedPeerRole {
   const auth = isAuthenticated(ctx.actorId);
 
   if (isStaticAgentOwner(ctx.selfAid, ctx.actorId)) {
-    return resultFor('owner', 'agent-config-owner', auth);
+    return resultFor('owner', 'agent-config-owner', auth, ctx.selfAid, true);
+  }
+  if (isStaticAgentAdmin(ctx.selfAid, ctx.actorId)) {
+    return resultFor('admin', 'agent-config-admin', auth, ctx.selfAid, true);
   }
 
   if (ctx.chatType === 'private') {
-    const found = getPrivateRoleAssignment(ctx.selfAid, ctx.actorId);
-    if (found) {
-      return resultFor(found.role, 'assignment', auth, privateAssignmentKey(ctx.actorId), found);
-    }
-    return resultFor(defaultRoleFor('private'), 'default', auth);
+    const privateRoles = readRelationRoles(ctx.selfAid, ctx.channelType, ctx.actorId);
+    const assigned = normalizeUserRole(privateRoles?.assigned, ctx.selfAid);
+    if (assigned) return resultFor(assigned, 'relation-assigned', auth, ctx.selfAid);
+
+    const fallback = normalizeDefaultRole(readAgentDefaultRole(ctx.selfAid, 'private'), ctx.selfAid);
+    return fallback ? resultFor(fallback, 'default', auth, ctx.selfAid) : resultFor(null, 'none', auth, ctx.selfAid);
   }
 
-  const groupId = ctx.conversationId;
-  const groupMember = getGroupMemberRoleAssignment(ctx.selfAid, groupId, ctx.actorId);
-  if (groupMember) {
-    return resultFor(groupMember.role, 'assignment', auth, groupMemberAssignmentKey(groupId, ctx.actorId), groupMember);
-  }
+  const groupRoles = readRelationRoles(ctx.selfAid, ctx.channelType, ctx.conversationId);
+  const memberRole = normalizeUserRole(groupRoles?.members?.[ctx.actorId], ctx.selfAid);
+  if (memberRole) return resultFor(memberRole, 'group-member', auth, ctx.selfAid);
 
-  const privateAssignment = getPrivateRoleAssignment(ctx.selfAid, ctx.actorId);
-  if (privateAssignment) {
-    return resultFor(privateAssignment.role, 'private-inherited', auth, privateAssignmentKey(ctx.actorId), privateAssignment);
-  }
+  const privateRoles = readRelationRoles(ctx.selfAid, ctx.channelType, ctx.actorId);
+  const inherited = normalizeUserRole(privateRoles?.assigned, ctx.selfAid);
+  if (inherited) return resultFor(inherited, 'private-inherited', auth, ctx.selfAid);
 
-  const groupAssignment = getGroupRoleAssignment(ctx.selfAid, groupId);
-  if (groupAssignment) {
-    return resultFor(groupAssignment.role, 'group-default', auth, groupAssignmentKey(groupId), groupAssignment);
-  }
+  const groupAssigned = normalizeUserRole(groupRoles?.assigned, ctx.selfAid);
+  if (groupAssigned) return resultFor(groupAssigned, 'group-default', auth, ctx.selfAid);
 
-  return resultFor(defaultRoleFor('group'), 'default', auth);
+  const fallback = normalizeDefaultRole(readAgentDefaultRole(ctx.selfAid, 'group'), ctx.selfAid);
+  return fallback ? resultFor(fallback, 'default', auth, ctx.selfAid) : resultFor(null, 'none', auth, ctx.selfAid);
 }
 
-export function roleToSessionIdentity(role: string): { role: string; mode: 'interactive' } {
-  return { role, mode: 'interactive' };
+export function roleToSessionIdentity(role: string | null): { role: string; mode: 'interactive' } {
+  return { role: role ?? 'none', mode: 'interactive' };
 }
 
-export function checkRoleAccess(role: string): boolean {
+export function checkRoleAccess(role: string | null | undefined, selfAid?: string): boolean {
+  if (!role) return false;
+  if (isManagementRole(role)) return true;
+  const roleDef = getRoleDefinition(role, selfAid);
+  if (!roleDef) return false;
+  return roleDef.allowAccess ?? true;
+}
+
+function resultFor(
+  role: string | null,
+  source: ResolvedPeerRole['source'],
+  auth: boolean,
+  selfAid?: string,
+  forceAccess = false,
+): ResolvedPeerRole {
+  const exists = role ? (isManagementRole(role) || roleExists(role, selfAid)) : false;
+  const roleDef = role ? getRoleDefinition(role, selfAid) : null;
+  return {
+    effectiveRole: exists ? role : null,
+    source: exists ? source : 'none',
+    isAuthenticated: auth,
+    allowAccess: forceAccess || !!(roleDef && (roleDef.allowAccess ?? true)),
+    roleExists: exists,
+  };
+}
+
+function listAgentAids(aid: string, field: 'owners' | 'admins'): string[] {
+  if (!aid) return [];
   try {
-    const rolesConfig = readRolesConfig();
-    const roleDef = rolesConfig.roles[role];
-    if (!roleDef) return false;
-    return roleDef.allowAccess ?? true;
+    const config = read<AgentConfig>(ConfigTarget.Agent, { self: aid }, { cache: true });
+    const values = config?.[field];
+    if (!Array.isArray(values)) return [];
+    return Array.from(new Set(values.map(value => String(value || '').trim()).filter(Boolean)));
   } catch {
-    return false;
+    return [];
   }
+}
+
+function readAgentDefaultRole(aid: string, chatType: 'private' | 'group'): string | null | undefined {
+  const config = read<AgentConfig>(ConfigTarget.Agent, { self: aid }, { cache: true });
+  const defaults = config?.roles?.defaultRoles;
+  if (defaults && Object.prototype.hasOwnProperty.call(defaults, chatType)) {
+    return defaults[chatType] ?? null;
+  }
+  return null;
+}
+
+function readRelationRoles(selfAid: string, channelType: string, channelId: string): RelationRolesConfig | undefined {
+  if (!selfAid || !channelType || !channelId) return undefined;
+  const peerKey = formatPeerKey(channelType, channelId);
+  const config = read<RelationConfig>(ConfigTarget.Relation, { self: selfAid, peerKey }, { cache: true });
+  return config?.roles;
+}
+
+function normalizeUserRole(value: unknown, selfAid: string): string | null {
+  if (typeof value !== 'string' || !roleExists(value, selfAid)) return null;
+  return value;
 }

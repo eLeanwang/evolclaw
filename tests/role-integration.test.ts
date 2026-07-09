@@ -28,10 +28,10 @@ describe('role constraints integration', () => {
       { self: aid, peerKey },
     );
 
-    const guestEffective = resolveEffective({ self: aid, peerKey, role: 'guest' });
-    expect(guestEffective.permissionMode).toBe('readonly');
-    expect(guestEffective.baseagents?.claude?.model).toBe('claude-haiku-4-5-20251001');
-    expect(guestEffective.dispatch).toBe('mention');
+    const visitorEffective = resolveEffective({ self: aid, peerKey, role: 'visitor' });
+    expect(visitorEffective.permissionMode).toBe('readonly');
+    expect(visitorEffective.baseagents?.claude?.model).toBe('claude-haiku-4-5-20251001');
+    expect(visitorEffective.dispatch).toBe('mention');
 
     const ownerEffective = resolveEffective({ self: aid, peerKey, role: 'owner' });
     expect(ownerEffective.permissionMode).toBe('bypass');
@@ -52,7 +52,7 @@ describe('role constraints integration', () => {
     expect(effective.baseagents?.claude?.model).toBe('claude-opus-4-8');
   });
 
-  it('validates relation behavior writes with provided role and defaults to guest otherwise', () => {
+  it('validates relation behavior writes only with provided role', () => {
     // v3: RelationBehavior → Relation
     const ownerResult = validateConfigWrite(
       ConfigTarget.Relation,
@@ -66,8 +66,8 @@ describe('role constraints integration', () => {
       { permissionMode: 'bypass' },
       { self: aid, peerKey },
     );
-    expect(defaultResult.valid).toBe(false);
-    expect(defaultResult.effectiveConfig.permissionMode).toBe('readonly');
+    expect(defaultResult.valid).toBe(true);
+    expect(defaultResult.effectiveConfig.permissionMode).toBe('bypass');
   });
 
   it('does not apply constraints when peerKey is missing', () => {

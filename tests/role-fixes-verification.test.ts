@@ -1,51 +1,49 @@
 import { describe, expect, it } from 'vitest';
-import { ConfigTarget, read, validateConfig } from '../src/config/config-manager.js';
-import { privateAssignmentKey, setPrivateRoleAssignment, writeRoleAssignments } from '../src/config/role-assignments.js';
+import { ConfigTarget, validateConfig } from '../src/config/config-manager.js';
 
 describe('role source cleanup verification', () => {
-  it('accepts static agent owners but rejects old admin/member lists', () => {
+  it('accepts static agent owner/admin fields', () => {
     expect(validateConfig(ConfigTarget.Agent, {
-      aid: 'legacy.agentid.pub',
+      aid: 'clean.agentid.pub',
       channels: [],
       owners: ['alice.aid.pub'],
+      admins: ['ops.aid.pub'],
     })).toEqual([]);
-
-    expect(validateConfig(ConfigTarget.Agent, {
-      aid: 'legacy.agentid.pub',
-      channels: [],
-      admins: ['alice.aid.pub'],
-    })).not.toEqual([]);
-
-    expect(validateConfig(ConfigTarget.Agent, {
-      aid: 'legacy.agentid.pub',
-      channels: [],
-      members: ['alice.aid.pub'],
-    })).not.toEqual([]);
   });
 
-  it('rejects relation-level role assignment fields', () => {
-    expect(validateConfig(ConfigTarget.Relation, { role: 'owner' })).not.toEqual([]);
-    expect(validateConfig(ConfigTarget.Relation, { owners: ['alice.aid.pub'] })).not.toEqual([]);
-    expect(validateConfig(ConfigTarget.Relation, { admins: ['alice.aid.pub'] })).not.toEqual([]);
-  });
-
-  it('accepts role-assignments config as the assignment source', () => {
-    const aid = 'clean.agentid.pub';
-    const peerId = 'alice.aid.pub';
-
-    setPrivateRoleAssignment(aid, peerId, 'owner');
-    const config = read<any>(ConfigTarget.RoleAssignments, { self: aid });
-
-    expect(validateConfig(ConfigTarget.RoleAssignments, config)).toEqual([]);
-    expect(config.assignments[privateAssignmentKey(peerId)].role).toBe('owner');
-  });
-
-  it('rejects malformed role assignment keys through role assignment writes', () => {
-    expect(() => writeRoleAssignments('bad.agentid.pub', {
-      $schema_version: 2,
-      assignments: {
-        wrong: { scope: 'private', peerId: 'alice.aid.pub', role: 'owner' },
+  it('accepts relation roles through roles.assigned and roles.members', () => {
+    expect(validateConfig(ConfigTarget.Relation, {
+      roles: {
+        assigned: 'member',
+        members: {
+          'alice.aid.pub': 'visitor',
+        },
       },
-    })).toThrow('Invalid role assignment key');
+    })).toEqual([]);
+  });
+
+  it('rejects management roles in relation user-role assignments', () => {
+    expect(validateConfig(ConfigTarget.Relation, {
+      roles: { assigned: 'owner' },
+    })).not.toEqual([]);
+    expect(validateConfig(ConfigTarget.Relation, {
+      roles: { members: { 'alice.aid.pub': 'admin' } },
+    })).not.toEqual([]);
+  });
+
+  it('rejects custom definitions that reuse management role names', () => {
+    expect(validateConfig(ConfigTarget.Agent, {
+      aid: 'clean.agentid.pub',
+      channels: [],
+      roles: {
+        definitions: {
+          owner: {
+            description: 'must not be user-defined',
+            allowAccess: true,
+            permissions: {},
+          },
+        },
+      },
+    })).not.toEqual([]);
   });
 });

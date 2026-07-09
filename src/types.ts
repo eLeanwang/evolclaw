@@ -191,9 +191,8 @@ export interface SessionMetadata {
     codex?: string;
     gemini?: string;
   };
-  permissionMode?: string;  // 权限模式（per-session）: auto | bypass | readonly | request | edit | plan | noask
+  permissionMode?: string;  // 历史兼容字段；权限模式运行时按 relation/agent behavior 解析
   dispatchMode?: string;           // 群聊分发模式缓存（服务器下发值，per-session）: mention | broadcast
-  dispatchModeOverride?: string;   // 用户 /dispatch 命令写入的显式覆盖；undefined = 跟随服务器
   resumeAt?: string;  // /rewind chat 标记的回退点（assistant message uuid）
 }
 
@@ -263,13 +262,30 @@ export interface SubMessage {
    * 子消息类别。缺省（普通对端消息）走 private/group 渲染模式；
    * 'owner-hint' 为观察者插话提示，走 inject 渲染模式（owner 信封头）。
    * 'restart-resume' 为队列恢复提示，仍走普通信封渲染，但处理器会用它切分 pending 插入段。
+   * 'handoff' 为 msg send 跨会话一次性上下文，替代当前入站消息的普通渲染。
    * 详见 docs/observer-insert-design.md 第二部分。
    */
-  kind?: 'owner-hint' | 'restart-resume';
+  kind?: 'owner-hint' | 'restart-resume' | 'handoff';
   /** owner-hint 专用：提示发出时间（epoch ms），渲染成信封头 {{injectTime}}。 */
   injectTime?: number;
   /** owner-hint 专用：提示来源 owner AID。 */
   ownerAid?: string;
+  /** handoff 专用：跨会话上下文渲染数据。 */
+  handoff?: {
+    kind: 'request_to_target' | 'response_to_origin';
+    origin?: {
+      channel?: string;
+      peerId?: string;
+      threadId?: string;
+      peerName?: string;
+      peerType?: string;
+      role?: string;
+    };
+    previousContent?: string;
+    previousMessageId?: string | null;
+    replyCommand?: string;
+    continueCommand?: string;
+  };
 }
 
 export interface Message {
@@ -779,23 +795,6 @@ export interface ProactiveBehaviorBlock {
   tool_use_reminder?: boolean;
 }
 
-export interface GroupVenueSyncConfig {
-  /** 是否从群资源空间同步群规则和资源索引。默认 true。 */
-  enabled?: boolean;
-  /** 群空间内的规则文件路径。默认 /announce/evolclaw/rules.md。 */
-  rulesPath?: string;
-  /** 群空间资源索引扫描根路径。默认 /。 */
-  indexPath?: string;
-  /** 注入资源索引的最大条目数。默认 80。 */
-  maxIndexItems?: number;
-  /** 规则文件最大字节数。默认 65536。 */
-  maxRulesBytes?: number;
-  /** 两次远端 mtime 检查最小间隔。默认 60000ms。 */
-  refreshIntervalMs?: number;
-  /** 预留：只有显式管理命令可写回远端；运行期同步不写远端。 */
-  allowRemoteWrite?: boolean;
-}
-
 // channels[].* —— per-agent，新结构里以列表形式存储。
 // 元素必带 type + name，name 是该 agent 内 channel 类型下的本地标识（不含 '#'）。
 // AUN 类型一个 agent 只允许一个实例，name 通常约定 'main'。
@@ -873,6 +872,7 @@ export interface ProcessConfig {
   $schema_version?: number;
   aid?: string;
   owners?: string[];
+  admins?: string[];
   debug?: DebugBlock;
   tunnel?: { targets: Array<{ name: string; port: number; pathPrefix?: string }> };
   aun?: { encryptionSeed?: string | null };
@@ -900,7 +900,6 @@ export interface DefaultsConfig {
   projects?: ProjectsBlock;
   aun?: AunRuntimeBlock;
   debug?: DebugBlock;
-  group_venue_sync?: GroupVenueSyncConfig;
 }
 
 /**
@@ -919,6 +918,7 @@ export interface AgentConfig {
   initialized?: boolean;
   /** Agent owner AID 列表；当前控制面仍需要读取旧 config 字段。 */
   owners?: string[];
+  admins?: string[];
   aun?: AunRuntimeBlock;
   channels: ChannelInstance[];
   models?: ModelsBlock;
@@ -947,8 +947,6 @@ export interface AgentConfig {
   show_activities?: ShowActivitiesMode;
   // proactive 模式细粒度策略
   proactive?: ProactiveBehaviorBlock;
-  // 群 venue 资源同步
-  group_venue_sync?: GroupVenueSyncConfig;
   // 渲染
   render?: { private?: string; group?: string; inject?: string };
   // 富内容
@@ -956,7 +954,7 @@ export interface AgentConfig {
   // 执行权限模式
   permissionMode?: string;
   // 角色级覆盖
-  roles?: Record<string, RoleOverride>;
+  roles?: RolePolicyConfig;
 }
 
 /**
@@ -977,11 +975,10 @@ export interface RelationConfig {
   dispatch?: 'mention' | 'broadcast';
   show_activities?: ShowActivitiesMode;
   proactive?: ProactiveBehaviorBlock;
-  group_venue_sync?: GroupVenueSyncConfig;
   render?: { private?: string; group?: string; inject?: string };
   enable_rich_content?: boolean;
   permissionMode?: string;
-  roles?: Record<string, RoleOverride>;
+  roles?: RelationRolesConfig;
 }
 
 /**
@@ -997,6 +994,7 @@ export interface EffectiveAgentConfig {
   lifecycle?: AgentLifecycle;
   initialized?: boolean;
   owners?: string[];
+  admins?: string[];
   aun?: AunRuntimeBlock;
   channels: ChannelInstance[];
   models?: ModelsBlock;
@@ -1023,7 +1021,6 @@ export interface EffectiveAgentConfig {
   show_activities?: ShowActivitiesMode;
   // proactive 模式细粒度策略
   proactive?: ProactiveBehaviorBlock;
-  group_venue_sync?: GroupVenueSyncConfig;
   // 渲染
   render?: { private?: string; group?: string; inject?: string };
   // 富内容
@@ -1031,7 +1028,7 @@ export interface EffectiveAgentConfig {
   // 执行权限模式
   permissionMode?: string;
   // 角色级覆盖
-  roles?: Record<string, RoleOverride>;
+  roles?: RolePolicyConfig;
 }
 
 // ── 出站协议类型（OutboundPayload / OutboundEnvelope / ChannelCapabilities） ──
@@ -1095,8 +1092,8 @@ export interface ChannelCapabilities {
 
 // ── Trigger types ──
 
-export type TriggerScheduleType = 'delay' | 'at' | 'cron' | 'interval' | 'event';
-export type TriggerSessionStrategy = 'latest' | 'thread';
+export type TriggerScheduleType = 'once' | 'delay' | 'at' | 'cron' | 'interval' | 'event';
+export type TriggerSessionStrategy = 'main' | 'thread';
 
 export interface Trigger {
   id: string;
@@ -1165,8 +1162,8 @@ export interface MenuUpdateRequest {
   name: string;
   value: string;         // 目标值
   cmd?: string;
-  // 结构化附加参数。baseagent 支持 args.scope:
-  //   'session' 仅切当前会话 | 'default' 仅改 agent 默认 | 'both'（默认）两者都改
+  // 结构化附加参数。menu 配置项默认使用 args.scope='agent'；
+  // 显式 args.scope='relation' 时写当前 peer/group 覆盖。capability 的 project scope 另行定义。
   args?: Record<string, any>;
 }
 
@@ -1332,39 +1329,37 @@ export interface CommandAuthorizationAuditEvent {
 
 // ── Role System Types ──
 
-export type BuiltinRole = 'owner' | 'admin' | 'member' | 'guest' | 'anonymous';
+export type ManagementRole = 'owner' | 'admin';
+export type BuiltinUserRole = 'member' | 'visitor';
+export type BuiltinRole = ManagementRole | BuiltinUserRole;
 
 export interface RolesConfig {
   $schema_version: number;
   defaultRoles?: {
-    private: string;
-    group: string;
+    private?: string | null;
+    group?: string | null;
   };
   roles: Record<string, RoleDefinition>;
 }
 
+export interface RolePolicyConfig {
+  defaultRoles?: {
+    private?: string | null;
+    group?: string | null;
+  };
+  definitions?: Record<string, RoleDefinition>;
+}
+
 export interface RoleDefinition {
   description: string;
-  allowAccess?: boolean;  // 该角色是否允许访问，默认 true（anonymous 默认 false）
+  allowAccess?: boolean;  // 该角色是否允许访问，默认 true
   permissions: Record<string, FieldPermission>;
   commandPermissions?: Record<string, CommandPermission>;  // 命令权限配置
 }
 
-export type RoleAssignmentScope = 'private' | 'group' | 'group-member';
-
-export interface RoleAssignment {
-  scope: RoleAssignmentScope;
-  peerId?: string;
-  groupId?: string;
-  role: string;
-  note?: string;
-  createdAt?: number;
-  updatedAt?: number;
-}
-
-export interface RoleAssignmentsConfig {
-  $schema_version: number;
-  assignments: Record<string, RoleAssignment>;
+export interface RelationRolesConfig {
+  assigned?: string | null;
+  members?: Record<string, string | null>;
 }
 
 export interface FieldPermission<T = any> {

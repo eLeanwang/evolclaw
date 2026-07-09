@@ -15,29 +15,35 @@
 import type { WatchSource } from './types.js';
 import { getModelCatalogSnapshot, type ModelCatalogApiEntry } from './models.js';
 import { resolveParentDistModule, toFileUrl } from './parent-package.js';
+import { resolvePaths } from '../paths.js';
 
 // 动态导入 evolclaw 主项目的角色配置模块
 async function getRolesModule() {
   const rolesPath = resolveParentDistModule('config', 'roles.js');
   const cmPath = resolveParentDistModule('config', 'config-manager.js');
+  const resolverPath = resolveParentDistModule('config', 'peer-role-resolver.js');
 
   // Windows 上需要转换为 file:// URL
   try {
     const rolesMod = await import(toFileUrl(rolesPath));
     const cmMod = await import(toFileUrl(cmPath));
+    const resolverMod = await import(toFileUrl(resolverPath));
 
     if (!rolesMod.readRolesConfig) throw new Error('readRolesConfig not found in roles.js');
     if (!rolesMod.getBuiltinRolesConfig) throw new Error('getBuiltinRolesConfig not found in roles.js');
-    if (!cmMod.writeRoles) throw new Error('writeRoles not found in config-manager.js');
+    if (!rolesMod.roleExists) throw new Error('roleExists not found in roles.js');
     if (!cmMod.read) throw new Error('read not found in config-manager.js');
+    if (!cmMod.write) throw new Error('write not found in config-manager.js');
     if (!cmMod.ConfigTarget) throw new Error('ConfigTarget not found in config-manager.js');
 
     return {
-      readRolesConfig: rolesMod.readRolesConfig as () => any,
+      readRolesConfig: rolesMod.readRolesConfig as (selfAid?: string) => any,
       getBuiltinRolesConfig: rolesMod.getBuiltinRolesConfig as () => any,
-      writeRoles: cmMod.writeRoles as (full: any) => void,
+      roleExists: rolesMod.roleExists as (role: string, selfAid?: string) => boolean,
       read: cmMod.read as (target: any, sel?: any) => any,
+      write: cmMod.write as (target: any, value: any, sel?: any) => void,
       ConfigTarget: cmMod.ConfigTarget as any,
+      resolver: resolverMod as any,
     };
   } catch (err) {
     console.error('[role-definitions] Failed to import roles modules:', err);
@@ -74,10 +80,15 @@ function isWriteMethod(method: string | undefined): boolean {
   return method === 'PUT' || method === 'POST' || method === 'DELETE';
 }
 
-function canManageRoleDefinitions(processConfig: any, auth: RoleWriteAuth): boolean {
+function canManageRoleDefinitions(processConfig: any, auth: RoleWriteAuth, aid: string, resolver: any): boolean {
   if (auth.localDirect) return true;
   const actor = auth.actorAid || '';
-  return !!actor && Array.isArray(processConfig?.owners) && processConfig.owners.includes(actor);
+  if (!actor) return false;
+  if (Array.isArray(processConfig?.owners) && processConfig.owners.includes(actor)) return true;
+  return !!aid && (
+    !!resolver.isStaticAgentOwner?.(aid, actor)
+    || !!resolver.isStaticAgentAdmin?.(aid, actor)
+  );
 }
 
 const MODEL_PERMISSION_FIELD = 'baseagents.claude.model';
@@ -149,6 +160,100 @@ function readJsonBody(req: any): Promise<any> {
     });
     req.on('error', reject);
   });
+}
+
+function parseUrl(rawUrl: string): { path: string; query: Record<string, string> } {
+  const qIdx = rawUrl.indexOf('?');
+  if (qIdx === -1) return { path: rawUrl, query: {} };
+  const query: Record<string, string> = {};
+  for (const pair of rawUrl.slice(qIdx + 1).split('&')) {
+    const [k, v] = pair.split('=');
+    if (k) query[decodeURIComponent(k)] = decodeURIComponent(v || '');
+  }
+  return { path: rawUrl.slice(0, qIdx), query };
+}
+
+async function getAgentsFromIpc(): Promise<any[]> {
+  try {
+    const { ipcQuery } = await import('../ipc-client.js');
+    const resp = await ipcQuery<{ ok: boolean; agents: any[] }>(
+      resolvePaths().socket,
+      { type: 'evolagent.list' },
+      3000,
+    );
+    return resp?.agents ?? [];
+  } catch {
+    return [];
+  }
+}
+
+function summarizeAgents(agents: any[]): any[] {
+  return agents
+    .filter(agent => agent?.aid)
+    .map(agent => ({
+      aid: agent.aid,
+      displayName: agent.displayName ?? agent.personalName,
+      name: agent.name,
+    }));
+}
+
+function resolveRequestedAid(raw: unknown, agents: any[]): string | null {
+  const requested = typeof raw === 'string' ? raw.trim() : '';
+  if (requested) return requested;
+  return agents.find(agent => agent?.aid)?.aid || null;
+}
+
+function isReservedRoleName(roleName: string): boolean {
+  return roleName === 'owner' || roleName === 'admin';
+}
+
+function isValidUserRoleName(roleName: string): boolean {
+  return /^[a-z0-9_-]+$/.test(roleName) && !isReservedRoleName(roleName);
+}
+
+function builtinUserRoles(modules: any): Set<string> {
+  return new Set(Object.keys(modules.getBuiltinRolesConfig().roles || {}));
+}
+
+function readAgentConfig(modules: any, aid: string): any {
+  return modules.read(modules.ConfigTarget.Agent, { self: aid }) || { aid, channels: [] };
+}
+
+function writeAgentConfig(modules: any, aid: string, config: any): void {
+  modules.write(modules.ConfigTarget.Agent, { ...config, aid, channels: Array.isArray(config.channels) ? config.channels : [] }, { self: aid });
+}
+
+function getAgentRoleDefinitions(config: any): Record<string, any> {
+  return config.roles?.definitions && typeof config.roles.definitions === 'object'
+    ? config.roles.definitions
+    : {};
+}
+
+function updateAgentRoles(modules: any, aid: string, updater: (roles: any, config: any) => void): any {
+  const config = readAgentConfig(modules, aid);
+  const roles = config.roles && typeof config.roles === 'object' ? { ...config.roles } : {};
+  if (roles.definitions && typeof roles.definitions === 'object') {
+    roles.definitions = { ...roles.definitions };
+  }
+  if (roles.defaultRoles && typeof roles.defaultRoles === 'object') {
+    roles.defaultRoles = { ...roles.defaultRoles };
+  }
+  updater(roles, config);
+  const next = { ...config, roles };
+  writeAgentConfig(modules, aid, next);
+  return next;
+}
+
+function normalizeDefaultRoleInput(value: unknown, current: string | null | undefined): string | null {
+  if (value === null || value === '') return null;
+  if (typeof value === 'string') return value;
+  return current ?? null;
+}
+
+function validateRoleDefinitionName(roleName: string): string | null {
+  if (!roleName || !/^[a-z0-9_-]+$/.test(roleName)) return 'Invalid role name';
+  if (isReservedRoleName(roleName)) return 'owner/admin are management identities and cannot be user role definitions';
+  return null;
 }
 
 function inferSelectionMode(allowedModels: string[] = []): SelectionMode {
@@ -365,21 +470,28 @@ async function buildModelPermissionResponse(roleName: string, roleDef: any, over
   };
 }
 
-async function buildSnapshot(): Promise<any> {
+async function buildSnapshot(params: Record<string, any> = {}): Promise<any> {
   try {
-    const { readRolesConfig } = await getRolesModule();
-    return readRolesConfig();
+    const modules = await getRolesModule();
+    const agents = await getAgentsFromIpc();
+    const aid = resolveRequestedAid(params.aid, agents);
+    const config = modules.readRolesConfig(aid || undefined);
+    return {
+      ...config,
+      aid,
+      agents: summarizeAgents(agents),
+    };
   } catch (err) {
     console.error('[role-definitions] Failed to build snapshot:', err);
-    return { $schema_version: 1, roles: {}, error: String(err) };
+    return { $schema_version: 1, aid: null, agents: [], roles: {}, error: String(err) };
   }
 }
 
 export const roleDefinitionsSource: WatchSource = {
   kind: 'roleDefinitions',
 
-  async snapshot(): Promise<any> {
-    return buildSnapshot();
+  async snapshot(params: Record<string, any> = {}): Promise<any> {
+    return buildSnapshot(params);
   },
 
   subscribe(_params: Record<string, any>, push: (data: any) => void): () => void {
@@ -389,7 +501,7 @@ export const roleDefinitionsSource: WatchSource = {
     const tick = async () => {
       if (stopped) return;
       try {
-        const snap = await buildSnapshot();
+        const snap = await buildSnapshot(_params);
         const json = JSON.stringify(snap);
         if (json !== lastJson) {
           lastJson = json;
@@ -414,8 +526,12 @@ export const roleDefinitionsSource: WatchSource = {
 // HTTP API handler
 export async function handleRoleDefinitionsApi(req: any, res: any, auth: RoleWriteAuth = {}): Promise<void> {
   try {
-    const { readRolesConfig, getBuiltinRolesConfig, writeRoles, read, ConfigTarget } = await getRolesModule();
-    const urlPath = (req.url || '').split('?')[0];
+    const modules = await getRolesModule();
+    const { readRolesConfig, getBuiltinRolesConfig, read, ConfigTarget } = modules;
+    const parsedUrl = parseUrl(req.url || '');
+    const urlPath = parsedUrl.path;
+    const agents = await getAgentsFromIpc();
+    const aid = resolveRequestedAid(parsedUrl.query.aid, agents);
     const roleRoute = urlPath.match(/^\/api\/role-definitions\/([^/]+)$/);
     const roleNestedRoute = urlPath.match(/^\/api\/role-definitions\/([^/]+)\/([^/]+)$/);
     const decodeRoleName = (raw: string) => {
@@ -426,73 +542,80 @@ export async function handleRoleDefinitionsApi(req: any, res: any, auth: RoleWri
       }
     };
 
-    if (isWriteMethod(req.method)) {
-      const processConfig = read(ConfigTarget.Process) || {};
-      if (!canManageRoleDefinitions(processConfig, auth)) {
-        console.warn('[role-definitions] Write forbidden:', {
-          method: req.method,
-          url: req.url,
-          actorAid: auth.actorAid,
-          localDirect: !!auth.localDirect
-        });
-        sendJson(res, 403, { error: 'forbidden: process owner required' });
-        return;
-      }
-    }
-
-    if (req.method === 'GET' && urlPath === '/api/role-definitions') {
-      sendJson(res, 200, readRolesConfig());
-      return;
-    }
-
     if (req.method === 'GET' && urlPath === '/api/role-definitions/operations') {
       const { listOperations } = await getOperationRegistryModule();
       sendJson(res, 200, { operations: listOperations() });
       return;
     }
 
+    if (isWriteMethod(req.method)) {
+      if (!aid) {
+        sendJson(res, 400, { error: 'aid is required' });
+        return;
+      }
+      const processConfig = read(ConfigTarget.Process) || {};
+      if (!canManageRoleDefinitions(processConfig, auth, aid, modules.resolver)) {
+        console.warn('[role-definitions] Write forbidden:', {
+          method: req.method,
+          url: req.url,
+          actorAid: auth.actorAid,
+          localDirect: !!auth.localDirect
+        });
+        sendJson(res, 403, { error: 'forbidden: agent owner/admin required' });
+        return;
+      }
+    }
+
+    if (req.method === 'GET' && urlPath === '/api/role-definitions') {
+      sendJson(res, 200, await buildSnapshot({ aid }));
+      return;
+    }
+
     if (req.method === 'PUT' && urlPath === '/api/role-definitions') {
       try {
         const incoming = await readJsonBody(req);
-        const config = readRolesConfig();
-
-        if (incoming.defaultRoles && typeof incoming.defaultRoles === 'object') {
-          config.defaultRoles = {
-            private: typeof incoming.defaultRoles.private === 'string'
-              ? incoming.defaultRoles.private
-              : (config.defaultRoles?.private || 'anonymous'),
-            group: typeof incoming.defaultRoles.group === 'string'
-              ? incoming.defaultRoles.group
-              : (config.defaultRoles?.group || 'guest'),
-          };
-        }
+        const currentConfig = readRolesConfig(aid || undefined);
 
         if (incoming.roles && typeof incoming.roles === 'object') {
           for (const [roleName, roleDef] of Object.entries(incoming.roles)) {
+            const nameError = validateRoleDefinitionName(roleName);
+            if (nameError) {
+              sendJson(res, 400, { error: `${nameError}: ${roleName}` });
+              return;
+            }
             const validation = await validateRoleModelPermission(roleDef);
             if (!validation.ok) {
-              sendJson(res, 400, {
-                error: `Invalid model permissions for role ${roleName}`,
-                errors: validation.errors
-              });
+              sendJson(res, 400, { error: `Invalid model permissions for role ${roleName}`, errors: validation.errors });
               return;
             }
             const commandValidation = validateCommandPermissions((roleDef as any)?.commandPermissions);
             if (!commandValidation.ok) {
-              sendJson(res, 400, {
-                error: `Invalid command permissions for role ${roleName}`,
-                errors: commandValidation.errors
-              });
+              sendJson(res, 400, { error: `Invalid command permissions for role ${roleName}`, errors: commandValidation.errors });
               return;
             }
           }
-          config.roles = incoming.roles;
         }
 
-        writeRoles(config);
-        sendJson(res, 200, { ok: true });
+        updateAgentRoles(modules, aid!, (roles: any) => {
+          if (incoming.defaultRoles && typeof incoming.defaultRoles === 'object') {
+            roles.defaultRoles = {
+              private: normalizeDefaultRoleInput(incoming.defaultRoles.private, currentConfig.defaultRoles?.private),
+              group: normalizeDefaultRoleInput(incoming.defaultRoles.group, currentConfig.defaultRoles?.group),
+            };
+          }
+
+          if (incoming.roles && typeof incoming.roles === 'object') {
+            const nextDefinitions: Record<string, any> = {};
+            for (const [roleName, roleDef] of Object.entries(incoming.roles)) {
+              nextDefinitions[roleName] = roleDef;
+            }
+            roles.definitions = nextDefinitions;
+          }
+        });
+
+        sendJson(res, 200, { ok: true, data: await buildSnapshot({ aid }) });
       } catch (err: any) {
-        console.error('[role-definitions] Failed to update global config:', err);
+        console.error('[role-definitions] Failed to update agent role config:', err);
         sendJson(res, 400, { error: err.message });
       }
       return;
@@ -503,12 +626,13 @@ export async function handleRoleDefinitionsApi(req: any, res: any, auth: RoleWri
         const data = await readJsonBody(req);
         const { name, description, permissions, commandPermissions } = data;
 
-        if (!name || !/^[a-z0-9_-]+$/.test(name)) {
-          sendJson(res, 400, { error: 'Invalid role name' });
+        const nameError = validateRoleDefinitionName(name);
+        if (nameError) {
+          sendJson(res, 400, { error: nameError });
           return;
         }
 
-        const config = readRolesConfig();
+        const config = readRolesConfig(aid || undefined);
         if (config.roles[name]) {
           sendJson(res, 409, { error: 'Role already exists' });
           return;
@@ -531,10 +655,11 @@ export async function handleRoleDefinitionsApi(req: any, res: any, auth: RoleWri
           return;
         }
 
-        config.roles[name] = newRole;
-        writeRoles(config);
+        updateAgentRoles(modules, aid!, (roles: any) => {
+          roles.definitions = { ...(roles.definitions || {}), [name]: newRole };
+        });
 
-        sendJson(res, 201, { ok: true, role: config.roles[name] });
+        sendJson(res, 201, { ok: true, role: newRole });
       } catch (err: any) {
         console.error('[role-definitions] Failed to create role:', err);
         sendJson(res, 400, { error: err.message });
@@ -544,7 +669,7 @@ export async function handleRoleDefinitionsApi(req: any, res: any, auth: RoleWri
 
     if (req.method === 'GET' && roleNestedRoute?.[2] === 'configurable-models') {
       const roleName = decodeRoleName(roleNestedRoute[1]);
-      const config = readRolesConfig();
+      const config = readRolesConfig(aid || undefined);
       const roleDef = config.roles[roleName];
       if (!roleDef) {
         sendJson(res, 404, { success: false, error: 'Role not found' });
@@ -558,7 +683,7 @@ export async function handleRoleDefinitionsApi(req: any, res: any, auth: RoleWri
 
     if (req.method === 'POST' && roleNestedRoute?.[2] === 'preview-models') {
       const roleName = decodeRoleName(roleNestedRoute[1]);
-      const config = readRolesConfig();
+      const config = readRolesConfig(aid || undefined);
       const roleDef = config.roles[roleName];
       if (!roleDef) {
         sendJson(res, 404, { success: false, error: 'Role not found' });
@@ -580,7 +705,7 @@ export async function handleRoleDefinitionsApi(req: any, res: any, auth: RoleWri
 
     if (req.method === 'PUT' && roleNestedRoute?.[2] === 'model-permissions') {
       const roleName = decodeRoleName(roleNestedRoute[1]);
-      const config = readRolesConfig();
+      const config = readRolesConfig(aid || undefined);
       const roleDef = config.roles[roleName];
       if (!roleDef) {
         sendJson(res, 404, { success: false, error: 'Role not found' });
@@ -606,7 +731,9 @@ export async function handleRoleDefinitionsApi(req: any, res: any, auth: RoleWri
         allowedModels: validation.value.allowedModels,
       };
 
-      writeRoles(config);
+      updateAgentRoles(modules, aid!, (roles: any) => {
+        roles.definitions = { ...(roles.definitions || {}), [roleName]: roleDef };
+      });
       const data = await buildModelPermissionResponse(roleName, roleDef, validation.value);
       sendJson(res, 200, { success: true, data });
       return;
@@ -621,9 +748,12 @@ export async function handleRoleDefinitionsApi(req: any, res: any, auth: RoleWri
         return;
       }
 
-      const config = readRolesConfig();
-      config.roles[roleName] = builtinRole;
-      writeRoles(config);
+      updateAgentRoles(modules, aid!, (roles: any) => {
+        const definitions = { ...(roles.definitions || {}) };
+        delete definitions[roleName];
+        if (Object.keys(definitions).length) roles.definitions = definitions;
+        else delete roles.definitions;
+      });
 
       sendJson(res, 200, { ok: true, role: builtinRole });
       return;
@@ -631,7 +761,7 @@ export async function handleRoleDefinitionsApi(req: any, res: any, auth: RoleWri
 
     if (req.method === 'GET' && roleRoute) {
       const roleName = decodeRoleName(roleRoute[1]);
-      const config = readRolesConfig();
+      const config = readRolesConfig(aid || undefined);
       const roleDef = config.roles[roleName];
       if (!roleDef) {
         sendJson(res, 404, { error: 'Role not found' });
@@ -644,20 +774,25 @@ export async function handleRoleDefinitionsApi(req: any, res: any, auth: RoleWri
 
     if (req.method === 'DELETE' && roleRoute) {
       const roleName = decodeRoleName(roleRoute[1]);
-      const builtinRoles = ['owner', 'admin', 'member', 'guest', 'anonymous'];
-      if (builtinRoles.includes(roleName)) {
-        sendJson(res, 403, { error: 'Cannot delete builtin role' });
+      const builtinRoles = builtinUserRoles(modules);
+      if (builtinRoles.has(roleName) || isReservedRoleName(roleName)) {
+        sendJson(res, 403, { error: 'Cannot delete builtin or management role' });
         return;
       }
 
-      const config = readRolesConfig();
-      if (!config.roles[roleName]) {
+      const agentConfig = readAgentConfig(modules, aid!);
+      const definitions = getAgentRoleDefinitions(agentConfig);
+      if (!definitions[roleName]) {
         sendJson(res, 404, { error: 'Role not found' });
         return;
       }
 
-      delete config.roles[roleName];
-      writeRoles(config);
+      updateAgentRoles(modules, aid!, (roles: any) => {
+        const nextDefinitions = { ...(roles.definitions || {}) };
+        delete nextDefinitions[roleName];
+        if (Object.keys(nextDefinitions).length) roles.definitions = nextDefinitions;
+        else delete roles.definitions;
+      });
 
       sendJson(res, 200, { ok: true });
       return;
@@ -667,7 +802,13 @@ export async function handleRoleDefinitionsApi(req: any, res: any, auth: RoleWri
       try {
         const roleName = decodeRoleName(roleRoute[1]);
         const updates = await readJsonBody(req);
-        const config = readRolesConfig();
+        const nameError = validateRoleDefinitionName(roleName);
+        if (nameError) {
+          sendJson(res, 400, { error: nameError });
+          return;
+        }
+
+        const config = readRolesConfig(aid || undefined);
         const currentRole = config.roles[roleName];
         if (!currentRole) {
           sendJson(res, 404, { error: 'Role not found' });
@@ -710,8 +851,9 @@ export async function handleRoleDefinitionsApi(req: any, res: any, auth: RoleWri
           return;
         }
 
-        config.roles[roleName] = nextRole;
-        writeRoles(config);
+        updateAgentRoles(modules, aid!, (roles: any) => {
+          roles.definitions = { ...(roles.definitions || {}), [roleName]: nextRole };
+        });
 
         sendJson(res, 200, { ok: true });
       } catch (err: any) {

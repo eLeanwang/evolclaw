@@ -14,11 +14,11 @@ describe('Role Configuration', () => {
   });
 
   describe('readRolesConfig', () => {
-    it('returns builtin v4 config when file does not exist', () => {
+    it('returns builtin user roles when agent config does not exist', () => {
       const config = readRolesConfig();
-      expect(config.$schema_version).toBe(4);
-      expect(config.defaultRoles).toEqual({ private: 'anonymous', group: 'guest' });
-      expect(Object.keys(config.roles)).toEqual(['owner', 'admin', 'member', 'guest', 'anonymous']);
+      expect(config.$schema_version).toBe(1);
+      expect(config.defaultRoles).toEqual({ private: null, group: null });
+      expect(Object.keys(config.roles)).toEqual(['member', 'visitor']);
     });
   });
 
@@ -27,18 +27,19 @@ describe('Role Configuration', () => {
       expect(getRoleDefinition('owner')?.permissions).toBeDefined();
       expect(getRoleDefinition('admin')?.permissions).toBeDefined();
       expect(getRoleDefinition('member')?.permissions).toBeDefined();
-      expect(getRoleDefinition('guest')?.permissions).toBeDefined();
-      expect(getRoleDefinition('anonymous')?.allowAccess).toBe(false);
+      expect(getRoleDefinition('visitor')?.permissions).toBeDefined();
+      expect(getRoleDefinition('guest')).toBeNull();
+      expect(getRoleDefinition('anonymous')).toBeNull();
     });
 
     it('returns null for unknown role', () => {
       expect(getRoleDefinition('unknown-role')).toBeNull();
     });
 
-    it('uses cache on second call', () => {
+    it('returns equivalent definitions on repeated calls', () => {
       const first = getRoleDefinition('owner');
       const second = getRoleDefinition('owner');
-      expect(first).toBe(second);
+      expect(second).toEqual(first);
     });
   });
 
@@ -47,8 +48,8 @@ describe('Role Configuration', () => {
       expect(getFieldPermission('owner', 'permissionMode')?.default).toBe('bypass');
       expect(getFieldPermission('admin', 'permissionMode')?.default).toBe('request');
       expect(getFieldPermission('member', 'permissionMode')?.default).toBe('auto');
-      expect(getFieldPermission('guest', 'permissionMode')?.default).toBe('readonly');
-      expect(getFieldPermission('anonymous', 'permissionMode')?.default).toBe('readonly');
+      expect(getFieldPermission('visitor', 'permissionMode')?.default).toBe('readonly');
+      expect(getFieldPermission('none', 'permissionMode')).toBeNull();
     });
 
     it('gets nested field permission', () => {
@@ -76,8 +77,7 @@ describe('Role Configuration', () => {
         'claude-sonnet-*',
         'claude-haiku-*',
       ]);
-      expect(getFieldPermission('guest', 'baseagents.claude.model')?.allowedModels).toEqual(['claude-haiku-*']);
-      expect(getFieldPermission('anonymous', 'baseagents.claude.model')?.allowedModels).toEqual(['claude-haiku-*']);
+      expect(getFieldPermission('visitor', 'baseagents.claude.model')?.allowedModels).toEqual(['claude-haiku-*']);
     });
   });
 
@@ -85,8 +85,8 @@ describe('Role Configuration', () => {
     it('keeps builtin field override policy', () => {
       expect(getFieldPermission('owner', 'chatmode')?.allowOverride).toBe(true);
       expect(getFieldPermission('owner', 'permissionMode')?.allowOverride).toBe(false);
-      expect(getFieldPermission('guest', 'chatmode')?.allowOverride).toBe(false);
-      expect(getFieldPermission('guest', 'baseagents.claude.model')?.allowOverride).toBe(false);
+      expect(getFieldPermission('visitor', 'chatmode')?.allowOverride).toBe(false);
+      expect(getFieldPermission('visitor', 'baseagents.claude.model')?.allowOverride).toBe(false);
       expect(getFieldPermission('member', 'chatmode')?.allowOverride).toBe(true);
       expect(getFieldPermission('member', 'dispatch')?.allowOverride).toBe(false);
     });
@@ -101,8 +101,8 @@ describe('Role Configuration', () => {
       });
       expect(getCommandPermissions('admin')['dangerous:*']?.constraints?.requireDaemonOwner).toBe(true);
       expect(getCommandPermissions('member')['model.*']).toBeDefined();
-      expect(getCommandPermissions('guest')['model.list']).toBeDefined();
-      expect(getCommandPermissions('anonymous')['*']?.allow).toBe(false);
+      expect(getCommandPermissions('visitor')['model.list']).toBeDefined();
+      expect(getCommandPermissions('none')['*']).toBeUndefined();
     });
   });
 
@@ -115,11 +115,11 @@ describe('Role Configuration', () => {
   });
 
   describe('getBuiltinRolesConfig', () => {
-    it('returns valid builtin v4 config', () => {
+    it('returns valid builtin user role config', () => {
       const config = getBuiltinRolesConfig();
-      expect(config.$schema_version).toBe(4);
-      expect(config.defaultRoles).toEqual({ private: 'anonymous', group: 'guest' });
-      expect(Object.keys(config.roles)).toHaveLength(5);
+      expect(config.$schema_version).toBe(1);
+      expect(config.defaultRoles).toEqual({ private: null, group: null });
+      expect(Object.keys(config.roles)).toEqual(['member', 'visitor']);
     });
 
     it('has required role properties', () => {
