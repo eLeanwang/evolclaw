@@ -18,8 +18,17 @@ import path from 'path';
 import fs from 'fs';
 import os from 'os';
 
-/** 判定用户是否为指定渠道的 owner */
-export type IdentityResolver = (channel: string, userId?: string) => SessionIdentity;
+/**
+ * 解析会话身份（角色）。
+ * chatType/conversationId 用于群聊场景正确命中群成员角色表；
+ * 省略时按私聊语义解析（conversationId 回退为 userId）。
+ */
+export type IdentityResolver = (
+  channel: string,
+  userId?: string,
+  chatType?: 'private' | 'group',
+  conversationId?: string,
+) => SessionIdentity;
 /** 判定用户是否为指定渠道的 admin */
 /** 判定用户是否为指定渠道的 member */
 export type ChatModeDefaultsProvider = (
@@ -89,8 +98,14 @@ export class SessionManager {
     return path.join(homeDir, '.claude', 'projects', encodedPath, `${sessionId}.jsonl`);
   }
 
-  resolveIdentity(channel: string, userId?: string): SessionIdentity {
-    return this.identityResolver?.(channel, userId) ?? { role: 'none', mode: 'interactive' };
+  resolveIdentity(
+    channel: string,
+    userId?: string,
+    chatType?: 'private' | 'group',
+    conversationId?: string,
+  ): SessionIdentity {
+    return this.identityResolver?.(channel, userId, chatType, conversationId)
+      ?? { role: 'none', mode: 'interactive' };
   }
 
   async updateIdentity(sessionId: string, identity: SessionIdentity): Promise<void> {
@@ -556,9 +571,12 @@ export class SessionManager {
     if (!channelType) {
       throw new Error(`[SessionManager] getOrCreateSession requires channelType. channel="${channel}" channelId="${channelId}"`);
     }
+    // 群聊场景下 conversationId 应为群 ID（AUN 群聊 channelId 即 groupId），私聊为 userId。
+    // 用于 resolveIdentity fallback 正确命中群成员角色表（见 resolvePeerRoleDetail）。
+    const identityConversationId = chatType === 'group' ? (metadata?.groupId || channelId) : userId;
     if (threadId) {
       const session = this.getOrCreateThreadSession(channel, channelId, threadId, defaultProjectPath, metadata, name, baseagent, selfAID, channelType, peerType, chatType);
-      session.identity = identity ?? this.resolveIdentity(channel, userId);
+      session.identity = identity ?? this.resolveIdentity(channel, userId, chatType, identityConversationId);
       return session;
     }
 
@@ -569,7 +587,7 @@ export class SessionManager {
     if (active && !active.threadId) {
       const validSessionId = this.validateSessionFile(active);
       const session: Session = { ...active, agentSessionId: validSessionId };
-      session.identity = identity ?? this.resolveIdentity(channel, userId);
+      session.identity = identity ?? this.resolveIdentity(channel, userId, chatType, identityConversationId);
 
       let mutated = false;
       if (chatType && session.chatType !== chatType) {
@@ -618,7 +636,7 @@ export class SessionManager {
     if (existing) {
       const validSessionId = this.validateSessionFile(existing);
       const session: Session = { ...existing, agentSessionId: validSessionId };
-      session.identity = identity ?? this.resolveIdentity(channel, userId);
+      session.identity = identity ?? this.resolveIdentity(channel, userId, chatType, identityConversationId);
 
       if (!session.metadata) session.metadata = {};
       if (session.selfAID !== selfAID) {
@@ -643,7 +661,7 @@ export class SessionManager {
 
     // Create new session
     const sessionMetadata: any = { ...(metadata || {}) };
-    const newIdentity = identity ?? this.resolveIdentity(channel, userId);
+    const newIdentity = identity ?? this.resolveIdentity(channel, userId, chatType, identityConversationId);
 
     const resolvedBaseagent = baseagent || 'claude';
     const session: Session = {

@@ -45,6 +45,7 @@ import { insertUsageEvent, insertContextBreakdown, insertModelCalls } from '../.
 import { normalizeUsage } from '../../stats/normalizer.js';
 import { resolvePrices } from '../../stats/price-resolver.js';
 import { getBudgetStatus } from '../../stats/budget.js';
+import { formatUsageSubjectKey, getRoleBudgetStatus } from '../../stats/role-budget.js';
 import { snapshot } from './response-snapshot.js';
 import { ResponseModeCoordinator, type ResolvedInbound } from '../../response-system/coordinator.js';
 import { ResponseModeRegistry } from '../../response-system/registry.js';
@@ -1152,13 +1153,38 @@ export class ResponseEngine implements IMessageProcessor {
 
       // ── 硬上限检查：超限直接返回提示，不调模型 ──
       {
-        const budgetAgentAid = session.selfAID || message.selfAID || '';
-        const budgetPeerKey = formatPeerKey(message.channel, message.channelId);
+        const budgetAgentAid = selfAid || session.selfAID || message.selfAID || '';
+        const budgetPeerKey = peerKey || formatPeerKey(currentChannelType, message.channelId);
         const budgetStatus = getBudgetStatus(resolveRoot(), budgetAgentAid, budgetPeerKey);
         if (budgetStatus.hard_blocked) {
           logger.warn(`[ResponseEngine] Budget hard limit reached: agent=${budgetAgentAid} peer=${budgetPeerKey} pct=${budgetStatus.pct_used.toFixed(1)}%`);
           this.touchAgentActivity(channelKey);
           adapter.send(envelope, { kind: 'status.completed', metadata: { durationMs: 0 } }).catch(() => {});
+          return;
+        }
+        const roleBudgetStatus = getRoleBudgetStatus(resolveRoot(), {
+          selfAid: budgetAgentAid,
+          role: peerRole,
+          channelType: currentChannelType,
+          chatType,
+          channelId: message.channelId,
+          peerId: message.peerId || undefined,
+        });
+        if (roleBudgetStatus.hard_blocked) {
+          const digits = roleBudgetStatus.currency === 'USD' ? 4 : 2;
+          const usageText = roleBudgetStatus.limit_amount >= 0
+            ? `${roleBudgetStatus.currency} ${roleBudgetStatus.used_amount.toFixed(digits)}/${roleBudgetStatus.limit_amount.toFixed(digits)}`
+            : '';
+          logger.warn(`[ResponseEngine] Role budget hard limit reached: agent=${budgetAgentAid} role=${peerRole} subject=${roleBudgetStatus.usage_subject_key} usage=${usageText}`);
+          this.touchAgentActivity(channelKey);
+          adapter.send(envelope, {
+            kind: 'system.error',
+            text: `Role usage limit reached (${peerRole}${usageText ? `: ${usageText}` : ''}).`,
+            subtype: 'role_budget_exceeded',
+            recoverable: false,
+            metadata: { roleBudget: roleBudgetStatus },
+          } as any).catch(() => {});
+          adapter.send(envelope, { kind: 'status.completed', metadata: { durationMs: 0, roleBudget: roleBudgetStatus } as any }).catch(() => {});
           return;
         }
       }
@@ -1256,6 +1282,14 @@ export class ResponseEngine implements IMessageProcessor {
         await adapter.send({ ...envelope, replyContext: capturedReplyContext }, { kind: 'result.text', text, isFinal: true });
       });
 
+      const authChatType = chatType === 'group' ? 'group' : 'private';
+      const authConversationId = authChatType === 'group'
+        ? (session.metadata?.groupId || session.channelId || capturedChannelId)
+        : (message.peerId || session.metadata?.peerId || capturedChannelId);
+      const authPeerKey = session.channelType && authConversationId
+        ? formatPeerKey(session.channelType, authConversationId)
+        : undefined;
+
       // 设置权限审批的交互上下文（支持交互卡片）
       agent.setPermissionContext?.(session.id, {
         adapter,
@@ -1267,6 +1301,10 @@ export class ResponseEngine implements IMessageProcessor {
         agentName: agentNameForStats,
         taskId,
         chatmode: isProactive ? 'proactive' : 'interactive',
+        role: identityRole,
+        chatType: authChatType,
+        selfAid: session.selfAID || message.selfAID,
+        peerKey: authPeerKey,
         flushPending: async () => {
           await renderer.flush(false);
         },
@@ -2139,6 +2177,8 @@ export class ResponseEngine implements IMessageProcessor {
               ts: Date.now(),
               agent_aid: statsAgentAid,
               peer_key: statsPeerKey,
+              usage_subject_key: formatUsageSubjectKey(currentChannelType, chatType, message.channelId, message.peerId || undefined),
+              role: session.identity?.role || 'none',
               peer_type: session.chatType || undefined,
               session_id: session.id,
               model: statsModel,

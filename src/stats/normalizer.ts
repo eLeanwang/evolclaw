@@ -7,6 +7,8 @@ export interface UsageEvent {
   ts: number;
   agent_aid: string;
   peer_key: string;
+  usage_subject_key?: string;
+  role?: string;
   peer_type?: string;
   session_id?: string;
   model: string;
@@ -53,6 +55,8 @@ export function normalizeUsage(
     ts: number;
     agent_aid: string;
     peer_key: string;
+    usage_subject_key?: string;
+    role?: string;
     peer_type?: string;
     session_id?: string;
     model: string;
@@ -121,6 +125,8 @@ export function normalizeUsage(
     ts: meta.ts,
     agent_aid: meta.agent_aid,
     peer_key: meta.peer_key,
+    usage_subject_key: meta.usage_subject_key,
+    role: meta.role,
     peer_type: meta.peer_type,
     session_id: meta.session_id,
     model: meta.model,

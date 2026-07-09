@@ -135,7 +135,7 @@ describe('ConfigManager CRUD (v3 unified config.json)', () => {
       owners: ['owner.aid.pub'],
       projects: { defaultPath: '/workspace' },
       // 行为参数
-      show_activities: false,
+      show_activities: 'none',
       chatmode: { private: 'proactive' },
       dispatch: 'broadcast',
       baseagents: { claude: { model: 'sonnet' } },
@@ -144,7 +144,7 @@ describe('ConfigManager CRUD (v3 unified config.json)', () => {
     expect(fs.existsSync(agentConfig(AID))).toBe(true);
 
     const config = read<any>(ConfigTarget.Agent, { self: AID });
-    expect(config.show_activities).toBe(false);
+    expect(config.show_activities).toBe('none');
     expect(config.owners).toContain('owner.aid.pub');
     expect(config.baseagents.claude.model).toBe('sonnet');
   });

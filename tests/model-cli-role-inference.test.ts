@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { ConfigTarget, write, read } from '../src/config/config-manager.js';
+import { ConfigError, ConfigTarget, write, read } from '../src/config/config-manager.js';
 import { clearRolesCache } from '../src/config/roles.js';
 
 vi.mock('../src/core/model/model-catalog.js', () => ({
@@ -88,16 +88,30 @@ describe('model CLI role inference', () => {
     expect(catalog.getCatalog).not.toHaveBeenCalled();
   });
 
+  it('rejects relation model overrides that violate a provided role by default', () => {
+    const selfAid = 'reject-violating-write.agentid.pub';
+    const currentAid = 'current-user.aid.pub';
+    write(ConfigTarget.Agent, { aid: selfAid, channels: [] }, { self: selfAid });
+    write(ConfigTarget.Relation, { roles: { assigned: 'visitor' } }, { self: selfAid, peerKey: `aun#${currentAid}` });
+
+    expect(() => write(
+      ConfigTarget.Relation,
+      { roles: { assigned: 'visitor' }, baseagents: { claude: { model: 'claude-opus-4-8' } } },
+      { self: selfAid, peerKey: `aun#${currentAid}`, role: 'visitor' },
+    )).toThrow(ConfigError);
+  });
+
   it('returns effective model without leaking scope diagnostics', async () => {
     const selfAid = 'frontend-peer.agentid.pub';
     const currentAid = 'current-user.aid.pub';
     write(ConfigTarget.Agent, { aid: selfAid, channels: [] }, { self: selfAid });
     write(ConfigTarget.Relation, { roles: { assigned: 'visitor' } }, { self: selfAid, peerKey: `aun#${currentAid}` });
-    // v3: 写入 relation config 时提供 role，会触发角色约束警告，但仍写入原始值
+    // Seed legacy/unsafe stored data explicitly; normal relation writes reject this by default.
     write(
       ConfigTarget.Relation,
       { roles: { assigned: 'visitor' }, baseagents: { claude: { model: 'claude-opus-4-8' } } },
       { self: selfAid, peerKey: `aun#${currentAid}`, role: 'visitor' },
+      { allowRoleConstraintViolations: true },
     );
 
     const logs: string[] = [];

@@ -1264,12 +1264,11 @@ export class AgentRunner {
 
       // H 类文件保护检查（所有权限模式都生效）
       const permCtx = this.permissionContexts.get(sessionId);
-      const session = sessionManager?.getActiveSession?.(sessionId);
       const hClassContext = {
         sessionId,
         channel: permCtx?.channel,
         peerId: permCtx?.userId,
-        role: session?.identity?.role
+        role: permCtx?.role,
       };
       const hResult = checkHClassWrite(input.tool_name, input.tool_input || {}, hClassContext);
       if (hResult.behavior === 'deny') {
@@ -1281,15 +1280,14 @@ export class AgentRunner {
       if (input.tool_name === 'Bash') {
         const command = typeof input.tool_input?.command === 'string' ? input.tool_input.command : '';
         const permCtx = this.permissionContexts.get(sessionId);
-        const session = sessionManager?.getActiveSession?.(sessionId);
         const ecAuthCtx = {
           actorId: permCtx?.userId,
           channel: permCtx?.channel,
-          channelId: session?.identity?.channel,
-          chatType: session?.identity?.chatType,
-          selfAid: session?.identity?.self,
-          peerKey: session?.identity?.peerKey,
-          role: session?.identity?.role || 'none',
+          channelId: permCtx?.channelId,
+          chatType: permCtx?.chatType,
+          selfAid: permCtx?.selfAid,
+          peerKey: permCtx?.peerKey,
+          role: permCtx?.role || 'none',
           isDaemonOwner: false, // claude-runner 在会话内执行，不是 daemon owner 操作
           fromControlChannel: permCtx?.channel?.startsWith('control#') || false,
         };
@@ -1308,12 +1306,11 @@ export class AgentRunner {
 
       if (callPermissionMode === 'readonly') {
         const permCtx = this.permissionContexts.get(sessionId);
-        const session = sessionManager?.getActiveSession?.(sessionId);
         const readonlyContext = {
           sessionId,
           channel: permCtx?.channel,
           peerId: permCtx?.userId,
-          role: session?.identity?.role
+          role: permCtx?.role,
         };
         const roResult = checkReadonly(input.tool_name, input.tool_input || {}, projectPath, readonlyContext);
         if (roResult.behavior === 'deny') {
@@ -1446,12 +1443,11 @@ export class AgentRunner {
       // readonly 模式：二次拦截（belt-and-suspenders）
       if (callPermissionMode === 'readonly') {
         const permCtx = this.permissionContexts.get(sessionId);
-        const session = sessionManager?.getActiveSession?.(sessionId);
         const readonlyContext = {
           sessionId,
           channel: permCtx?.channel,
           peerId: permCtx?.userId,
-          role: session?.identity?.role
+          role: permCtx?.role,
         };
         const roResult = checkReadonly(toolName, input, projectPath, readonlyContext);
         if (roResult.behavior === 'deny') {

@@ -12,6 +12,7 @@ import os from 'os';
 import { checkLatestVersion, getLocalVersion, isLinkedInstall, compareVersions } from '../../utils/npm-ops.js';
 import { loadEvolclawConfig } from '../../config-store.js';
 import {
+  ConfigTarget,
   read as cfgRead,
   resolveEffective,
   routeFieldPath,
@@ -22,7 +23,7 @@ import { isProcessLevelOwner } from './menu-handler.js';
 import { execAgentAction } from '../message/command-handler-agent-control.js';
 import { authorizeCommand } from './command-permission.js';
 import { auditCommandAuthorization } from './command-audit.js';
-import { resolvePermissionMode, writeRelationPermissionMode } from '../model/config-scope.js';
+import { resolvePermissionMode, writeRelationPermissionMode, writeScope } from '../model/config-scope.js';
 import { formatPeerKey } from '../relation/peer-identity.js';
 import { modelMatches, resolveCommandModelResolution } from './model-resolve.js';
 import { filterModelsForRole, validateModelSelectionForRole } from '../model/model-permission.js';
@@ -134,6 +135,52 @@ function writeSlashDispatch(target: SlashDispatchTarget, value: SlashDispatchVal
   if (value === null) delete cur.dispatch;
   else cur.dispatch = value;
   cfgWrite(route.target, cur, target.sel);
+}
+
+interface SlashRelationTarget {
+  self: string;
+  peerKey: string;
+  role: string;
+}
+
+function resolveSlashRelationTarget(this: any, params: {
+  session?: Session | null;
+  channel: string;
+  channelId: string;
+  userId?: string;
+  selfAID?: string;
+  role: string;
+  chatType?: string;
+}): SlashRelationTarget | { error: string; code: string } {
+  const self = params.selfAID
+    ?? params.session?.selfAID
+    ?? this.getOwningAgent?.(params.channel)?.aid
+    ?? this.resolveSelfAID?.(params.channel);
+  if (!self) return { error: 'missing current agent aid', code: 'MISSING_AID' };
+
+  const actualChatType = params.session?.chatType || params.chatType;
+  const peerId = actualChatType === 'group'
+    ? ((params.session?.metadata as any)?.groupId || params.channelId)
+    : (params.userId || (params.session?.metadata as any)?.peerId);
+  if (!peerId) return { error: 'missing current peer id', code: 'MISSING_PEER' };
+
+  const channelType = params.session?.channelType || this.resolveChannelType?.(params.channel) || params.channel.split('#')[0];
+  return {
+    self,
+    peerKey: formatPeerKey(channelType, peerId),
+    role: params.role,
+  };
+}
+
+function writeRelationChatmode(target: SlashRelationTarget, field: SlashChatmodeField, value: SlashChatmodeValue): void {
+  const sel: Selector = { self: target.self, peerKey: target.peerKey, role: target.role };
+  const cur = (cfgRead<Record<string, any>>(ConfigTarget.Relation, sel) as Record<string, any>) || {};
+  const block = cur.chatmode && typeof cur.chatmode === 'object' && !Array.isArray(cur.chatmode)
+    ? { ...cur.chatmode }
+    : {};
+  block[field] = value;
+  cur.chatmode = block;
+  cfgWrite(ConfigTarget.Relation, cur, sel);
 }
 
 function getAvailableEfforts(agent: any, model: string): readonly Effort[] {
@@ -409,7 +456,9 @@ export async function handleSlashCommand(this: any,
   if (source === 'card-trigger') chatType = undefined;
 
   // 解析身份（按实例名）
-  const identity = overrideIdentity ?? this.sessionManager.resolveIdentity(channel, userId);
+  const narrowedChatType = chatType === 'group' ? 'group' : chatType === 'private' ? 'private' : undefined;
+  const identityConversationId = narrowedChatType === 'group' ? channelId : userId;
+  const identity = overrideIdentity ?? this.sessionManager.resolveIdentity(channel, userId, narrowedChatType, identityConversationId);
   const policy = this.getPolicy(channel);
 
   // 按当前会话选择 agent 后端。懒加载，避免错配 session 卡住 /baseagent 等恢复命令。
@@ -673,12 +722,30 @@ export async function handleSlashCommand(this: any,
       : undefined;
     const permRole = permSession.identity?.role || identity.role || 'none';
     const permScope = { self: permSelfAid || undefined, peerKey: permPeerKey, role: permRole };
+    const permIntentArgs = { self: permScope.self };
 
     // /perm（无参数）：显示当前模式和可选模式
     if (!args) {
       if (!hasPermissionController(permAgent)) {
         return { kind: 'command.error' as const, text: '❌ 权限控制不可用' };
       }
+      const authDenied = await authorizeSlashIntent({
+        intent: {
+          operation: 'permission.current',
+          scope: 'relation',
+          source: 'slash',
+          args: permIntentArgs,
+        },
+        identity,
+        session: permSession,
+        explicitChatType: permSession.chatType === 'group' ? 'group' : 'private',
+        channel,
+        channelId,
+        userId,
+        selfAid: permScope.self,
+        isDaemonOwner,
+      });
+      if (authDenied) return authDenied;
       const currentMode = resolvePermissionMode(permScope);
       const modes = permAgent.listModes();
 
@@ -720,6 +787,24 @@ export async function handleSlashCommand(this: any,
       // /perm allow|always|deny：快捷审批
       // 优先走 InteractionRouter fallback（统一降级路径）
       if (arg === 'allow' || arg === 'always' || arg === 'deny') {
+        const authDenied = await authorizeSlashIntent({
+          intent: {
+            operation: 'permission.answer',
+            scope: 'relation',
+            source: 'slash',
+            args: { ...permIntentArgs, value: arg },
+          },
+          identity,
+          session: permSession,
+          explicitChatType: permSession.chatType === 'group' ? 'group' : 'private',
+          channel,
+          channelId,
+          userId,
+          selfAid: permScope.self,
+          isDaemonOwner,
+        });
+        if (authDenied) return authDenied;
+
         const fb = await this.handleInteractionFallback('perm', arg, permSession.id, userId);
         if (fb.matched) return { kind: 'command.result' as const, text: fb.result ?? '✓ 已回答' };
 
@@ -753,13 +838,26 @@ export async function handleSlashCommand(this: any,
           if (!matched.available) {
             return { kind: 'command.error' as const, text: `❌ ${matched.key} 模式当前不可用：${matched.unavailableReason}` };
           }
-          // 关系级权限模式切换允许 owner/admin；visitor/member 只能查询当前模式。
-          if (!isAdmin) {
-            return { kind: 'command.error' as const, text: '❌ 权限模式切换仅限管理员' };
-          }
+          const authDenied = await authorizeSlashIntent({
+            intent: {
+              operation: 'permission.update',
+              scope: 'relation',
+              source: 'slash',
+              args: { ...permIntentArgs, value: arg },
+            },
+            identity,
+            session: permSession,
+            explicitChatType: permSession.chatType === 'group' ? 'group' : 'private',
+            channel,
+            channelId,
+            userId,
+            selfAid: permScope.self,
+            isDaemonOwner,
+          });
+          if (authDenied) return authDenied;
           // 写关系级 config.json（运行时按 关系>角色>出厂默认 解析）；无法定位 self/peer 时跳过写入（仅响应）
           if (permScope.self && permScope.peerKey) {
-            writeRelationPermissionMode(permScope.self, permScope.peerKey, arg);
+            writeRelationPermissionMode(permScope.self, permScope.peerKey, arg, permRole);
           }
           if (this.shouldSuppressCardTriggerResult(source, channel)) return null;
           return { kind: 'command.result' as const, text: `✓ 权限模式已切换为: ${matched.key} (${matched.nameZh})\n${matched.description}` };
@@ -1227,8 +1325,46 @@ export async function handleSlashCommand(this: any,
       newModel = decision.model || newModel;
     }
 
-    const isCodexAgent = modelAgent.name === 'codex';
     const changes: string[] = [];
+    const relationTarget = resolveSlashRelationTarget.call(this, {
+      session: modelSession,
+      channel,
+      channelId,
+      userId,
+      selfAID,
+      role: identity.role,
+      chatType: modelChatType,
+    });
+    if (!('error' in relationTarget)) {
+      try {
+        writeScope('relation', {
+          self: relationTarget.self,
+          peerKey: relationTarget.peerKey,
+          role: relationTarget.role,
+        }, modelAgent.name, {
+          model: newModel,
+          effort: newEffort,
+        });
+      } catch (e: any) {
+        return { kind: 'command.error' as const, text: `Failed to update relation model settings: ${e?.message || e}` };
+      }
+      if (newModel) changes.push(`妯″瀷: ${newModel}`);
+      if (newEffort) changes.push(`鎺ㄧ悊寮哄害: ${newEffort}`);
+      this.eventBus.publish({
+        type: 'runner:model-changed',
+        sessionId: modelSession?.id,
+        agentName: this.agentRegistry?.resolveByChannel(channel)?.name,
+        baseagent: modelSession?.baseagent || modelAgent.name,
+        model: newModel,
+        effort: newEffort,
+        timestamp: Date.now()
+      });
+      if (this.shouldSuppressCardTriggerResult(source, channel)) return null;
+      return { kind: 'command.result' as const, text: `鉁?宸插垏鎹n  ${changes.join('\n  ')}` };
+    }
+    if (!isAdmin) {
+      return { kind: 'command.error' as const, text: `Cannot locate relation scope: ${relationTarget.error}` };
+    }
 
     if (newModel) {
       modelAgent.setModel?.(newModel);
@@ -1356,11 +1492,41 @@ export async function handleSlashCommand(this: any,
       return { kind: 'command.error' as const, text: '⚠️ 当前模型不支持推理强度设置' };
     }
 
-    // 带参（切换）需 admin+；无参查询已在上方返回
-    if (!isAdmin) return { kind: 'command.error' as const, text: '❌ 无权限：切换推理强度仅限管理员使用' };
+    // Non-admin users write effort overrides to their relation scope below.
 
     // /effort auto：恢复 SDK 默认
     if (args === 'auto') {
+      const relationTarget = resolveSlashRelationTarget.call(this, {
+        session: effortSession,
+        channel,
+        channelId,
+        userId,
+        selfAID,
+        role: identity.role,
+        chatType,
+      });
+      if (!('error' in relationTarget)) {
+        try {
+          writeScope('relation', {
+            self: relationTarget.self,
+            peerKey: relationTarget.peerKey,
+            role: relationTarget.role,
+          }, effortAgent.name, { effort: null });
+        } catch (e: any) {
+          return { kind: 'command.error' as const, text: `Failed to update relation effort: ${e?.message || e}` };
+        }
+        this.eventBus.publish({
+          type: 'runner:model-changed',
+          sessionId: effortSession?.id,
+          agentName: this.agentRegistry?.resolveByChannel(channel)?.name,
+          baseagent: effortSession?.baseagent || effortAgent.name,
+          effort: 'auto',
+          timestamp: Date.now(),
+        });
+        if (this.shouldSuppressCardTriggerResult(source, channel)) return null;
+        return { kind: 'command.result' as const, text: '鉁?鎺ㄧ悊寮哄害宸叉仮澶嶄负 auto (SDK榛樿)' };
+      }
+      if (!isAdmin) return { kind: 'command.error' as const, text: `Cannot locate relation scope: ${relationTarget.error}` };
       effortAgent.setEffort?.(undefined);
       const err = this.persistBaseagentEffort(channel, effortAgent.name, undefined);
       if (err) return { kind: 'command.result' as const, text: `${err}\n已更新运行时配置，但未持久化` };
@@ -1385,6 +1551,37 @@ export async function handleSlashCommand(this: any,
     }
 
     const newEffort = args as Effort;
+    const relationTarget = resolveSlashRelationTarget.call(this, {
+      session: effortSession,
+      channel,
+      channelId,
+      userId,
+      selfAID,
+      role: identity.role,
+      chatType,
+    });
+    if (!('error' in relationTarget)) {
+      try {
+        writeScope('relation', {
+          self: relationTarget.self,
+          peerKey: relationTarget.peerKey,
+          role: relationTarget.role,
+        }, effortAgent.name, { effort: newEffort });
+      } catch (e: any) {
+        return { kind: 'command.error' as const, text: `Failed to update relation effort: ${e?.message || e}` };
+      }
+      this.eventBus.publish({
+        type: 'runner:model-changed',
+        sessionId: effortSession?.id,
+        agentName: this.agentRegistry?.resolveByChannel(channel)?.name,
+        baseagent: effortSession?.baseagent || effortAgent.name,
+        effort: newEffort,
+        timestamp: Date.now(),
+      });
+      if (this.shouldSuppressCardTriggerResult(source, channel)) return null;
+      return { kind: 'command.result' as const, text: `鉁?鎺ㄧ悊寮哄害: ${newEffort}` };
+    }
+    if (!isAdmin) return { kind: 'command.error' as const, text: `Cannot locate relation scope: ${relationTarget.error}` };
     effortAgent.setEffort?.(newEffort);
 
     const err = this.persistBaseagentEffort(channel, effortAgent.name, newEffort);
@@ -1633,7 +1830,45 @@ export async function handleSlashCommand(this: any,
       return { kind: 'command.error' as const, text: '⚠️ 当前正在处理消息，请稍后再试\n使用 /stop 中断当前任务后重试' };
     }
 
-    writeSlashChatmode(target, arg);
+    const chatmodeAuthDenied = await authorizeSlashIntent({
+      intent: {
+        operation: 'chatmode.update',
+        scope: isAdmin ? 'agent' : 'relation',
+        source: 'slash',
+        args: { value: arg, self: target.sel.self },
+      },
+      identity,
+      session: chatmodeSession,
+      explicitChatType: activeChatType === 'group' ? 'group' : 'private',
+      channel,
+      channelId,
+      userId,
+      selfAid: target.sel.self,
+      isDaemonOwner,
+    });
+    if (chatmodeAuthDenied) return chatmodeAuthDenied;
+
+    if (isAdmin) {
+      writeSlashChatmode(target, arg);
+    } else {
+      const relationTarget = resolveSlashRelationTarget.call(this, {
+        session: chatmodeSession,
+        channel,
+        channelId,
+        userId,
+        selfAID,
+        role: chatmodeSession?.identity?.role || identity.role,
+        chatType: chatmodeSession?.chatType || activeChatType,
+      });
+      if ('error' in relationTarget) {
+        return { kind: 'command.error' as const, text: `Cannot locate relation scope: ${relationTarget.error}` };
+      }
+      try {
+        writeRelationChatmode(relationTarget, target.field, arg);
+      } catch (e: any) {
+        return { kind: 'command.error' as const, text: `Failed to update relation chatmode: ${e?.message || e}` };
+      }
+    }
     if (this.shouldSuppressCardTriggerResult(source, channel)) return null;
     return { kind: 'command.result' as const, text: `✅ 会话模式已切换: ${arg}` };
   }
@@ -1708,9 +1943,23 @@ export async function handleSlashCommand(this: any,
       return { kind: 'command.error' as const, text: `❌ 无效模式: ${arg}\n可选: mention / broadcast / clear\n用法: /dispatch <模式>` };
     }
 
-    if (!isAdmin) {
-      return { kind: 'command.error' as const, text: '❌ 无权限：群聊中切换分发模式仅限管理员使用' };
-    }
+    const dispatchAuthDenied = await authorizeSlashIntent({
+      intent: {
+        operation: 'dispatch.update',
+        scope: 'agent',
+        source: 'slash',
+        args: { value: arg, self: dispatchTarget.sel.self },
+      },
+      identity,
+      session: dispatchSession,
+      explicitChatType: 'group',
+      channel,
+      channelId,
+      userId,
+      selfAid: dispatchTarget.sel.self,
+      isDaemonOwner,
+    });
+    if (dispatchAuthDenied) return dispatchAuthDenied;
 
     if (arg === 'clear') {
       writeSlashDispatch(dispatchTarget, null);

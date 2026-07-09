@@ -119,6 +119,18 @@ function sanitizeCapabilityOptionsForRole(items: any[], role: string): any[] {
   });
 }
 
+/**
+ * 从菜单上下文的 session 推导 resolveIdentity 所需的 chatType/conversationId，
+ * 保证群聊场景命中群成员角色表（否则回退私聊语义会误判角色）。
+ * 返回可展开到 resolveIdentity 位置参数的元组：[chatType, conversationId]。
+ */
+function menuIdentityArgs(session: Session | null | undefined): readonly [('private' | 'group')?, string?] {
+  if (!session) return [];
+  const chatType = session.chatType === 'group' ? 'group' : session.chatType === 'private' ? 'private' : undefined;
+  const conversationId = chatType === 'group' ? (session.metadata?.groupId || session.channelId) : session.metadata?.peerId;
+  return [chatType, conversationId];
+}
+
 function sanitizeCapabilityQueryForRole(data: any, role: string): any {
   if (role === 'owner' || role === 'admin') return data;
   const { projectPath: _projectPath, ...rest } = data;
@@ -451,7 +463,7 @@ interface MenuModelTarget {
 }
 
 function menuChatmodeScope(args?: Record<string, any>): MenuChatmodeScope | { error: string; code: string } {
-  const raw = menuStringArg(args, 'scope') ?? 'agent';
+  const raw = menuStringArg(args, 'scope') ?? 'relation';
   if (raw === 'agent' || raw === 'relation') return raw;
   return { error: `无效 scope: ${raw}，可选: agent / relation`, code: 'INVALID_SCOPE' };
 }
@@ -555,7 +567,7 @@ function writeMenuChatmode(target: MenuChatmodeTarget, value: MenuChatmodeValue)
 }
 
 function menuDispatchScope(args?: Record<string, any>): MenuDispatchScope | { error: string; code: string } {
-  const raw = menuStringArg(args, 'scope') ?? 'agent';
+  const raw = menuStringArg(args, 'scope') ?? 'relation';
   if (raw === 'agent' || raw === 'relation') return raw;
   return { error: `无效 scope: ${raw}，可选: agent / relation`, code: 'INVALID_SCOPE' };
 }
@@ -680,23 +692,29 @@ function isMenuPermissionValue(value: string | undefined): value is MenuPermissi
 }
 
 function readMenuPermission(target: MenuPermissionTarget): MenuPermissionValue {
+  const sel = target.scope === 'relation'
+    ? { ...target.sel, role: undefined }
+    : target.sel;
   try {
-    const mode = resolveEffective(target.sel, { cache: true }).permissionMode;
+    const mode = resolveEffective(sel, { cache: true }).permissionMode;
     if (isMenuPermissionValue(mode)) return mode;
   } catch {}
-  const fallback = resolvePermissionMode(target.sel);
+  const fallback = resolvePermissionMode(sel);
   return isMenuPermissionValue(fallback) ? fallback : 'auto';
 }
 
 function writeMenuPermission(target: MenuPermissionTarget, value: MenuPermissionValue): void {
   const route = routeFieldPath(target.fieldPath, target.scope);
-  const cur = (cfgRead<Record<string, any>>(route.target, target.sel) as Record<string, any>) || {};
+  const sel = target.scope === 'relation'
+    ? { ...target.sel, role: undefined }
+    : target.sel;
+  const cur = (cfgRead<Record<string, any>>(route.target, sel) as Record<string, any>) || {};
   cur.permissionMode = value;
-  cfgWrite(route.target, cur, target.sel);
+  cfgWrite(route.target, cur, sel);
 }
 
 function menuModelScope(args?: Record<string, any>): MenuModelScope | { error: string; code: string } {
-  const raw = menuStringArg(args, 'scope') ?? 'agent';
+  const raw = menuStringArg(args, 'scope') ?? 'relation';
   if (raw === 'agent' || raw === 'relation') return raw;
   return { error: `无效 scope: ${raw}，可选: agent / relation`, code: 'INVALID_SCOPE' };
 }
@@ -844,11 +862,13 @@ function buildMenuIntent(
     source: 'menu',
     args: { ...payload, ...(extra ?? {}) },
   });
-  const modelScope = args?.scope === 'relation' ? 'relation' : 'agent';
+  const modelScope = args?.scope === 'agent' ? 'agent' : 'relation';
 
   if (verb === 'query') {
     if (cmdBase === '/model') return intent('model.current', modelScope);
     if (cmdBase === '/effort') return intent('model.current', modelScope);
+    if (cmdBase === '/chatmode') return intent('chatmode.current', args?.scope === 'agent' ? 'agent' : 'relation');
+    if (cmdBase === '/dispatch') return intent('dispatch.current', args?.scope === 'agent' ? 'agent' : 'relation');
     if (cmdBase === '/gateway') return intent('gateway.read', 'process');
     if (cmdBase === '/config') return intent('config.read', 'process');
     if (cmdBase === '/system') return intent('system.status', 'process');
@@ -860,6 +880,8 @@ function buildMenuIntent(
   if (verb === 'update') {
     if (cmdBase === '/model') return intent('model.use', modelScope, { model: value });
     if (cmdBase === '/effort') return intent('model.effort', modelScope, { effort: value });
+    if (cmdBase === '/chatmode') return intent('chatmode.update', args?.scope === 'agent' ? 'agent' : 'relation', { value });
+    if (cmdBase === '/dispatch') return intent('dispatch.update', args?.scope === 'agent' ? 'agent' : 'relation', { value });
     if (cmdBase === '/gateway') return intent('gateway.write', 'process');
     if (cmdBase === '/config') return intent('config.write', 'process');
   }
@@ -1223,7 +1245,7 @@ export async function getSubMenuItems(this: any, cmd: string, channel: string, c
     }
     const target = resolveCapabilityTarget.call(this, { channel, args, session, fromControlChannel });
     if ('error' in target) throw { code: target.code, message: target.error };
-    const identity = overrideIdentity ?? this.sessionManager.resolveIdentity(channel, userId);
+    const identity = overrideIdentity ?? this.sessionManager.resolveIdentity(channel, userId, ...menuIdentityArgs(session));
     const options = await listCapabilityOptions(target.ctx, target.config, type) as any[];
     return sanitizeCapabilityOptionsForRole(options, identity.role);
   }
@@ -1232,7 +1254,7 @@ export async function getSubMenuItems(this: any, cmd: string, channel: string, c
   if (cmd === '/trigger') {
     const triggerScheduler = this.getTriggerSchedulerForChannel?.(channel);
     const scope = args?.options === 'all' ? 'all' : 'enabled';
-    const role = (overrideIdentity ?? this.sessionManager.resolveIdentity(channel, userId)).role;
+    const role = (overrideIdentity ?? this.sessionManager.resolveIdentity(channel, userId, ...menuIdentityArgs(session))).role;
     const isAdmin = role === 'owner' || role === 'admin';
     if (!triggerScheduler) return [];
     const list = triggerScheduler.list({ all: scope === 'all' });
@@ -1251,7 +1273,7 @@ export async function getSubMenuItems(this: any, cmd: string, channel: string, c
   }
 
   if (cmd === '/topic') {
-    const identity = overrideIdentity ?? this.sessionManager.resolveIdentity(channel, userId);
+    const identity = overrideIdentity ?? this.sessionManager.resolveIdentity(channel, userId, ...menuIdentityArgs(session));
     if (!this.canReadTopics(identity.role)) {
       throw { code: 'FORBIDDEN', message: '无权限查看话题' };
     }
@@ -1305,7 +1327,7 @@ export async function getSubMenuItems(this: any, cmd: string, channel: string, c
   }
 
   if (cmd === '/model') {
-    const identity = overrideIdentity ?? this.sessionManager.resolveIdentity(channel, userId);
+    const identity = overrideIdentity ?? this.sessionManager.resolveIdentity(channel, userId, ...menuIdentityArgs(session));
     const target = resolveMenuModelTarget.call(this, {
       args,
       session,
@@ -1375,7 +1397,7 @@ export async function getSubMenuItems(this: any, cmd: string, channel: string, c
   }
 
   if (cmd === '/effort') {
-    const identity = overrideIdentity ?? this.sessionManager.resolveIdentity(channel, userId);
+    const identity = overrideIdentity ?? this.sessionManager.resolveIdentity(channel, userId, ...menuIdentityArgs(session));
     const target = resolveMenuModelTarget.call(this, {
       args,
       session,
@@ -1405,7 +1427,7 @@ export async function getSubMenuItems(this: any, cmd: string, channel: string, c
       channel,
       channelId,
       userId,
-      role: (overrideIdentity ?? this.sessionManager.resolveIdentity(channel, userId)).role,
+      role: (overrideIdentity ?? this.sessionManager.resolveIdentity(channel, userId, ...menuIdentityArgs(session))).role,
       explicitChatType,
       fromControlChannel,
     });
@@ -1424,7 +1446,7 @@ export async function getSubMenuItems(this: any, cmd: string, channel: string, c
       channel,
       channelId,
       userId,
-      role: (overrideIdentity ?? this.sessionManager.resolveIdentity(channel, userId)).role,
+      role: (overrideIdentity ?? this.sessionManager.resolveIdentity(channel, userId, ...menuIdentityArgs(session))).role,
       explicitChatType,
       fromControlChannel,
     });
@@ -1446,7 +1468,7 @@ export async function getSubMenuItems(this: any, cmd: string, channel: string, c
       channel,
       channelId,
       userId,
-      role: (overrideIdentity ?? this.sessionManager.resolveIdentity(channel, userId)).role,
+      role: (overrideIdentity ?? this.sessionManager.resolveIdentity(channel, userId, ...menuIdentityArgs(session))).role,
       explicitChatType,
       fromControlChannel,
     });
@@ -1481,7 +1503,7 @@ export async function execMenuQuery(this: any,
   const gated = gateControlScope.call(this, { cmdBase, args, channel, fromControlChannel });
   if (gated) return gated;
   const { session, evolagent } = await this.loadMenuContext(channel, channelId);
-  const identity = overrideIdentity ?? this.sessionManager.resolveIdentity(channel, userId);
+  const identity = overrideIdentity ?? this.sessionManager.resolveIdentity(channel, userId, ...menuIdentityArgs(session));
   const authDenied = await authorizeMenuIntent.call(this, {
     intent: buildMenuIntent('query', cmdBase, args, undefined, undefined, fromControlChannel),
     identity,
@@ -1575,7 +1597,7 @@ export async function execMenuQuery(this: any,
     }
     const target = resolveCapabilityTarget.call(this, { channel, args, session, evolagent, fromControlChannel });
     if ('error' in target) return target;
-    const identity = this.sessionManager.resolveIdentity(channel, userId);
+    const identity = this.sessionManager.resolveIdentity(channel, userId, ...menuIdentityArgs(session));
     const data = queryCapabilityTypes(target.ctx, target.config, type);
     return { data: sanitizeCapabilityQueryForRole(data, identity.role) };
   }
@@ -1908,7 +1930,7 @@ export async function execMenuUpdate(this: any,
   const arg = value.trim();
   if (!arg) return { error: '缺少 value 参数', code: 'MISSING_VALUE' };
   const { session, evolagent } = await this.loadMenuContext(channel, channelId);
-  const identity = overrideIdentity ?? this.sessionManager.resolveIdentity(channel, userId);
+  const identity = overrideIdentity ?? this.sessionManager.resolveIdentity(channel, userId, ...menuIdentityArgs(session));
   const isAdmin = identity.role === 'owner' || identity.role === 'admin';
   const authDenied = await authorizeMenuIntent.call(this, {
     intent: buildMenuIntent('update', cmdBase, args, undefined, arg, fromControlChannel),
@@ -2058,7 +2080,6 @@ export async function execMenuUpdate(this: any,
   }
 
   if (cmdBase === '/effort') {
-    if (!isAdmin) return { error: '无权限', code: 'NO_PERMISSION' };
     const target = resolveMenuModelTarget.call(this, {
       args,
       session,
@@ -2104,7 +2125,6 @@ export async function execMenuUpdate(this: any,
   }
 
   if (cmdBase === '/chatmode') {
-    if (!isAdmin) return { error: '无权限', code: 'NO_PERMISSION' };
     if (arg !== 'interactive' && arg !== 'proactive') {
       return { error: `无效模式: ${arg}`, code: 'INVALID_VALUE' };
     }
@@ -2135,7 +2155,6 @@ export async function execMenuUpdate(this: any,
   }
 
   if (cmdBase === '/dispatch') {
-    if (!isAdmin) return { error: '无权限', code: 'NO_PERMISSION' };
     if (arg !== 'mention' && arg !== 'broadcast' && arg !== 'clear') {
       return { error: `无效模式: ${arg}`, code: 'INVALID_VALUE' };
     }
@@ -2241,7 +2260,7 @@ export async function execMenuAction(this: any,
     return { error: '操作需要 owner 权限', code: 'FORBIDDEN' };
   }
   const { session: authSession } = await this.loadMenuContext(channel, channelId);
-  const authIdentity = overrideIdentity ?? this.sessionManager.resolveIdentity(channel, userId);
+  const authIdentity = overrideIdentity ?? this.sessionManager.resolveIdentity(channel, userId, ...menuIdentityArgs(authSession));
   if (cmdBase === '/agent' && !fromControlChannel && !args?.aid) {
     const selfAid = this.getOwningAgent?.(channel)?.aid;
     if (selfAid) args = { ...(args ?? {}), aid: selfAid };
@@ -2270,7 +2289,7 @@ export async function execMenuAction(this: any,
   }
 
   const { session } = await this.loadMenuContext(channel, channelId);
-  const identity = overrideIdentity ?? this.sessionManager.resolveIdentity(channel, userId);
+  const identity = overrideIdentity ?? this.sessionManager.resolveIdentity(channel, userId, ...menuIdentityArgs(session));
   const isMenuAdmin = identity.role === 'owner' || identity.role === 'admin';
 
   // ── /agent action ──

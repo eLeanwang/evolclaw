@@ -772,17 +772,27 @@ async function main() {
   }).catch(() => {});
 
   // 初始化 SessionManager（文件系统后端）
-  const resolveSessionIdentity = (channel: string, userId?: string): SessionIdentity => {
+  const resolveSessionIdentity = (
+    channel: string,
+    userId?: string,
+    chatType?: 'private' | 'group',
+    conversationId?: string,
+  ): SessionIdentity => {
     const parsed = tryParseChannelKey(channel);
     const owningAgent = agentRegistry.resolveByChannel(channel);
     const selfAid = owningAgent?.aid ?? parsed?.selfAID;
     if (!selfAid || !userId) return { role: 'none', mode: 'interactive' };
+    const actualChatType = chatType || 'private';
+    // 群聊角色需按群 ID 命中群成员角色表；私聊按 userId。缺省回退到 userId 保持旧行为。
+    const actualConversationId = actualChatType === 'group'
+      ? (conversationId || userId)
+      : userId;
     const detail = resolvePeerRoleDetail({
       selfAid,
       channelType: parsed?.type || channel,
-      chatType: 'private',
+      chatType: actualChatType,
       actorId: userId,
-      conversationId: userId,
+      conversationId: actualConversationId,
     });
     return roleToSessionIdentity(detail.effectiveRole);
   };

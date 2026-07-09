@@ -30,6 +30,11 @@ export const USER_PLANE_CAPABILITY_CEILING = {
     'model.use',
     'model.effort',
     'model.reset',
+    'permission.current',
+    'permission.answer',
+    'chatmode.current',
+    'chatmode.update',
+    'dispatch.current',
     'session.list',
     'session.create',
     'session.rename',
@@ -247,11 +252,19 @@ function checkConstraints(
     if (!peerCheck.ok) return peerCheck;
   }
 
-  if (constraints.ownAgentOnly) {
+  if (constraints.ownAgentOnly || constraints.targetCurrentAgentOnly) {
     const argSelf = stringArg(ctx.intent.args.self);
     if (argSelf && argSelf !== ctx.selfAid) {
       return { ok: false, reason: 'Only the current agent can be targeted' };
     }
+  }
+
+  if (constraints.requireAgentOwner && ctx.role !== 'owner') {
+    return { ok: false, reason: 'This command requires agent owner permission' };
+  }
+
+  if (constraints.requireAgentAdmin && ctx.role !== 'owner' && ctx.role !== 'admin') {
+    return { ok: false, reason: 'This command requires agent admin permission' };
   }
 
   if (constraints.privateOnly && ctx.chatType !== 'private') {

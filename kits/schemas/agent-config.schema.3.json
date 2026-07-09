@@ -76,7 +76,19 @@
               "description": { "type": "string" },
               "allowAccess": { "type": "boolean" },
               "permissions": { "type": "object" },
-              "commandPermissions": { "type": "object" }
+              "commandPermissions": { "type": "object" },
+              "usageLimits": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "enabled": { "type": "boolean" },
+                  "resetMode": { "type": "string", "enum": ["never", "daily", "weekly", "monthly"] },
+                  "currency": { "type": "string", "enum": ["CNY", "USD"] },
+                  "limitAmount": { "type": ["number", "null"], "minimum": 0 },
+                  "costBasis": { "type": "string", "enum": ["gateway", "official"] },
+                  "scope": { "type": "string", "enum": ["subject", "role"] }
+                }
+              }
             }
           }
         }

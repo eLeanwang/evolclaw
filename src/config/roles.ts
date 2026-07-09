@@ -119,6 +119,9 @@ function mergeRoleDefinition(base: RoleDefinition, overlay: RoleDefinition): Rol
       ...(base.commandPermissions || {}),
       ...(overlay.commandPermissions || {}),
     },
+    usageLimits: overlay.usageLimits
+      ? { ...(base.usageLimits || {}), ...overlay.usageLimits }
+      : base.usageLimits ? { ...base.usageLimits } : undefined,
   };
 }
 
@@ -136,5 +139,6 @@ function cloneRoleDefinition(def: RoleDefinition): RoleDefinition {
     allowAccess: def.allowAccess,
     permissions: { ...(def.permissions || {}) },
     commandPermissions: { ...(def.commandPermissions || {}) },
+    usageLimits: def.usageLimits ? { ...def.usageLimits } : undefined,
   };
 }

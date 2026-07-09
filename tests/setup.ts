@@ -4,6 +4,7 @@ import os from 'os';
 import path from 'path';
 import { _resetRoot } from '../src/paths.js';
 import { _resetSchemaCache } from '../src/config/schema-registry.js';
+import { closeStatsDb } from '../src/stats/db.js';
 
 let testHome: string | undefined;
 
@@ -15,6 +16,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  closeStatsDb();
   delete process.env.EVOLCLAW_HOME;
   _resetRoot();
   _resetSchemaCache();
@@ -23,4 +25,3 @@ afterEach(() => {
     testHome = undefined;
   }
 });
-

@@ -1251,7 +1251,11 @@ export interface CommandAuthorizationContext {
 
 export interface CommandPermissionConstraints {
   ownPeerOnly?: boolean;
+  /** @deprecated Use targetCurrentAgentOnly. This only checks that the target self is the current agent. */
   ownAgentOnly?: boolean;
+  targetCurrentAgentOnly?: boolean;
+  requireAgentAdmin?: boolean;
+  requireAgentOwner?: boolean;
   privateOnly?: boolean;
   groupOnly?: boolean;
   requireDaemonOwner?: boolean;
@@ -1338,6 +1342,10 @@ export interface CommandAuthorizationAuditEvent {
 export type ManagementRole = 'owner' | 'admin';
 export type BuiltinUserRole = 'member' | 'visitor';
 export type BuiltinRole = ManagementRole | BuiltinUserRole;
+export type RoleUsageCostBasis = 'gateway' | 'official';
+export type RoleUsageLimitScope = 'subject' | 'role';
+export type RoleUsageResetMode = 'never' | 'daily' | 'weekly' | 'monthly';
+export type RoleUsageCurrency = 'CNY' | 'USD';
 
 export interface RolesConfig {
   $schema_version: number;
@@ -1356,11 +1364,21 @@ export interface RolePolicyConfig {
   definitions?: Record<string, RoleDefinition>;
 }
 
+export interface RoleUsageLimits {
+  enabled?: boolean;
+  resetMode?: RoleUsageResetMode;
+  currency?: RoleUsageCurrency;
+  limitAmount?: number | null;
+  costBasis?: RoleUsageCostBasis;
+  scope?: RoleUsageLimitScope;
+}
+
 export interface RoleDefinition {
   description: string;
   allowAccess?: boolean;  // 该角色是否允许访问，默认 true
   permissions: Record<string, FieldPermission>;
   commandPermissions?: Record<string, CommandPermission>;  // 命令权限配置
+  usageLimits?: RoleUsageLimits;
 }
 
 export interface RelationRolesConfig {

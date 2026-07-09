@@ -6,7 +6,8 @@ import { buildEnvelope } from './message-utils.js';
 import { chatDirPath } from '../session/session-fs-store.js';
 import { tryParseChannelKey } from '../channel-loader.js';
 import { resolvePaths } from '../../paths.js';
-import { addStaticAgentOwner, hasStaticAgentOwner, resolvePeerRoleDetail, roleToSessionIdentity, type ResolvedPeerRole } from '../../config/peer-role-resolver.js';
+import { addStaticAgentOwner, hasStaticAgentOwner, resolvePeerRoleDetail, type ResolvedPeerRole } from '../../config/peer-role-resolver.js';
+import { authorizeAccess, buildAuthSubject } from '../auth/auth-gateway.js';
 import type { SessionManager } from '../session/session-manager.js';
 import type { IMessageProcessor } from './message-processor-interface.js';
 import type { MessageQueue } from './message-queue.js';
@@ -128,10 +129,29 @@ export class MessageBridge {
           conversationId,
           peerType: msg.peerType,
         });
-        const identity = roleToSessionIdentity(roleDetail.effectiveRole);
+        const authSubject = buildAuthSubject({
+          selfAid,
+          actorId,
+          channel: channelName,
+          channelType: msg.channelType || parsedChannelKey?.type || effectiveChannelType,
+          channelId: msg.channelId,
+          chatType,
+          conversationId,
+          peerType: msg.peerType,
+          roleDetail,
+          fromControlChannel: msg.isControlChannel ?? false,
+        });
+        const accessDecision = authorizeAccess(authSubject);
+        const identity = authSubject.identity;
 
         // 渠道入站日志
         logger.channelIn({ channel: channelName, channelId: msg.channelId, peerId: msg.peerId, peerName: msg.peerName, chatType: msg.chatType, msgId: msg.messageId, threadId: msg.threadId, content, images: msg.images?.length ?? 0, mentions: msg.mentions, replyContext: msg.replyContext });
+
+        if (!accessDecision.allow) {
+          logger.warn(`[MessageBridge] Access denied before command routing: channel=${channelName} channelId=${msg.channelId} actor=${actorId ?? '<none>'} role=${identity.role} reason=${accessDecision.reason}`);
+          await this.sendAccessDenied(adapter, channelName, msg, sendReply);
+          return;
+        }
 
         // 0. 自定义消息快速路径（menu.query 等）
         if (await this.handleCustomPayload(content, channelName, msg, sendReply, adapter, identity)) return;
@@ -545,6 +565,33 @@ export class MessageBridge {
   }
 
   /** 首次交互自动绑定 owner —— 通过 channel-routed self-agent 完成 */
+  private async sendAccessDenied(
+    adapter: ChannelAdapter | undefined,
+    channel: string,
+    msg: InboundMessage,
+    sendReply: (channelId: string, text: string, replyContext?: ReplyContext) => Promise<void>,
+  ): Promise<void> {
+    const text = 'Access denied: this role is not allowed to access this agent.';
+    if (adapter?.send) {
+      const envelope = buildEnvelope({
+        taskId: `access-denied-${randomBytes(4).toString('hex')}`,
+        channel,
+        channelId: msg.channelId,
+        agentName: this.agentRegistry?.resolveByChannel(channel)?.name ?? '<unknown>',
+        chatmode: 'interactive',
+        replyContext: msg.replyContext,
+      });
+      await adapter.send(envelope, {
+        kind: 'system.error',
+        text,
+        subtype: 'access_denied',
+        recoverable: false,
+      });
+      return;
+    }
+    await sendReply(msg.channelId, text, msg.replyContext);
+  }
+
   private async autoBindOwner(selfAid: string, channelKey: string, userId: string): Promise<void> {
     if (hasStaticAgentOwner(selfAid)) return;
     addStaticAgentOwner(selfAid, userId);

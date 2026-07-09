@@ -42,6 +42,10 @@ import type {
 } from '../types.js';
 
 const USER_ROLE_NAME_RE = /^[a-z0-9_-]+$/;
+const ROLE_USAGE_COST_BASIS = new Set(['gateway', 'official']);
+const ROLE_USAGE_SCOPES = new Set(['subject', 'role']);
+const ROLE_USAGE_RESET_MODES = new Set(['never', 'daily', 'weekly', 'monthly']);
+const ROLE_USAGE_CURRENCIES = new Set(['CNY', 'USD']);
 
 export enum ConfigTarget {
   Process = 'process',                  // evolclaw.json锛堢嫭绔嬶級
@@ -218,6 +222,8 @@ function groupFor(target: ConfigTarget, sel?: Selector): string {
 export interface WriteOpts {
   /** 璺宠繃 schema 鏍￠獙锛堣縼绉诲唴閮ㄥ啓鍥炵敤锛夈€?*/
   skipValidate?: boolean;
+  /** Allow trusted internal migrations to persist configs that would be downgraded at runtime. */
+  allowRoleConstraintViolations?: boolean;
 }
 
 function normalizeAgentConfigForWrite<T extends Record<string, any>>(value: T): T {
@@ -271,6 +277,7 @@ function validateAgentRolePolicy(value: Record<string, any>): void {
     if (!isValidUserRoleNameLocal(roleName)) {
       throw new ConfigError('VALIDATION_ERROR', `Invalid user role definition: ${roleName}`);
     }
+    validateRoleUsageLimits((definitions as Record<string, any>)[roleName]?.usageLimits, `roles.definitions.${roleName}.usageLimits`);
     validRoleNames.add(roleName);
   }
 
@@ -283,6 +290,35 @@ function validateAgentRolePolicy(value: Record<string, any>): void {
     if (typeof role !== 'string' || !validRoleNames.has(role)) {
       throw new ConfigError('VALIDATION_ERROR', `Invalid default role for ${key}: ${String(role)}`);
     }
+  }
+}
+
+function validateRoleUsageLimits(value: unknown, field: string): void {
+  if (value === undefined) return;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new ConfigError('VALIDATION_ERROR', `${field} must be an object`);
+  }
+  const limits = value as Record<string, unknown>;
+  if (limits.enabled !== undefined && typeof limits.enabled !== 'boolean') {
+    throw new ConfigError('VALIDATION_ERROR', `${field}.enabled must be a boolean`);
+  }
+  if (limits.resetMode !== undefined && !ROLE_USAGE_RESET_MODES.has(String(limits.resetMode))) {
+    throw new ConfigError('VALIDATION_ERROR', `${field}.resetMode must be never, daily, weekly, or monthly`);
+  }
+  if (limits.currency !== undefined && !ROLE_USAGE_CURRENCIES.has(String(limits.currency))) {
+    throw new ConfigError('VALIDATION_ERROR', `${field}.currency must be CNY or USD`);
+  }
+  const amount = limits.limitAmount;
+  if (amount !== undefined && amount !== null) {
+    if (typeof amount !== 'number' || !Number.isFinite(amount) || amount < 0) {
+      throw new ConfigError('VALIDATION_ERROR', `${field}.limitAmount must be a non-negative number or null`);
+    }
+  }
+  if (limits.costBasis !== undefined && !ROLE_USAGE_COST_BASIS.has(String(limits.costBasis))) {
+    throw new ConfigError('VALIDATION_ERROR', `${field}.costBasis must be gateway or official`);
+  }
+  if (limits.scope !== undefined && !ROLE_USAGE_SCOPES.has(String(limits.scope))) {
+    throw new ConfigError('VALIDATION_ERROR', `${field}.scope must be subject or role`);
   }
 }
 
@@ -356,13 +392,12 @@ export function write<T = any>(target: ConfigTarget, value: T, sel?: Selector, o
       if (!validation.valid) {
         console.warn(`[config-manager] Role constraint violations on write:`,
           validation.violations.map(v => `${v.field}: ${v.reason}`));
-        // 娉ㄦ剰锛氬綋鍓嶄负璀﹀憡妯″紡锛屼笉闃绘鍐欏叆
-        // 鏈潵鍙互閫氳繃鐜鍙橀噺鍚敤涓ユ牸妯″紡锛?
-        // if (process.env.EVOLCLAW_STRICT_ROLE_MODE === 'true') {
-        //   throw new ConfigError('ROLE_VIOLATION', 'Config violates role constraints');
-        // }
+        if (sel.role && !opts.allowRoleConstraintViolations) {
+          throw new ConfigError('ROLE_VIOLATION', 'Config violates role constraints');
+        }
       }
     } catch (err) {
+      if (err instanceof ConfigError && err.code === 'ROLE_VIOLATION') throw err;
       console.warn('[config-manager] Failed to validate role constraints on write:', err);
       // 楠岃瘉澶辫触涓嶉樆姝㈠啓鍏ワ紝鍙褰曡鍛?
     }
