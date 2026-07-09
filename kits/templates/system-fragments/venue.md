@@ -20,15 +20,6 @@ clientType: {{clientType}} # 客户端类型：desktop / web / mobile
 {{?groupId}}
 groupId: {{groupId}}
 {{/}}
-{{?venueKey}}
-venueKey: {{venueKey}} # 本地环境目录键，目录位于 $VENUES_DIR/{{venueKey}}/
-{{/}}
-{{?groupRulesStatus}}
-groupRulesStatus: {{groupRulesStatus}} # synced/cached/missing/forbidden/invalid_metadata/file_mismatch/too_large/unreadable/error
-{{/}}
-{{?groupRulesError}}
-groupRulesError: {{groupRulesError}}
-{{/}}
 {{?sameDevice}}
 sameDevice: true # 对端与你运行在同一台设备上
 {{/}}

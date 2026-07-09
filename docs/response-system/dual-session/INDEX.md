@@ -13,7 +13,7 @@
 1. **[README.md](./README.md)** - 总览和快速开始
 2. **[architecture.md](./architecture.md)** - 完整的系统架构
 3. **[data-structures.md](./data-structures.md)** - 完整的 TypeScript 接口定义
-4. **[RESPONSE-MODE-SYSTEM-ARCHITECTURE.md](../dual-session-lite/RESPONSE-MODE-SYSTEM-ARCHITECTURE.md)** - 响应模式体系架构（已移至 dual-session-lite）
+4. **[../ARCHITECTURE.md](../ARCHITECTURE.md)** - 响应模式体系架构（入口文档）
 
 ### ✅ 配置文档
 

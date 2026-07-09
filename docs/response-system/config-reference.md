@@ -181,9 +181,12 @@ baseLevelMs: short=60000, medium=120000, long=180000（辅助会话决策输出�
 | 优先级 | 层级 | 路径 |
 |--------|------|------|
 | 1（最高） | 关系级 | `$RELATIONS_DIR/<peerKey>/config.json` |
-| 2 | 环境级 | `$VENUES_DIR/<venueKey>/config.json` |
+| 2 | 环境级（预留） | 环境层尚未定型，config 路径待定 |
 | 3 | Agent 级 | `$AGENT_DIR/config.json` |
 | 4（最低） | 出厂默认值 | 代码内置 |
+
+> **环境级 config 待定**：环境层承载更高抽象（组织、类型级共性），不为具体群/私聊实例建目录。
+> 环境级 config 的存储路径、键的设计留待环境层正向规划时确定。本次仅消除旧的 `venueKey` 命名。
 
 **覆盖示例**：
 

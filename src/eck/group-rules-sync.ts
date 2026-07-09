@@ -5,7 +5,8 @@ import { TextDecoder } from 'util';
 import type { AIDStore, AUNClient } from '@agentunion/fastaun';
 import { getAidStore, isValidAid, loadClient, SLOT } from '../aun/aid/index.js';
 import { checkGroupIndex as checkGroupIndexRpc, getGroupIndex as getGroupIndexRpc } from '../aun/msg/group-index.js';
-import { agentVenuesDir } from '../paths.js';
+import { agentRelationsDir } from '../paths.js';
+import { formatPeerKey } from '../core/relation/peer-identity.js';
 import { atomicWriteBytes } from '../utils/atomic-write.js';
 import { logger } from '../utils/logger.js';
 import { invalidateKitCache } from './kit-renderer.js';
@@ -21,9 +22,7 @@ export type GroupRulesStatus =
   | 'unreadable'
   | 'error';
 
-export interface GroupVenueSyncVars {
-  venueKey?: string;
-  venueDir?: string;
+export interface GroupRulesSyncVars {
   groupRulesPath?: string;
   groupRulesStatus?: GroupRulesStatus;
   groupRulesError?: string;
@@ -64,15 +63,15 @@ const RULES_LOCAL_PATH = 'rules.md';
 const MAX_RULES_BYTES = 4 * 1024;
 const MTIME_TOLERANCE_MS = 1;
 
-export async function syncGroupVenueContext(opts: {
+export async function syncGroupRulesContext(opts: {
   selfAid?: string;
   groupId?: string;
   channel: string;
-}): Promise<GroupVenueSyncVars> {
+}): Promise<GroupRulesSyncVars> {
   const { selfAid, groupId, channel } = opts;
   if (!selfAid || !groupId || !isValidAid(selfAid)) return {};
 
-  const paths = venuePaths(selfAid, channel, groupId);
+  const paths = relationPaths(selfAid, channel, groupId);
   fs.mkdirSync(paths.dir, { recursive: true });
 
   const group = lazyGroupClient(selfAid);
@@ -80,8 +79,6 @@ export async function syncGroupVenueContext(opts: {
     const resolved = await resolveGroupRules(group.client, groupId, paths.localRulesPath);
     if (resolved.changed) invalidateKitCache();
     return {
-      venueKey: paths.venueKey,
-      venueDir: paths.dir,
       groupRulesPath: resolved.usable ? paths.localRulesPath : undefined,
       groupRulesStatus: resolved.status,
       groupRulesError: resolved.error,
@@ -89,10 +86,8 @@ export async function syncGroupVenueContext(opts: {
   } catch (e) {
     const status = classifyError(e);
     const error = errorMessage(e);
-    logger.warn(`[GroupVenueSync] ${groupId} rules sync failed: ${error}`);
+    logger.warn(`[GroupRulesSync] ${groupId} rules sync failed: ${error}`);
     return {
-      venueKey: paths.venueKey,
-      venueDir: paths.dir,
       groupRulesStatus: status,
       groupRulesError: error,
     };
@@ -188,7 +183,7 @@ async function safeCheckGroupIndex(client: AUNClient, groupId: string): Promise<
   try {
     return await checkGroupIndexRpc(client, groupId) as CheckGroupIndexResult;
   } catch (e) {
-    logger.debug(`[GroupVenueSync] checkGroupIndex ignored for ${groupId}: ${errorMessage(e)}`);
+    logger.debug(`[GroupRulesSync] checkGroupIndex ignored for ${groupId}: ${errorMessage(e)}`);
     return null;
   }
 }
@@ -221,7 +216,7 @@ async function getRulesContent(client: AUNClient, groupId: string, forcePull: bo
       pulled: false,
     };
   } catch (e) {
-    logger.debug(`[GroupVenueSync] getRules fallback to getGroupIndex for ${groupId}: ${errorMessage(e)}`);
+    logger.debug(`[GroupRulesSync] getRules fallback to getGroupIndex for ${groupId}: ${errorMessage(e)}`);
     const index = await getGroupIndex(client, groupId);
     return {
       groupAid: index.group_aid || groupId,
@@ -350,108 +345,71 @@ function assertUtf8(bytes: Uint8Array): void {
   new TextDecoder('utf-8', { fatal: true }).decode(bytes);
 }
 
-function venuePaths(selfAid: string, channel: string, groupId: string) {
-  const venueKey = `${channel}#${encodeURIComponent(groupId)}`;
-  const dir = path.join(agentVenuesDir(selfAid), venueKey);
+function relationPaths(selfAid: string, channel: string, groupId: string) {
+  const peerKey = formatPeerKey(channel, groupId);
+  const dir = path.join(agentRelationsDir(selfAid), peerKey);
   return {
-    venueKey,
+    peerKey,
     dir,
     localRulesPath: path.join(dir, RULES_LOCAL_PATH),
   };
 }
 
-function statusError(status: GroupRulesStatus, message: string): Error & { groupRulesStatus?: GroupRulesStatus } {
-  const error = new Error(message) as Error & { groupRulesStatus?: GroupRulesStatus };
-  error.groupRulesStatus = status;
-  return error;
+class StatusError extends Error {
+  status: GroupRulesStatus;
+  constructor(status: GroupRulesStatus, message: string) {
+    super(message);
+    this.status = status;
+  }
 }
 
-function classifyError(error: unknown): GroupRulesStatus {
-  if (isRecord(error) && typeof error.groupRulesStatus === 'string') {
-    const status = error.groupRulesStatus;
-    if (isGroupRulesStatus(status)) return status;
-  }
-  const haystack = errorHaystack(error);
-  if (/(forbidden|unauthorized|permission|denied|no_permission|permission_denied|无权限|权限|拒绝|\b401\b|\b403\b)/i.test(haystack)) {
-    return 'forbidden';
-  }
-  if (/(not[_ -]?found|notfound|no such|enoent|missing|不存在|\b404\b|rules not found)/i.test(haystack)) {
-    return 'missing';
-  }
-  if (/(signature|verify|verification|signed_by|body_hash|invalid signature|验签|签名)/i.test(haystack)) {
-    return 'invalid_metadata';
-  }
-  if (/(timeout|temporar|unavailable|econn|network|socket|reset|下载|读取)/i.test(haystack)) {
-    return 'unreadable';
-  }
+function statusError(status: GroupRulesStatus, message: string): StatusError {
+  return new StatusError(status, message);
+}
+
+function classifyError(e: unknown): GroupRulesStatus {
+  if (e instanceof StatusError) return e.status;
+  const msg = errorMessage(e).toLowerCase();
+  if (msg.includes('forbidden') || msg.includes('unauthorized') || msg.includes('permission')) return 'forbidden';
+  if (msg.includes('not found') || msg.includes('does not exist')) return 'missing';
   return 'error';
 }
 
-function isGroupRulesStatus(value: string): value is GroupRulesStatus {
-  return value === 'synced'
-    || value === 'cached'
-    || value === 'missing'
-    || value === 'forbidden'
-    || value === 'invalid_metadata'
-    || value === 'file_mismatch'
-    || value === 'too_large'
-    || value === 'unreadable'
-    || value === 'error';
+function errorMessage(e: unknown): string {
+  return e instanceof Error ? e.message : String(e);
 }
 
-function numberField(obj: Record<string, unknown>, keys: string[]): number | undefined {
-  for (const key of keys) {
-    const value = obj[key];
-    if (typeof value === 'number' && Number.isFinite(value)) return value;
-    if (typeof value === 'string' && value.trim() && Number.isFinite(Number(value))) return Number(value);
-  }
-  return undefined;
+function isRecord(x: unknown): x is Record<string, unknown> {
+  return typeof x === 'object' && x !== null && !Array.isArray(x);
+}
+
+function stringValue(x: unknown): string {
+  return typeof x === 'string' ? x : '';
 }
 
 function stringField(obj: Record<string, unknown>, keys: string[]): string | undefined {
-  for (const key of keys) {
-    const value = obj[key];
-    if (typeof value === 'string' && value.trim()) return value;
+  for (const k of keys) {
+    const v = obj[k];
+    if (typeof v === 'string') return v;
   }
   return undefined;
 }
 
-function stringValue(value: unknown): string {
-  return value === undefined || value === null ? '' : String(value).trim();
+function numberField(obj: Record<string, unknown>, keys: string[]): number | undefined {
+  for (const k of keys) {
+    const v = obj[k];
+    if (typeof v === 'number' && Number.isFinite(v)) return v;
+  }
+  return undefined;
 }
 
 function mtimeMsField(obj: Record<string, unknown>): number | undefined {
-  const direct = numberField(obj, ['mtimeMs', 'mtime_ms', 'updatedAtMs', 'updated_at_ms']);
-  if (direct !== undefined) return direct;
-  const seconds = numberField(obj, ['mtime', 'updated_at', 'updatedAt', 'last_modified', 'modified_at']);
-  if (seconds !== undefined) return seconds > 10_000_000_000 ? seconds : seconds * 1000;
-  for (const key of ['modifiedAt', 'modified_at', 'mtime_iso']) {
-    const value = obj[key];
-    if (typeof value === 'string') {
-      const parsed = Date.parse(value);
-      if (Number.isFinite(parsed)) return parsed;
+  const candidates = ['mtimeMs', 'mtime_ms', 'mtimeMillis', 'mtime'];
+  for (const k of candidates) {
+    const v = obj[k];
+    if (typeof v === 'number' && Number.isFinite(v)) {
+      return k === 'mtime' && v < 1e12 ? v * 1000 : v;
     }
   }
   return undefined;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
-}
-
-function errorHaystack(error: unknown): string {
-  if (!isRecord(error)) return errorMessage(error);
-  return [
-    error.name,
-    error.message,
-    error.code,
-    error.status,
-    error.statusCode,
-    error.error,
-  ].map(value => value === undefined ? '' : String(value)).join(' ');
-}
-
-function errorMessage(error: unknown): string {
-  if (error instanceof Error) return error.message;
-  return String(error);
 }

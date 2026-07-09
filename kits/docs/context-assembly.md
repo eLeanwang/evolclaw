@@ -295,7 +295,7 @@ coding 场景（无 channel/无身份）下，`chatType`、`channel`、`selfAid`
 | 40 | venue-fragment | fragment | chatType≠null | ✓ |
 | 41 | venue-chattype | `$KITS_DOCS/venues/{{chatType}}.md` | chatType≠null | ✗ |
 | 42 | venue-channel-chattype | `$KITS_DOCS/venues/{{channel}}-{{chatType}}.md` | chatType≠null | ✗ |
-| 43 | venue-group-profile | `$VENUES_DIR/{{channel}}#{{groupId}}/profile.md` | groupId≠null | ✗ |
+| 43 | relation-group-profile | `$RELATIONS_DIR/{{peerKey}}/profile.md` | groupId≠null | ✗ |
 | 44 | venue-client | `$KITS_DOCS/venues/client-{{clientType}}.md` | clientType≠null | ✗ |
 | 50 | channel-layer | fragment | channel≠null | ✓ |
 | 55 | commands | fragment | channel≠null | ✓ |
@@ -306,7 +306,7 @@ coding 场景（无 channel/无身份）下，`chatType`、`channel`、`selfAid`
 
 ## 环境层文档目录结构
 
-venue-* 段从两棵目录树取文件——随包发布的通用文档（只读）和 agent 私有的具体环境文档（按需创建）：
+venue-* 段从随包发布的通用文档（只读）取文件：
 
 ```
 $KITS_DOCS/venues/                  通用环境文档（随包发布，只读）
@@ -319,11 +319,10 @@ $KITS_DOCS/venues/                  通用环境文档（随包发布，只读�
 ├── client-desktop.md               桌面端环境
 ├── client-mobile.md                移动端环境
 └── ...
-
-$AGENT_DIR/venues/                  agent 私有环境文档（按需创建）
-└── <channel>#<urlEncode(groupId)>/
-    └── profile.md                  具体群的特别内容
 ```
+
+> **注意**：具体群/私聊实例的 profile 数据落**关系层** `$RELATIONS_DIR/<peerKey>/profile.md`，
+> 由 `relation-group-profile` 段注入，不在 venues 目录。
 
 ## 输出结构
 

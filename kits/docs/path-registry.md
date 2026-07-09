@@ -27,8 +27,8 @@
 | `$AGENTS_DIR` | `$EVOLCLAW_HOME/agents` | 所有 agent 数据根 |
 | `$AGENT_DIR` | `$AGENTS_DIR/<self-aid>` | 当前 agent 数据目录 |
 | `$SELF_DIR` | `$AGENT_DIR/personal` | 自己的身份档案 |
-| `$RELATIONS_DIR` | `$AGENT_DIR/relations` | 对端关系档案 |
-| `$VENUES_DIR` | `$AGENT_DIR/venues` | 场所档案 |
+| `$RELATIONS_DIR` | `$AGENT_DIR/relations` | 对端关系档案（含具体群/私聊实例数据） |
+| `$VENUES_DIR` | `$AGENT_DIR/venues` | 环境层（预留，更高抽象，非实例） |
 | `$AGENT_INDEX` | `$AGENT_DIR/index` | agent 级索引 |
 
 ## 外部依赖路径（需寻找）
