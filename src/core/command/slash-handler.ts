@@ -409,7 +409,9 @@ export async function handleSlashCommand(this: any,
   if (source === 'card-trigger') chatType = undefined;
 
   // 解析身份（按实例名）
-  const identity = overrideIdentity ?? this.sessionManager.resolveIdentity(channel, userId);
+  const narrowedChatType = chatType === 'group' ? 'group' : chatType === 'private' ? 'private' : undefined;
+  const identityConversationId = narrowedChatType === 'group' ? channelId : userId;
+  const identity = overrideIdentity ?? this.sessionManager.resolveIdentity(channel, userId, narrowedChatType, identityConversationId);
   const policy = this.getPolicy(channel);
 
   // 按当前会话选择 agent 后端。懒加载，避免错配 session 卡住 /baseagent 等恢复命令。

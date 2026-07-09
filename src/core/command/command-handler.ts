@@ -763,7 +763,7 @@ export class CommandHandler {
       : actorId;
 
     if (!selfAid || !actorId || !conversationId) {
-      const fallback = session.identity ?? this.sessionManager.resolveIdentity(session.channel, userId);
+      const fallback = session.identity ?? this.sessionManager.resolveIdentity(session.channel, userId, chatType, conversationId ?? undefined);
       logger.info(`[ctl] identity fallback: sessionId=${session.id} role=${fallback.role} selfAid=${selfAid ?? 'none'} actor=${actorId ?? 'none'} conversation=${conversationId ?? 'none'}`);
       return fallback;
     }

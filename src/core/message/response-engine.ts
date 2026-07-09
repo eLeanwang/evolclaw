@@ -1282,6 +1282,14 @@ export class ResponseEngine implements IMessageProcessor {
         await adapter.send({ ...envelope, replyContext: capturedReplyContext }, { kind: 'result.text', text, isFinal: true });
       });
 
+      const authChatType = chatType === 'group' ? 'group' : 'private';
+      const authConversationId = authChatType === 'group'
+        ? (session.metadata?.groupId || session.channelId || capturedChannelId)
+        : (message.peerId || session.metadata?.peerId || capturedChannelId);
+      const authPeerKey = session.channelType && authConversationId
+        ? formatPeerKey(session.channelType, authConversationId)
+        : undefined;
+
       // 设置权限审批的交互上下文（支持交互卡片）
       agent.setPermissionContext?.(session.id, {
         adapter,
@@ -1293,6 +1301,10 @@ export class ResponseEngine implements IMessageProcessor {
         agentName: agentNameForStats,
         taskId,
         chatmode: isProactive ? 'proactive' : 'interactive',
+        role: identityRole,
+        chatType: authChatType,
+        selfAid: session.selfAID || message.selfAID,
+        peerKey: authPeerKey,
         flushPending: async () => {
           await renderer.flush(false);
         },

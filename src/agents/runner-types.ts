@@ -35,6 +35,11 @@ export interface PermissionContext {
   taskId?: string;
   /** 当前会话 chatmode（interactive | proactive） */
   chatmode?: 'interactive' | 'proactive';
+  /** Runtime role resolved from the current inbound peer/group context. */
+  role?: string;
+  chatType?: 'private' | 'group';
+  selfAid?: string;
+  peerKey?: string;
   /** proactive 模式行为策略钩子：PreToolUse 阶段调用，返回 block 则拒绝工具调用 */
   policyHook?: (toolName: string, toolInput: Record<string, unknown>) => { block: boolean; reason?: string } | undefined;
   /** 发送交互卡片前刷新当前 renderer 队列，避免卡片早于事件消息到达 */
