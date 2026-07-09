@@ -1,6 +1,15 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
 import { CommandHandler } from '../../src/core/command/command-handler.js';
 import { EventBus } from '../../src/core/event-bus.js';
+import { _resetRoot } from '../../src/paths.js';
+import { _resetSchemaCache } from '../../src/config/schema-registry.js';
+
+const TEST_AID = 'test.agentid.pub';
+let tmpRoot: string;
+const oldHome = process.env.EVOLCLAW_HOME;
 
 // D1：/system 进程级鉴权查 evolclaw.json.owners。默认让 user1 在 owners 名单内，
 // 使既有正向用例继续通过；FORBIDDEN 用例按需覆写。
@@ -13,12 +22,55 @@ vi.mock('../../src/config-store.js', async (importOriginal) => {
   };
 });
 
+beforeEach(() => {
+  tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'evolclaw-menu-'));
+  process.env.EVOLCLAW_HOME = tmpRoot;
+  _resetRoot();
+  _resetSchemaCache();
+  ownersMock.value = ['user1'];
+
+  const agentDir = path.join(tmpRoot, 'agents', TEST_AID);
+  fs.mkdirSync(agentDir, { recursive: true });
+  fs.writeFileSync(path.join(agentDir, 'config.json'), JSON.stringify({
+    $schema_version: 1,
+    aid: TEST_AID,
+    channels: [],
+    active_baseagent: 'claude',
+    baseagents: { claude: { model: 'sonnet' } },
+    chatmode: { private: 'interactive', group: 'proactive' },
+    dispatch: 'mention',
+    permissionMode: 'auto',
+    show_activities: true,
+  }));
+});
+
+afterEach(() => {
+  fs.rmSync(tmpRoot, { recursive: true, force: true });
+  if (oldHome) process.env.EVOLCLAW_HOME = oldHome;
+  else delete process.env.EVOLCLAW_HOME;
+  _resetRoot();
+  _resetSchemaCache();
+});
+
+function testAgentConfigPath(): string {
+  return path.join(tmpRoot, 'agents', TEST_AID, 'config.json');
+}
+
+function readTestAgentConfig(): any {
+  return JSON.parse(fs.readFileSync(testAgentConfigPath(), 'utf-8'));
+}
+
+function writeTestAgentConfig(patch: Record<string, any>): void {
+  fs.writeFileSync(testAgentConfigPath(), JSON.stringify({ ...readTestAgentConfig(), ...patch }));
+}
+
 function createMockSessionManager(overrides: Record<string, any> = {}) {
   return {
     getOrCreateSession: vi.fn().mockResolvedValue(null),
     getActiveSession: vi.fn().mockResolvedValue({
       id: 'sess-1', channel: 'aun', channelId: 'chat1',
       projectPath: '/tmp/test', agentId: 'claude',
+      baseagent: 'claude', selfAID: TEST_AID, channelType: 'aun',
       agentSessionId: 'agent-sess-123',
       chatType: 'private', sessionMode: 'interactive',
       metadata: { permissionMode: 'auto' },
@@ -27,6 +79,7 @@ function createMockSessionManager(overrides: Record<string, any> = {}) {
     getActiveSessionSync: vi.fn().mockReturnValue({
       id: 'sess-1', channel: 'aun', channelId: 'chat1',
       projectPath: '/tmp/test', agentId: 'claude',
+      baseagent: 'claude', selfAID: TEST_AID, channelType: 'aun',
       chatType: 'private', sessionMode: 'interactive',
       metadata: { permissionMode: 'auto' },
       createdAt: Date.now(), updatedAt: Date.now(),
@@ -86,6 +139,44 @@ function createMockAgentRunner() {
   } as any;
 }
 
+function createMockAgentRegistry(overrides: Record<string, any> = {}) {
+  const agent = {
+    aid: TEST_AID,
+    name: '<unknown>',
+    baseagent: 'claude',
+    projectPath: '/tmp/test',
+    config: {
+      $schema_version: 1,
+      aid: TEST_AID,
+      channels: [],
+      active_baseagent: 'claude',
+      baseagents: { claude: { model: 'sonnet' } },
+      projects: { defaultPath: '/tmp/test' },
+      chatmode: { private: 'interactive', group: 'proactive' },
+    },
+    getContext: vi.fn(),
+    getShowActivities: vi.fn().mockReturnValue('all'),
+    setShowActivities: vi.fn(),
+    setActiveBaseagent: vi.fn(),
+    setLifecycle: vi.fn(),
+    setBaseagentModel: vi.fn(),
+    setBaseagentEffort: vi.fn(),
+    setChatmodePrivate: vi.fn(),
+    setDispatch: vi.fn(),
+    getObservable: vi.fn().mockReturnValue(false),
+    setObservable: vi.fn(),
+    channelInstanceNames: vi.fn().mockReturnValue(['aun']),
+  };
+  return {
+    resolveByChannel: vi.fn().mockReturnValue(agent),
+    get: vi.fn((name: string) => (name === TEST_AID || name === '<unknown>' ? agent : null)),
+    list: vi.fn().mockReturnValue([]),
+    getShowActivities: vi.fn().mockReturnValue('all'),
+    setShowActivities: vi.fn(),
+    ...overrides,
+  } as any;
+}
+
 function createHandler(opts: { sessionManager?: any; agentRegistry?: any; messageQueue?: any; agentRunner?: any } = {}) {
   const sm = opts.sessionManager ?? createMockSessionManager();
   const agentRunner = opts.agentRunner ?? createMockAgentRunner();
@@ -94,7 +185,7 @@ function createHandler(opts: { sessionManager?: any; agentRegistry?: any; messag
   const eb = new EventBus();
   const handler = new CommandHandler(sm, agentRunner, cache, eb);
   handler.setMessageQueue(mq);
-  if (opts.agentRegistry) handler.setAgentRegistry(opts.agentRegistry);
+  handler.setAgentRegistry(opts.agentRegistry ?? createMockAgentRegistry());
   return { handler, sm, eb, agentRunner };
 }
 
@@ -103,14 +194,14 @@ describe('execMenuQuery', () => {
     it('returns current mode', async () => {
       const { handler } = createHandler();
       const result = await handler.execMenuQuery('/perm', 'aun', 'chat1', 'user1');
-      expect(result).toEqual({ data: { mode: 'auto' } });
+      expect(result).toEqual({ data: { mode: 'auto', scope: 'agent', field: 'permissionMode', self: TEST_AID } });
     });
 
-    it('returns NO_ACTIVE_SESSION when no session', async () => {
+    it('falls back to agent config when no session', async () => {
       const sm = createMockSessionManager({ getActiveSession: vi.fn().mockResolvedValue(null) });
       const { handler } = createHandler({ sessionManager: sm });
       const result = await handler.execMenuQuery('/perm', 'aun', 'chat1', 'user1') as any;
-      expect(result.code).toBe('NO_ACTIVE_SESSION');
+      expect(result).toEqual({ data: { mode: 'auto', scope: 'agent', field: 'permissionMode', self: TEST_AID } });
     });
   });
 
@@ -118,17 +209,15 @@ describe('execMenuQuery', () => {
     it('returns current mode', async () => {
       const { handler } = createHandler();
       const result = await handler.execMenuQuery('/chatmode', 'aun', 'chat1', 'user1');
-      expect(result).toEqual({ data: { mode: 'interactive' } });
+      expect(result).toEqual({ data: { mode: 'interactive', scope: 'agent', field: 'chatmode.private', self: TEST_AID } });
     });
 
-    it('falls back to evolagent config when no session', async () => {
+    it('falls back to agent config when no session', async () => {
+      writeTestAgentConfig({ chatmode: { private: 'proactive', group: 'proactive' } });
       const sm = createMockSessionManager({ getActiveSession: vi.fn().mockResolvedValue(null) });
-      const agentRegistry = {
-        resolveByChannel: vi.fn().mockReturnValue({ config: { chatmode: { private: 'proactive' } } }),
-      };
-      const { handler } = createHandler({ sessionManager: sm, agentRegistry });
+      const { handler } = createHandler({ sessionManager: sm });
       const result = await handler.execMenuQuery('/chatmode', 'aun', 'chat1', 'user1');
-      expect(result).toEqual({ data: { mode: 'proactive' } });
+      expect(result).toEqual({ data: { mode: 'proactive', scope: 'agent', field: 'chatmode.private', self: TEST_AID } });
     });
   });
 
@@ -149,7 +238,7 @@ describe('execMenuQuery', () => {
       });
       const { handler } = createHandler({ sessionManager: sm });
       const result = await handler.execMenuQuery('/dispatch', 'aun', 'chat1', 'user1');
-      expect(result).toEqual({ data: { mode: 'mention' } });
+      expect(result).toEqual({ data: { mode: 'mention', scope: 'agent', field: 'dispatch', self: TEST_AID } });
     });
   });
 
@@ -157,13 +246,13 @@ describe('execMenuQuery', () => {
     it('returns current mode (no session needed)', async () => {
       const sm = createMockSessionManager({ getActiveSession: vi.fn().mockResolvedValue(null) });
       const agentRegistry = {
-        getShowActivities: vi.fn().mockReturnValue('dm-only'),
+        getShowActivities: vi.fn().mockReturnValue('none'),
         setShowActivities: vi.fn(),
         resolveByChannel: vi.fn().mockReturnValue(null),
       };
       const { handler } = createHandler({ sessionManager: sm, agentRegistry });
       const result = await handler.execMenuQuery('/activity', 'aun', 'chat1', 'user1');
-      expect(result).toEqual({ data: { mode: 'dm-only' } });
+      expect(result).toEqual({ data: { mode: 'none' } });
     });
 
     it('defaults to all when no registry', async () => {
@@ -260,7 +349,8 @@ describe('execMenuQuery', () => {
 
     it('returns null path when nothing available', async () => {
       const sm = createMockSessionManager({ getActiveSession: vi.fn().mockResolvedValue(null) });
-      const { handler } = createHandler({ sessionManager: sm });
+      const agentRegistry = createMockAgentRegistry({ resolveByChannel: vi.fn().mockReturnValue(null) });
+      const { handler } = createHandler({ sessionManager: sm, agentRegistry });
       const result = await handler.execMenuQuery('/pwd', 'aun', 'chat1', 'user1');
       expect(result).toEqual({ data: { name: null, path: null } });
     });
@@ -295,33 +385,32 @@ describe('execMenuQuery', () => {
 describe('execMenuUpdate', () => {
   describe('/perm', () => {
     it('switches mode (owner)', async () => {
-      const { handler, sm } = createHandler();
+      const { handler } = createHandler();
       const result = await handler.execMenuUpdate('/perm', 'bypass', 'aun', 'chat1', 'user1');
-      expect(result).toEqual({ data: { mode: 'bypass' } });
-      expect(sm.updateSession).toHaveBeenCalledWith('sess-1', { metadata: { permissionMode: 'bypass' } });
+      expect(result).toEqual({ data: { mode: 'bypass', scope: 'agent', field: 'permissionMode', self: TEST_AID } });
+      expect(readTestAgentConfig().permissionMode).toBe('bypass');
     });
 
     it('switches to readonly mode (owner)', async () => {
-      const { handler, sm } = createHandler();
+      const { handler } = createHandler();
       const result = await handler.execMenuUpdate('/perm', 'readonly', 'aun', 'chat1', 'user1');
-      expect(result).toEqual({ data: { mode: 'readonly' } });
-      expect(sm.updateSession).toHaveBeenCalledWith('sess-1', { metadata: { permissionMode: 'readonly' } });
+      expect(result).toEqual({ data: { mode: 'readonly', scope: 'agent', field: 'permissionMode', self: TEST_AID } });
+      expect(readTestAgentConfig().permissionMode).toBe('readonly');
     });
 
     it('switches mode (admin)', async () => {
       const sm = createMockSessionManager({ resolveIdentity: vi.fn().mockReturnValue({ role: 'admin' }) });
       const { handler } = createHandler({ sessionManager: sm });
       const result = await handler.execMenuUpdate('/perm', 'noask', 'aun', 'chat1', 'user1');
-      expect(result).toEqual({ data: { mode: 'noask' } });
-      expect(sm.updateSession).toHaveBeenCalledWith('sess-1', { metadata: { permissionMode: 'noask' } });
+      expect(result).toEqual({ data: { mode: 'noask', scope: 'agent', field: 'permissionMode', self: TEST_AID } });
+      expect(readTestAgentConfig().permissionMode).toBe('noask');
     });
 
     it('handles /perm readonly through the chat command path', async () => {
-      const { handler, sm } = createHandler();
+      const { handler } = createHandler();
       const result = await handler.handle('/perm readonly', 'aun', 'chat1', undefined, 'user1') as any;
       expect(result.kind).toBe('command.result');
       expect(result.text).toContain('readonly');
-      expect(sm.updateSession).toHaveBeenCalledWith('sess-1', { metadata: { permissionMode: 'readonly' } });
     });
 
     it('handles /perm readonly through the chat command path for admin', async () => {
@@ -330,7 +419,6 @@ describe('execMenuUpdate', () => {
       const result = await handler.handle('/perm readonly', 'aun', 'chat1', undefined, 'user1') as any;
       expect(result.kind).toBe('command.result');
       expect(result.text).toContain('readonly');
-      expect(sm.updateSession).toHaveBeenCalledWith('sess-1', { metadata: { permissionMode: 'readonly' } });
     });
 
     it('rejects invalid mode', async () => {
@@ -346,20 +434,21 @@ describe('execMenuUpdate', () => {
       expect(result.code).toBe('NO_PERMISSION');
     });
 
-    it('returns NO_ACTIVE_SESSION when no session', async () => {
+    it('writes agent config when no session', async () => {
       const sm = createMockSessionManager({ getActiveSession: vi.fn().mockResolvedValue(null) });
       const { handler } = createHandler({ sessionManager: sm });
       const result = await handler.execMenuUpdate('/perm', 'bypass', 'aun', 'chat1', 'user1') as any;
-      expect(result.code).toBe('NO_ACTIVE_SESSION');
+      expect(result).toEqual({ data: { mode: 'bypass', scope: 'agent', field: 'permissionMode', self: TEST_AID } });
+      expect(readTestAgentConfig().permissionMode).toBe('bypass');
     });
   });
 
   describe('/chatmode', () => {
     it('switches mode in session', async () => {
-      const { handler, sm } = createHandler();
+      const { handler } = createHandler();
       const result = await handler.execMenuUpdate('/chatmode', 'proactive', 'aun', 'chat1', 'user1');
-      expect(result).toEqual({ data: { mode: 'proactive' } });
-      expect(sm.updateSession).toHaveBeenCalledWith('sess-1', { sessionMode: 'proactive' });
+      expect(result).toEqual({ data: { mode: 'proactive', scope: 'agent', field: 'chatmode.private', self: TEST_AID } });
+      expect(readTestAgentConfig().chatmode.private).toBe('proactive');
     });
 
     it('rejects invalid mode', async () => {
@@ -368,16 +457,12 @@ describe('execMenuUpdate', () => {
       expect(result.code).toBe('INVALID_VALUE');
     });
 
-    it('writes to evolagent config when no session', async () => {
+    it('writes to agent config when no session', async () => {
       const sm = createMockSessionManager({ getActiveSession: vi.fn().mockResolvedValue(null) });
-      const setChatmodePrivate = vi.fn();
-      const agentRegistry = {
-        resolveByChannel: vi.fn().mockReturnValue({ setChatmodePrivate, config: {} }),
-      };
-      const { handler } = createHandler({ sessionManager: sm, agentRegistry });
+      const { handler } = createHandler({ sessionManager: sm });
       const result = await handler.execMenuUpdate('/chatmode', 'proactive', 'aun', 'chat1', 'user1');
-      expect(result).toEqual({ data: { mode: 'proactive' } });
-      expect(setChatmodePrivate).toHaveBeenCalledWith('proactive');
+      expect(result).toEqual({ data: { mode: 'proactive', scope: 'agent', field: 'chatmode.private', self: TEST_AID } });
+      expect(readTestAgentConfig().chatmode.private).toBe('proactive');
     });
 
     it('rejects non-admin in group chat', async () => {
@@ -404,7 +489,8 @@ describe('execMenuUpdate', () => {
       });
       const { handler } = createHandler({ sessionManager: sm });
       const result = await handler.execMenuUpdate('/dispatch', 'broadcast', 'aun', 'chat1', 'user1');
-      expect(result).toEqual({ data: { mode: 'broadcast' } });
+      expect(result).toEqual({ data: { mode: 'broadcast', scope: 'agent', field: 'dispatch', self: TEST_AID } });
+      expect(readTestAgentConfig().dispatch).toBe('broadcast');
     });
 
     it('rejects in private chat', async () => {
@@ -413,23 +499,18 @@ describe('execMenuUpdate', () => {
       expect(result.code).toBe('NOT_APPLICABLE');
     });
 
-    it('clear removes dispatchModeOverride, follows server again', async () => {
-      const updateSession = vi.fn().mockResolvedValue(undefined);
+    it('clear removes agent dispatch override', async () => {
       const sm = createMockSessionManager({
         getActiveSession: vi.fn().mockResolvedValue({
           id: 'sess-1', chatType: 'group', sessionMode: 'interactive',
           metadata: { permissionMode: 'auto', dispatchMode: 'mention', dispatchModeOverride: 'broadcast' },
           projectPath: '/tmp', agentId: 'claude', createdAt: Date.now(), updatedAt: Date.now(),
         }),
-        updateSession,
       });
       const { handler } = createHandler({ sessionManager: sm });
       const result = await handler.execMenuUpdate('/dispatch', 'clear', 'aun', 'chat1', 'user1');
-      expect(result).toEqual({ data: { mode: null } });
-      // dispatchModeOverride dropped; dispatchMode (server cache) preserved
-      const written = updateSession.mock.calls[0][1].metadata;
-      expect(written.dispatchModeOverride).toBeUndefined();
-      expect(written.dispatchMode).toBe('mention');
+      expect(result).toEqual({ data: { mode: null, scope: 'agent', field: 'dispatch', self: TEST_AID } });
+      expect(readTestAgentConfig().dispatch).toBeUndefined();
     });
   });
 
@@ -438,9 +519,9 @@ describe('execMenuUpdate', () => {
       const setShowActivities = vi.fn();
       const agentRegistry = { getShowActivities: vi.fn(), setShowActivities, resolveByChannel: vi.fn().mockReturnValue(null) };
       const { handler } = createHandler({ agentRegistry });
-      const result = await handler.execMenuUpdate('/activity', 'dm', 'aun', 'chat1', 'user1');
-      expect(result).toEqual({ data: { mode: 'dm-only' } });
-      expect(setShowActivities).toHaveBeenCalledWith('aun', 'dm-only');
+      const result = await handler.execMenuUpdate('/activity', 'none', 'aun', 'chat1', 'user1');
+      expect(result).toEqual({ data: { mode: 'none' } });
+      expect(setShowActivities).toHaveBeenCalledWith('aun', 'none');
     });
 
     it('rejects invalid mode', async () => {
@@ -1012,12 +1093,10 @@ describe('getSubMenuItems — selected field', () => {
     expect(proactive?.selected).toBe(false);
   });
 
-  it('/chatmode falls back to evolagent config when no session', async () => {
+  it('/chatmode falls back to agent config when no session', async () => {
+    writeTestAgentConfig({ chatmode: { private: 'proactive', group: 'proactive' } });
     const sm = createMockSessionManager({ getActiveSession: vi.fn().mockResolvedValue(null) });
-    const agentRegistry = {
-      resolveByChannel: vi.fn().mockReturnValue({ config: { chatmode: { private: 'proactive' } } }),
-    };
-    const { handler } = createHandler({ sessionManager: sm, agentRegistry });
+    const { handler } = createHandler({ sessionManager: sm });
     const items = await handler.getSubMenuItems('/chatmode', 'aun', 'chat1');
     const proactive = items?.find(i => i.value === 'proactive');
     const interactive = items?.find(i => i.value === 'interactive');
@@ -1026,6 +1105,7 @@ describe('getSubMenuItems — selected field', () => {
   });
 
   it('/dispatch marks current mode as selected', async () => {
+    writeTestAgentConfig({ dispatch: 'broadcast' });
     const sm = createMockSessionManager({
       getActiveSession: vi.fn().mockResolvedValue({
         id: 'sess-1', agentId: 'claude', chatType: 'group', sessionMode: 'interactive',

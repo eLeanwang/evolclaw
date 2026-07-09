@@ -29,6 +29,8 @@ interface BridgeHarness {
   triggerInbound: (msg: InboundMessage) => Promise<void>;
 }
 
+const anonymousIdentity = expect.objectContaining({ role: 'anonymous', mode: 'interactive' });
+
 /** 构造一个最小的 MessageBridge harness，捕获 adapter.send / sendReply 调用 */
 function makeBridge(opts: { adapterSend?: ReturnType<typeof vi.fn> | undefined } = {}): BridgeHarness {
   const cmdHandler = {
@@ -239,7 +241,7 @@ describe('MessageBridge — menu 协议', () => {
       chatType: 'group',
     }));
 
-    expect(h.cmdHandler.getMenuItems).toHaveBeenCalledWith('owner', 'group', 'agent');
+    expect(h.cmdHandler.getMenuItems).toHaveBeenCalledWith('anonymous', 'group', 'agent');
   });
 
   it('menu.list 在控制 channel 使用 control scope', async () => {
@@ -252,7 +254,7 @@ describe('MessageBridge — menu 协议', () => {
       isControlChannel: true,
     }));
 
-    expect(h.cmdHandler.getMenuItems).toHaveBeenCalledWith('owner', 'private', 'control');
+    expect(h.cmdHandler.getMenuItems).toHaveBeenCalledWith('anonymous', 'private', 'control');
   });
 
   it('menu.query 通过 name 解析 cmd 并调用 execMenuQuery', async () => {
@@ -262,7 +264,7 @@ describe('MessageBridge — menu 协议', () => {
 
     await h.triggerInbound(makeInbound({ content: JSON.stringify({ type: 'menu.query', id: 'q1', name: 'chatmode' }) }));
 
-    expect(h.cmdHandler.execMenuQuery).toHaveBeenCalledWith('/chatmode', 'test-instance', 'chat-1', 'peer-1', undefined, 'private', false);
+    expect(h.cmdHandler.execMenuQuery).toHaveBeenCalledWith('/chatmode', 'test-instance', 'chat-1', 'peer-1', undefined, 'private', false, anonymousIdentity);
     expect(parseCustomResponse(sendMock)).toEqual({
       type: 'menu.response',
       id: 'q1',
@@ -278,7 +280,7 @@ describe('MessageBridge — menu 协议', () => {
 
     await h.triggerInbound(makeInbound({ content: JSON.stringify({ type: 'menu.options', id: 'o1', name: 'chatmode' }) }));
 
-    expect(h.cmdHandler.getSubMenuItems).toHaveBeenCalledWith('/chatmode', 'test-instance', 'chat-1', 'peer-1', undefined, undefined, 'private', false);
+    expect(h.cmdHandler.getSubMenuItems).toHaveBeenCalledWith('/chatmode', 'test-instance', 'chat-1', 'peer-1', undefined, anonymousIdentity, 'private', false);
     expect(parseCustomResponse(sendMock)).toEqual({
       type: 'menu.response',
       id: 'o1',
@@ -294,7 +296,7 @@ describe('MessageBridge — menu 协议', () => {
 
     await h.triggerInbound(makeInbound({ content: JSON.stringify({ type: 'menu.update', id: 'u1', name: 'chatmode', value: 'proactive' }) }));
 
-    expect(h.cmdHandler.execMenuUpdate).toHaveBeenCalledWith('/chatmode', 'proactive', 'test-instance', 'chat-1', 'peer-1', undefined, false);
+    expect(h.cmdHandler.execMenuUpdate).toHaveBeenCalledWith('/chatmode', 'proactive', 'test-instance', 'chat-1', 'peer-1', anonymousIdentity, false, undefined);
     expect(parseCustomResponse(sendMock)).toEqual({
       type: 'menu.response',
       id: 'u1',
@@ -325,7 +327,7 @@ describe('MessageBridge — menu 协议', () => {
 
     await h.triggerInbound(makeInbound({ content: JSON.stringify({ type: 'menu.action', id: 'a1', name: 'session', action: 'stop' }) }));
 
-    expect(h.cmdHandler.execMenuAction).toHaveBeenCalledWith('/session', 'stop', undefined, 'test-instance', 'chat-1', 'peer-1', undefined, 'private', 'a1', false);
+    expect(h.cmdHandler.execMenuAction).toHaveBeenCalledWith('/session', 'stop', undefined, 'test-instance', 'chat-1', 'peer-1', anonymousIdentity, 'private', 'a1', false);
     expect(parseCustomResponse(sendMock)).toEqual({
       type: 'menu.response',
       id: 'a1',
@@ -344,7 +346,7 @@ describe('MessageBridge — menu 协议', () => {
     }) }));
 
     expect(h.cmdHandler.execMenuAction).toHaveBeenCalledWith(
-      '/session', 'switch', { target: '前端重构' }, 'test-instance', 'chat-1', 'peer-1', undefined, 'private', 'a2', false
+      '/session', 'switch', { target: '前端重构' }, 'test-instance', 'chat-1', 'peer-1', anonymousIdentity, 'private', 'a2', false
     );
   });
 
@@ -355,7 +357,7 @@ describe('MessageBridge — menu 协议', () => {
 
     await h.triggerInbound(makeInbound({ content: JSON.stringify({ type: 'menu.options', id: 'topic-o1', name: 'topic' }) }));
 
-    expect(h.cmdHandler.getSubMenuItems).toHaveBeenCalledWith('/topic', 'test-instance', 'chat-1', 'peer-1', undefined, undefined, 'private', false);
+    expect(h.cmdHandler.getSubMenuItems).toHaveBeenCalledWith('/topic', 'test-instance', 'chat-1', 'peer-1', undefined, anonymousIdentity, 'private', false);
     expect(parseCustomResponse(sendMock)).toEqual({
       type: 'menu.response',
       id: 'topic-o1',

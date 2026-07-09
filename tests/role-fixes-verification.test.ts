@@ -3,18 +3,20 @@ import { ConfigTarget, read, validateConfig } from '../src/config/config-manager
 import { privateAssignmentKey, setPrivateRoleAssignment, writeRoleAssignments } from '../src/config/role-assignments.js';
 
 describe('role source cleanup verification', () => {
-  it('accepts static agent owners but rejects old admin/member lists', () => {
+  it('accepts current agent owner/admin fields but rejects removed member lists', () => {
     expect(validateConfig(ConfigTarget.Agent, {
       aid: 'legacy.agentid.pub',
       channels: [],
       owners: ['alice.aid.pub'],
     })).toEqual([]);
 
+    // agent-config v1 remains the registered current schema and keeps admins
+    // for compatibility; scoped role assignments are still externalized below.
     expect(validateConfig(ConfigTarget.Agent, {
       aid: 'legacy.agentid.pub',
       channels: [],
       admins: ['alice.aid.pub'],
-    })).not.toEqual([]);
+    })).toEqual([]);
 
     expect(validateConfig(ConfigTarget.Agent, {
       aid: 'legacy.agentid.pub',
