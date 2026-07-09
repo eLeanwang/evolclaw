@@ -23,6 +23,31 @@ evolclaw 收到消息 → 构造一份 **vars**（运行时变量，见下）→
 
 加载时合并两者（见"合并与覆盖"）。manifest 只加载一次并缓存。
 
+## 多 manifest：按会话原型（sessionType）选清单
+
+不同**会话原型**加载不同的 manifest 文件，各自走同一引擎、同一两级覆盖机制：
+
+| 会话原型（`session.sessionType`） | manifest 文件 | 用途 |
+|------|------|------|
+| `main`（默认） | `eck_manifest.json` | 主会话，完整上下文 |
+| `auxiliary` | `eck_manifest.auxiliary.json` | 辅助会话（双会话模式），精简上下文 |
+| 未来：`approval` / `goal` / ... | `eck_manifest.<type>.json` | 权限审批 / 目标管理等专用会话 |
+
+**映射由 agent config 的 `sessionManifests` 字段定义**（走 config 分级覆盖：关系/环境/agent 级）：
+
+```jsonc
+// $AGENT_DIR/config.json
+{
+  "sessionManifests": {
+    "main": "eck_manifest.json",              // 缺省可省略，兜底就是它
+    "auxiliary": "eck_manifest.auxiliary.json"
+  }
+}
+```
+
+渲染时按 `session.sessionType`（缺省 `'main'`）查 `sessionManifests`，取不到则回退 `eck_manifest.json`。
+**每个 manifest 文件各自两级合并**（`$KITS/<file>` + `$ECK/<file>`），互不干扰。
+
 ## section 字段
 
 manifest 是 `{ "$schema_version": 1, "sections": [...] }`。每个 section：
@@ -34,11 +59,85 @@ manifest 是 `{ "$schema_version": 1, "sections": [...] }`。每个 section：
 | `file` | type=file | 文件路径，可含 `$NAME` / `{{key}}` |
 | `path` | type=directory | 目录路径 |
 | `pattern` | | 目录匹配 glob，默认 `*.md`（支持 `*` 和 `{a,b}`） |
+| `maxFiles` | | type=directory：最多加载文件数，默认 20。超出停止加载并注入截断说明 |
+| `maxBytes` | | type=directory：最多加载总字节，默认 40960（40KB）。超出停止加载并注入截断说明（至少保留 1 个文件） |
 | `order` | ✓ | 排序，**升序**决定上下文中出现的先后 |
 | `needsInjection` | ✓ | `true`=按模板渲染（解析 `{{}}` 条件与变量）；`false`=原样读入 |
 | `when` | ✓ | 加载条件，`"always"` 或条件对象（见下） |
 | `enabled` | | `false` 时整段跳过 |
+| `loop` | | 三段式循环：`{ forEach, childFile, separator? }`。有 loop 时 file 作 wrapper，见"三段式循环" |
 | `description` | | 调试输出里的人类可读标签 |
+
+### 三段式循环（wrapper + forEach + child）
+
+批量数据（如一批消息）用 `loop` 字段做"包裹层 + 循环体"渲染，避免手写重复模板：
+
+```jsonc
+{
+  "id": "batch-messages",
+  "type": "file",
+  "file": "$KITS_.../batch-wrapper.md",   // ① wrapper：包裹模板，含 {{@loop}} 占位
+  "loop": {
+    "forEach": "items",                    // ② 循环 vars 里的数组变量
+    "childFile": "$KITS_.../batch-item.md", // ③ 每元素渲染的子模板
+    "separator": "\n"                      // 元素间分隔符，默认 "\n"
+  },
+  "needsInjection": true,
+  "order": 5,
+  "when": "always"
+}
+```
+
+**wrapper 模板**（`{{@loop}}` 处填入循环结果）：
+```
+【批次 剩余{{remainingInQueue}}条 | 主队列{{pendingCount}}】
+{{@loop}}
+【批次结束】
+```
+
+**childFile 模板**（每个元素，可访问元素字段 + 外层 vars + `{{@index}}`）：
+```
+[{{@index}}] {{peerName}}: {{content}}
+```
+
+**渲染规则**：
+- 对 `vars[forEach]` 数组每个元素渲染 childFile（对象元素 → 字段可用 `{{field}}`；标量 → `{{.}}`），以 `separator` 连接
+- wrapper 单独渲染（其变量如 `remainingInQueue` 来自 vars），`{{@loop}}` 位置**字面量填入**循环结果 → 循环结果不被二次解析
+- childFile 内可再嵌套 `{{#each}}` 或另一个占位，支持多层
+- 空数组 / 非数组 → 循环结果为空串
+- wrapper 不含 `{{@loop}}` → 循环结果追加到 wrapper 末尾（容错）
+
+> **消息渲染层的 loop**：`eck_message_manifest.json` 里的 loop 段是**批次包裹层**——
+> child 由 message-renderer 的逐条渲染（`renderOneItem`，自带 content 哨兵）产出，
+> 用户消息文本里的 `{{}}` 不会被二次解析。批次 vars（remainingInQueue 等）从 sessionVars 透传。
+> 详见 `prompt-loading-architecture.md`。
+
+### 清单顶层字段
+
+除 `sections` 外，manifest 顶层还支持全局限额（总闸，跨所有段累计）：
+
+| 字段 | 默认 | 含义 |
+|------|------|------|
+| `$schema_version` | — | 版本号 |
+| `mode` | patch | `patch`（合并）/ `replace`（完全替换），见"合并与覆盖" |
+| `totalMaxFiles` | 50 | 整个清单渲染最多文件数。达到后停止加载后续所有段 |
+| `totalMaxBytes` | 102400（100KB） | 整个清单渲染最多总字节。达到后停止加载后续所有段 |
+
+## 目录加载限额（安全保护）
+
+`type: directory` 段加载整个目录，若目录内容失控会撑爆提示词。两层限额保护：
+
+- **单目录限额**（`maxFiles` 20 / `maxBytes` 40KB）：单个目录段最多加载多少。超出时停止加载该目录后续文件，并在该段末尾注入一行截断说明：
+  `[注意] 目录 $KITS_RULES 未完整加载：N 个文件未加载（达文件数上限 20 个）。`
+- **总闸限额**（`totalMaxFiles` 50 / `totalMaxBytes` 100KB）：整个清单所有段加起来的上限。达到后停止加载后续所有命中段，末尾注入总截断说明，**带上未加载的 section id 集合**：
+  `[注意] 上下文清单总量超限（>50 文件 / >100KB），以下 section 未加载：goal-fragment, extra-docs。`
+
+> **注**：字节按文件原始内容（`rawContent`）计，不含渲染后变化，也不含截断说明行本身。
+> 单目录"至少保留 1 个文件"——避免单个超大文件导致整段为空。
+> 截断信息同时写入调试输出（`manifest-*.md`），便于排查。
+
+> **现状**：当前唯一目录段 `$KITS_RULES` = 6 文件 / ~18KB，远低于默认限额，不受影响。
+> 新增规则文档时注意别让该目录逼近 40KB。
 
 ## when 条件求值
 

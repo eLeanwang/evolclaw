@@ -301,13 +301,17 @@ function migrateConfig(oldConfig: any): ResponseModeConfig {
 
 ### Task 3.2：打断机制优化（2天）
 
+> 权威机制见 [interrupt-mechanism.md](./interrupt-mechanism.md)。
+
 **功能**：
-- 实现硬打断（调用 SDK abort）
-- 实现打断信息注入
+- 实现硬打断（调用 SDK abort，旧 process() 抛错中止，不 completeBatch/feedback）
+- 实现打断场景特殊提取（一次性提取全部，≤100/20k）
+- 实现打断信息注入（previousMessageStrategy 三策略，提示词层）
 - 优化打断策略
 
 **测试**：
-- [ ] 硬打断生效
+- [ ] 硬打断生效（abort 中止 callModel）
+- [ ] 打断场景全量提取（紧急消息一定在批次内）
 - [ ] 打断信息正确注入
 - [ ] 副作用无法撤回（符合预期）
 

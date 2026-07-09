@@ -74,7 +74,7 @@ enum MessageState {
   PENDING = 'pending',             // 刚到达，未处理
   HOLD = 'hold',                   // 挂起（与agent无关）
   DELAY = 'delay',                 // 延迟投递
-  TRANSFERRED = 'transferred',     // 已投递到主队列
+  // transfer 时消息立即移出队列，无 TRANSFERRED 中间态
 }
 ```
 

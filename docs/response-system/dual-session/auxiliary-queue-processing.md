@@ -119,7 +119,7 @@ enum MessageState {
   PENDING = 'pending',      // 新到达，未判断
   HOLD = 'hold',            // 挂起，等待重新判断
   DELAY = 'delay',          // 延迟投递
-  TRANSFERRED = 'transferred',  // 已投递到主队列
+  // transfer 时消息立即移出队列，无 TRANSFERRED 中间态
 }
 
 interface QueuedMessage {
@@ -153,8 +153,8 @@ interface QueuedMessage {
   ↓ extractBatch() 提取 → processedByAuxiliary=true（进入辅助会话上下文）
   ↓ (辅助会话判断)
   ├─→ HOLD (挂起) ─→ 留在队列，不再重新提取（仍在辅助会话上下文中）
-  ├─→ DELAY (延迟) ─→ 到期 ─→ triggerDelayExpired() 扫描转投 ─→ TRANSFERRED
-  └─→ TRANSFER (立即) ─→ 投递「已喂给辅助会话」的消息 ─→ TRANSFERRED
+  ├─→ DELAY (延迟) ─→ 到期 ─→ triggerDelayExpired() 扫描转投 ─→ 移除出队列
+  └─→ TRANSFER (立即) ─→ 投递「已喂给辅助会话」的消息 ─→ 移除出队列
 ```
 
 ---
@@ -410,7 +410,7 @@ async function transferToMain(batch: TransferBatch) {
 
 > **角色一致性与打断条件由主队列负责**：主队列在提取处理批次（`extractBatch`）时按角色分组，
 > 保证同一处理批次内角色统一；打断时是否允许，也在主队列侧结合角色一致性判断。
-> 详见主队列/主会话设计文档，本文不展开。
+> 打断机制完整论述见 [interrupt-mechanism.md](./interrupt-mechanism.md)，本文不展开。
 
 ---
 
@@ -620,10 +620,10 @@ T+1s: 辅助会话输出 transfer
 | PENDING | ✅ 提取 | 新消息，作为 newMessages 给辅助会话判断 |
 | HOLD | ❌ 不提取 | 已在辅助会话上下文中，仅通过上下文参与新批次判断；留在队列等待 transfer 时一起投递 |
 | DELAY | ❌ 不提取 | 已在辅助会话上下文中，仅通过上下文参与新批次判断；到期后直接转投（不再判断） |
-| TRANSFERRED | ❌ 不提取 | 已移除出队列 |
 
 > **说明**：HOLD/DELAY 的消息正文不会被重新提取喂给辅助会话（避免重复），
 > 它们只通过辅助会话的上下文记忆参与后续新批次的综合判断。
+> transfer 时消息立即移出队列，无 TRANSFERRED 中间态。
 
 ---
 

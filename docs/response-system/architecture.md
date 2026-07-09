@@ -164,17 +164,19 @@ interface CommonResponseModeConfig {
 | 值 | 说明 | 所有模式通用语义 |
 |---|------|-----------------|
 | `disabled` | 所有消息都处理 | 默认值 |
-| `mention-only` | 仅处理被 @ 的消息 | 过滤未 @ 的消息 |
+| `mention-only` | 仅处理被 @ 的消息 | 未 @ 消息入队作引用上下文，不触发处理 |
 
 **各响应模式的实现**：
 
 #### single-session
 - `disabled`：所有消息直接进入会话处理
-- `mention-only`：只有被 @ 的消息进入会话，其他过滤
+- `mention-only`：只有被 @ 的消息触发处理，未 @ 消息入队作引用上下文（不丢弃）
 
 #### dual-session
 - `disabled`：所有消息进辅助队列 → 辅助会话判断
-- `mention-only`：只有被 @ 的消息进辅助队列，其他过滤
+- `mention-only`：所有消息都进辅助队列，只有被 @ / 活跃发言人消息触发处理，其余作引用上下文
+
+> 详细机制（引用读取边界、队列淘汰、活跃发言人）见 [MENTION-MODE-MECHANISM.md](./dual-session/MENTION-MODE-MECHANISM.md)
 
 ### 3.4 model（模型选择）
 

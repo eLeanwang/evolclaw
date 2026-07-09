@@ -62,17 +62,18 @@
           - 主会话正在处理？
           - 当前批次 < 50 条？
                      ↓
-                  打断成功
+                  打断成立
                      ↓
         ┌────────────────────────────────┐
         │   MainSession.interrupt()      │
-        │   - 停止当前处理                │
+        │   - 硬打断（调用 SDK abort）    │
+        │   - 旧 process() 抛错中止       │
         │   - 标记 idle                   │
         └────────────┬───────────────────┘
                      ↓
         新消息追加到主队列末尾
                      ↓
-        重新提取批次（≤50条）
+        打断场景特殊提取：主队列全部（≤100/20k）
                      ↓
         [阶段 4] 主会话处理
         ┌────────────────────────────────┐
@@ -107,7 +108,6 @@
         │   AuxiliarySession             │
         │     .processFeedback()         │
         │   - 更新上下文                  │
-        │   - 移除已处理消息              │
         │   - 输出 ack                    │
         └────────────┬───────────────────┘
                      ↓
@@ -258,10 +258,8 @@ async function executeDecision(output: AuxiliaryOutput) {
       });
     }
     
-    // 更新状态
-    for (const msg of messages) {
-      auxiliaryQueue.updateState(msg.id, MessageState.TRANSFERRED);
-    }
+    // 从辅助队列移除（提取即移除，不等反馈）
+    auxiliaryQueue.remove(messages.map(m => m.id));
   }
 }
 ```
@@ -301,7 +299,8 @@ async function interrupt(messages: Message[]) {
     return await append(messages);
   }
   
-  // 打断主会话
+  // 打断主会话：硬打断,中止正在进行的模型调用,停止当前批次处理
+  // 被打断批次的消息不回灌队列,仅保留在主会话上下文中
   logger.info('[MainQueue] Interrupt', { 
     currentBatch: mainSession.getCurrentBatchSize(),
     newMessages: messages.length 
@@ -312,10 +311,13 @@ async function interrupt(messages: Message[]) {
   // 新消息追加到队列末尾
   mainQueue.push(...messages);
   
-  // 重新触发处理
+  // 触发主会话处理。打断场景下一次性提取主队列全部消息（≤100/20k）
+  // 确保紧急消息在批次内。详见 interrupt-mechanism.md §5
   await triggerMainSession();
 }
 ```
+
+> 打断机制完整论述见 [interrupt-mechanism.md](./interrupt-mechanism.md)（唯一事实源）。
 
 ---
 
@@ -406,8 +408,16 @@ async function processFeedback(feedback: MainFeedback) {
 回复：${feedback.replies.join(' / ')}
 `);
   
-  // 4. 从辅助队列移除已处理消息
-  auxiliaryQueue.remove(feedback.processedMessageIds);
+  // 3. 更新上下文
+  auxiliarySession.context.append(`
+[主会话反馈 ${feedback.batchId}]
+已处理消息：${feedback.processedMessageIds.join(', ')}
+总结：${feedback.summary}
+回复：${feedback.replies.join(' / ')}
+`);
+  
+  // 注：transfer 时已移除，此处不再操作队列
+  // 反馈的作用是更新辅助会话上下文，让它知道主会话消费了哪些消息
   
   logger.info('[Auxiliary] Feedback processed', { 
     ackReason: output.ack.reason 
@@ -524,12 +534,13 @@ async function processFeedback(feedback: MainFeedback) {
       → 执行打断：mainSession.interrupt()
   
   T2.7: 主会话被打断
-      → 停止处理 A（A 已在上下文）
+      → 硬 abort：中止正在进行的 callModel（A 已在上下文）
+      → 旧 process(A) 抛错中止，不 completeBatch/feedback
       → 标记 idle
   
-  T2.8: 主队列重新提取批次
-      → 提取：主队列中的消息 B, C + 新投递的紧急消息
-      → 批次：[B, C, 紧急消息]
+  T2.8: 主队列打断场景特殊提取
+      → 一次性提取主队列全部（≤100/20k）：B, C + 新投递的紧急消息
+      → 批次：[B, C, 紧急消息]（A 不回灌队列，仅留在上下文）
   
   T2.9: 主会话处理新批次
       → 上下文中有 A

@@ -117,36 +117,62 @@ function buildECKVars(session: Session): ECKVars {
 > （`$ECK/eck_manifest.json`，patch 合并进基础 manifest），**不直接改基础 manifest**。
 > **审查系统 manifest 的真实机制后再修改；若发现冲突或不一致，先找用户澄清，不要自行臆改。**
 
-### 3.1 dual-session 覆盖文件（overlay）
+### 3.1 辅助会话：独立 manifest
 
-dual-session 的段通过**覆盖文件** `$ECK/eck_manifest.json` 追加进基础 manifest（patch 合并：
-同 `id` 浅合并，新 `id` 追加）。只需写 dual-session 新增的段，**不要贴整份基础 manifest**。
+辅助会话是一个**独立会话原型**（`sessionType: 'auxiliary'`），加载专属的精简 manifest
+`eck_manifest.auxiliary.json`（不塞进主 manifest）。映射由 agent config 的 `sessionManifests` 定义：
+
+```jsonc
+// $AGENT_DIR/config.json
+{
+  "sessionManifests": {
+    "auxiliary": "eck_manifest.auxiliary.json"
+    // "main" 缺省，兜底 eck_manifest.json
+  }
+}
+```
+
+`kits/eck_manifest.auxiliary.json`（基础，随包发布；`$ECK/eck_manifest.auxiliary.json` 可两级覆盖）：
+
+```jsonc
+{
+  "$schema_version": 1,
+  "totalMaxFiles": 20,
+  "totalMaxBytes": 51200,
+  "sections": [
+    { "id": "rules", "type": "directory", "path": "$KITS_RULES", "order": 10,
+      "needsInjection": false, "when": "always", "description": "ECK 核心规则" },
+    { "id": "auxiliary-role", "type": "file",
+      "file": "$KITS_DOCS/response-system/dual-session/prompts/auxiliary-base.md",
+      "order": 20, "needsInjection": true, "when": "always",
+      "description": "辅助会话职责：hold/delay/transfer + 背压调节" },
+    { "id": "session", "type": "file", "file": "$KITS_FRAGMENTS/session.md",
+      "order": 60, "needsInjection": true, "when": "always" },
+    { "id": "baseagent", "type": "file", "file": "$KITS_FRAGMENTS/baseagent.md",
+      "order": 70, "needsInjection": true, "when": { "var": "baseAgent", "neq": null } }
+  ]
+}
+```
+
+**辅助会话 manifest 刻意精简**：只含 rules + 辅助职责 + session + baseagent，
+**不含**身份层/关系层/对端 profile/venue/命令——辅助会话只做投递判断，不需要这些重段，省 token 提速。
+
+### 3.2 主会话与 mention：主 manifest 的覆盖文件
+
+主会话（`sessionType: 'main'`）走默认 `eck_manifest.json`。dual-session 只需给它追加
+mention 说明段，通过**覆盖文件** `$ECK/eck_manifest.json`（patch 合并，不贴整份基础 manifest）：
 
 ```json
 // $ECK/eck_manifest.json（覆盖文件，patch 合并进基础 manifest）
 {
   "sections": [
     {
-      "id": "dual-session-auxiliary-prompt",
-      "type": "file",
-      "file": "$KITS_DOCS/response-system/dual-session/prompts/auxiliary-base.md",
-      "when": { "all": [
-        { "var": "responseMode", "eq": "dual-session" },
-        { "var": "sessionType", "eq": "auxiliary" }
-      ] },
-      "order": 10,
-      "description": "辅助会话提示词"
-    },
-    {
       "id": "dual-session-main-prompt",
       "type": "file",
       "file": "$KITS_DOCS/response-system/dual-session/prompts/main-base.md",
-      "when": { "all": [
-        { "var": "responseMode", "eq": "dual-session" },
-        { "var": "sessionType", "eq": "main" }
-      ] },
+      "when": { "var": "responseMode", "eq": "dual-session" },
       "order": 10,
-      "description": "主会话提示词"
+      "description": "主会话提示词（dual-session）"
     },
     {
       "id": "mention-mode-guide-mention-only",
@@ -160,12 +186,15 @@ dual-session 的段通过**覆盖文件** `$ECK/eck_manifest.json` 追加进基�
 }
 ```
 
+> **主会话不需要 sessionType 判断**：它就是默认 manifest，`dual-session-main-prompt` 只靠
+> `responseMode === 'dual-session'` 命中即可（辅助会话走独立 manifest，不会误命中）。
+
 > **回复方式（chatMode）不在此定义**：「当前渠道怎么回复、怎么发消息」由 ECK 的 `[channel]` 段
 > 唯一负责（见 `kits/rules/06-channel.md` 与 `kits/templates/system-fragments/channel.md`）。
 > `[channel]` 段读取 ECK Vars 里的 `chatMode` 并按 interactive/proactive 分流解释，
 > response-system 不重复定义发送命令，避免与 `[channel]` 段冲突。
 
-### 3.2 加载规则
+### 3.3 加载规则
 
 **条件求值**（以 `context-assembly.md` 的 `evaluateWhen` 为准）：
 
@@ -173,19 +202,17 @@ dual-session 的段通过**覆盖文件** `$ECK/eck_manifest.json` 追加进基�
 - 单条件：`{ "var": "X", "eq": V }` / `{ "var": "X", "neq": V }` / `{ "var": "X", "in": [...] }` / `{ "var": "X", "nin": [...] }`
 - 组合：`{ "all": [...] }`（全为真）/ `{ "any": [...] }`（任一为真）
 - `eq: null` 匹配"未注入"，`neq: null` 匹配"已注入"
-- 命中的 section 按 `order` 升序排序后拼接（字段名和排序方向以 `context-assembly.md` 为准）
+- 命中的 section 按 `order` 升序排序后拼接
 
-**示例**（仅列 response-system 定义的 section；回复方式由 [channel] 段另行提供，不在此表）：
+**各会话原型加载的 manifest**：
 
-| 场景 | 命中的 response-system sections |
-|------|----------------|
-| **coding 模式（single-session）** | 无（回复方式由 [channel] 段处理） |
-| **单聊（single-session）** | 无（回复方式由 [channel] 段处理） |
-| **群聊（dual-session，主会话）** | `dual-session-main-prompt`（`sessionType === 'main'`） |
-| **群聊（dual-session，辅助会话）** | `dual-session-auxiliary-prompt`（`sessionType === 'auxiliary'`） |
+| 场景 | sessionType | 加载的 manifest | 关键 section |
+|------|------|------|------|
+| coding / 单聊（single-session） | main | `eck_manifest.json` | 无 dual-session 专属段 |
+| 群聊（dual-session，主会话） | main | `eck_manifest.json` + 覆盖 | `dual-session-main-prompt`（+ mention 段） |
+| 群聊（dual-session，辅助会话） | auxiliary | `eck_manifest.auxiliary.json` | `auxiliary-role` |
 
-> mention-only 时另加 `mention-mode-guide-mention-only` 段。chatMode 不对应
-> response-system 的 section——它是 ECK Vars，由 [channel] 段读取解释。
+> chatMode 不对应 response-system 的 section——它是 ECK Vars，由 [channel] 段读取解释。
 
 ---
 

@@ -123,6 +123,7 @@ function renderOneItem(
   const out: string[] = [];
   for (const section of sections) {
     if (section.enabled === false) continue;
+    if (section.loop) continue;  // loop 段是批次级包裹，由 renderMessageBody 处理，不参与逐条
     if (!evaluateWhen(section.when, itemVars)) continue;
     const files = loadSectionFiles(section, itemVars, sessionCache);
     for (const [, rawContent] of files) {
@@ -158,17 +159,46 @@ export function renderMessageBody(
   const contentSentinel = `\x00ECMSG-${randomUUID()}\x00`;
   const sessionCache = new Map<string, string>();  // render-local cache (template files are small & fixed)
 
-  const renderedParts: string[] = [];
   const allImages: Array<{ data: string; mimeType: string }> = [];
-
   for (const item of items) {
-    renderedParts.push(renderOneItem(item, sessionVars, sessionCache, contentSentinel));
     if (item.images && item.images.length > 0) allImages.push(...item.images);
   }
 
-  const body = renderedParts.join('\n\n');
+  // 逐条渲染每个 item（自带哨兵，防用户文本里的 {{}} 被二次解析）。
+  const renderedParts = items.map(item => renderOneItem(item, sessionVars, sessionCache, contentSentinel));
+
+  // 批次包裹层：message manifest 里若有 loop 段（wrapper file + 批次 vars），
+  // 用它包裹逐条结果——wrapper 渲染批次 vars（如 remainingInQueue，从 sessionVars 透传），
+  // {{@loop}} 处字面量填入逐条结果（已渲染完成，不再过模板 → 哨兵天然生效）。
+  const body = wrapBatch(renderedParts, sessionVars, sessionCache) ?? renderedParts.join('\n\n');
+
   writeMessageDebug(sessionId, items, body);
   return { body, images: allImages };
+}
+
+/**
+ * 若 message manifest 含 loop 段，用其 wrapper 包裹逐条渲染结果。返回包裹后 body，
+ * 无 loop 段则返回 null（调用方回退到 join）。
+ * 逐条结果 renderedParts 已是最终文本，作为字面量填入 wrapper 的 {{@loop}}，不二次解析。
+ */
+function wrapBatch(renderedParts: string[], sessionVars: Vars, sessionCache: Map<string, string>): string | null {
+  const sections = loadManifest(MESSAGE_MANIFEST_FILE);
+  const loopSection = sections.find(s => s.loop && s.enabled !== false && evaluateWhen(s.when, sessionVars));
+  if (!loopSection || !loopSection.loop || !loopSection.file) return null;
+
+  const wrapperFiles = loadSectionFiles(loopSection, sessionVars, sessionCache);
+  if (wrapperFiles.length === 0) return null;
+  const wrapperTpl = wrapperFiles[0][1];
+
+  const sep = loopSection.loop.separator ?? '\n\n';
+  const loopResult = renderedParts.join(sep);
+  // wrapper 渲染批次 vars，{{@loop}} 用哨兵占位后字面量替换回 loopResult（避免逐条结果被二次解析）。
+  const LOOP_SENTINEL = '\x00ECLOOP\x00';
+  const wrapperWithSentinel = wrapperTpl.includes('{{@loop}}')
+    ? wrapperTpl.split('{{@loop}}').join(LOOP_SENTINEL)
+    : wrapperTpl + '\n' + LOOP_SENTINEL;
+  const rendered = renderTemplate(wrapperWithSentinel, sessionVars, /* stripBlankLines */ false);
+  return rendered.split(LOOP_SENTINEL).join(loopResult);
 }
 
 // ── Debug ──

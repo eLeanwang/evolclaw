@@ -62,8 +62,8 @@
 
 |  | 系统提示词渲染层 | 消息渲染层 |
 |--|--|--|
-| **驱动文件** | `kits/eck_manifest.json` | `kits/eck_message_manifest.json` |
-| **覆盖文件** | `$EVOLCLAW_HOME/eck/eck_manifest.json` | `$EVOLCLAW_HOME/eck/eck_message_manifest.json` |
+| **驱动文件** | `kits/eck_manifest.json`（默认；按 `session.sessionType` 经 config.sessionManifests 可切到 `eck_manifest.<type>.json`，如 auxiliary） | `kits/eck_message_manifest.json` |
+| **覆盖文件** | `$EVOLCLAW_HOME/eck/<驱动文件名>` | `$EVOLCLAW_HOME/eck/eck_message_manifest.json` |
 | **模板目录** | `kits/templates/system-fragments/` | `kits/templates/message-fragments/` |
 | **输出去向** | `systemPrompt.append`（每轮覆盖，不进 transcript） | `effectivePrompt`（进 transcript，成永久历史） |
 | **vars 粒度** | 会话级（一次构造，整批复用） | item 级（每条叠加 peerName/now/images） |
@@ -129,6 +129,17 @@ IMPORTANT: Use this context when it affects the current interaction.
 </system-reminder>
 ```
 
+### 加载限额（防撑爆保护）
+
+目录段与整个清单都有加载上限，超出即截断并注入说明（详见 `context-assembly.md`「目录加载限额」）：
+
+| 层级 | 维度 | 默认 | 覆盖字段 |
+|------|------|------|---------|
+| 单目录段 | 文件数 / 字节 | 20 / 40KB | section `maxFiles` / `maxBytes` |
+| 整个清单 | 文件数 / 字节 | 50 / 100KB | 清单顶层 `totalMaxFiles` / `totalMaxBytes` |
+
+超限时：单目录段末尾注入 `[注意] 目录 X 未完整加载…`；总闸超限则停止加载后续段，末尾注入 `[注意] …以下 section 未加载：<id 集合>`。截断信息同步进 `manifest-*.md` 调试输出。
+
 ---
 
 ## 消息渲染层详解
@@ -154,6 +165,27 @@ for each SubMessage in items:
 
 join('\n\n') → { body: string, images: ImageData[] }
 ```
+
+### 批次包裹层（loop 段）
+
+消息 manifest 里若有 `loop` 段（见 `context-assembly.md`「三段式循环」），逐条渲染结果会被**包裹**：
+
+```
+逐条渲染（每条走 renderOneItem，自带 content 哨兵）→ renderedParts[]
+  ↓
+wrapBatch：loop 段的 file 作 wrapper，渲染批次 vars（remainingInQueue/pendingCount 等，从 sessionVars 透传）
+  ↓
+wrapper 的 {{@loop}} 处字面量填入 renderedParts.join(separator)
+```
+
+- **child = renderOneItem 逐条结果**（不用 loop.childFile）——复用消息渲染的完整逻辑（哨兵/renderMode/图片/handoff）
+- **哨兵天然生效**：每条 content 在 renderOneItem 内已哨兵化，wrapBatch 只做字面量拼接，用户消息里的 `{{}}` 不被解析
+- loop 段的 `separator` 默认 `\n`（消息层若不设则逐条间用 `\n\n`；wrapper 内 loop 段可自定）
+- **无 loop 段** → 回退现有 `join('\n\n')`，行为不变（向后兼容）
+- loop 段只做批次包裹，不参与逐条 renderOneItem（renderOneItem 跳过 `section.loop`）
+
+> 批次包裹层是响应模式（单会话/双会话）批量处理消息的基础设施：把背压信号、批次头尾
+> 渲染在逐条消息外层，供辅助会话/主会话感知队列状态。
 
 ### 初始 manifest（一个段）
 

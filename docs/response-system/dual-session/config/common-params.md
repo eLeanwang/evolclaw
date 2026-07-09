@@ -127,7 +127,7 @@ class MainSession {
 | 值 | 说明 | 通用语义 |
 |---|------|---------|
 | `disabled` | 所有消息都处理 | 默认值 |
-| `mention-only` | 仅处理被 @ 的消息 | 过滤未 @ 的消息 |
+| `mention-only` | 仅处理被 @ 的消息 | 未 @ 消息入队作引用上下文，不触发处理 |
 
 **详细机制**：请参见 [MENTION-MODE-MECHANISM.md](../MENTION-MODE-MECHANISM.md)
 
@@ -137,16 +137,25 @@ class MainSession {
 
 **实现方式**：
 
+> 详细实现见 [MENTION-MODE-MECHANISM.md](../MENTION-MODE-MECHANISM.md)。
+> 下方仅列出入队与触发逻辑的简化示意。
+
 ```typescript
-// mention-only 模式
+// mention-only 模式：所有消息一律入队，只有 @ / 活跃发言人才触发处理
 if (config.mentionMode === 'mention-only') {
-  if (message.isMentioned || isActiveSpeaker(message.peerId)) {
-    // 主消息或活跃发言人消息：入队并触发处理
-  logger.info('Message filtered: not mentioned');
+  await auxiliaryQueue.enqueue(message);  // 所有消息都入队（不过滤）
+  
+  if (message.isMentioned) {
+    // 被 @ 消息：立即触发处理（提取 primary + references，锚点清理）
+    await handleMentionTrigger(message);
+  } else if (isActiveSpeaker(message.peerId)) {
+    // 活跃发言人后续消息：走正常流程（防抖触发）
+  }
+  // else：纯未 @ 消息，不触发处理，留在队列作引用上下文
   return;
 }
 
-// 其他消息进入辅助队列
+// disabled 模式：所有消息进入辅助队列，防抖触发
 await auxiliaryQueue.enqueue(message);
 ```
 
@@ -155,11 +164,12 @@ await auxiliaryQueue.enqueue(message);
 | mentionMode | 被 @ 的消息 | 未被 @ 的消息 | 响应延迟 |
 |-------------|-----------|-------------|---------|
 | `disabled` | 进入辅助队列 → 辅助会话判断 | 进入辅助队列 → 辅助会话判断 | 3-63秒 |
-| `mention-only` | 进入辅助队列 → 辅助会话判断 | **过滤（不处理）** | 3-63秒 |
+| `mention-only` | 进入辅助队列 → 辅助会话判断 | 进入辅助队列（**作引用上下文，不触发处理**） | 3-63秒 |
 
 **注意**：
 - 被 @ 的消息会触发辅助会话判断（可能立即投递或延迟）
-- 未被 @ 的消息在 `mention-only` 模式下直接过滤
+- 未被 @ 的消息在 `mention-only` 模式下**进入辅助队列**作为引用上下文，不触发处理（靠锚点清理 / 滚动淘汰离开队列）
+- 活跃发言人的后续消息（5 分钟内）走正常流程，会被触发、投递、回复
 
 ### 4.4 适用场景
 
@@ -180,7 +190,7 @@ await auxiliaryQueue.enqueue(message);
   }
 }
 
-// 只响应 @（过滤其他消息）
+// 只响应 @（未 @ 消息作引用上下文）
 {
   "responseMode": "dual-session",
   "config": {
@@ -385,14 +395,14 @@ sections:
 ### 通用参数的特点
 
 ✅ **所有响应模式都支持**：single-session / dual-session / workflow  
-✅ **职责明确**：chatMode（如何回复）/ mentionMode（如何过滤）/ model（用什么模型）  
+✅ **职责明确**：chatMode（如何回复）/ mentionMode（是否触发处理）/ model（用什么模型）  
 ✅ **配置灵活**：支持多层级配置和覆盖  
 ✅ **ECK 集成**：自动提取到 ECK Vars，供 Context Assembly 使用  
 
 ### 双会话的实现要点
 
 - **chatMode**：主会话根据参数决定回复方式
-- **mentionMode**：消息入队前根据参数决定过滤/路由策略
+- **mentionMode**：消息入队后根据参数决定是否触发处理/路由策略
 - **model**：主会话使用该模型（辅助会话有独立配置 `auxiliaryModel`）
 
 ---

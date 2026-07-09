@@ -1,0 +1,43 @@
+{
+  "$schema_version": 1,
+  "totalMaxFiles": 20,
+  "totalMaxBytes": 51200,
+  "sections": [
+    {
+      "id": "rules",
+      "type": "directory",
+      "path": "$KITS_RULES",
+      "order": 10,
+      "needsInjection": false,
+      "when": "always",
+      "description": "ECK 核心规则（辅助会话也需了解基础约定）"
+    },
+    {
+      "id": "auxiliary-role",
+      "type": "file",
+      "file": "$KITS_DOCS/response-system/dual-session/prompts/auxiliary-base.md",
+      "order": 20,
+      "needsInjection": true,
+      "when": "always",
+      "description": "辅助会话职责：判断投递时机（hold/delay/transfer）+ 背压调节"
+    },
+    {
+      "id": "session",
+      "type": "file",
+      "file": "$KITS_FRAGMENTS/session.md",
+      "order": 60,
+      "needsInjection": true,
+      "when": "always",
+      "description": "会话层：当前会话实例状态"
+    },
+    {
+      "id": "baseagent",
+      "type": "file",
+      "file": "$KITS_FRAGMENTS/baseagent.md",
+      "order": 70,
+      "needsInjection": true,
+      "when": { "var": "baseAgent", "neq": null },
+      "description": "Base Agent 特定配置"
+    }
+  ]
+}

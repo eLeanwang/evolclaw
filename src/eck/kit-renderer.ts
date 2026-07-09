@@ -3,12 +3,13 @@ import path from 'path';
 import { eckDebugDir } from '../paths.js';
 import { logger } from '../utils/logger.js';
 import {
-  type Vars, type ManifestSection, type ResolveStatus,
-  loadManifest, invalidateManifestCache, evaluateWhen, renderTemplate,
-  resolvePathWithDiag, loadSectionFiles, buildPathMappings, shortenPath,
+  type Vars, type ManifestSection, type ResolveStatus, type DirOverflow,
+  loadManifest, loadManifestMeta, invalidateManifestCache, evaluateWhen, renderTemplate,
+  renderLoopSection, resolvePathWithDiag, loadSectionFiles, loadChildTemplate,
+  buildPathMappings, shortenPath,
 } from './manifest-engine.js';
 
-const MANIFEST_FILE = 'eck_manifest.json';
+const DEFAULT_MANIFEST_FILE = 'eck_manifest.json';
 
 export interface KitRenderContext {
   vars: Vars;
@@ -26,7 +27,7 @@ function getSessionCache(sessionId: string): Map<string, string> {
 }
 
 export function loadKitManifest(): void {
-  const sections = loadManifest(MANIFEST_FILE);
+  const sections = loadManifest(DEFAULT_MANIFEST_FILE);
   logger.info(`[KitRenderer] Loaded manifest: ${sections.length} sections`);
 }
 
@@ -58,17 +59,44 @@ interface SectionDiagnostic {
   emptyContent?: boolean;
   used: boolean;
   injected: boolean;
+  dirOverflow?: DirOverflow;   // 目录段超单目录限额
+  skippedByTotalCap?: boolean; // 因总闸超限未加载
 }
 
 // ── Main render ──
 
-export function renderKitSections(ctx: KitRenderContext): string {
-  const sections = loadManifest(MANIFEST_FILE);
+/**
+ * 渲染单个 section 的一份文件内容。
+ * - 有 loop：file 作为 wrapper，加载 childFile，走三段式 renderLoopSection。
+ * - 无 loop：needsInjection 则模板渲染，否则原样。
+ * 系统提示词层的 loop 数据视为可信（背压信号等），不做 content 哨兵化。
+ */
+function renderSectionContent(section: ManifestSection, rawContent: string, vars: Vars): string {
+  if (section.loop) {
+    const childTpl = loadChildTemplate(section.loop.childFile, vars);
+    if (childTpl === null) return '';  // child 模板缺失 → 该段落空
+    return renderLoopSection(
+      rawContent, childTpl, section.loop.forEach, vars,
+      /* stripBlankLines */ true, section.loop.separator ?? '\n',
+    );
+  }
+  return section.needsInjection ? renderTemplate(rawContent, vars) : rawContent;
+}
+
+export function renderKitSections(ctx: KitRenderContext, manifestFile: string = DEFAULT_MANIFEST_FILE): string {
+  const sections = loadManifest(manifestFile);
+  const meta = loadManifestMeta(manifestFile);
   const fileParts: string[] = [];
   const fragmentParts: string[] = [];
   const pathMappings = buildPathMappings(ctx.vars);
   const sessionCache = getSessionCache(ctx.sessionId);
   const diagnostics: SectionDiagnostic[] = [];
+
+  // 总闸计数（跨所有段累计）
+  let totalFiles = 0;
+  let totalBytes = 0;
+  let capReached = false;
+  const skippedByCap: string[] = [];  // 因总闸超限未加载的 section id
 
   for (const section of sections) {
     const rawPath = section.type === 'file' ? (section.file ?? '') : (section.path ?? '');
@@ -78,6 +106,18 @@ export function renderKitSections(ctx: KitRenderContext): string {
       enabled: section.enabled !== false, whenPassed: false, resolvedPath: null,
       resolveStatus: 'no-path', fileCount: 0, used: false, injected: false,
     };
+
+    // 总闸已触发：后续命中的段一律不加载，只记录 id
+    if (capReached) {
+      diag.skippedByTotalCap = true;
+      // 仅当该段本会命中时才计入"未加载"集合（enabled 且 when 通过）
+      if (section.enabled !== false && evaluateWhen(section.when, ctx.vars)) {
+        diag.whenPassed = true;
+        skippedByCap.push(section.id);
+      }
+      diagnostics.push(diag);
+      continue;
+    }
 
     if (section.enabled === false) {
       diag.resolveStatus = 'skipped-disabled';
@@ -98,8 +138,10 @@ export function renderKitSections(ctx: KitRenderContext): string {
       if (r.unresolvedTokens.length > 0) diag.unresolvedTokens = r.unresolvedTokens;
     }
 
-    const files = loadSectionFiles(section, ctx.vars, sessionCache);
+    const overflowOut: { value?: DirOverflow } = {};
+    const files = loadSectionFiles(section, ctx.vars, sessionCache, overflowOut);
     diag.fileCount = files.length;
+    if (overflowOut.value) diag.dirOverflow = overflowOut.value;
     // 路径解析成功但读出 0 文件 → 文件/目录不存在（存在性不再单独 syscall，
     // 由内容读取顺带得到；详见 manifest-engine.resolvePathWithDiag）。
     if (files.length === 0) {
@@ -110,17 +152,42 @@ export function renderKitSections(ctx: KitRenderContext): string {
 
     let anyUsed = false;
     for (const [filePath, rawContent] of files) {
-      const content = section.needsInjection ? renderTemplate(rawContent, ctx.vars) : rawContent;
+      // 总闸检查（文件数 / 字节）：达到即停止本段及后续所有段
+      const size = Buffer.byteLength(rawContent, 'utf-8');
+      if (totalFiles >= meta.totalMaxFiles || totalBytes + size > meta.totalMaxBytes) {
+        capReached = true;
+        break;
+      }
+      const content = renderSectionContent(section, rawContent, ctx.vars);
       if (!content.trim()) { diag.emptyContent = true; continue; }
       const label = section.description ? `${section.id} — ${section.description}` : section.id;
       const displayPath = shortenPath(filePath, pathMappings);
       const part = `Contenu de ${displayPath} (${label}):\n\n${content.trimEnd()}`;
       fileParts.push(part);
+      totalFiles += 1;
+      totalBytes += size;
       anyUsed = true;
       if (section.needsInjection) { fragmentParts.push(part); diag.injected = true; }
     }
+
+    // 单目录段超限：注入截断说明行
+    if (diag.dirOverflow) {
+      const ov = diag.dirOverflow;
+      const displayPath = shortenPath(diag.resolvedPath ?? rawPath, pathMappings);
+      const note = `[注意] 目录 ${displayPath} 未完整加载：${ov.droppedFiles} 个文件未加载` +
+        `（达${ov.reason === 'files' ? '文件数' : '字节'}上限 ${ov.limit}${ov.reason === 'bytes' ? ' 字节' : ' 个'}）。`;
+      fileParts.push(note);
+    }
+
     diag.used = anyUsed;
     diagnostics.push(diag);
+  }
+
+  // 总闸超限：末尾注入总截断说明（含未加载 section id 集合）
+  if (capReached && skippedByCap.length > 0) {
+    const note = `[注意] 上下文清单总量超限（>${meta.totalMaxFiles} 文件 / >${Math.round(meta.totalMaxBytes / 1024)}KB），` +
+      `以下 section 未加载：${skippedByCap.join(', ')}。`;
+    fileParts.push(note);
   }
 
   const body = fileParts.join('\n\n');
@@ -294,6 +361,10 @@ function formatManifestDiagnostics(ctx: KitRenderContext, diagnostics: SectionDi
     }
     lines.push(`- file count: ${d.fileCount}`);
     if (d.emptyContent) lines.push(`- note: 文件存在但渲染后内容为空`);
+    if (d.dirOverflow) {
+      lines.push(`- dir overflow: ${d.dirOverflow.droppedFiles} 文件未加载（达${d.dirOverflow.reason === 'files' ? '文件数' : '字节'}上限 ${d.dirOverflow.limit}）`);
+    }
+    if (d.skippedByTotalCap) lines.push(`- skipped: 总闸超限未加载`);
     lines.push(`- used in output: ${d.used ? 'yes' : 'no'}`);
     lines.push(`- injected as fragment: ${d.injected ? 'yes' : 'no'}`);
     lines.push('');

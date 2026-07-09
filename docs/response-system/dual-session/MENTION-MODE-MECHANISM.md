@@ -228,8 +228,8 @@ class DualSessionEngine {
     // 3. 激活发言人（5分钟内后续消息可不 @）
     this.activateSpeaker(mentionedMessage.peerId);
 
-    // 4. 锚点清理：移除锚点时序之前的 PENDING + TRANSFERRED 消息
-    //    （保留 DELAY —— 那是活跃发言人后续消息，仍待投递，见 §5.5）
+    // 4. 锚点清理：移除锚点时序之前**除 DELAY 外的所有消息**
+    //    （只保留 DELAY —— 那是活跃发言人后续消息，仍待投递，见 §5.5）
     await this.auxiliaryQueue.cleanupBeforeAnchor(mentionedMessage);
   }
   
@@ -280,7 +280,7 @@ class DualSessionEngine {
 1. ✅ 提取批次：被 @ 消息 + 之前的引用消息（引用读取边界 20 条/24h 内，见 §5.4）
 2. ✅ 投递给辅助会话判断
 3. ✅ 激活发言人（5分钟窗口）
-4. ✅ **锚点清理**：移除锚点之前的 PENDING + TRANSFERRED，保留 DELAY（见 §5.5）
+4. ✅ **锚点清理**：移除锚点之前**除 DELAY 外的所有消息**（见 §5.5）
 
 ---
 
@@ -416,14 +416,13 @@ class AuxiliaryQueue {
     };
   }
 
-  // 锚点清理：移除锚点之前的 PENDING + TRANSFERRED，保留 DELAY（§5.5）
+  // 锚点清理：移除锚点之前**除 DELAY 外的所有消息**，只保留 DELAY（§5.5）
   async cleanupBeforeAnchor(anchorMessage: Message): Promise<void> {
     const anchorIndex = this.messages.indexOf(anchorMessage);
     this.messages = this.messages.filter((m, i) => {
-      if (i > anchorIndex) return true;          // 锚点之后：保留
-      if (m.id === anchorMessage.id) return false; // 锚点本身：已投递，移除
+      if (i > anchorIndex) return true;                // 锚点之后：保留
       if (m.state === MessageState.DELAY) return true; // 待投递的跟随消息：保留
-      return false;                              // PENDING / TRANSFERRED：移除
+      return false;                                    // 锚点本身 + 其余状态（PENDING/HOLD/TRANSFERRED）：移除
     });
   }
 }
@@ -512,6 +511,8 @@ if (mentionMode === 'mention-only') {
 
   if (message.isMentioned || isActiveSpeaker(message.peerId)) {
     // 主消息或活跃发言人消息：触发处理
+    // ⚠️ 简化示意——两条触发路径实际不同：@ 立即 handleMentionTrigger，
+    //    活跃发言人后续消息走防抖。**细节见 §4.2**
     triggerProcessing(message);
   }
   // else：未 @ 且非活跃发言人 → 不触发（不防抖、不判断），
@@ -584,36 +585,37 @@ function getBatchRole(batch: {
 
 | 路径 | 触发时机 | 移除范围 | 适用 |
 |------|---------|---------|------|
-| **① 反馈移除** | 主会话消费完批次、反馈到达 | `processedMessageIds` | 被 transfer 的消息（含活跃发言人后续消息）——与 disabled 同链路 |
-| **② 锚点清理** | 收到被 @ 消息 | 锚点之前的 PENDING + TRANSFERRED（**保留 DELAY**） | mention-only 特有 |
+| **① transfer 即移除** | transfer / DELAY 到期 / 强制转投 | 被投递的消息（当场移除，不等反馈） | disabled + mention-only 通用 |
+| **② 锚点清理** | 收到被 @ 消息 | 锚点之前除 DELAY 外的所有消息（**只保留 DELAY**） | mention-only 特有 |
 | **③ 滚动淘汰** | 队列长度达到 `2 × maxQueueSize` | 移除最老的 `maxQueueSize` 条 | **模式无关**，队列层兜底 |
 
 #### 未 @ 消息的两类归宿
 
 mention-only 下未 @ 的消息，按是否来自活跃发言人分两条链路：
 
-- **活跃发言人的后续消息**：走**正常流程**（防抖 → 辅助会话 → transfer → 主会话消费 → **路径①反馈移除**），与 disabled 完全一致。这些消息会被投递、被回复（依赖 5 分钟跟随机制）。
+- **活跃发言人的后续消息**：走**正常流程**（防抖 → 辅助会话 → transfer → **路径① transfer 即移除**），与 disabled 完全一致。这些消息会被投递、被回复（依赖 5 分钟跟随机制）。
 - **纯未 @ 消息**（非活跃发言人）：不触发处理，静静留在队列，靠**路径②锚点清理**（有 @ 到来时）或**路径③滚动淘汰**（长期无 @、堆积到 2L 时）离开。
 
 #### ② 锚点清理
 
 ```typescript
-// 收到被 @ 消息 → 移除锚点之前的 PENDING + TRANSFERRED，保留 DELAY
+// 收到被 @ 消息 → 移除锚点之前除 DELAY 外的所有消息，只保留 DELAY
 async cleanupBeforeAnchor(anchorMessage: Message): Promise<void> {
   const anchorIndex = this.messages.indexOf(anchorMessage);
   this.messages = this.messages.filter((m, i) => {
-    if (i > anchorIndex) return true;              // 锚点之后：保留
-    if (m.id === anchorMessage.id) return false;   // 锚点本身：已投递，移除
+    if (i > anchorIndex) return true;                // 锚点之后：保留
     if (m.state === MessageState.DELAY) return true; // 待投递的跟随消息：保留
-    return false;                                  // PENDING / TRANSFERRED：移除
+    return false;                                    // 锚点本身 + 其余状态：移除
   });
 }
 ```
 
 **为什么这样清理**（一条消息最多进一次上下文、严格按时序、杜绝二次 @ 重复提取）：
+锚点之前**只保留 DELAY**，其余一律删除：
 - **PENDING**（纯未 @ 消息）：本次 @ 已把它读作 reference 或跳过，之后不该再被引用 → 删。
+- **HOLD**（辅助会话已挂起）：锚点已重置当前上下文，旧 HOLD 不再单独投递 → 删。
 - **TRANSFERRED**（已交付主队列）：辅助队列职责已尽，不等反馈 → 删（路径①对它是冗余，此处顺带清掉）。
-- **DELAY**（活跃发言人后续消息，辅助会话已判定要投递、正在延迟等待）：**必须保留**，否则丢失待回复消息 → 走路径①自然移除。
+- **DELAY**（活跃发言人后续消息，辅助会话已判定要投递、正在延迟等待）：**唯一保留项**，否则丢失待回复消息 → 走路径①自然移除。
 
 #### ③ 滚动淘汰（模式无关）
 
@@ -667,7 +669,7 @@ T3: Owner: "@agent 你怎么看？"（被@）
        references: [msg-T0, msg-T1, msg-T2]
     2. 投递给辅助会话 → transfer
     3. 激活 Owner（T3 ~ T8）
-    4. 锚点清理：移除锚点 T3 之前的 PENDING + TRANSFERRED
+    4. 锚点清理：移除锚点 T3 之前除 DELAY 外的所有消息
        → 本例全是 PENDING，全部移除 [msg-T0, msg-T1, msg-T2, msg-T3]
   → 投递给主队列 → 主会话处理（附加引用上下文）
   → 辅助队列：[]
@@ -690,7 +692,7 @@ T10: Owner: "@agent 这个问题"（被@）
        references: [msg-T9]
     2. 投递给辅助会话 → transfer
     3. 激活 Owner（T10 ~ T15）
-    4. 锚点清理：移除锚点 T10 之前的 PENDING + TRANSFERRED
+    4. 锚点清理：移除锚点 T10 之前除 DELAY 外的所有消息
        → msg-T9 为 PENDING，移除 [msg-T9, msg-T10]
 ```
 

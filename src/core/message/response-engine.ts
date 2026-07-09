@@ -1521,7 +1521,11 @@ export class ResponseEngine implements IMessageProcessor {
           sessionId: session.id,
         };
 
-        const kitContext = renderKitSections(kitCtx);
+        // 按会话原型（sessionType）选 manifest 文件：config.sessionManifests 映射，缺省回退主 manifest。
+        const sessionType = session.sessionType ?? 'main';
+        const sessionManifests = this.agentRegistry?.resolveByChannel(channelKey)?.config?.sessionManifests as Record<string, string> | undefined;
+        const manifestFile = sessionManifests?.[sessionType] ?? 'eck_manifest.json';
+        const kitContext = renderKitSections(kitCtx, manifestFile);
         if (kitContext) contextParts.push(kitContext);
 
         effectiveSystemPrompt = [options?.systemPromptAppend, ...contextParts].filter(Boolean).join('\n') || undefined;

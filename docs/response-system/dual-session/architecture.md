@@ -91,7 +91,10 @@ class AuxiliaryQueue {
     maxBatchBytes: 10240,       // 每批最多字节数
   };
   
-  constructor(private chatType: 'private' | 'group') {
+  constructor(
+    private chatType: 'private' | 'group',
+    private mentionMode: 'disabled' | 'mention-only' = 'disabled',
+  ) {
     // 单聊场景下队列容量限制为 15 条
     if (chatType === 'private') {
       this.config.maxSize = 15;
@@ -140,9 +143,27 @@ class AuxiliaryQueue {
     // 重置防抖定时器
     this.resetDebounceTimer();
     
-    // 检查队列是否满
-    if (this.shouldForceTransfer()) {
-      this.forceTransferAll();
+    // 队列容量控制：按 mentionMode 分流（唯一入口，模式无关地兜底）
+    if (this.mentionMode === 'mention-only') {
+      // mention-only：未 @ 消息不参与强制转投（只作引用上下文），
+      // 仅在堆到 2×maxSize 时滚动淘汰最老的一半（见 MENTION-MODE-MECHANISM.md §5.5）
+      this.rollingEvict();
+    } else {
+      // disabled：到 maxSize 强制转投主队列（不打断）
+      if (this.shouldForceTransfer()) {
+        this.forceTransferAll();
+      }
+    }
+  }
+  
+  // 滚动淘汰（mention-only 兜底）：达到 2×maxSize 时砍掉最老的一半，保留 maxSize 条
+  private rollingEvict(): void {
+    const L = this.config.maxSize;   // 群 50 / 单 15
+    if (this.messages.size >= 2 * L) {
+      // Map 按插入序迭代，取最老的 (size - L) 条移除
+      const overflow = this.messages.size - L;
+      const oldest = Array.from(this.messages.keys()).slice(0, overflow);
+      this.remove(oldest);
     }
   }
   
@@ -292,11 +313,10 @@ class AuxiliarySession {
     const input = this.buildFeedbackInput(feedback);
     const output = await this.callModel(input);
     
-    // 更新上下文
+    // 更新上下文（反馈的作用是让辅助会话知道主会话消费了哪些消息）
     this.context.append(`[主会话反馈] ${feedback.summary}`);
     
-    // 从辅助队列移除已处理消息
-    auxiliaryQueue.remove(feedback.processedMessageIds);
+    // 注：transfer 时已移除，此处不再操作队列
   }
   
   // 执行决策
@@ -337,7 +357,7 @@ class AuxiliarySession {
 
 - 接收从辅助会话投递的消息
 - 维护消息优先级
-- 支持打断和重新提取批次
+- 支持打断（硬 abort）与打断场景特殊提取（≤100/20k，见 §3.3）
 - 提供批次提取接口
 
 #### 数据结构
@@ -386,8 +406,11 @@ class MainQueue {
     // 注意：this.processing（当前批次）不会重新入队
     // 因为这些消息已经在主会话上下文中了（见 interrupt-mechanism.md §4）
     
-    // 从主队列提取新批次（打断场景特殊提取：≤100 条 / 20k，见 §5）
-    this.triggerMainSession({ interrupt: true });
+    // 触发主会话处理新批次。
+    // 注意：打断场景的批次提取不同于普通 extractBatch（≤50）——
+    // 需一次性提取主队列全部消息（上限 100 条 / 20k 字节），
+    // 确保紧急消息一定在批次内。提取规则见 interrupt-mechanism.md §5
+    this.triggerMainSession();
   }
   
   // 提取批次
@@ -519,15 +542,12 @@ class MainSession {
     }
   }
   
-  // 打断（硬打断，详见 interrupt-mechanism.md §3）
-  async interrupt(): Promise<void> {
-    // 硬 abort：中止正在进行的 callModel 请求
-    // 单设 status='idle' 不足以中断 await callModel，必须真正 abort
-    await this.abortController?.abort();  // → SDK sdkStream.interrupt()
-    this.status = 'idle';
-    // 被 abort 的 process() 续体会抛错中止，不会执行到 completeBatch/feedback
-    // 当前批次中的消息已在上下文，保留（不回灌队列，见 interrupt-mechanism.md §4）
-  }
+  // 打断：硬打断，中止正在进行的模型调用
+  // 契约（详见 interrupt-mechanism.md §3、§4）：
+  //   - 必须真正中止进行中的模型调用，不能只把 status 置为 idle
+  //   - 当前批次的处理随之停止：不产出回复、不生成反馈、不标记批次完成
+  //   - 被打断批次的消息已在上下文中，保留；不回灌队列
+  async interrupt(): Promise<void>;
   
   // 状态查询
   isIdle(): boolean {
@@ -606,26 +626,18 @@ setTimeout(() => {
 
 #### 打断行为
 
-```typescript
-if (shouldInterrupt) {
-  // 1. 停止主会话（硬打断，调用 SDK 的 abort()）
-  //    abort 使旧 process() 续体抛错中止，不会 completeBatch/feedback
-  await mainSession.interrupt();
-  
-  // 2. 当前批次中的消息A已在主会话上下文（保留，不回灌队列）
-  
-  // 3. 新投递的消息追加到主队列末尾
-  mainQueue.append(newMessages);
-  
-  // 4. 打断场景特殊提取：一次性提取主队列全部消息
-  //    上限放宽为 100 条 / 20k 字节（区别于普通批次的 ≤50 条）
-  //    确保紧急消息一定在新批次中，详见 interrupt-mechanism.md §5
-  const newBatch = mainQueue.extractBatchForInterrupt();  // ≤100 条 / 20k
-  
-  // 5. 主会话处理新批次（消息A仍在上下文）
-  mainSession.process(newBatch);
-}
-```
+打断成立后依次发生：
+
+1. **硬打断主会话**：中止正在进行的模型调用，当前批次的处理立即停止，
+   不再产出回复、不生成反馈、不标记批次完成。
+2. **被打断批次保留在上下文**：这些消息已在主会话上下文中，不回灌队列。
+3. **新消息追加到主队列末尾**。
+4. **特殊提取新批次**：打断场景下一次性提取主队列全部消息（上限 100 条 /
+   20k 字节，区别于普通批次的 ≤50 条），确保紧急消息一定在新批次内。
+5. **主会话处理新批次**：被打断的消息仍在上下文中，如何对待由
+   `previousMessageStrategy` 通过打断通知指导。
+
+> 完整论述见 [interrupt-mechanism.md](./interrupt-mechanism.md) §3–§6。
 
 **副作用无法撤回**：
 - 已发送的回复无法撤回
@@ -808,7 +820,7 @@ interface DualSessionConfig {
 | mentionMode | 被 @ 的消息 | 未被 @ 的消息 |
 |-------------|-----------|-------------|
 | `disabled` | 进入辅助队列 | 进入辅助队列 |
-| `mention-only` | 进入辅助队列（作为主消息） | **过滤**（未 @ 消息作为引用上下文） |
+| `mention-only` | 进入辅助队列（作为主消息 primary） | 进入辅助队列（作为引用上下文，**不触发处理**） |
 
 **mention-only 特殊机制**：
 - 被 @ 的消息：立即触发辅助会话处理，提取该消息 + 之前的引用消息（最多20条/24小时内）

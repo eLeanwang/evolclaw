@@ -541,6 +541,7 @@ export function resolveEffective(sel: Selector, opts: ReadOpts = {}): EffectiveA
     show_activities: config.show_activities,
     proactive: config.proactive,
     render: config.render,
+    sessionManifests: config.sessionManifests,
     enable_rich_content: config.enable_rich_content,
     permissionMode: config.permissionMode,
     roles: config.roles,
@@ -568,7 +569,8 @@ export function resolveEffective(sel: Selector, opts: ReadOpts = {}): EffectiveA
         'debounce',
         'enable_rich_content',
         'proactive',
-        'render'
+        'render',
+        'sessionManifests'
       ];
 
       for (const field of behaviorFieldNames) {
@@ -684,6 +686,7 @@ const BEHAVIOR_TOP_FIELDS = new Set([
   'show_activities',
   'proactive',
   'render',
+  'sessionManifests',
   'enable_rich_content',
   'permissionMode',
 ]);
@@ -698,6 +701,7 @@ const EFFECTIVE_BEHAVIOR_FIELDS = [
   'show_activities',
   'proactive',
   'render',
+  'sessionManifests',
   'enable_rich_content',
   'permissionMode',
   'roles',

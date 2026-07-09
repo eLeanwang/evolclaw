@@ -226,6 +226,7 @@ export interface Session {
   sessionKey: string;  // agent 内部会话路由键 (channelType#urlEncode(channelId)#urlEncode(threadId))
   chatType: string;  // 'private' | 'group'，由 Channel 填充
   chatMode: string;  // 'interactive' | 'proactive'
+  sessionType?: string;  // 会话原型：'main'（默认）| 'auxiliary' | 'approval' | ...，决定加载哪份 manifest（config.sessionManifests 映射）
   projectPath: string;
   agentSessionId?: string;
   name?: string;
@@ -949,6 +950,8 @@ export interface AgentConfig {
   proactive?: ProactiveBehaviorBlock;
   // 渲染
   render?: { private?: string; group?: string; inject?: string };
+  // 会话原型 → manifest 文件映射（sessionType 决定加载哪份系统提示词清单）
+  sessionManifests?: Record<string, string>;
   // 富内容
   enable_rich_content?: boolean;
   // 执行权限模式
@@ -976,6 +979,7 @@ export interface RelationConfig {
   show_activities?: ShowActivitiesMode;
   proactive?: ProactiveBehaviorBlock;
   render?: { private?: string; group?: string; inject?: string };
+  sessionManifests?: Record<string, string>;
   enable_rich_content?: boolean;
   permissionMode?: string;
   roles?: RelationRolesConfig;
@@ -1023,6 +1027,8 @@ export interface EffectiveAgentConfig {
   proactive?: ProactiveBehaviorBlock;
   // 渲染
   render?: { private?: string; group?: string; inject?: string };
+  // 会话原型 → manifest 文件映射（sessionType 决定加载哪份系统提示词清单）
+  sessionManifests?: Record<string, string>;
   // 富内容
   enable_rich_content?: boolean;
   // 执行权限模式
