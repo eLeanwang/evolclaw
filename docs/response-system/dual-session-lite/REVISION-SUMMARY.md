@@ -48,7 +48,7 @@
 #### 新增配置参数
 ```typescript
 interface DualSessionConfig {
-  mentionMode: 'disabled' | 'fast-track';  // 默认：disabled
+  mentionMode: 'disabled' | 'mention-only';  // 默认：disabled
 }
 ```
 
@@ -59,7 +59,7 @@ interface DualSessionConfig {
 - 由辅助会话判断相关性（hold / delay / transfer）
 - 保留 `isMentioned` 标记，在提示词中提示相关性
 
-**fast-track（提及模式）**：
+**mention-only（提及模式）**：
 - 被 @ 的消息**直接投递到主队列并打断**
 - 跳过辅助会话判断
 - 未被 @ 的消息进入辅助队列，由辅助会话判断
@@ -86,12 +86,12 @@ if (enforceMention && !isMentioned) {
 const config = this.dualSessionConfig;
 const isMentioned = mentionedSelf || mentionedAll;
 
-if (config.mentionMode === 'fast-track' && isMentioned) {
-  logger.info(`Group message fast-track (mentioned)`, { messageId });
+if (config.mentionMode === 'mention-only' && isMentioned) {
+  logger.info(`Group message mention-only (mentioned)`, { messageId });
   
   await mainQueue.interrupt([message], {
     reason: '被 @ 提及，快速通道',
-    source: 'mention-fast-track'
+    source: 'mention-only'
   });
   
   return;
@@ -124,14 +124,14 @@ const message: Message = {
 ```json
 {
   "dualSessionConfig": {
-    "mentionMode": "fast-track"
+    "mentionMode": "mention-only"
   }
 }
 ```
 
 #### 行为对比
 
-| 场景 | disabled 模式 | fast-track 模式 |
+| 场景 | disabled 模式 | mention-only 模式 |
 |------|--------------|----------------|
 | @ 本 agent 的消息 | 进入辅助队列 → 辅助会话判断 | **直接投递主队列 + 打断** |
 | 未 @ 的消息 | 进入辅助队列 → 辅助会话判断 | 进入辅助队列 → 辅助会话判断 |
@@ -189,7 +189,7 @@ const message: Message = {
    **结论**：
    - ✅ 保持辅助会话的 LLM 判断机制
    - ✅ 不在辅助会话判断中硬编码规则
-   - ✅ @ 本 agent 的快速通道通过 `mentionMode: fast-track` 配置实现（可选）
+   - ✅ @ 本 agent 的快速通道通过 `mentionMode: mention-only` 配置实现（可选）
 
 2. **延迟等级机制不复杂**：
    > 这个机制本身并不复杂，不需要分成两次来实现。一次实现是正确的。
@@ -277,7 +277,7 @@ const message: Message = {
 - [ ] 主队列正确追加和打断
 - [ ] 主会话正确处理批次并发送回复
 - [ ] MainFeedback 正确传递给辅助会话
-- [ ] mention 快速通道正确工作（mentionMode: fast-track）
+- [ ] mention 快速通道正确工作（mentionMode: mention-only）
 - [ ] 单聊场景正确工作（无 hold、无随机、主会话空闲触发）
 - [ ] 错误处理和降级机制正确工作
 - [ ] 队列持久化和恢复正确

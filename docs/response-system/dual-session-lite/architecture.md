@@ -1191,7 +1191,7 @@ MainSession
 ```typescript
 interface DualSessionConfig {
   // ... 其他配置
-  mentionMode: 'disabled' | 'fast-track';  // 默认 'disabled'
+  mentionMode: 'disabled' | 'mention-only';  // 默认 'disabled'
 }
 ```
 
@@ -1202,10 +1202,11 @@ interface DualSessionConfig {
 - 由辅助会话判断相关性（hold / delay / transfer）
 - 保留 `isMentioned` 标记，在提示词中提示相关性
 
-**fast-track（提及模式）**：
-- 被 @ 的消息**直接投递到主队列并打断**
-- 跳过辅助会话判断
-- 未被 @ 的消息进入辅助队列，由辅助会话判断
+**mention-only（提及模式）**：
+- 被 @ 的消息：立即触发辅助会话处理，提取该消息 + 之前的引用消息（最多20条/24小时内）
+- 未被 @ 的消息：作为引用上下文，不触发处理
+- 活跃发言人机制：被 @ 的发言人在接下来5分钟内的消息视为主消息（无需再 @）
+- **详见 dual-session/MENTION-MODE-MECHANISM.md**
 
 #### 实施细节
 
@@ -1235,20 +1236,23 @@ if (enforceMention && !isMentioned) {
 const config = this.dualSessionConfig;
 const isMentioned = mentionedSelf || mentionedAll;
 
-if (config.mentionMode === 'fast-track' && isMentioned) {
-  // 快速通道：直接投递到主队列并打断
-  logger.info(`Group message fast-track (mentioned)`, { messageId });
+if (config.mentionMode === 'mention-only') {
+  // 提及模式：详细实现见 dual-session/MENTION-MODE-MECHANISM.md
+  await auxiliaryQueue.enqueue(message);
   
-  // 跳过辅助队列，直接投递
-  await mainQueue.interrupt([message], {
-    reason: '被 @ 提及，快速通道',
-    source: 'mention-fast-track'
-  });
+  if (isMentioned) {
+    // 被 @ 消息：立即触发处理
+    await handleMentionTrigger(message);
+  } else if (isActiveSpeaker(message.from.id)) {
+    // 活跃发言人的后续消息：走正常流程（由防抖触发）
+  } else {
+    // 未 @ 且非活跃发言人：不触发处理，作为引用上下文
+  }
   
   return;
 }
 
-// 其他消息进入辅助队列
+// disabled 模式：所有消息进入辅助队列
 await auxiliaryQueue.enqueue(message);
 ```
 
@@ -1297,19 +1301,19 @@ const message: Message = {
 ```json
 {
   "dualSessionConfig": {
-    "mentionMode": "fast-track"  // 该群启用快速通道
+    "mentionMode": "mention-only"  // 该群启用提及模式
   }
 }
 ```
 
 #### 行为对比
 
-| 场景 | disabled 模式 | fast-track 模式 |
+| 场景 | disabled 模式 | mention-only 模式 |
 |------|--------------|----------------|
-| @ 本 agent 的消息 | 进入辅助队列 → 辅助会话判断 | **直接投递主队列 + 打断** |
-| 未 @ 的消息 | 进入辅助队列 → 辅助会话判断 | 进入辅助队列 → 辅助会话判断 |
-| 响应延迟 | 3-63 秒（防抖 + 随机） | **< 1 秒**（跳过辅助队列） |
-| 适用场景 | 多 agent 群聊，需要智能判断 | Owner 主导的群聊，@ 即响应 |
+| @ 本 agent 的消息 | 进入辅助队列 → 辅助会话判断 | **立即触发辅助会话处理（作为主消息）** |
+| 未 @ 的消息 | 进入辅助队列 → 辅助会话判断 | **作为引用上下文（不触发处理）** |
+| 响应延迟 | 3-63 秒（防抖 + 随机） | **< 5 秒**（立即触发辅助会话） |
+| 适用场景 | 多 agent 群聊，需要智能判断 | Owner 主导的群聊，只响应 @ 消息 |
 
 #### 兼容性说明
 
