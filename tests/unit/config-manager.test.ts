@@ -1,14 +1,24 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { _resetRoot, resolvePaths, agentConfig } from '../../src/paths.js';
+import { _resetRoot, resolvePaths, agentConfig, agentRelationConfig } from '../../src/paths.js';
 import {
   ConfigTarget, read, write, ensureFile, resolveAgentConfig,
-  resolveEffective, initConfigManager, ConfigError,
+  resolveEffective, initConfigManager, ConfigError, routeFieldPath,
 } from '../../src/config/config-manager.js';
 import { mergeLayers, expandVars, buildEnvResolver, _resetEnvWarnings } from '../../src/config/merge.js';
 import { loadSchema, _resetSchemaCache } from '../../src/config/schema-registry.js';
+import {
+  isBehaviorConfigFieldPath,
+  isCriticalAgentControlField,
+  isSafeBehaviorConfigField,
+  parseConfigFieldValue,
+  resolveConfigFieldRule,
+  resolveRoleFieldPermission,
+} from '../../src/config/config-field-policy.js';
+import { cmdConfig } from '../../src/cli/config.js';
+import { formatPeerKey } from '../../src/core/relation/peer-identity.js';
 
 const AID = 'bot.agentid.pub';
 const PEER = 'aun#alice.agentid.pub';
@@ -251,5 +261,113 @@ describe('process config is independent', () => {
     const agentEffective = resolveEffective({ self: AID });
     expect(agentEffective.aid).toBe(AID);
     expect(agentEffective.owners).not.toContain('admin.aid.pub');
+  });
+});
+
+describe('config field policy', () => {
+  let root: string;
+  beforeEach(() => { root = setupHome(); initConfigManager(); });
+  afterEach(() => cleanup(root));
+
+  const safeFields = [
+    'active_baseagent',
+    'baseagents.claude.model',
+    'baseagents.claude.effort',
+    'baseagents.codex.reasoning',
+    'baseagents.claude.agentProgressSummaries',
+    'baseagents.codex.enableRequestUserInput',
+    'baseagents.codex.approvalsReviewer',
+    'baseagents.gemini.mode',
+    'baseagents.gemini.useVertex',
+    'chatmode.private',
+    'response_modes.default_private',
+    'flush_delay',
+    'debounce',
+    'dispatch',
+    'show_activities',
+    'proactive.pre_tool_1stmsgchk',
+    'render.private',
+    'sessionManifests.default',
+    'enable_rich_content',
+    'permissionMode',
+  ];
+
+  it('keeps every safe field inside the behavior route and relation schema', () => {
+    for (const field of safeFields) {
+      expect(isSafeBehaviorConfigField(field), field).toBe(true);
+      expect(isBehaviorConfigFieldPath(field), field).toBe(true);
+      expect(routeFieldPath(field, 'relation').target, field).toBe(ConfigTarget.Relation);
+    }
+  });
+
+  it('keeps sensitive and unknown fields outside the user field plane', () => {
+    for (const field of ['owners', 'admins', 'roles', 'channels', 'baseagents.claude.apiKey']) {
+      expect(resolveConfigFieldRule(field).class, field).toBe('sensitive');
+      expect(isSafeBehaviorConfigField(field), field).toBe(false);
+    }
+    expect(resolveConfigFieldRule('made_up_field').class).toBe('unknown');
+    expect(isSafeBehaviorConfigField('chatmode.secret')).toBe(false);
+    expect(isSafeBehaviorConfigField('response_modes.configs.secret')).toBe(false);
+    expect(isCriticalAgentControlField('roles.definitions.member')).toBe(true);
+  });
+
+  it('matches exact field permissions before safe top-level permissions', () => {
+    const chatmode = { default: {}, allowOverride: true };
+    const exact = { default: 'interactive', allowOverride: false };
+    expect(resolveRoleFieldPermission({ chatmode, 'chatmode.private': exact }, 'chatmode.private')).toBe(exact);
+    expect(resolveRoleFieldPermission({ chatmode }, 'chatmode.group')).toBe(chatmode);
+    expect(resolveRoleFieldPermission({ baseagents: chatmode }, 'baseagents.claude.apiKey')).toBeUndefined();
+  });
+
+  it('coerces scalar values and rejects invalid or unsafe values', () => {
+    expect(parseConfigFieldValue('chatmode.private', 'interactive')).toEqual({ ok: true, value: 'interactive' });
+    expect(parseConfigFieldValue('chatmode.private', 'invalid').ok).toBe(false);
+    expect(parseConfigFieldValue('enable_rich_content', 'true')).toEqual({ ok: true, value: true });
+    expect(parseConfigFieldValue('enable_rich_content', '1').ok).toBe(false);
+    expect(parseConfigFieldValue('flush_delay', '2.5')).toEqual({ ok: true, value: 2.5 });
+    expect(parseConfigFieldValue('flush_delay', '-1').ok).toBe(false);
+    expect(parseConfigFieldValue('dispatch', 'broadcast')).toEqual({ ok: true, value: 'broadcast' });
+    expect(parseConfigFieldValue('show_activities', 'text').ok).toBe(false);
+    expect(parseConfigFieldValue('permissionMode', 'bypass')).toEqual({ ok: true, value: 'bypass' });
+    expect(parseConfigFieldValue('active_baseagent', 'codex')).toEqual({ ok: true, value: 'codex' });
+    expect(parseConfigFieldValue('active_baseagent', 'unknown').ok).toBe(false);
+    expect(parseConfigFieldValue('sessionManifests.main', 'custom.json')).toEqual({ ok: true, value: 'custom.json' });
+    expect(parseConfigFieldValue('sessionManifests.main', '../../secret.json').ok).toBe(false);
+  });
+});
+
+describe('config CLI relation writes', () => {
+  let root: string;
+  beforeEach(() => { root = setupHome(); });
+  afterEach(() => cleanup(root));
+
+  it('writes the selected relation file without mutating agent config', async () => {
+    const self = 'relation-write.agentid.pub';
+    const peerKey = formatPeerKey('aun', 'member.agentid.pub');
+    const agentFile = agentConfig(self);
+    fs.mkdirSync(path.dirname(agentFile), { recursive: true });
+    fs.writeFileSync(agentFile, JSON.stringify({
+      $schema_version: 1,
+      aid: self,
+      channels: [],
+      chatmode: { private: 'interactive' },
+    }, null, 2));
+    const beforeAgent = fs.readFileSync(agentFile, 'utf8');
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+
+    try {
+      await cmdConfig([
+        'set', 'chatmode.private', 'proactive',
+        '--self', self, '--peer', peerKey,
+        '--format', 'json',
+      ]);
+    } finally {
+      log.mockRestore();
+    }
+
+    const relationFile = agentRelationConfig(self, peerKey);
+    expect(fs.existsSync(relationFile)).toBe(true);
+    expect(JSON.parse(fs.readFileSync(relationFile, 'utf8')).chatmode.private).toBe('proactive');
+    expect(fs.readFileSync(agentFile, 'utf8')).toBe(beforeAgent);
   });
 });

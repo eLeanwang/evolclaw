@@ -40,6 +40,7 @@ import type {
   RelationConfig,
   EffectiveAgentConfig,
 } from '../types.js';
+import { isBehaviorConfigFieldPath } from './config-field-policy.js';
 
 const USER_ROLE_NAME_RE = /^[a-z0-9_-]+$/;
 const ROLE_USAGE_COST_BASIS = new Set(['gateway', 'official']);
@@ -728,20 +729,6 @@ export interface FieldRoute {
 
 type ConfigScope = 'process' | 'defaults' | 'agent' | 'relation';
 
-const BEHAVIOR_TOP_FIELDS = new Set([
-  'active_baseagent',
-  'chatmode',
-  'flush_delay',
-  'debounce',
-  'dispatch',
-  'show_activities',
-  'proactive',
-  'render',
-  'sessionManifests',
-  'enable_rich_content',
-  'permissionMode',
-]);
-
 const EFFECTIVE_BEHAVIOR_FIELDS = [
   'active_baseagent',
   'baseagents',
@@ -757,18 +744,6 @@ const EFFECTIVE_BEHAVIOR_FIELDS = [
   'permissionMode',
   'roles',
 ];
-
-const BASEAGENT_BEHAVIOR_FIELDS = new Set([
-  'model',
-  'effort',
-  'reasoning',
-  'agentProgressSummaries',
-  'excludeDynamicSections',
-  'enableRequestUserInput',
-  'approvalsReviewer',
-  'mode',
-  'useVertex',
-]);
 
 /**
  * 缁欏畾 selector 浣滅敤鍩?+ 椤跺眰瀛楁鍚嶏紝鍒ゅ畾鍐欏叆钀界偣銆?
@@ -792,13 +767,13 @@ export function routeFieldPath(
   const topField = fieldPath.split('.')[0];
   if (scope === 'process') return routeIn('evolclaw', ConfigTarget.Process, topField);
   if (scope === 'defaults') {
-    if (isBehaviorFieldPath(fieldPath)) {
+    if (isBehaviorConfigFieldPath(fieldPath)) {
       throw new ConfigError('DEFAULT_BEHAVIOR_REJECT', `--default 不支持行为字段: ${fieldPath}`);
     }
     return routeIn('defaults', ConfigTarget.Defaults, topField);
   }
 
-  if (isBehaviorFieldPath(fieldPath)) {
+  if (isBehaviorConfigFieldPath(fieldPath)) {
     // v3 璁捐锛氳涓哄瓧娈垫寜浣滅敤鍩熻矾鐢卞埌瀵瑰簲鐨?schema
     if (scope === 'agent') {
       return routeIn('agent-config', ConfigTarget.Agent, topField);
@@ -809,16 +784,6 @@ export function routeFieldPath(
 
   if (scope === 'agent') return routeIn('agent-config', ConfigTarget.Agent, topField);
   return routeIn('relation-config', ConfigTarget.Relation, topField);
-}
-
-function isBehaviorFieldPath(fieldPath: string): boolean {
-  const parts = fieldPath.split('.');
-  const top = parts[0];
-  if (top === 'baseagents') {
-    const field = parts[2];
-    return !!field && BASEAGENT_BEHAVIOR_FIELDS.has(field);
-  }
-  return BEHAVIOR_TOP_FIELDS.has(top);
 }
 
 function routeIn(name: LogicalSchemaName, target: ConfigTarget, topField: string): FieldRoute {

@@ -1,7 +1,12 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { authorizeCommand, USER_PLANE_CAPABILITY_CEILING } from '../../../src/core/command/command-permission.js';
+import {
+  authorizeCommand,
+  authorizeResolvedConfigOperation,
+  USER_PLANE_CAPABILITY_CEILING,
+} from '../../../src/core/command/command-permission.js';
 import { ConfigTarget, write } from '../../../src/config/config-manager.js';
 import { clearRolesCache } from '../../../src/config/roles.js';
+import { resolveConfigOperation } from '../../../src/config/resolved-config-op.js';
 import type { CommandAuthorizationContext } from '../../../src/types.js';
 
 describe('Command Permission', () => {
@@ -315,6 +320,280 @@ describe('Command Permission', () => {
       };
       const decision = authorizeCommand(ctx);
       expect(decision.allow).toBe(false);
+    });
+  });
+
+  describe('Config authorization', () => {
+    const relationArgs = {
+      self: 'agent1',
+      peer: 'aun#group1',
+      peerKey: 'aun#group1',
+      configScope: 'relation',
+    };
+    const memberContext: CommandAuthorizationContext = {
+      intent: {
+        operation: 'config.get',
+        scope: 'relation',
+        source: 'menu.cli',
+        args: { ...relationArgs, field: 'chatmode.private' },
+      },
+      actorId: 'member1',
+      chatType: 'group',
+      selfAid: 'agent1',
+      peerKey: 'aun#group1',
+      role: 'member',
+      source: 'menu.cli',
+    };
+
+    const memberConfigContext: Omit<CommandAuthorizationContext, 'intent'> = {
+      actorId: 'member1',
+      chatType: 'group',
+      selfAid: 'agent1',
+      peerKey: 'aun#group1',
+      role: 'member',
+      source: 'menu.cli',
+    };
+
+    function resolveOp(argv: string[]) {
+      const resolved = resolveConfigOperation(argv);
+      expect(resolved.ok).toBe(true);
+      if (!resolved.ok) throw new Error(`${resolved.code}: ${resolved.reason}`);
+      return resolved.op;
+    }
+
+    function authorizeConfig(
+      argv: string[],
+      context: Omit<CommandAuthorizationContext, 'intent'> = memberConfigContext,
+    ) {
+      return authorizeResolvedConfigOperation(resolveOp(argv), context);
+    }
+
+    it('fails closed when a field config intent has no resolved operation', () => {
+      const decision = authorizeCommand(memberContext);
+      expect(decision.allow).toBe(false);
+      if (!decision.allow) expect(decision.code).toBe('NOT_ALLOWED');
+    });
+
+    it('allows member reads and role-overridable relation writes', () => {
+      expect(authorizeConfig([
+        'config', 'get', 'chatmode.private', '--self', 'agent1', '--peer', 'aun#group1',
+      ]).allow).toBe(true);
+      expect(authorizeConfig([
+        'config', 'set', 'chatmode.private', 'interactive', '--self', 'agent1', '--peer', 'aun#group1',
+      ]).allow).toBe(true);
+      expect(authorizeConfig([
+        'config', 'unset', 'chatmode.private', '--self', 'agent1', '--peer', 'aun#group1',
+      ]).allow).toBe(true);
+    });
+
+    it('applies field type, override, and allowed-model constraints', () => {
+      expect(resolveConfigOperation([
+        'config', 'set', 'chatmode.private', 'invalid', '--self', 'agent1', '--peer', 'aun#group1',
+      ])).toMatchObject({ ok: false, code: 'INVALID_CONFIG_VALUE' });
+
+      for (const [field, value] of [
+        ['permissionMode', 'bypass'],
+        ['baseagents.claude.model', 'gpt-5'],
+      ]) {
+        const decision = authorizeConfig([
+          'config', 'set', field, value, '--self', 'agent1', '--peer', 'aun#group1',
+        ]);
+        expect(decision.allow).toBe(false);
+        if (!decision.allow) expect(decision.code).toBe('ARGUMENT_MISMATCH');
+      }
+
+      expect(authorizeConfig([
+        'config', 'set', 'baseagents.claude.model', 'claude-sonnet-4-6',
+        '--self', 'agent1', '--peer', 'aun#group1',
+      ]).allow).toBe(true);
+    });
+
+    it('keeps visitor config access read-only', () => {
+      const visitorContext = { ...memberConfigContext, role: 'visitor' };
+      const visitorRead = authorizeConfig([
+        'config', 'get', 'chatmode.private', '--self', 'agent1', '--peer', 'aun#group1',
+      ], visitorContext);
+      expect(visitorRead.allow).toBe(true);
+
+      const visitorWrite = authorizeConfig([
+        'config', 'set', 'chatmode.private', 'interactive', '--self', 'agent1', '--peer', 'aun#group1',
+      ], visitorContext);
+      expect(visitorWrite.allow).toBe(false);
+      if (!visitorWrite.allow) expect(visitorWrite.code).toBe('NO_PERMISSION');
+    });
+
+    it('rejects non-management agent scope and other relation targets', () => {
+      const agentDecision = authorizeConfig([
+        'config', 'get', 'chatmode.private', '--self', 'agent1',
+      ]);
+      expect(agentDecision.allow).toBe(false);
+      if (!agentDecision.allow) expect(agentDecision.code).toBe('SCOPE_MISMATCH');
+
+      const otherPeerDecision = authorizeConfig([
+        'config', 'get', 'chatmode.private', '--self', 'agent1', '--peer', 'aun#other-group',
+      ]);
+      expect(otherPeerDecision.allow).toBe(false);
+      if (!otherPeerDecision.allow) expect(otherPeerDecision.code).toBe('ARGUMENT_MISMATCH');
+    });
+
+    it('allows a group relation without comparing the group id to actor id', () => {
+      expect(authorizeConfig([
+        'config', 'get', 'chatmode.private', '--self', 'agent1', '--peer', 'aun#group1',
+      ]).allow).toBe(true);
+    });
+
+    it('limits every group role to relation-scoped config mutations', () => {
+      const groupOwnerContext: Omit<CommandAuthorizationContext, 'intent'> = {
+        ...memberConfigContext,
+        actorId: 'owner1',
+        role: 'owner',
+        isDaemonOwner: true,
+      };
+
+      for (const argv of [
+        ['config', 'set', 'chatmode.group', 'interactive', '--self', 'agent1'],
+        ['config', 'set', 'debug', 'true', '--process'],
+      ]) {
+        const decision = authorizeConfig(argv, groupOwnerContext);
+        expect(decision.allow).toBe(false);
+        if (!decision.allow) expect(decision.code).toBe('SCOPE_MISMATCH');
+      }
+
+      expect(authorizeConfig([
+        'config', 'set', 'chatmode.group', 'interactive',
+        '--self', 'agent1', '--peer', 'aun#group1',
+      ], groupOwnerContext).allow).toBe(true);
+      expect(authorizeConfig([
+        'config', 'get', 'chatmode.group', '--self', 'agent1',
+      ], groupOwnerContext).allow).toBe(true);
+    });
+
+    it('denies sensitive config operations to user roles', () => {
+      const decision = authorizeConfig([
+        'config', 'get', 'owners', '--self', 'agent1', '--peer', 'aun#group1',
+      ]);
+      expect(decision.allow).toBe(false);
+      if (!decision.allow) expect(decision.code).toBe('NOT_ALLOWED');
+    });
+
+    it('requires explicit config grants instead of category or global wildcards', () => {
+      write(ConfigTarget.Agent, {
+        aid: 'broad.agentid.pub',
+        channels: [],
+        roles: {
+          definitions: {
+            broad: {
+              description: 'Broad config test role',
+              allowAccess: true,
+              permissions: { chatmode: { default: {}, allowOverride: true } },
+              commandPermissions: {
+                'category:read': { allow: true },
+                'category:write-own': { allow: true },
+                '*': { allow: true },
+              },
+            },
+          },
+        },
+      }, { self: 'broad.agentid.pub' });
+
+      const decision = authorizeConfig([
+        'config', 'get', 'chatmode.private', '--self', 'broad.agentid.pub', '--peer', 'aun#group1',
+      ], {
+        ...memberConfigContext,
+        selfAid: 'broad.agentid.pub',
+        role: 'broad',
+      });
+      expect(decision.allow).toBe(false);
+      if (!decision.allow) expect(decision.code).toBe('NO_PERMISSION');
+    });
+
+    it('allows explicit config wildcard grants but still enforces role field permissions', () => {
+      write(ConfigTarget.Agent, {
+        aid: 'explicit.agentid.pub',
+        channels: [],
+        roles: {
+          definitions: {
+            explicit: {
+              description: 'Explicit config test role',
+              allowAccess: true,
+              permissions: { chatmode: { default: {}, allowOverride: true } },
+              commandPermissions: { 'config.*': { allow: true, scopes: ['relation'] } },
+            },
+          },
+        },
+      }, { self: 'explicit.agentid.pub' });
+
+      const context: Omit<CommandAuthorizationContext, 'intent'> = {
+        ...memberConfigContext,
+        selfAid: 'explicit.agentid.pub',
+        role: 'explicit',
+      };
+      expect(authorizeConfig([
+        'config', 'set', 'chatmode.private', 'proactive',
+        '--self', 'explicit.agentid.pub', '--peer', 'aun#group1',
+      ], context).allow).toBe(true);
+
+      const denied = authorizeConfig([
+        'config', 'set', 'flush_delay', '1',
+        '--self', 'explicit.agentid.pub', '--peer', 'aun#group1',
+      ], context);
+      expect(denied.allow).toBe(false);
+      if (!denied.allow) expect(denied.code).toBe('ARGUMENT_MISMATCH');
+    });
+
+    it('protects critical identity and role fields from admin writes', () => {
+      const adminDecision = authorizeCommand({
+        intent: {
+          operation: 'config.write',
+          scope: 'agent',
+          source: 'menu.cli',
+          args: { self: 'agent1', field: 'owners', value: 'owner1' },
+          dangerous: true,
+        },
+        selfAid: 'agent1',
+        role: 'admin',
+        isDaemonOwner: true,
+        source: 'menu.cli',
+      });
+      expect(adminDecision.allow).toBe(false);
+      if (!adminDecision.allow) expect(adminDecision.code).toBe('NOT_ALLOWED');
+
+      const ownerWithoutDaemon = authorizeCommand({
+        intent: {
+          operation: 'config.write',
+          scope: 'agent',
+          source: 'menu.cli',
+          args: { self: 'agent1', field: 'owners', value: 'owner1' },
+          dangerous: true,
+        },
+        selfAid: 'agent1',
+        role: 'owner',
+        isDaemonOwner: false,
+        source: 'menu.cli',
+      });
+      expect(ownerWithoutDaemon.allow).toBe(false);
+      if (!ownerWithoutDaemon.allow) expect(ownerWithoutDaemon.code).toBe('ARGUMENT_MISMATCH');
+
+      expect(authorizeCommand({
+        intent: {
+          operation: 'config.write',
+          scope: 'agent',
+          source: 'menu.cli',
+          args: { self: 'agent1', field: 'owners', value: 'owner1' },
+          dangerous: true,
+        },
+        selfAid: 'agent1',
+        role: 'owner',
+        isDaemonOwner: true,
+        source: 'menu.cli',
+      }).allow).toBe(true);
+    });
+
+    it('includes field config operations in the user-plane ceiling only', () => {
+      expect(USER_PLANE_CAPABILITY_CEILING.allowOperations.has('config.get')).toBe(true);
+      expect(USER_PLANE_CAPABILITY_CEILING.allowOperations.has('config.set')).toBe(true);
+      expect(USER_PLANE_CAPABILITY_CEILING.allowOperations.has('config.unset')).toBe(true);
+      expect(USER_PLANE_CAPABILITY_CEILING.allowOperations.has('config.write')).toBe(false);
     });
   });
 

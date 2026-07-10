@@ -34,8 +34,8 @@ import {
   resolveCapabilityContext,
   updateCapabilityPolicy,
 } from '../capability/capability-manager.js';
-import { parseCliIntent, rawCliIntent, withDefaultRelationContext } from './cli-intent-parser.js';
-import { authorizeCommand } from './command-permission.js';
+import { normalizeCliArgv, parseCliIntent, rawCliIntent, withDefaultRelationContext } from './cli-intent-parser.js';
+import { authorizeCommand, authorizeResolvedConfigOperation } from './command-permission.js';
 import { auditCommandAuthorization, hashArgv } from './command-audit.js';
 import type { CommandAuthorizationContext, CommandIntent, CommandScope } from '../../types.js';
 import { chatmodeFieldForPeer } from '../message/peer-mode.js';
@@ -2685,6 +2685,8 @@ export async function execMenuAction(this: any,
                : null;
     if (!argv || argv.length === 0) return { error: '缺少 argv 或 command', code: 'MISSING_VALUE' };
 
+    argv = normalizeCliArgv(argv);
+
     const cliAgent = this.getOwningAgent?.(channel);
     const cliSelfAid = cliAgent?.aid;
     const cliChannelType = this.resolveChannelType?.(channel);
@@ -2699,10 +2701,13 @@ export async function execMenuAction(this: any,
 
     // 解析 CLI intent
     const parseResult = Array.isArray(args?.argv)
-      ? parseCliIntent(argv, 'menu.cli')
+      ? parseCliIntent(argv, 'menu.cli', { defaultRelation: { self: cliSelfAid, peer: cliPeerKey } })
       : { kind: 'raw' as const, intent: rawCliIntent(argv, 'menu.cli'), reason: 'command string is always treated as raw CLI' };
     if (parseResult.kind === 'invalid') {
       return { error: parseResult.reason, code: parseResult.code };
+    }
+    if (parseResult.kind === 'recognized' && parseResult.resolvedConfigOp) {
+      argv = parseResult.resolvedConfigOp.canonicalArgv;
     }
 
     // 构造授权上下文
@@ -2722,7 +2727,20 @@ export async function execMenuAction(this: any,
     const isDaemonOwner = authCtx.isDaemonOwner;
 
     // 授权检查
-    const decision = authorizeMenuContext(authCtx);
+    const decision = parseResult.kind === 'recognized' && parseResult.resolvedConfigOp
+      ? authorizeResolvedConfigOperation(parseResult.resolvedConfigOp, {
+          actorId: authCtx.actorId,
+          channel: authCtx.channel,
+          channelId: authCtx.channelId,
+          chatType: authCtx.chatType,
+          selfAid: authCtx.selfAid,
+          peerKey: authCtx.peerKey,
+          role: authCtx.role,
+          isDaemonOwner: authCtx.isDaemonOwner,
+          fromControlChannel: authCtx.fromControlChannel,
+          source: authCtx.source,
+        })
+      : authorizeMenuContext(authCtx);
     if (!decision.allow) {
       await auditCommandAuthorization({
         ts: Date.now(),

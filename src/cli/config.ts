@@ -9,18 +9,21 @@
  */
 
 import { isHelpFlag, wantsHelp, getArgValue } from './help.js';
-import { normalizePeer, ModelScopeError } from '../core/model/config-scope.js';
 import {
   ConfigTarget, read, write, ensureFile, resolveEffective,
-  routeFieldPath, listFields, initConfigManager, ConfigError,
-  readFieldWithSource, resolveEffectiveWithSources,
-  type Selector, type FieldRoute,
+  listFields, initConfigManager, ConfigError,
+  resolveEffectiveWithSources,
+  type Selector,
 } from '../config/config-manager.js';
 import {
   snapshot, restore, diffVersions, listAllVersions, readCurrent, prune, collectConfigFiles,
 } from '../config/snapshot.js';
 import { readBootLog } from '../config/boot-log.js';
 import { resolvePaths } from '../paths.js';
+import { parseConfigSelector } from './config-selector.js';
+import { resolveConfigOperation } from '../config/resolved-config-op.js';
+import { executeResolvedConfigOperation, type ConfigExecutionResult } from '../config/config-operation-service.js';
+import { ipcQuery, type IpcConfigOpResponse } from '../ipc.js';
 
 type Scope = 'process' | 'defaults' | 'agent' | 'relation';
 
@@ -58,177 +61,85 @@ interface ParsedScope {
 
 /** 解析 --self/--peer/--default/--process。forWrite=true 时无 selector 报错（fail-closed）。 */
 function parseScope(args: string[], formatJson: boolean, forWrite: boolean): ParsedScope {
-  const self = getArgValue(args, '--self');
-  const peerRaw = getArgValue(args, '--peer');
-  const isDefault = args.includes('--default');
-  const isProcess = args.includes('--process') || args.includes('--evolclaw');
-
-  // 互斥校验
-  const exclusive = [isProcess, isDefault, !!self].filter(Boolean).length;
-  if (isProcess && (self || isDefault)) fail(formatJson, 'SELECTOR_CONFLICT', '--process 不能与 --self/--default 同用');
-  if (isDefault && self) fail(formatJson, 'SELECTOR_CONFLICT', '--default 不能与 --self 同用');
-
-  if (isProcess) return { scope: 'process', sel: {} };
-  if (isDefault) return { scope: 'defaults', sel: {} };
-
-  if (self) {
-    let peerKey: string | undefined;
-    if (peerRaw !== undefined) {
-      try { peerKey = normalizePeer(peerRaw); }
-      catch (e) { if (e instanceof ModelScopeError) fail(formatJson, e.code, e.message); throw e; }
-    }
-    return { scope: peerKey ? 'relation' : 'agent', sel: { self, peerKey } };
-  }
-  if (peerRaw !== undefined) fail(formatJson, 'PEER_WITHOUT_SELF', '--peer 必须配合 --self 使用');
-
-  // 无任何 selector
-  if (forWrite) {
-    fail(formatJson, 'SELECTOR_REQUIRED',
-      '写操作必须指定作用域：--self <aid> [--peer <peerKey>] | --default | --process（防误写全局）');
-  }
-  void exclusive;
-  return { scope: 'agent', sel: {} }; // 读操作全局视角（无 self → 仅 defaults 可达）
+  const parsed = parseConfigSelector(args, { requireSelector: forWrite });
+  if (!parsed.ok) fail(formatJson, parsed.code, parsed.reason);
+  return {
+    scope: parsed.scope,
+    sel: {
+      ...(parsed.self ? { self: parsed.self } : {}),
+      ...(parsed.peerKey ? { peerKey: parsed.peerKey } : {}),
+    },
+  };
 }
 
 // ── 权限控制 ────────────────────────────────────────────────────────────
-
-function gateWrite(route: FieldRoute, formatJson: boolean): void {
-  if (isAgentEnv() && route.permission === 'H') {
-    fail(formatJson, 'FORBIDDEN_H_WRITE',
-      `agent 托管环境不可写此字段（落 ${route.schema}）；仅人可改。`);
-  }
-}
 
 function gateHumanOnly(op: string, formatJson: boolean): void {
   if (isAgentEnv()) fail(formatJson, 'FORBIDDEN', `${op} 仅人可执行（agent 托管环境被拒）`);
 }
 
-// ── 字段值解析（按 schema 类型）──────────────────────────────────────────────
-
-function coerceValue(raw: string, route: FieldRoute): unknown {
-  if (route.merge === 'list') return [raw]; // 单元素，写入时 append-union（D11）
-  if (route.enum) return raw;
-  // scalar：尝试 number/bool，否则字符串
-  if (raw === 'true') return true;
-  if (raw === 'false') return false;
-  if (/^-?\d+(\.\d+)?$/.test(raw)) return Number(raw);
-  return raw;
-}
-
-/** 点路径 set：把 a.b.c=value 套进对象。返回顶层字段名。 */
-function setNested(obj: Record<string, any>, dotPath: string, value: unknown): string {
-  const parts = dotPath.split('.');
-  const top = parts[0];
-  let cur = obj;
-  for (let i = 0; i < parts.length - 1; i++) {
-    if (!cur[parts[i]] || typeof cur[parts[i]] !== 'object') cur[parts[i]] = {};
-    cur = cur[parts[i]];
-  }
-  cur[parts[parts.length - 1]] = value;
-  return top;
-}
-
-function getNested(obj: any, dotPath: string): unknown {
-  return dotPath.split('.').reduce((o, k) => (o == null ? undefined : o[k]), obj);
-}
-
 // ── 命令实现 ──────────────────────────────────────────────────────────────────
 
-function cmdGet(args: string[], formatJson: boolean): void {
-  const field = positional(args, 1);
-  if (!field) fail(formatJson, 'MISSING_FIELD', 'get 需要 <field>');
-  const { scope, sel } = parseScope(args, formatJson, false);
-
-  if (scope === 'process') {
-    const cfg = read(ConfigTarget.Process, sel) || {};
-    const val = getNested(cfg, field!);
-    return emit(formatJson, { ok: true, field, value: val ?? null, scope }, () =>
-      `${field} = ${JSON.stringify(val ?? null)}  (process，链外单层)`);
+function renderConfigExecution(result: ConfigExecutionResult, formatJson: boolean): void {
+  if (!result.ok) fail(formatJson, result.code, result.error);
+  if (result.subcommand === 'get') {
+    const payload = {
+      ok: true,
+      field: result.field,
+      value: result.value,
+      scope: result.scope,
+      ...(result.source ? { source: result.source } : {}),
+    };
+    return emit(formatJson, payload, () => {
+      if (!result.source) return `${result.field} = ${JSON.stringify(result.value)}  (${result.scope})`;
+      const sourceLabel = result.source.target === ConfigTarget.Defaults ? 'defaults' :
+        result.source.target === ConfigTarget.Agent ? 'agent' :
+        result.source.target === ConfigTarget.Relation ? 'relation' : result.source.target;
+      return `${result.field} = ${JSON.stringify(result.value)}  [来自: ${sourceLabel}]`;
+    });
   }
-
-  // 使用来源追踪函数获取值和来源
-  const withSource = readFieldWithSource(field!, sel);
-
-  if (!withSource) {
-    return emit(formatJson, { ok: true, field, value: null, scope }, () =>
-      `${field} = null  (未定义)`);
+  if (result.subcommand === 'set') {
+    return emit(formatJson, {
+      ok: true,
+      field: result.field,
+      value: result.value,
+      scope: result.scope,
+      permission: formatPermission(result.permission),
+      file: result.file,
+    }, () => `✓ 已设置 ${result.field} = ${JSON.stringify(result.value)}  [config/${result.scope}]\n  生效：该范围所有会话下条消息起。`);
   }
-
-  const { value, source } = withSource;
   emit(formatJson, {
     ok: true,
-    field,
-    value: value ?? null,
-    scope,
-    source: {
-      target: source.target,
-      file: source.file
-    }
-  }, () => {
-    const sourceLabel = source.target === ConfigTarget.Defaults ? 'defaults' :
-                       source.target === ConfigTarget.Agent ? 'agent' :
-                       source.target === ConfigTarget.Relation ? 'relation' : source.target;
-    return `${field} = ${JSON.stringify(value ?? null)}  [来自: ${sourceLabel}]`;
-  });
+    field: result.field,
+    removed: result.removed,
+    ...(result.removed ? { scope: result.scope } : {}),
+  }, () => result.removed
+    ? `✓ 已删除 ${result.field}（${result.scope} 层），回落下一层。`
+    : `（${result.field} 在该层未设置，无需删除）`);
 }
 
-function cmdSet(args: string[], formatJson: boolean): void {
-  const field = positional(args, 1);
-  const value = positional(args, 2);
-  if (!field || value === undefined) fail(formatJson, 'MISSING_ARG', 'set 需要 <field> <value>');
-  const { scope, sel } = parseScope(args, formatJson, true);
+function runLocalFieldConfig(args: string[], formatJson: boolean): void {
+  const resolved = resolveConfigOperation(['config', ...args]);
+  if (!resolved.ok) fail(formatJson, resolved.code, resolved.reason);
+  renderConfigExecution(executeResolvedConfigOperation(resolved.op), formatJson);
+}
 
-  let route: FieldRoute;
-  try { route = routeFieldPath(field!, scope); }
-  catch (e) { return failFromConfigErr(e, formatJson); }
-
-  gateWrite(route, formatJson);
-
-  const target = route.target;
-  const existing = (read<Record<string, any>>(target, sel) as Record<string, any>) || {};
-  const coerced = coerceValue(value!, route);
-
-  // D11：单文件内 list set = append-union
-  if (route.merge === 'list') {
-    const prev = getNested(existing, field!);
-    const prevArr = Array.isArray(prev) ? prev : [];
-    const merged = [...new Set([...prevArr, ...(coerced as unknown[])].map(v => typeof v === 'object' ? JSON.stringify(v) : v))]
-      .map(v => { try { return typeof v === 'string' && v.startsWith('{') ? JSON.parse(v) : v; } catch { return v; } });
-    setNested(existing, field!, merged);
-  } else {
-    setNested(existing, field!, coerced);
-  }
-
+async function runManagedFieldConfig(args: string[], formatJson: boolean): Promise<void> {
+  const sessionId = process.env.EVOLCLAW_SESSION_ID;
+  if (!sessionId) fail(formatJson, 'NO_SESSION', 'EVOLCLAW_SESSION_ID 未设置');
+  let response: IpcConfigOpResponse | null;
   try {
-    ensureFile(target, sel);
-    write(target, existing, sel);
-  } catch (e) { return failFromConfigErr(e, formatJson); }
-
-  emit(formatJson, { ok: true, field, value: coerced, scope, permission: formatPermission(route.permission), file: route.schema }, () =>
-    `✓ 已设置 ${field} = ${JSON.stringify(coerced)}  [config/${scope}]\n  生效：该范围所有会话下条消息起。`);
-}
-
-function cmdUnset(args: string[], formatJson: boolean): void {
-  const field = positional(args, 1);
-  if (!field) fail(formatJson, 'MISSING_FIELD', 'unset 需要 <field>');
-  const { scope, sel } = parseScope(args, formatJson, true);
-
-  if (scope === 'process') fail(formatJson, 'UNSET_PROCESS_REJECT', 'evolclaw.json 无下层可回落，unset --process 被拒（请直接编辑文件）');
-
-  let route: FieldRoute;
-  try { route = routeFieldPath(field!, scope); }
-  catch (e) { return failFromConfigErr(e, formatJson); }
-  gateWrite(route, formatJson);
-
-  const existing = (read<Record<string, any>>(route.target, sel) as Record<string, any>);
-  if (!existing) return emit(formatJson, { ok: true, field, removed: false }, () => `（${field} 在该层未设置，无需删除）`);
-  // 删点路径末端
-  const parts = field!.split('.');
-  let cur: any = existing;
-  for (let i = 0; i < parts.length - 1; i++) { if (cur == null) break; cur = cur[parts[i]]; }
-  if (cur && typeof cur === 'object') delete cur[parts[parts.length - 1]];
-  try { write(route.target, existing, sel); } catch (e) { return failFromConfigErr(e, formatJson); }
-  emit(formatJson, { ok: true, field, removed: true, scope }, () => `✓ 已删除 ${field}（${scope} 层），回落下一层。`);
+    response = await ipcQuery<IpcConfigOpResponse>(resolvePaths().socket, {
+      type: 'config.op',
+      argv: ['config', ...args],
+      sessionId,
+    }, 10_000);
+  } catch {
+    response = null;
+  }
+  if (!response) fail(formatJson, 'DAEMON_UNAVAILABLE', '无法连接 evolclaw 服务');
+  if (!response.ok || !response.result) fail(formatJson, response.code || 'CONFIG_AUTH_FAILED', response.error || 'config operation failed');
+  renderConfigExecution(response.result, formatJson);
 }
 
 function cmdShow(args: string[], formatJson: boolean): void {
@@ -479,9 +390,6 @@ const HELP = `用法: evolclaw config <command> [options]
 
 async function dispatch(sub: string, args: string[], formatJson: boolean): Promise<void> {
   switch (sub) {
-    case 'get': return cmdGet(args, formatJson);
-    case 'set': return cmdSet(args, formatJson);
-    case 'unset': return cmdUnset(args, formatJson);
     case 'show': return cmdShow(args, formatJson);
     case 'effective': return cmdEffective(args, formatJson);
     case 'fields': return cmdFields(args, formatJson);
@@ -507,7 +415,17 @@ export async function cmdConfig(args: string[]): Promise<void> {
   if (wantsHelp(args) && sub !== undefined && positional(args, 1) === undefined && args.includes('--help')) {
     // 子命令级 help 仍打总 help（简化）
   }
+  const isFieldCommand = sub === 'get' || sub === 'set' || sub === 'unset';
+  if (isAgentEnv()) {
+    if (!isFieldCommand) fail(formatJson, 'FORBIDDEN_AGENT_CONFIG', `Agent 托管环境不允许 config ${sub}`);
+    await runManagedFieldConfig(args, formatJson);
+    return;
+  }
   try { initConfigManager(); }
   catch (e) { fail(formatJson, 'SCHEMA_INIT_FAILED', e instanceof Error ? e.message : String(e)); }
+  if (isFieldCommand) {
+    runLocalFieldConfig(args, formatJson);
+    return;
+  }
   await dispatch(sub, args, formatJson);
 }

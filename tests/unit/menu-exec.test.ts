@@ -1197,6 +1197,246 @@ describe('getMenuItems', () => {
   });
 });
 
+describe('/cli config authorization', () => {
+  function installPassthroughSpy(handler: CommandHandler) {
+    const passthrough = vi.fn().mockResolvedValue({ data: { ok: true } });
+    (handler as any).execCliPassthrough = passthrough;
+    return passthrough;
+  }
+
+  it('authorizes and executes the same normalized relation argv for member', async () => {
+    const sm = createMockSessionManager({
+      resolveIdentity: vi.fn().mockReturnValue({ role: 'member', mode: 'interactive' }),
+    });
+    const { handler } = createHandler({ sessionManager: sm });
+    const passthrough = installPassthroughSpy(handler);
+
+    const result = await handler.execMenuAction(
+      '/cli',
+      'exec',
+      { argv: ['ec', 'config', 'set', 'chatmode.private', 'proactive'] },
+      'aun',
+      'chat1',
+      'user1',
+    );
+
+    expect(result).toEqual({ data: { ok: true } });
+    expect(passthrough).toHaveBeenCalledWith([
+      'config', 'set', 'chatmode.private', 'proactive',
+      '--self', TEST_AID, '--peer', formatPeerKey('aun', 'user1'),
+    ]);
+  });
+
+  it('does not spawn for denied fields or sensitive reads', async () => {
+    const sm = createMockSessionManager({
+      resolveIdentity: vi.fn().mockReturnValue({ role: 'member', mode: 'interactive' }),
+    });
+    const { handler } = createHandler({ sessionManager: sm });
+    const passthrough = installPassthroughSpy(handler);
+
+    const deniedWrite = await handler.execMenuAction(
+      '/cli', 'exec',
+      { argv: ['config', 'set', 'permissionMode', 'bypass'] },
+      'aun', 'chat1', 'user1',
+    ) as any;
+    expect(deniedWrite.code).toBe('ARGUMENT_MISMATCH');
+
+    const deniedRead = await handler.execMenuAction(
+      '/cli', 'exec',
+      { argv: ['config', 'get', 'owners'] },
+      'aun', 'chat1', 'user1',
+    ) as any;
+    expect(deniedRead.code).toBe('NOT_ALLOWED');
+    expect(passthrough).not.toHaveBeenCalled();
+  });
+
+  it('keeps visitor config access read-only before spawn', async () => {
+    const sm = createMockSessionManager({
+      resolveIdentity: vi.fn().mockReturnValue({ role: 'visitor', mode: 'interactive' }),
+    });
+    const { handler } = createHandler({ sessionManager: sm });
+    const passthrough = installPassthroughSpy(handler);
+
+    const readResult = await handler.execMenuAction(
+      '/cli', 'exec',
+      { argv: ['config', 'get', 'chatmode.private'] },
+      'aun', 'chat1', 'user1',
+    );
+    expect(readResult).toEqual({ data: { ok: true } });
+    expect(passthrough).toHaveBeenCalledTimes(1);
+
+    const writeResult = await handler.execMenuAction(
+      '/cli', 'exec',
+      { argv: ['config', 'set', 'chatmode.private', 'interactive'] },
+      'aun', 'chat1', 'user1',
+    ) as any;
+    expect(writeResult.code).toBe('NO_PERMISSION');
+    expect(passthrough).toHaveBeenCalledTimes(1);
+  });
+
+  it('uses the current group relation without comparing it to the actor id', async () => {
+    const groupSession = {
+      id: 'group-session', channel: 'aun', channelId: 'group1',
+      projectPath: '/tmp/test', agentId: 'claude', baseagent: 'claude',
+      selfAID: TEST_AID, channelType: 'aun', sessionKey: 'aun#group1#',
+      chatType: 'group', sessionMode: 'interactive', chatMode: 'interactive',
+      metadata: { groupId: 'group1', permissionMode: 'auto' },
+      createdAt: Date.now(), updatedAt: Date.now(),
+    };
+    const sm = createMockSessionManager({
+      getActiveSession: vi.fn().mockResolvedValue(groupSession),
+      getActiveSessionSync: vi.fn().mockReturnValue(groupSession),
+      resolveIdentity: vi.fn().mockReturnValue({ role: 'member', mode: 'interactive' }),
+    });
+    const { handler } = createHandler({ sessionManager: sm });
+    const passthrough = installPassthroughSpy(handler);
+
+    const result = await handler.execMenuAction(
+      '/cli', 'exec',
+      { argv: ['config', 'set', 'chatmode.group', 'proactive'] },
+      'aun', 'group1', 'member1',
+    );
+    expect(result).toEqual({ data: { ok: true } });
+    expect(passthrough).toHaveBeenCalledWith([
+      'config', 'set', 'chatmode.group', 'proactive',
+      '--self', TEST_AID, '--peer', formatPeerKey('aun', 'group1'),
+    ]);
+  });
+});
+
+describe('managed agent config IPC', () => {
+  function managedSession(peerId = 'user1') {
+    return {
+      id: 'managed-session',
+      channel: 'aun',
+      channelId: 'chat1',
+      projectPath: '/tmp/test',
+      agentId: 'claude',
+      baseagent: 'claude',
+      selfAID: TEST_AID,
+      channelType: 'aun',
+      sessionKey: `aun#${peerId}#`,
+      agentSessionId: 'agent-sess-123',
+      chatType: 'private',
+      sessionMode: 'interactive',
+      chatMode: 'interactive',
+      metadata: { permissionMode: 'auto', peerId },
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    };
+  }
+
+  function createManagedHandler(role: 'member' | 'visitor') {
+    const session = managedSession();
+    writeRelationConfig('user1', { roles: { assigned: role } });
+    const sm = createMockSessionManager({
+      getSessionById: vi.fn().mockResolvedValue(session),
+    });
+    return createHandler({ sessionManager: sm }).handler;
+  }
+
+  it('resolves the trusted session relation and writes only its relation config', async () => {
+    const handler = createManagedHandler('member');
+    const result = await handler.handleConfigOperation(
+      ['config', 'set', 'chatmode.private', 'proactive'],
+      'managed-session',
+    );
+
+    expect(result).toMatchObject({
+      ok: true,
+      result: {
+        subcommand: 'set',
+        field: 'chatmode.private',
+        value: 'proactive',
+        scope: 'relation',
+      },
+    });
+    expect(readRelationConfigByKey(formatPeerKey('aun', 'user1')).chatmode.private).toBe('proactive');
+    expect(readTestAgentConfig().chatmode.private).toBe('interactive');
+  });
+
+  it('keeps visitor field access read-only', async () => {
+    const handler = createManagedHandler('visitor');
+    const readResult = await handler.handleConfigOperation(
+      ['config', 'get', 'chatmode.private'],
+      'managed-session',
+    );
+    expect(readResult).toMatchObject({
+      ok: true,
+      result: { subcommand: 'get', field: 'chatmode.private', value: 'interactive', scope: 'relation' },
+    });
+
+    const writeResult = await handler.handleConfigOperation(
+      ['config', 'set', 'chatmode.private', 'proactive'],
+      'managed-session',
+    );
+    expect(writeResult).toMatchObject({ ok: false, code: 'NO_PERMISSION' });
+    expect(readTestAgentConfig().chatmode.private).toBe('interactive');
+  });
+
+  it('denies sensitive fields and selectors outside the current relation', async () => {
+    const handler = createManagedHandler('member');
+    const sensitive = await handler.handleConfigOperation(
+      ['config', 'get', 'owners'],
+      'managed-session',
+    );
+    expect(sensitive).toMatchObject({ ok: false, code: 'NOT_ALLOWED' });
+
+    const otherRelation = await handler.handleConfigOperation(
+      [
+        'config', 'set', 'chatmode.private', 'proactive',
+        '--self', TEST_AID, '--peer', formatPeerKey('aun', 'other-user'),
+      ],
+      'managed-session',
+    );
+    expect(otherRelation).toMatchObject({ ok: false, code: 'ARGUMENT_MISMATCH' });
+    expect(fs.existsSync(relationConfigPathByKey(formatPeerKey('aun', 'other-user')))).toBe(false);
+  });
+
+  it('limits a group owner to relation-scoped config mutations', async () => {
+    const ownerId = 'owner.agentid.pub';
+    writeTestAgentConfig({ owners: [ownerId] });
+    const groupSession = {
+      ...managedSession(ownerId),
+      id: 'managed-group-session',
+      channelId: 'group1',
+      sessionKey: 'aun#group1#',
+      chatType: 'group',
+      metadata: { permissionMode: 'auto', peerId: ownerId, groupId: 'group1' },
+    };
+    const sm = createMockSessionManager({
+      getSessionById: vi.fn().mockResolvedValue(groupSession),
+    });
+    const { handler } = createHandler({ sessionManager: sm });
+
+    for (const argv of [
+      ['config', 'set', 'chatmode.group', 'interactive', '--self', TEST_AID],
+      ['config', 'set', 'debug', 'true', '--process'],
+    ]) {
+      expect(await handler.handleConfigOperation(argv, groupSession.id))
+        .toMatchObject({ ok: false, code: 'SCOPE_MISMATCH' });
+    }
+
+    expect(await handler.handleConfigOperation(
+      ['config', 'set', 'chatmode.group', 'interactive'],
+      groupSession.id,
+    )).toMatchObject({
+      ok: true,
+      result: { subcommand: 'set', field: 'chatmode.group', scope: 'relation' },
+    });
+    expect(readRelationConfigByKey(formatPeerKey('aun', 'group1')).chatmode.group).toBe('interactive');
+    expect(readTestAgentConfig().chatmode.group).toBe('proactive');
+  });
+
+  it('rejects an invalid daemon session', async () => {
+    const { handler } = createHandler();
+    expect(await handler.handleConfigOperation(
+      ['config', 'get', 'chatmode.private'],
+      'missing-session',
+    )).toMatchObject({ ok: false, code: 'INVALID_SESSION' });
+  });
+});
+
 describe('getSubMenuItems — selected field', () => {
   it('/s marks active session as selected with rich fields', async () => {
     const sm = createMockSessionManager({

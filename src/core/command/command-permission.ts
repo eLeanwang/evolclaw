@@ -9,6 +9,12 @@ import type {
 } from '../../types.js';
 import { getRoleDefinition } from '../../config/roles.js';
 import { isManagementRole } from '../../config/builtin-roles.js';
+import {
+  isCriticalAgentControlField,
+  resolveRoleFieldPermission,
+} from '../../config/config-field-policy.js';
+import type { ResolvedConfigOp } from '../../config/resolved-config-op.js';
+import { normalizePeer } from '../model/config-scope.js';
 import { getOperationMeta } from './operation-registry.js';
 import { formatPeerKey, parsePeerKey } from '../relation/peer-identity.js';
 
@@ -48,6 +54,9 @@ export const USER_PLANE_CAPABILITY_CEILING = {
     'ec.msg.file',
     'ec.group.send',
     'ec.group.file',
+    'config.get',
+    'config.set',
+    'config.unset',
   ]),
   denyOperations: new Set<string>([
     'role.assign',
@@ -72,12 +81,47 @@ export const USER_PLANE_CAPABILITY_CEILING = {
 export function authorizeCommand(
   ctx: CommandAuthorizationContext
 ): CommandAuthorizationDecision {
+  return authorizeCommandInternal(ctx);
+}
+
+export function authorizeResolvedConfigOperation(
+  op: ResolvedConfigOp,
+  context: Omit<CommandAuthorizationContext, 'intent'>,
+): CommandAuthorizationDecision {
+  return authorizeCommandInternal({ ...context, intent: intentForResolvedConfig(op, context.source) }, op);
+}
+
+function authorizeCommandInternal(
+  ctx: CommandAuthorizationContext,
+  resolvedConfigOp?: ResolvedConfigOp,
+): CommandAuthorizationDecision {
   const { intent, role } = ctx;
   const operation = intent.operation;
   const opMeta = getOperationMeta(operation);
 
   if (!opMeta) {
     return denyDecision(ctx, 'NOT_ALLOWED', `Unknown operation: ${operation}`, operation, intent.scope);
+  }
+
+  if (isFieldConfigOperation(operation) && !resolvedConfigOp) {
+    return denyDecision(ctx, 'NOT_ALLOWED', 'Resolved config operation is required', operation, intent.scope, opMeta.dangerous);
+  }
+  if (resolvedConfigOp
+    && (resolvedConfigOp.operationId !== operation || resolvedConfigOp.commandScope !== intent.scope)) {
+    return denyDecision(ctx, 'NOT_ALLOWED', 'Resolved config operation does not match the command intent', operation, intent.scope, opMeta.dangerous);
+  }
+
+  if (ctx.chatType === 'group'
+    && isConfigMutationOperation(operation)
+    && intent.scope !== 'relation') {
+    return denyDecision(
+      ctx,
+      'SCOPE_MISMATCH',
+      'Group chats may only modify relation-scoped config',
+      operation,
+      intent.scope,
+      opMeta.dangerous,
+    );
   }
 
   if (opMeta.sources && !opMeta.sources.includes(ctx.source)) {
@@ -104,6 +148,46 @@ export function authorizeCommand(
     return denyDecision(ctx, 'NOT_ALLOWED', `Operation ${operation} is outside the user permission plane`, operation, intent.scope, opMeta.dangerous);
   }
 
+  if (!isManagementRole(role) && isFieldConfigOperation(operation)) {
+    if (intent.scope !== 'relation') {
+      return denyDecision(
+        ctx,
+        'SCOPE_MISMATCH',
+        `Role ${role} may only access relation-scoped config`,
+        operation,
+        intent.scope,
+        opMeta.dangerous,
+      );
+    }
+    const relationCheck = checkCurrentRelation(ctx, resolvedConfigOp);
+    if (!relationCheck.ok) {
+      return denyDecision(
+        ctx,
+        'ARGUMENT_MISMATCH',
+        relationCheck.reason || 'Config target is not the current relation',
+        operation,
+        intent.scope,
+        opMeta.dangerous,
+      );
+    }
+  }
+
+  if (operation === 'config.write'
+    && (intent.scope === 'agent' || intent.scope === 'relation')
+    && (resolvedConfigOp
+      ? isCriticalAgentControlField(resolvedConfigOp.field)
+      : configKeysFromArgs(intent.args).some(isCriticalAgentControlField))
+    && role !== 'owner') {
+    return denyDecision(
+      ctx,
+      'NOT_ALLOWED',
+      'Critical agent identity and role fields require owner permission',
+      operation,
+      intent.scope,
+      opMeta.dangerous,
+    );
+  }
+
   const matchResult = matchCommandPermission(
     operation,
     opMeta.category,
@@ -125,6 +209,21 @@ export function authorizeCommand(
       intent.scope,
       opMeta.dangerous,
       matchedRule
+    );
+  }
+
+  if (!isManagementRole(role)
+    && isFieldConfigOperation(operation)
+    && matchedRule !== operation
+    && matchedRule !== 'config.*') {
+    return denyDecision(
+      ctx,
+      'NO_PERMISSION',
+      `Role ${role} requires an explicit config permission`,
+      operation,
+      intent.scope,
+      opMeta.dangerous,
+      matchedRule,
     );
   }
 
@@ -165,8 +264,24 @@ export function authorizeCommand(
     );
   }
 
+  if (!isManagementRole(role) && isFieldConfigOperation(operation)) {
+    const fieldPolicy = operation === 'config.get' ? 'behavior-read' : 'role-overridable-write';
+    const fieldCheck = checkConfigFieldPolicy(ctx, fieldPolicy, resolvedConfigOp);
+    if (!fieldCheck.ok) {
+      return denyDecision(
+        ctx,
+        'ARGUMENT_MISMATCH',
+        fieldCheck.reason || 'Config field is not allowed',
+        operation,
+        intent.scope,
+        opMeta.dangerous,
+        matchedRule,
+      );
+    }
+  }
+
   if (permission.constraints) {
-    const constraintCheck = checkConstraints(ctx, permission.constraints);
+    const constraintCheck = checkConstraints(ctx, permission.constraints, resolvedConfigOp);
     if (!constraintCheck.ok) {
       return denyDecision(
         ctx,
@@ -245,7 +360,8 @@ function isUserPlaneOperationAllowed(operation: string, category: OperationCateg
 
 function checkConstraints(
   ctx: CommandAuthorizationContext,
-  constraints: CommandPermissionConstraints
+  constraints: CommandPermissionConstraints,
+  resolvedConfigOp?: ResolvedConfigOp,
 ): ConstraintCheckResult {
   if (constraints.ownPeerOnly) {
     const peerCheck = checkOwnPeer(ctx);
@@ -324,7 +440,101 @@ function checkConstraints(
     if (!fieldCheck.ok) return fieldCheck;
   }
 
+  if (constraints.configFieldPolicy) {
+    const fieldCheck = checkConfigFieldPolicy(ctx, constraints.configFieldPolicy, resolvedConfigOp);
+    if (!fieldCheck.ok) return fieldCheck;
+  }
+
+  if (constraints.currentRelationOnly) {
+    const relationCheck = checkCurrentRelation(ctx, resolvedConfigOp);
+    if (!relationCheck.ok) return relationCheck;
+  }
+
   return { ok: true };
+}
+
+function isFieldConfigOperation(operation: string): boolean {
+  return operation === 'config.get' || operation === 'config.set' || operation === 'config.unset';
+}
+
+function isConfigMutationOperation(operation: string): boolean {
+  return operation === 'config.set' || operation === 'config.unset' || operation === 'config.write';
+}
+
+function checkConfigFieldPolicy(
+  ctx: CommandAuthorizationContext,
+  policy: 'behavior-read' | 'role-overridable-write',
+  resolvedConfigOp?: ResolvedConfigOp,
+): ConstraintCheckResult {
+  if (!resolvedConfigOp) return { ok: false, reason: 'Resolved config operation is required' };
+  const field = resolvedConfigOp.field;
+  if (!resolvedConfigOp.route || (resolvedConfigOp.fieldRule.class !== 'safe-scalar' && resolvedConfigOp.fieldRule.class !== 'safe-readonly-object')) {
+    return { ok: false, reason: `Config field ${field} is not available to user roles` };
+  }
+
+  const roleDef = getRoleDefinition(ctx.role, ctx.selfAid);
+  const fieldPermission = roleDef
+    ? resolveRoleFieldPermission(roleDef.permissions || {}, field)
+    : undefined;
+  if (!fieldPermission) {
+    return { ok: false, reason: `Role ${ctx.role} has no field permission for ${field}` };
+  }
+  if (policy === 'behavior-read') return { ok: true };
+  if (!fieldPermission.allowOverride) {
+    return { ok: false, reason: `Role ${ctx.role} cannot override ${field}` };
+  }
+
+  if (ctx.intent.operation === 'config.set') {
+    return checkFieldValueAllowed(fieldPermission, resolvedConfigOp.value);
+  }
+  return { ok: true };
+}
+
+function checkCurrentRelation(ctx: CommandAuthorizationContext, resolvedConfigOp?: ResolvedConfigOp): ConstraintCheckResult {
+  const requestedSelf = resolvedConfigOp?.self ?? stringArg(ctx.intent.args.self);
+  if (!ctx.selfAid || !requestedSelf || requestedSelf !== ctx.selfAid) {
+    return { ok: false, reason: 'Only the current agent relation can be targeted' };
+  }
+
+  const requestedPeer = resolvedConfigOp?.peerKey || stringArg(ctx.intent.args.peerKey) || stringArg(ctx.intent.args.peer);
+  if (!ctx.peerKey || !requestedPeer) {
+    return { ok: false, reason: 'Current relation context is required' };
+  }
+
+  try {
+    if (normalizeRelationPeer(requestedPeer) !== normalizeRelationPeer(ctx.peerKey)) {
+      return { ok: false, reason: 'Only the current relation can be targeted' };
+    }
+  } catch {
+    return { ok: false, reason: 'Cannot verify the current relation target' };
+  }
+  return { ok: true };
+}
+
+function intentForResolvedConfig(op: ResolvedConfigOp, source: CommandAuthorizationContext['source']): CommandAuthorizationContext['intent'] {
+  const dangerous = op.operationId === 'config.read' || op.operationId === 'config.write';
+  return {
+    operation: op.operationId,
+    scope: op.commandScope,
+    source,
+    args: {
+      field: op.field,
+      ...(op.subcommand === 'set' ? { value: op.value } : {}),
+      configScope: op.configScope,
+      ...(op.self ? { self: op.self } : {}),
+      ...(op.peerKey ? { peer: op.peerKey, peerKey: op.peerKey } : {}),
+    },
+    rawArgv: op.canonicalArgv,
+    ...(dangerous ? { dangerous: true } : {}),
+  };
+}
+
+function normalizeRelationPeer(peer: string): string {
+  const legacyIndex = peer.indexOf('::');
+  if (legacyIndex > 0) {
+    return formatPeerKey(peer.slice(0, legacyIndex), peer.slice(legacyIndex + 2));
+  }
+  return normalizePeer(peer);
 }
 
 function checkAllowedConfigKeys(

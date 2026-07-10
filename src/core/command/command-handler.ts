@@ -30,6 +30,11 @@ import {
 } from '../../trigger/types.js';
 import { tryParseChannelKey } from '../channel-loader.js';
 import { displaySessionTitle } from '../session/session-title.js';
+import { resolveConfigOperation } from '../../config/resolved-config-op.js';
+import { executeResolvedConfigOperation } from '../../config/config-operation-service.js';
+import { authorizeResolvedConfigOperation } from './command-permission.js';
+import { auditCommandAuthorization, hashArgv } from './command-audit.js';
+import type { IpcConfigOpResponse } from '../../ipc.js';
 import { isQuickCommand } from './slash-gate.js';
 import { handleSlashCommand } from './slash-handler.js';
 import { resolveChatModeForPeer } from '../message/peer-mode.js';
@@ -1807,6 +1812,70 @@ export class CommandHandler {
     } catch {
       return resolveChatModeForPeer({ chatType: session.chatType, peerType });
     }
+  }
+
+  /**
+   * Agent managed CLI config entrypoint. Identity and relation are resolved
+   * from the daemon-owned session rather than caller-provided flags.
+   */
+  async handleConfigOperation(argv: string[], sessionId: string): Promise<IpcConfigOpResponse> {
+    const session = await this.sessionManager.getSessionById(sessionId);
+    if (!session) return { ok: false, code: 'INVALID_SESSION', error: '无效的 session' };
+
+    const actorId = session.metadata?.peerId;
+    const identity = this.resolveCtlIdentity(session, actorId);
+    const parsedChannel = tryParseChannelKey(session.channel);
+    const selfAid = session.selfAID || this.getOwningAgent(session.channel)?.aid || parsedChannel?.selfAID;
+    const channelType = session.channelType || parsedChannel?.type || this.resolveChannelType(session.channel);
+    const chatType: 'private' | 'group' = session.chatType === 'group' ? 'group' : 'private';
+    const peerId = chatType === 'group'
+      ? (session.metadata?.groupId || session.channelId)
+      : actorId;
+    const peerKey = channelType && peerId ? formatPeerKey(channelType, peerId) : undefined;
+    const resolved = resolveConfigOperation(argv, {
+      defaultRelation: { self: selfAid, peerKey },
+    });
+    if (!resolved.ok) return { ok: false, code: resolved.code, error: resolved.reason };
+
+    const authContext = {
+      actorId,
+      channel: session.channel,
+      channelId: session.channelId,
+      chatType,
+      selfAid,
+      peerKey,
+      role: identity.role,
+      isDaemonOwner: false,
+      fromControlChannel: false,
+      source: 'agent-tool' as const,
+    };
+    const decision = authorizeResolvedConfigOperation(resolved.op, authContext);
+    await auditCommandAuthorization({
+      ts: Date.now(),
+      source: 'agent-tool',
+      operation: resolved.op.operationId,
+      scope: resolved.op.commandScope,
+      dangerous: decision.dangerous ?? false,
+      actorId,
+      selfAid,
+      peerKey,
+      channel: session.channel,
+      channelId: session.channelId,
+      role: identity.role,
+      isDaemonOwner: false,
+      fromControlChannel: false,
+      decision: decision.allow ? 'allow' : 'deny',
+      code: decision.allow ? undefined : decision.code,
+      reason: decision.allow ? undefined : decision.reason,
+      matchedRule: decision.matchedRule,
+      argvHash: hashArgv(resolved.op.canonicalArgv),
+    });
+    if (!decision.allow) return { ok: false, code: decision.code, error: decision.reason };
+
+    const result = executeResolvedConfigOperation(resolved.op);
+    return result.ok
+      ? { ok: true, result }
+      : { ok: false, code: result.code, error: result.error };
   }
 
   /**

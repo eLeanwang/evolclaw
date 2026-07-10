@@ -1,5 +1,7 @@
 import { describe, it, expect } from 'vitest';
-import { parseCliIntent, rawCliIntent, withDefaultRelationContext } from '../../../src/core/command/cli-intent-parser.js';
+import { normalizeCliArgv, parseCliIntent, rawCliIntent, withDefaultRelationContext } from '../../../src/core/command/cli-intent-parser.js';
+import { parseConfigSelector } from '../../../src/cli/config-selector.js';
+import { resolveConfigOperation } from '../../../src/config/resolved-config-op.js';
 
 describe('CLI Intent Parser', () => {
   describe('Model commands', () => {
@@ -83,6 +85,165 @@ describe('CLI Intent Parser', () => {
       if (result.kind === 'recognized') {
         expect(result.intent.operation).toBe('stats.rebuild');
         expect(result.intent.dangerous).toBe(true);
+      }
+    });
+  });
+
+  describe('Config commands', () => {
+    it('distinguishes relation, agent, defaults, and process selectors', () => {
+      expect(parseConfigSelector(['--self', 'agent1', '--peer', 'user1'], { requireSelector: true }))
+        .toEqual({ ok: true, scope: 'relation', self: 'agent1', peerKey: 'aun#user1' });
+      expect(parseConfigSelector(['--self', 'agent1'], { requireSelector: true }))
+        .toEqual({ ok: true, scope: 'agent', self: 'agent1' });
+      expect(parseConfigSelector(['--default'], { requireSelector: true }))
+        .toEqual({ ok: true, scope: 'defaults' });
+      expect(parseConfigSelector(['--evolclaw'], { requireSelector: true }))
+        .toEqual({ ok: true, scope: 'process' });
+    });
+
+    it('fails closed for missing and conflicting selectors', () => {
+      expect(parseConfigSelector([], { requireSelector: true })).toMatchObject({ ok: false, code: 'SELECTOR_REQUIRED' });
+      expect(parseConfigSelector(['--peer', 'user1'], { requireSelector: true })).toMatchObject({ ok: false, code: 'PEER_WITHOUT_SELF' });
+      expect(parseConfigSelector(['--self'], { requireSelector: true })).toMatchObject({ ok: false, code: 'MISSING_FLAG_VALUE' });
+      expect(parseConfigSelector(['--self', 'a', '--self', 'b'], { requireSelector: true })).toMatchObject({ ok: false, code: 'SELECTOR_CONFLICT' });
+      expect(parseConfigSelector(['--self', 'a', '--default'], { requireSelector: true })).toMatchObject({ ok: false, code: 'SELECTOR_CONFLICT' });
+      expect(parseConfigSelector(['--process', '--default'], { requireSelector: true })).toMatchObject({ ok: false, code: 'SELECTOR_CONFLICT' });
+    });
+
+    it('parses relation get, set, and unset operations', () => {
+      const cases = [
+        { argv: ['config', 'get', 'chatmode.private', '--self', 'agent1', '--peer', 'aun#user1'], operation: 'config.get', value: undefined },
+        { argv: ['config', 'set', 'chatmode.private', 'interactive', '--self', 'agent1', '--peer', 'aun#user1'], operation: 'config.set', value: 'interactive' },
+        { argv: ['config', 'unset', 'chatmode.private', '--self', 'agent1', '--peer', 'aun#user1'], operation: 'config.unset', value: undefined },
+      ];
+
+      for (const testCase of cases) {
+        const result = parseCliIntent(testCase.argv);
+        expect(result.kind).toBe('recognized');
+        if (result.kind === 'recognized') {
+          expect(result.intent).toMatchObject({
+            operation: testCase.operation,
+            scope: 'relation',
+            args: {
+              field: 'chatmode.private',
+              self: 'agent1',
+              peer: 'aun#user1',
+              peerKey: 'aun#user1',
+              configScope: 'relation',
+            },
+          });
+          expect(result.intent.args.value).toBe(testCase.value);
+        }
+      }
+    });
+
+    it('normalizes executable prefixes and resolves the current relation', () => {
+      expect(normalizeCliArgv(['ec', 'config', 'get', 'chatmode.private']))
+        .toEqual(['config', 'get', 'chatmode.private']);
+      expect(normalizeCliArgv(['evolclaw', 'config', 'get', 'chatmode.private']))
+        .toEqual(['config', 'get', 'chatmode.private']);
+
+      const result = parseCliIntent(
+        ['ec', 'config', 'set', 'chatmode.private', 'proactive'],
+        'menu.cli',
+        { defaultRelation: { self: 'agent1', peer: 'aun#user1' } },
+      );
+      expect(result.kind).toBe('recognized');
+      if (result.kind === 'recognized') {
+        expect(result.resolvedConfigOp?.canonicalArgv).toEqual([
+          'config', 'set', 'chatmode.private', 'proactive',
+          '--self', 'agent1', '--peer', 'aun#user1',
+        ]);
+        expect(result.intent.rawArgv).toEqual(result.resolvedConfigOp?.canonicalArgv);
+      }
+
+      // Default relation injection for config is owned by the config resolver.
+      expect(withDefaultRelationContext(
+        ['ec', 'config', 'set', 'chatmode.private', 'proactive'],
+        { self: 'agent1', peer: 'aun#user1' },
+      )).toEqual(['config', 'set', 'chatmode.private', 'proactive']);
+    });
+
+    it('does not inject defaults over explicit config selectors', () => {
+      const result = parseCliIntent(
+        ['config', 'set', 'chatmode.private', 'interactive', '--self', 'agent2'],
+        'menu.cli',
+        { defaultRelation: { self: 'agent1', peer: 'aun#user1' } },
+      );
+      expect(result.kind).toBe('recognized');
+      if (result.kind === 'recognized') {
+        expect(result.resolvedConfigOp?.canonicalArgv)
+          .toEqual(['config', 'set', 'chatmode.private', 'interactive', '--self', 'agent2']);
+      }
+    });
+
+    it('resolves canonical config argv deterministically and idempotently', () => {
+      const first = resolveConfigOperation(
+        ['ec', 'config', 'set', 'chatmode.private', 'proactive', '--format', 'json'],
+        { defaultRelation: { self: 'agent1', peerKey: 'aun#user1' } },
+      );
+      expect(first.ok).toBe(true);
+      if (!first.ok) return;
+
+      const repeated = resolveConfigOperation(
+        ['ec', 'config', 'set', 'chatmode.private', 'proactive', '--format', 'json'],
+        { defaultRelation: { self: 'agent1', peerKey: 'aun#user1' } },
+      );
+      const canonical = resolveConfigOperation(first.op.canonicalArgv);
+      expect(repeated).toEqual(first);
+      expect(canonical).toEqual(first);
+    });
+
+    it('upgrades sensitive and process fields to dangerous management operations', () => {
+      const sensitiveRead = parseCliIntent(['config', 'get', 'owners', '--self', 'agent1']);
+      expect(sensitiveRead.kind).toBe('recognized');
+      if (sensitiveRead.kind === 'recognized') {
+        expect(sensitiveRead.intent).toMatchObject({ operation: 'config.read', scope: 'agent', dangerous: true });
+      }
+
+      const sensitiveWrite = parseCliIntent(['config', 'set', 'owners', 'owner1', '--self', 'agent1']);
+      expect(sensitiveWrite.kind).toBe('recognized');
+      if (sensitiveWrite.kind === 'recognized') {
+        expect(sensitiveWrite.intent).toMatchObject({ operation: 'config.write', scope: 'agent', dangerous: true });
+      }
+
+      const processWrite = parseCliIntent(['config', 'set', 'debug', 'true', '--process']);
+      expect(processWrite.kind).toBe('recognized');
+      if (processWrite.kind === 'recognized') {
+        expect(processWrite.intent).toMatchObject({ operation: 'config.write', scope: 'process', dangerous: true });
+        expect(processWrite.intent.args.configScope).toBe('process');
+      }
+    });
+
+    it('keeps global config management commands process-scoped', () => {
+      for (const argv of [
+        ['config', 'list'],
+        ['config', 'history'],
+        ['config', 'snapshot', '--full'],
+        ['config', 'restore', 'v1'],
+      ]) {
+        const result = parseCliIntent(argv);
+        expect(result.kind).toBe('recognized');
+        if (result.kind === 'recognized') {
+          expect(result.intent.scope).toBe('process');
+          expect(result.intent.dangerous).toBe(true);
+        }
+      }
+    });
+
+    it('rejects missing, conflicting, and ambiguous config arguments', () => {
+      const cases = [
+        { argv: ['config', 'set', 'chatmode.private', 'interactive'], code: 'SELECTOR_REQUIRED' },
+        { argv: ['config', 'set', 'chatmode.private', 'interactive', '--peer', 'user1'], code: 'PEER_WITHOUT_SELF' },
+        { argv: ['config', 'set', 'chatmode.private', 'interactive', '--self', 'agent1', '--process'], code: 'SELECTOR_CONFLICT' },
+        { argv: ['config', 'set', 'chatmode.private', 'interactive', 'extra', '--self', 'agent1'], code: 'INVALID_CONFIG_COMMAND' },
+        { argv: ['config', 'set', 'chatmode', '{}', '--self', 'agent1'], code: 'UNSUPPORTED_CONFIG_VALUE' },
+      ];
+
+      for (const testCase of cases) {
+        const result = parseCliIntent(testCase.argv);
+        expect(result.kind).toBe('invalid');
+        if (result.kind === 'invalid') expect(result.code).toBe(testCase.code);
       }
     });
   });

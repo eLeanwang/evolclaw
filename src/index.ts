@@ -1802,6 +1802,7 @@ async function main() {
   // M3: direct call (not cast) — wire EvolAgentRegistry into IPC for evolagent.* handlers
   ipcServer.setAgentRegistry(agentRegistry);
   ipcServer.setMenuExecutor((payload) => cmdHandler.execMenuForEcweb(payload));
+  ipcServer.setConfigOperationExecutor((argv, sessionId) => cmdHandler.handleConfigOperation(argv, sessionId));
   cmdHandler.setDaemonStatusProvider(() => {
     const aidState = controlChannel?.getAidState?.();
     return {

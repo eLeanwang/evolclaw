@@ -1264,6 +1264,8 @@ export interface CommandPermissionConstraints {
   requireControlChannel?: boolean;
   requireExplicitDangerousGrant?: boolean;
   requireFieldOverride?: string;
+  configFieldPolicy?: 'behavior-read' | 'role-overridable-write';
+  currentRelationOnly?: boolean;
 
   allowedArgs?: Record<string, Array<string | number | boolean>>;
   deniedArgs?: Record<string, Array<string | number | boolean>>;

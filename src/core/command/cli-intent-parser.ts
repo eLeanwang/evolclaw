@@ -1,7 +1,11 @@
 import type { CommandIntent, CommandScope, CommandSource } from '../../types.js';
+import { parseConfigSelector, type ConfigSelectorParseResult } from '../../cli/config-selector.js';
+import { normalizeCliArgv } from '../../cli/cli-argv.js';
+import { resolveConfigOperation, type ResolvedConfigOp } from '../../config/resolved-config-op.js';
+export { normalizeCliArgv } from '../../cli/cli-argv.js';
 
 export type CliIntentParseResult =
-  | { kind: 'recognized'; intent: CommandIntent }
+  | { kind: 'recognized'; intent: CommandIntent; resolvedConfigOp?: ResolvedConfigOp }
   | { kind: 'raw'; intent: CommandIntent; reason: string }
   | { kind: 'invalid'; code: string; reason: string };
 
@@ -13,12 +17,12 @@ export interface DefaultRelationContext {
 const MODEL_RELATION_DEFAULT_SUBCOMMANDS = new Set(['list', 'current', 'info', 'use', 'effort', 'reset']);
 
 export function withDefaultRelationContext(
-  argv: string[],
+  inputArgv: string[],
   defaults: DefaultRelationContext
 ): string[] {
-  if (!argv || argv[0] !== 'model' || !MODEL_RELATION_DEFAULT_SUBCOMMANDS.has(argv[1] || '')) {
-    return argv;
-  }
+  const argv = normalizeCliArgv(inputArgv);
+  const isModelCommand = argv[0] === 'model' && MODEL_RELATION_DEFAULT_SUBCOMMANDS.has(argv[1] || '');
+  if (!isModelCommand) return argv;
   if (!defaults.self || !defaults.peer) return argv;
 
   const parsed = parseArgs(argv.slice(2));
@@ -30,15 +34,18 @@ export function withDefaultRelationContext(
 }
 
 export function parseCliIntent(
-  argv: string[],
-  source: CommandSource = 'menu.cli'
+  inputArgv: string[],
+  source: CommandSource = 'menu.cli',
+  options: { defaultRelation?: DefaultRelationContext } = {},
 ): CliIntentParseResult {
-  if (!argv || argv.length === 0) {
+  if (!inputArgv || inputArgv.length === 0) {
     return { kind: 'invalid', code: 'MISSING_ARGV', reason: 'Missing command argv' };
   }
+  const argv = normalizeCliArgv(inputArgv);
 
   const cmd = argv[0];
   if (cmd === 'model') return parseModelCommand(argv, source);
+  if (cmd === 'config') return parseConfigCommand(argv, source, options.defaultRelation);
   if (cmd === 'stats') return parseStatsCommand(argv, source);
   if (cmd === 'agent') return parseAgentCommand(argv, source);
   if (cmd === 'aid') return parseAidCommand(argv, source);
@@ -103,6 +110,197 @@ function parseModelCommand(argv: string[], source: CommandSource): CliIntentPars
     default:
       return raw(source, argv, `Unknown model subcommand: ${subcmd}`);
   }
+}
+
+const CONFIG_SELECTOR_OPTIONS: OptionDefinitions = {
+  '--self': 'value',
+  '--peer': 'value',
+  '--default': 'boolean',
+  '--process': 'boolean',
+  '--evolclaw': 'boolean',
+  '--format': 'value',
+};
+
+const CONFIG_SELECTOR_READ_SUBCOMMANDS = new Set(['show', 'effective', 'fields', 'validate']);
+const CONFIG_GLOBAL_READ_SUBCOMMANDS = new Set(['list', 'history', 'current']);
+
+function parseConfigCommand(
+  argv: string[],
+  source: CommandSource,
+  defaultRelation?: DefaultRelationContext,
+): CliIntentParseResult {
+  const subcmd = argv[1];
+  if (!subcmd) return raw(source, argv, 'Missing config subcommand');
+
+  if (subcmd === 'get' || subcmd === 'set' || subcmd === 'unset') {
+    const resolved = resolveConfigOperation(argv, {
+      ...(defaultRelation ? { defaultRelation: { self: defaultRelation.self, peerKey: defaultRelation.peer } } : {}),
+    });
+    if (!resolved.ok) return { kind: 'invalid', code: resolved.code, reason: resolved.reason };
+    return recognizedConfig(resolved.op, source);
+  }
+
+  if (CONFIG_SELECTOR_READ_SUBCOMMANDS.has(subcmd) || subcmd === 'init') {
+    const options = parseCanonicalOptions(argv.slice(2), CONFIG_SELECTOR_OPTIONS);
+    if (!options.ok) return options.result;
+    const selector = parseConfigSelector(argv.slice(2), { requireSelector: subcmd === 'init' });
+    if (!selector.ok) return selectorInvalid(selector);
+    const scope: CommandScope = selector.scope === 'defaults' ? 'process' : selector.scope;
+    const args = configSelectorArgs(selector, options.args);
+    return recognized(subcmd === 'init' ? 'config.write' : 'config.read', scope, source, args, argv, true);
+  }
+
+  if (CONFIG_GLOBAL_READ_SUBCOMMANDS.has(subcmd)) {
+    const options = parseCanonicalOptions(argv.slice(2), { '--format': 'value' });
+    if (!options.ok) return options.result;
+    return recognized('config.read', 'process', source, options.args, argv, true);
+  }
+
+  if (subcmd === 'boots') {
+    const options = parseCanonicalOptions(argv.slice(2), { '-n': 'value', '--num': 'value', '--format': 'value' });
+    if (!options.ok) return options.result;
+    return recognized('config.read', 'process', source, options.args, argv, true);
+  }
+
+  if (subcmd === 'diff') {
+    const business = parseLeadingPositionals(argv.slice(2), 2, 'config diff');
+    if (!business.ok) return business.result;
+    const options = parseCanonicalOptions(business.rest, { '--format': 'value' });
+    if (!options.ok) return options.result;
+    return recognized('config.read', 'process', source, {
+      fromVersion: business.values[0],
+      toVersion: business.values[1],
+      ...options.args,
+    }, argv, true);
+  }
+
+  if (subcmd === 'snapshot') {
+    const options = parseCanonicalOptions(argv.slice(2), { '--full': 'boolean', '--desc': 'value', '--format': 'value' });
+    if (!options.ok) return options.result;
+    return recognized('config.write', 'process', source, options.args, argv, true);
+  }
+
+  if (subcmd === 'prune') {
+    const options = parseCanonicalOptions(argv.slice(2), {
+      '--keep-full': 'value',
+      '--keep-delta': 'value',
+      '--yes': 'boolean',
+      '--format': 'value',
+    });
+    if (!options.ok) return options.result;
+    return recognized('config.write', 'process', source, options.args, argv, true);
+  }
+
+  if (subcmd === 'restore') {
+    const business = parseLeadingPositionals(argv.slice(2), 1, 'config restore');
+    if (!business.ok) return business.result;
+    const options = parseCanonicalOptions(business.rest, { '--format': 'value' });
+    if (!options.ok) return options.result;
+    return recognized('config.write', 'process', source, {
+      version: business.values[0],
+      ...options.args,
+    }, argv, true);
+  }
+
+  return raw(source, argv, `Unknown config subcommand: ${subcmd}`);
+}
+
+type OptionDefinitions = Record<string, 'boolean' | 'value'>;
+
+type CanonicalOptionsResult =
+  | { ok: true; args: Record<string, unknown> }
+  | InvalidConfigParseResult;
+
+function parseCanonicalOptions(argv: string[], definitions: OptionDefinitions): CanonicalOptionsResult {
+  const args: Record<string, unknown> = {};
+  const seen = new Set<string>();
+  for (let i = 0; i < argv.length; i++) {
+    const option = argv[i];
+    const kind = definitions[option];
+    if (!kind) {
+      return invalidConfigGrammar(`Unexpected config argument: ${option}`);
+    }
+    if (seen.has(option) || ((option === '--process' || option === '--evolclaw') && (seen.has('--process') || seen.has('--evolclaw')))) {
+      return invalidConfigGrammar(`Duplicate config option: ${option}`, 'SELECTOR_CONFLICT');
+    }
+    seen.add(option);
+    const key = option.replace(/^-+/, '').replace(/-([a-z])/g, (_, char: string) => char.toUpperCase());
+    if (kind === 'boolean') {
+      args[key] = true;
+      continue;
+    }
+    const value = argv[i + 1];
+    if (!value || value.startsWith('-')) {
+      return invalidConfigGrammar(`${option} requires a value`, 'MISSING_FLAG_VALUE');
+    }
+    args[key] = value;
+    i += 1;
+  }
+  return { ok: true, args };
+}
+
+type LeadingPositionalsResult =
+  | { ok: true; values: string[]; rest: string[] }
+  | InvalidConfigParseResult;
+
+type InvalidConfigParseResult = { ok: false; result: CliIntentParseResult };
+
+function parseLeadingPositionals(argv: string[], count: number, command: string): LeadingPositionalsResult {
+  const values = argv.slice(0, count);
+  if (values.length !== count || values.some(value => !value || value.startsWith('-'))) {
+    return invalidConfigGrammar(`${command} requires exactly ${count} positional argument${count === 1 ? '' : 's'}`, 'MISSING_ARG');
+  }
+  const rest = argv.slice(count);
+  if (rest[0] && !rest[0].startsWith('-')) {
+    return invalidConfigGrammar(`Unexpected positional argument for ${command}: ${rest[0]}`);
+  }
+  return { ok: true, values, rest };
+}
+
+function invalidConfigGrammar(reason: string, code = 'INVALID_CONFIG_COMMAND'): InvalidConfigParseResult {
+  return { ok: false, result: { kind: 'invalid', code, reason } };
+}
+
+function selectorInvalid(selector: Extract<ConfigSelectorParseResult, { ok: false }>): CliIntentParseResult {
+  return { kind: 'invalid', code: selector.code, reason: selector.reason };
+}
+
+function configSelectorArgs(
+  selector: Extract<ConfigSelectorParseResult, { ok: true }>,
+  parsedArgs: Record<string, unknown>,
+): Record<string, unknown> {
+  return {
+    ...parsedArgs,
+    configScope: selector.scope,
+    ...(selector.self ? { self: selector.self } : {}),
+    ...(selector.peerKey ? { peer: selector.peerKey, peerKey: selector.peerKey } : {}),
+    ...(selector.scope === 'process' ? { process: true } : {}),
+    ...(selector.scope === 'defaults' ? { default: true } : {}),
+  };
+}
+
+function recognizedConfig(op: ResolvedConfigOp, source: CommandSource): CliIntentParseResult {
+  const dangerous = op.operationId === 'config.read' || op.operationId === 'config.write';
+  return {
+    kind: 'recognized',
+    resolvedConfigOp: op,
+    intent: {
+      operation: op.operationId,
+      scope: op.commandScope,
+      source,
+      args: {
+        field: op.field,
+        ...(op.subcommand === 'set' ? { value: op.value } : {}),
+        configScope: op.configScope,
+        ...(op.self ? { self: op.self } : {}),
+        ...(op.peerKey ? { peer: op.peerKey, peerKey: op.peerKey } : {}),
+        ...(op.configScope === 'process' ? { process: true } : {}),
+        ...(op.configScope === 'defaults' ? { default: true } : {}),
+      },
+      rawArgv: op.canonicalArgv,
+      ...(dangerous ? { dangerous: true } : {}),
+    },
+  };
 }
 
 function parseStatsCommand(argv: string[], source: CommandSource): CliIntentParseResult {

@@ -55,6 +55,33 @@ export function getBuiltinUserRoleDefinitions(): Record<string, RoleDefinition> 
         'role.revoke': { allow: false },
         'category:read': { allow: true },
         'category:write-own': { allow: true },
+        'config.get': {
+          allow: true,
+          scopes: ['relation'],
+          constraints: {
+            currentRelationOnly: true,
+            targetCurrentAgentOnly: true,
+            configFieldPolicy: 'behavior-read',
+          },
+        },
+        'config.set': {
+          allow: true,
+          scopes: ['relation'],
+          constraints: {
+            currentRelationOnly: true,
+            targetCurrentAgentOnly: true,
+            configFieldPolicy: 'role-overridable-write',
+          },
+        },
+        'config.unset': {
+          allow: true,
+          scopes: ['relation'],
+          constraints: {
+            currentRelationOnly: true,
+            targetCurrentAgentOnly: true,
+            configFieldPolicy: 'role-overridable-write',
+          },
+        },
         'model.*': { allow: true, scopes: ['relation'], constraints: { ownPeerOnly: true, targetCurrentAgentOnly: true } },
         'permission.current': { allow: true, scopes: ['relation'], constraints: { ownPeerOnly: true, targetCurrentAgentOnly: true } },
         'permission.answer': { allow: true, scopes: ['relation'], constraints: { ownPeerOnly: true, targetCurrentAgentOnly: true } },
@@ -101,6 +128,15 @@ export function getBuiltinUserRoleDefinitions(): Record<string, RoleDefinition> 
       commandPermissions: {
         'role.assign': { allow: false },
         'role.revoke': { allow: false },
+        'config.get': {
+          allow: true,
+          scopes: ['relation'],
+          constraints: {
+            currentRelationOnly: true,
+            targetCurrentAgentOnly: true,
+            configFieldPolicy: 'behavior-read',
+          },
+        },
         'model.list': { allow: true, scopes: ['relation'], constraints: { ownPeerOnly: true, targetCurrentAgentOnly: true } },
         'model.current': { allow: true, scopes: ['relation'], constraints: { ownPeerOnly: true, targetCurrentAgentOnly: true } },
         'model.use': {

@@ -3,9 +3,8 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 
-vi.mock('../../src/ipc.js', () => ({
-  ipcQuery: vi.fn().mockRejectedValue(new Error('daemon offline')),
-}));
+const ipcMock = vi.hoisted(() => ({ query: vi.fn() }));
+vi.mock('../../src/ipc.js', () => ({ ipcQuery: ipcMock.query }));
 
 import { cmdConfig } from '../../src/cli/config.js';
 import { _resetRoot } from '../../src/paths.js';
@@ -47,7 +46,10 @@ async function runJson(args: string[]): Promise<any> {
 
 describe('integration: ec config CLI', () => {
   let root: string;
-  beforeEach(() => { root = setupHome(); });
+  beforeEach(() => {
+    root = setupHome();
+    ipcMock.query.mockReset().mockRejectedValue(new Error('daemon offline'));
+  });
   afterEach(() => cleanup(root));
 
   it('set 字段到 config.json；get 读回', async () => {
@@ -86,20 +88,54 @@ describe('integration: ec config CLI', () => {
     expect(r.code).toBe('DEFAULT_BEHAVIOR_REJECT');
   });
 
-  it('agent 托管环境写 H 字段 → 拒绝', async () => {
+  it('agent 托管环境字段操作通过 daemon IPC 执行', async () => {
     process.env.EVOLCLAW_SESSION_ID = 'sess-1';
-    const r = await runJson(['set', 'observable', 'true', '--self', AID]);
-    expect(r.ok).toBe(false);
-    expect(r.code).toBe('FORBIDDEN_H_WRITE');
+    ipcMock.query.mockResolvedValue({
+      ok: true,
+      result: {
+        ok: true,
+        subcommand: 'set',
+        field: 'show_activities',
+        value: 'none',
+        scope: 'relation',
+        permission: 'HA',
+        file: 'relation-config',
+      },
+    });
+
+    const r = await runJson([
+      'set', 'show_activities', 'none', '--self', AID, '--peer', 'aun#user1',
+    ]);
+    expect(r).toMatchObject({ ok: true, field: 'show_activities', scope: 'relation' });
+    expect(ipcMock.query).toHaveBeenCalledWith(expect.any(String), {
+      type: 'config.op',
+      argv: ['config', 'set', 'show_activities', 'none', '--self', AID, '--peer', 'aun#user1', '--format', 'json'],
+      sessionId: 'sess-1',
+    }, 10_000);
+
+    const agentConfig = JSON.parse(fs.readFileSync(path.join(root, 'agents', AID, 'config.json'), 'utf-8'));
+    expect(agentConfig.show_activities).toBeUndefined();
   });
 
-  it('agent 托管环境写 H 字段 → 拒绝（包括行为字段）', async () => {
+  it('agent 托管环境 daemon 不可用时 fail-closed', async () => {
     process.env.EVOLCLAW_SESSION_ID = 'sess-1';
-    // v3 当前实现：所有字段都在 agent-config（H），托管环境统一禁止写入
-    // TODO: 未来应迁移到字段级权限控制
     const r = await runJson(['set', 'show_activities', 'none', '--self', AID]);
     expect(r.ok).toBe(false);
-    expect(r.code).toBe('FORBIDDEN_H_WRITE');
+    expect(r.code).toBe('DAEMON_UNAVAILABLE');
+  });
+
+  it('agent 托管环境透传 daemon 的授权拒绝', async () => {
+    process.env.EVOLCLAW_SESSION_ID = 'sess-1';
+    ipcMock.query.mockResolvedValue({ ok: false, code: 'NO_PERMISSION', error: 'visitor is read-only' });
+    const r = await runJson(['set', 'show_activities', 'none']);
+    expect(r).toMatchObject({ ok: false, code: 'NO_PERMISSION', error: 'visitor is read-only' });
+  });
+
+  it('agent 托管环境拒绝配置管理子命令且不调用 IPC', async () => {
+    process.env.EVOLCLAW_SESSION_ID = 'sess-1';
+    const r = await runJson(['history']);
+    expect(r).toMatchObject({ ok: false, code: 'FORBIDDEN_AGENT_CONFIG' });
+    expect(ipcMock.query).not.toHaveBeenCalled();
   });
 
   it('--process 读写 evolclaw.json（链外单 H）', async () => {

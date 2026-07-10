@@ -9,6 +9,7 @@ import { fileCache } from './core/daemon-file-cache.js';
 import type { FileCacheStats } from './core/daemon-file-cache.js';
 import type { BindBeginRequest, BindBeginResponse, BindErrorResponse, BindStatusResponse } from './utils/aid-bind.js';
 import type { HandoffMetadata, TaskRuntimeContext } from './core/message/handoff.js';
+import type { ConfigExecutionResult } from './config/config-operation-service.js';
 
 const isWindows = process.platform === 'win32';
 const isNamedPipe = (p: string) => isWindows && p.startsWith('\\\\.\\pipe\\');
@@ -67,6 +68,19 @@ export interface IpcCtlResponse {
   error?: string;
 }
 
+export interface IpcConfigOpRequest {
+  type: 'config.op';
+  argv: string[];
+  sessionId: string;
+}
+
+export interface IpcConfigOpResponse {
+  ok: boolean;
+  result?: ConfigExecutionResult;
+  error?: string;
+  code?: string;
+}
+
 export interface IpcAunMsgSendResponse {
   ok: boolean;
   message_id?: string;
@@ -89,6 +103,7 @@ export interface IpcAunMsgSendLogRequest {
 
 type StatusProvider = () => IpcStatusResponse;
 type CommandExecutor = (cmd: string, sessionId: string) => Promise<IpcCtlResponse>;
+type ConfigOperationExecutor = (argv: string[], sessionId: string) => Promise<IpcConfigOpResponse>;
 type AunAidProvider = () => AidConnectionState[];
 type AunAidStatsProvider = () => AidStatsSnapshot[];
 type AunAidStatsRecorder = (params: { aid: string; toPeer: string; text: string; encrypt?: boolean; chatmode?: string }) => void;
@@ -133,6 +148,7 @@ export class IpcServer {
   private taskRuntimeContextProvider?: TaskRuntimeContextProvider;
   private aunMsgSender?: AunMsgSender;
   private bindExecutor?: BindExecutor;
+  private configOperationExecutor?: ConfigOperationExecutor;
 
   // CPU 占用追踪：IPC handler 是一次性同步调用，无法在响应里做 200ms 异步采样，
   // 故用后台 1s interval 累积 process.cpuUsage() 增量，handler 直接读最近值。
@@ -159,6 +175,10 @@ export class IpcServer {
   /** Inject menu.* executor (ECWeb Control proxies menu requests through this) */
   setMenuExecutor(executor: MenuExecutor): void {
     this.menuExecutor = executor;
+  }
+
+  setConfigOperationExecutor(executor: ConfigOperationExecutor): void {
+    this.configOperationExecutor = executor;
   }
 
   /** Inject AUN AID state aggregator for aun-aids IPC handler */
@@ -426,6 +446,14 @@ export class IpcServer {
         const { cmd: slashCmd, sessionId } = cmd as unknown as IpcCtlRequest;
         if (!slashCmd || !sessionId) return { ok: false, error: 'missing cmd or sessionId' };
         return await this.commandExecutor(slashCmd, sessionId);
+      }
+      case 'config.op': {
+        if (!this.configOperationExecutor) return { ok: false, code: 'NOT_CONFIGURED', error: 'config.op not configured' };
+        const { argv, sessionId } = cmd as unknown as IpcConfigOpRequest;
+        if (!Array.isArray(argv) || argv.some(value => typeof value !== 'string') || !sessionId) {
+          return { ok: false, code: 'INVALID_REQUEST', error: 'missing argv or sessionId' };
+        }
+        return await this.configOperationExecutor(argv, sessionId);
       }
       case 'trigger.list':
       case 'trigger.show':

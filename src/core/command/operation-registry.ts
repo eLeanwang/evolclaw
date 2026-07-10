@@ -30,7 +30,7 @@ const OPERATIONS: OperationMeta[] = [
     dangerous: false,
     defaultScopes: ['relation', 'role', 'agent'],
     description: '查询指定模型的详细信息',
-    sources: ['menu.cli'],
+    sources: ['menu.cli', 'agent-tool'],
   },
   {
     id: 'model.check',
@@ -38,7 +38,7 @@ const OPERATIONS: OperationMeta[] = [
     dangerous: false,
     defaultScopes: ['agent'],
     description: '检查模型可用性（可能触发网关探测）',
-    sources: ['menu.cli'],
+    sources: ['menu.cli', 'agent-tool'],
   },
   {
     id: 'model.use',
@@ -62,7 +62,7 @@ const OPERATIONS: OperationMeta[] = [
     dangerous: false,
     defaultScopes: ['relation', 'role', 'agent'],
     description: '重置模型配置到角色默认值',
-    sources: ['menu.cli'],
+    sources: ['menu.cli', 'agent-tool'],
   },
 
   // ── Session Operations ──
@@ -462,20 +462,44 @@ const OPERATIONS: OperationMeta[] = [
     sources: ['menu', 'control'],
   },
   {
+    id: 'config.get',
+    category: 'read',
+    dangerous: false,
+    defaultScopes: ['relation', 'agent'],
+    description: 'Read a relation or agent config field',
+    sources: ['menu.cli', 'agent-tool'],
+  },
+  {
+    id: 'config.set',
+    category: 'write-own',
+    dangerous: false,
+    defaultScopes: ['relation', 'agent'],
+    description: 'Write a relation or agent config field',
+    sources: ['menu.cli', 'agent-tool'],
+  },
+  {
+    id: 'config.unset',
+    category: 'write-own',
+    dangerous: false,
+    defaultScopes: ['relation', 'agent'],
+    description: 'Remove a relation or agent config field',
+    sources: ['menu.cli', 'agent-tool'],
+  },
+  {
     id: 'config.read',
     category: 'read',
     dangerous: true,
-    defaultScopes: ['process'],
+    defaultScopes: ['relation', 'agent', 'process'],
     description: '查询配置',
-    sources: ['menu', 'control'],
+    sources: ['menu', 'menu.cli', 'control'],
   },
   {
     id: 'config.write',
     category: 'process',
     dangerous: true,
-    defaultScopes: ['process'],
+    defaultScopes: ['relation', 'agent', 'process'],
     description: '修改配置',
-    sources: ['menu', 'control'],
+    sources: ['menu', 'menu.cli', 'control'],
   },
 
   // ── EC Command Operations ──
