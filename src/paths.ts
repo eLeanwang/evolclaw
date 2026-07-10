@@ -93,6 +93,9 @@ export function agentDir(aid: string): string {
 export function agentConfig(aid: string): string {
   return path.join(agentDir(aid), 'config.json');
 }
+export function agentContactConfig(aid: string): string {
+  return path.join(agentDir(aid), 'contact.json');
+}
 export function agentPersonalDir(aid: string): string {
   return path.join(agentDir(aid), 'personal');
 }

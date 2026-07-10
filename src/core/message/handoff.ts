@@ -26,6 +26,7 @@ export interface HandoffMetadata {
   origin?: HandoffOrigin;
   consumed_by_msg_id?: string;
   match?: HandoffMatchKind;
+  request_content?: string;
 }
 
 export interface ConsumedHandoffContext {
@@ -64,6 +65,13 @@ export interface TaskRuntimeContextIpcResponse {
   error?: string;
 }
 
+export interface HandoffReturnIpcResponse {
+  ok: boolean;
+  result_message_id?: string;
+  origin_session_id?: string;
+  error?: string;
+}
+
 export interface ConsumableHandoffMatch {
   entry: MessageLogEntry;
   match: HandoffMatchKind;
@@ -86,7 +94,7 @@ export function isHandoffOutbound(entry: MessageLogEntry, kinds?: HandoffKind[])
   const handoff = entryHandoff(entry);
   if (
     entry.dir !== 'out' ||
-    entry.source !== 'msg' ||
+    (entry.source !== 'msg' && entry.source !== 'handoff') ||
     isHandoffStateMessage(entry) ||
     !isHandoffKind(handoff?.kind)
   ) {
@@ -159,7 +167,9 @@ export function toConsumedHandoffContext(
     origin: handoff.origin ?? {},
     sourceMessage: {
       msgId: match.entry.msgId,
-      content: match.entry.content ?? '',
+      content: handoff.kind === 'response_to_origin' && typeof handoff.request_content === 'string'
+        ? handoff.request_content
+        : match.entry.content ?? '',
       from: match.entry.from,
       to: match.entry.to,
       ts: match.entry.ts,
@@ -224,24 +234,14 @@ export function resolveMsgSendHandoff(args: {
 }): HandoffMetadata | undefined {
   const runtime = args.runtime;
   if (!runtime) return undefined;
-  if (runtime.channel !== 'aun' || runtime.chatType !== 'private') return undefined;
   if (!runtime.selfAid || runtime.selfAid !== args.from) return undefined;
   if (!runtime.messageId) return undefined;
 
-  const consumed = runtime.consumedHandoff;
-  if (
-    consumed?.kind === 'request_to_target' &&
-    consumed.origin?.peerId &&
-    consumed.origin.peerId === args.to
-  ) {
-    return {
-      kind: 'response_to_origin',
-      origin: originFromRuntime(runtime),
-    };
-  }
-
   if (!runtime.peerId) return undefined;
   if (args.to === runtime.peerId) return undefined;
+  if (runtime.consumedHandoff?.kind === 'request_to_target' && args.to === runtime.consumedHandoff.origin.peerId) {
+    return undefined;
+  }
 
   return {
     kind: 'request_to_target',
@@ -318,4 +318,10 @@ export function formatEcMsgSendCommand(fromAid: string | undefined, toAid: strin
   const body = JSON.stringify(textPlaceholder);
   const thread = normalizedThreadId(threadId);
   return `ec msg send ${from} ${to} ${body}${thread ? ` --thread ${JSON.stringify(thread)}` : ''}`;
+}
+
+export function buildHandoffReturnMessageId(consumed: ConsumedHandoffContext): string {
+  const sourceId = consumed.sourceMessage.msgId || 'unknown';
+  const consumedBy = consumed.consumedByMessageId || 'unknown';
+  return `handoff-return:${sourceId}:${consumedBy}`;
 }

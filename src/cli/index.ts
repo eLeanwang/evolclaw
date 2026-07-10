@@ -185,6 +185,11 @@ export async function main(args: string[]) {
       await cmdMsg(args.slice(1));
       break;
     }
+    case 'handoff': {
+      const { cmdHandoff } = await import('./handoff-command.js');
+      await cmdHandoff(args.slice(1));
+      break;
+    }
     case 'group': {
       const { suppressSdkLogs } = await import('../aun/aid/index.js');
       suppressSdkLogs();
@@ -231,7 +236,7 @@ export async function main(args: string[]) {
       break;
     }
     default:
-      console.log(`Usage: evolclaw {init|start|stop|restart|status|logs|watch|ctl|queue|trigger|diagnose|net|mv}
+      console.log(`Usage: evolclaw {init|start|stop|restart|status|logs|watch|ctl|queue|trigger|handoff|diagnose|net|mv}
 
 Commands:
   init          初始化 evolclaw home (${resolvePaths().defaultsConfig})
@@ -258,6 +263,8 @@ Commands:
   ctl           运行时自管理（模型切换、推理强度、压缩上下文等）
                   evolclaw ctl help 查看完整命令列表
   trigger       daemon 级触发器管理（list/show/create/update/run）
+  handoff       跨会话任务回流
+                  handoff return <content>  将当前子会话结果交回来源会话处理
   queue          消息队列查询与操作
                   queue --agent <aid>          查看 agent 的所有队列
                   queue --agent <aid> --clear  清空待处理消息

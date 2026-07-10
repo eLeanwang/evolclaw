@@ -8,8 +8,13 @@ import type { AidStatsSnapshot, StatsSnapshot } from './utils/stats.js';
 import { fileCache } from './core/daemon-file-cache.js';
 import type { FileCacheStats } from './core/daemon-file-cache.js';
 import type { BindBeginRequest, BindBeginResponse, BindErrorResponse, BindStatusResponse } from './utils/aid-bind.js';
-import type { HandoffMetadata, TaskRuntimeContext } from './core/message/handoff.js';
+import type { HandoffMetadata, HandoffReturnIpcResponse, TaskRuntimeContext } from './core/message/handoff.js';
 import type { ConfigExecutionResult } from './config/config-operation-service.js';
+import type {
+  DingtalkContactBindRegisterRequest,
+  DingtalkContactBindRegisterResponse,
+  DingtalkContactBindErrorResponse,
+} from './channels/dingtalk.js';
 
 const isWindows = process.platform === 'win32';
 const isNamedPipe = (p: string) => isWindows && p.startsWith('\\\\.\\pipe\\');
@@ -98,7 +103,7 @@ export interface IpcAunMsgSendResponse {
 
 export interface IpcAunMsgSendLogRequest {
   content: string;
-  source?: 'daemon' | 'cli' | 'msg' | 'ctl' | 'owner-inject';
+  source?: 'daemon' | 'cli' | 'msg' | 'ctl' | 'owner-inject' | 'handoff';
   handoff?: HandoffMetadata;
 }
 
@@ -128,10 +133,15 @@ type QueueActionExecutor = (params: { agent: string; action: 'clear' | 'cancel' 
 type TriggerExecutor = (cmd: { type: string; [key: string]: any }) => Promise<any>;
 type TaskRuntimeContextProvider = (params: { sessionId: string }) => TaskRuntimeContext | null | undefined;
 type AunMsgSender = (params: { aid: string; to: string; payload: Record<string, unknown>; encrypt?: boolean; log?: IpcAunMsgSendLogRequest }) => Promise<IpcAunMsgSendResponse>;
+type HandoffReturnExecutor = (params: { sessionId?: string; content: string }) => Promise<HandoffReturnIpcResponse>;
 type BindExecutor = {
   begin: (cmd: BindBeginRequest) => BindBeginResponse | BindErrorResponse;
   status: (taskId: string) => BindStatusResponse | BindErrorResponse;
   cancel: (taskId: string) => BindStatusResponse | BindErrorResponse;
+};
+type DingtalkContactBindExecutor = {
+  register: (cmd: DingtalkContactBindRegisterRequest) =>
+    DingtalkContactBindRegisterResponse | DingtalkContactBindErrorResponse;
 };
 
 export class IpcServer {
@@ -148,8 +158,10 @@ export class IpcServer {
   private triggerExecutor?: TriggerExecutor;
   private taskRuntimeContextProvider?: TaskRuntimeContextProvider;
   private aunMsgSender?: AunMsgSender;
+  private handoffReturnExecutor?: HandoffReturnExecutor;
   private bindExecutor?: BindExecutor;
   private configOperationExecutor?: ConfigOperationExecutor;
+  private dingtalkContactBindExecutor?: DingtalkContactBindExecutor;
 
   // CPU 占用追踪：IPC handler 是一次性同步调用，无法在响应里做 200ms 异步采样，
   // 故用后台 1s interval 累积 process.cpuUsage() 增量，handler 直接读最近值。
@@ -232,9 +244,19 @@ export class IpcServer {
     this.aunMsgSender = sender;
   }
 
+  /** Inject internal handoff result return executor for `ec handoff return`. */
+  setHandoffReturnExecutor(executor: HandoffReturnExecutor): void {
+    this.handoffReturnExecutor = executor;
+  }
+
   /** Inject bootstrap QR bind executor for init/init aun. */
   setBindExecutor(executor: BindExecutor): void {
     this.bindExecutor = executor;
+  }
+
+  /** Inject DingTalk contact binding-code executor. */
+  setDingtalkContactBindExecutor(executor: DingtalkContactBindExecutor): void {
+    this.dingtalkContactBindExecutor = executor;
   }
 
   /** Start the 1s background CPU sampling loop (for monitor-snapshot). Call after start(). */
@@ -359,6 +381,16 @@ export class IpcServer {
         if (!this.bindExecutor) return { ok: false, error: 'bind executor not configured' };
         return this.bindExecutor.cancel(cmd.taskId);
       }
+      case 'dingtalk.contact-bind.register': {
+        if (!this.dingtalkContactBindExecutor) {
+          return { ok: false, error: 'dingtalk contact bind executor not configured' };
+        }
+        return this.dingtalkContactBindExecutor.register({
+          selfAid: cmd.selfAid,
+          channelName: cmd.channelName,
+          primaryId: cmd.primaryId,
+        });
+      }
       case 'aun-aids': {
         const aids = this.aunAidProvider ? this.aunAidProvider() : [];
         return { ok: true, aids };
@@ -437,6 +469,18 @@ export class IpcServer {
             payload: cmd.payload as Record<string, unknown>,
             encrypt: cmd.encrypt === true,
             log,
+          });
+        } catch (e: any) {
+          return { ok: false, error: e?.message || String(e) };
+        }
+      }
+      case 'handoff-return': {
+        if (!this.handoffReturnExecutor) return { ok: false, error: 'handoff return not configured' };
+        if (!cmd.content || typeof cmd.content !== 'string') return { ok: false, error: 'missing content' };
+        try {
+          return await this.handoffReturnExecutor({
+            sessionId: typeof cmd.sessionId === 'string' ? cmd.sessionId : undefined,
+            content: cmd.content,
           });
         } catch (e: any) {
           return { ok: false, error: e?.message || String(e) };

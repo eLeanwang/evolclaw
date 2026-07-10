@@ -129,7 +129,7 @@ export interface AunDaemonMsgSendArgs {
   encrypt?: boolean;
   log?: {
     content: string;
-    source?: 'daemon' | 'cli' | 'msg' | 'ctl' | 'owner-inject';
+    source?: 'daemon' | 'cli' | 'msg' | 'ctl' | 'owner-inject' | 'handoff';
     handoff?: {
       kind?: 'request_to_target' | 'response_to_origin';
       event?: 'consumed';
@@ -145,6 +145,7 @@ export interface AunDaemonMsgSendArgs {
       };
       consumed_by_msg_id?: string;
       match?: 'ref' | 'inferred';
+      request_content?: string;
     };
   };
 }

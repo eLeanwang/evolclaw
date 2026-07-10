@@ -111,10 +111,14 @@ export function generateInitSuccessMessage(
    启动服务: evolclaw start`;
   }
 
+  const ownerHint = channelType === 'aun'
+    ? `   配置 owner: evolclaw init ${channelType}`
+    : '   配置 owner: 在 agent config.json 的 owners 中写入 AID；非 AUN 渠道身份写入 contact.json';
+
   // 无 owner 的渠道
   return `\n💡 提示：${channelName}渠道已配置
    启动服务: evolclaw start
-   配置 owner: evolclaw init ${channelType}`;
+${ownerHint}`;
 }
 
 /**

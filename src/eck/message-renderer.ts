@@ -113,8 +113,6 @@ function renderOneItem(
     handoffOriginRole: item.handoff?.origin?.role,
     handoffPreviousMessageId: item.handoff?.previousMessageId ?? undefined,
     handoffPreviousContent: item.handoff ? handoffPreviousSentinel : undefined,
-    handoffReplyCommand: item.handoff?.replyCommand,
-    handoffContinueCommand: item.handoff?.continueCommand,
     // content held as a per-call random sentinel, swapped back post-render.
     // Using a UUID means no real message can collide with it.
     content: contentSentinel,

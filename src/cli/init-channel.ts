@@ -10,7 +10,7 @@ import readline from 'readline';
 import crypto from 'crypto';
 import { selectInstance, type InstanceChoice } from './init.js';
 import { loadAllAgents, loadAgent, saveAgent, loadEvolclawConfig, saveEvolclawConfig } from '../config-store.js';
-import { agentChannelUpsert } from './agent.js';
+import { agentChannelUpsert, type AgentChannelUpsertResult } from './agent.js';
 import type { ChannelInstance, AgentConfig } from '../types.js';
 import { isValidAid } from '../aun/aid/index.js';
 import { resolvePaths } from '../paths.js';
@@ -18,13 +18,14 @@ import { ipcQuery } from '../ipc.js';
 import { cmdStart } from './daemon-commands.js';
 import * as platform from '../utils/cross-platform.js';
 import { cleanupInstances } from '../utils/instance-registry.js';
-import { addStaticAgentOwner } from '../config/peer-role-resolver.js';
+import { bindContactAlias } from '../config/contact-book.js';
 
 function ask(rl: readline.Interface, question: string): Promise<string> {
   return new Promise(resolve => rl.question(question, resolve));
 }
 
 type BindFlowResult = { boundAid: string; boundName?: string } | null;
+type ContactBindingChoice = { primaryId: string; label: string };
 
 export async function runDaemonOwnerQrBindFlow(ownerMode: 'append' | 'replace' = 'append'): Promise<BindFlowResult> {
   const p = resolvePaths();
@@ -475,6 +476,7 @@ export async function cmdInitFeishu(): Promise<void> {
   let aid: string | null = null;
   let agentConfig: AgentConfig | null = null;
   let choice: InstanceChoice | null = null;
+  let contactBinding: ContactBindingChoice | null = null;
 
   try {
     aid = await pickAgentForChannel(rl);
@@ -488,6 +490,8 @@ export async function cmdInitFeishu(): Promise<void> {
     const existing = (agentConfig.channels || []).filter(c => c.type === 'feishu');
     choice = await pickInstanceWithinAgent(rl, 'feishu', existing);
     if (choice === null) return;
+    contactBinding = await pickOwnerAdminForChannelBinding(rl, agentConfig, 'feishu');
+    if (!contactBinding) return;
   } finally {
     rl.close();
   }
@@ -520,18 +524,16 @@ export async function cmdInitFeishu(): Promise<void> {
     appSecret: result.appSecret,
   } as ChannelInstance;
 
-  await commitChannel(aid!, channel, choice.action);
-  if (result.openId) {
-    addStaticAgentOwner(aid!, result.openId);
-  }
+  if (!await commitChannel(aid!, channel, choice.action)) return;
 
   console.log(`  App ID: ${result.appId}`);
-  if (result.openId) console.log(`  Owner: ${result.openId}`);
+  if (result.openId) console.log(`  Login Open ID: ${result.openId}`);
   if (result.domain !== 'unknown') console.log(`  Domain: ${result.domain}`);
+  bindQrActorToContact(aid!, contactBinding, 'feishu', result.openId);
 
   // Show unified init success message
   const { generateInitSuccessMessage } = await import('../utils/welcome.js');
-  console.log(generateInitSuccessMessage('feishu', !!result.openId));
+  console.log(generateInitSuccessMessage('feishu', false));
 }
 
 // ==================== WeChat ====================
@@ -585,7 +587,7 @@ async function pollQRStatus(baseUrl: string, qrcode: string): Promise<WechatQRSt
   }
 }
 
-export async function runWechatQrFlow(): Promise<{ baseUrl: string; token: string } | null> {
+export async function runWechatQrFlow(): Promise<{ baseUrl: string; token: string; userId?: string } | null> {
   const qrResp = await fetchQRCode(DEFAULT_BASE_URL);
 
   try {
@@ -635,6 +637,7 @@ export async function runWechatQrFlow(): Promise<{ baseUrl: string; token: strin
         return {
           baseUrl: status.baseurl || DEFAULT_BASE_URL,
           token: status.bot_token,
+          userId: status.ilink_user_id,
         };
     }
 
@@ -650,6 +653,7 @@ export async function cmdInitWechat(): Promise<void> {
   let aid: string | null = null;
   let agentConfig: AgentConfig | null = null;
   let choice: InstanceChoice | null = null;
+  let contactBinding: ContactBindingChoice | null = null;
 
   try {
     aid = await pickAgentForChannel(rl);
@@ -663,6 +667,8 @@ export async function cmdInitWechat(): Promise<void> {
     const existing = (agentConfig.channels || []).filter(c => c.type === 'wechat');
     choice = await pickInstanceWithinAgent(rl, 'wechat', existing);
     if (choice === null) return;
+    contactBinding = await pickOwnerAdminForChannelBinding(rl, agentConfig, 'wechat');
+    if (!contactBinding) return;
   } finally {
     rl.close();
   }
@@ -682,7 +688,8 @@ export async function cmdInitWechat(): Promise<void> {
     token: result.token,
   } as ChannelInstance;
 
-  await commitChannel(aid!, channel, choice.action);
+  if (!await commitChannel(aid!, channel, choice.action)) return;
+  bindQrActorToContact(aid!, contactBinding, 'wechat', result.userId);
 
   // Show unified init success message
   const { generateInitSuccessMessage } = await import('../utils/welcome.js');
@@ -950,6 +957,7 @@ export async function cmdInitDingtalk(): Promise<void> {
   let aid: string | null = null;
   let agentConfig: AgentConfig | null = null;
   let choice: InstanceChoice | null = null;
+  let contactBinding: ContactBindingChoice | null = null;
 
   try {
     aid = await pickAgentForChannel(rl);
@@ -963,6 +971,8 @@ export async function cmdInitDingtalk(): Promise<void> {
     const existing = (agentConfig.channels || []).filter(c => c.type === 'dingtalk');
     choice = await pickInstanceWithinAgent(rl, 'dingtalk', existing);
     if (choice === null) return;
+    contactBinding = await pickOwnerAdminForChannelBinding(rl, agentConfig, 'dingtalk');
+    if (!contactBinding) return;
   } finally {
     rl.close();
   }
@@ -1010,8 +1020,15 @@ export async function cmdInitDingtalk(): Promise<void> {
     clientSecret: result.clientSecret,
   } as ChannelInstance;
 
-  await commitChannel(aid!, channel, choice.action);
+  const commitResult = await commitChannel(aid!, channel, choice.action);
+  if (!commitResult) return;
   console.log(`  Client ID: ${result.clientId}`);
+
+  if (commitResult.reloaded) {
+    await registerDingtalkContactBind(aid!, commitResult.channelKey, contactBinding);
+  } else {
+    console.log('  ⚠ 服务未运行或热重载失败，无法注册钉钉绑定码；请启动服务后重新执行 ec init dingtalk 并再次扫码绑定。');
+  }
 
   const { generateInitSuccessMessage } = await import('../utils/welcome.js');
   console.log(generateInitSuccessMessage('dingtalk', false));
@@ -1036,6 +1053,7 @@ const enum QQBotBindStatus {
 interface QQBotBindResult {
   appId: string;
   clientSecret: string;
+  userOpenId?: string;
 }
 
 function qqbotApiHeaders(): Record<string, string> {
@@ -1153,7 +1171,11 @@ async function runQQBotBindFlow(): Promise<QQBotBindResult | typeof SKIP | typeo
         // Step 4: Decrypt the secret
         const clientSecret = decryptSecret(encryptedSecret, keyBuffer);
 
-        return { appId: botAppId, clientSecret };
+        return {
+          appId: botAppId,
+          clientSecret,
+          userOpenId: pollData.data?.user_openid,
+        };
       }
 
       if (status === QQBotBindStatus.EXPIRED) {
@@ -1169,7 +1191,7 @@ async function runQQBotBindFlow(): Promise<QQBotBindResult | typeof SKIP | typeo
   }
 }
 
-export async function runQQBotBindFlowSimple(): Promise<{ appId: string; clientSecret: string } | null> {
+export async function runQQBotBindFlowSimple(): Promise<{ appId: string; clientSecret: string; userOpenId?: string } | null> {
   try {
     const result = await runQQBotBindFlow();
     if (result === QUIT || result === SKIP) return null;
@@ -1185,6 +1207,7 @@ export async function cmdInitQQBot(): Promise<void> {
   let aid: string | null = null;
   let agentConfig: AgentConfig | null = null;
   let choice: InstanceChoice | null = null;
+  let contactBinding: ContactBindingChoice | null = null;
 
   try {
     aid = await pickAgentForChannel(rl);
@@ -1198,6 +1221,8 @@ export async function cmdInitQQBot(): Promise<void> {
     const existing = (agentConfig.channels || []).filter(c => c.type === 'qqbot');
     choice = await pickInstanceWithinAgent(rl, 'qqbot', existing);
     if (choice === null) return;
+    contactBinding = await pickOwnerAdminForChannelBinding(rl, agentConfig, 'qqbot');
+    if (!contactBinding) return;
   } finally {
     rl.close();
   }
@@ -1245,8 +1270,9 @@ export async function cmdInitQQBot(): Promise<void> {
     clientSecret: result.clientSecret,
   } as ChannelInstance;
 
-  await commitChannel(aid!, channel, choice.action);
+  if (!await commitChannel(aid!, channel, choice.action)) return;
   console.log(`  App ID: ${result.appId}`);
+  bindQrActorToContact(aid!, contactBinding, 'qqbot', result.userOpenId);
 
   const { generateInitSuccessMessage } = await import('../utils/welcome.js');
   console.log(generateInitSuccessMessage('qqbot', false));
@@ -1357,6 +1383,116 @@ async function pickInstanceWithinAgent(
   return await selectInstance(rl, channelType, view);
 }
 
+async function pickOwnerAdminForChannelBinding(
+  rl: readline.Interface,
+  agentConfig: AgentConfig,
+  channelType: string,
+): Promise<ContactBindingChoice | null> {
+  const candidates = ownerAdminContactCandidates(agentConfig);
+  if (candidates.length === 0) {
+    console.log(`\n❌ agent ${agentConfig.aid} 尚未配置 owners/admins，无法为 ${channelType} 扫码账号建立身份映射。`);
+    console.log('   请先通过 AUN 绑定 agent owner，或在 agent config.json 中配置 owners/admins 后重试。');
+    return null;
+  }
+
+  console.log(`\n请选择 ${channelType} 扫码账号要绑定到的 owner/admin AID：`);
+  candidates.forEach((candidate, index) => {
+    console.log(`  ${index + 1}. ${candidate.primaryId} (${candidate.label})`);
+  });
+
+  const defaultIndex = candidates.length === 1 ? 1 : null;
+  const prompt = defaultIndex ? `请选择 [${defaultIndex}]: ` : '请选择: ';
+  while (true) {
+    const raw = (await ask(rl, prompt)).trim();
+    const selected = raw === '' && defaultIndex ? defaultIndex : Number(raw);
+    if (Number.isInteger(selected) && selected >= 1 && selected <= candidates.length) {
+      return candidates[selected - 1];
+    }
+    console.log(`无效选择，请输入 1-${candidates.length}`);
+  }
+}
+
+function ownerAdminContactCandidates(agentConfig: AgentConfig): ContactBindingChoice[] {
+  const labels = new Map<string, Set<string>>();
+  const add = (value: unknown, label: 'owner' | 'admin') => {
+    const aid = String(value || '').trim();
+    if (!isValidAid(aid)) return;
+    let set = labels.get(aid);
+    if (!set) {
+      set = new Set<string>();
+      labels.set(aid, set);
+    }
+    set.add(label);
+  };
+
+  for (const owner of agentConfig.owners ?? []) add(owner, 'owner');
+  for (const admin of agentConfig.admins ?? []) add(admin, 'admin');
+
+  return [...labels.entries()].map(([primaryId, roles]) => ({
+    primaryId,
+    label: [...roles].join('/'),
+  }));
+}
+
+function bindQrActorToContact(
+  aid: string,
+  binding: ContactBindingChoice | null,
+  channelType: string,
+  actorId: string | undefined,
+): void {
+  if (!binding) return;
+  const normalizedActor = firstNonEmpty(actorId);
+  if (!normalizedActor) {
+    console.log(`  ⚠ ${channelType} 扫码流程未返回可绑定的用户 ID，未写入 contact.json`);
+    return;
+  }
+  try {
+    const changed = bindContactAlias(aid, binding.primaryId, channelType, normalizedActor);
+    const action = changed ? '已写入' : '已存在';
+    console.log(`  ✓ 身份映射${action}: ${channelType}:${normalizedActor} -> ${binding.primaryId}`);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.log(`  ⚠ 身份映射写入失败: ${message}`);
+  }
+}
+
+async function registerDingtalkContactBind(
+  aid: string,
+  channelName: string,
+  binding: ContactBindingChoice | null,
+): Promise<void> {
+  if (!binding) return;
+  const result = await ipcQuery<any>(
+    resolvePaths().socket,
+    {
+      type: 'dingtalk.contact-bind.register',
+      selfAid: aid,
+      channelName,
+      primaryId: binding.primaryId,
+    },
+    3000,
+  );
+
+  if (!result?.ok) {
+    console.log(`  ⚠ 钉钉绑定码注册失败: ${result?.error || 'daemon 不可用'}`);
+    console.log('    请重新执行 ec init dingtalk 并再次扫码绑定。');
+    return;
+  }
+
+  const expiresAt = new Date(Number(result.expiresAt)).toLocaleString();
+  console.log(`  ✓ 钉钉身份绑定码: ${result.code}`);
+  console.log(`    请在 10 分钟内私聊钉钉机器人，直接发送这 6 位数字绑定码。有效期至: ${expiresAt}`);
+  console.log('    非纯数字或位数不对只会提醒格式，不计入错误次数；6 位数字输错最多 5 次。');
+}
+
+function firstNonEmpty(...values: Array<unknown>): string | undefined {
+  for (const value of values) {
+    const text = String(value ?? '').trim();
+    if (text) return text;
+  }
+  return undefined;
+}
+
 /**
  * Persist the new/overwritten channel and trigger hot-reload.
  */
@@ -1364,16 +1500,17 @@ async function commitChannel(
   aid: string,
   channel: ChannelInstance,
   mode: 'add' | 'overwrite',
-): Promise<void> {
+): Promise<AgentChannelUpsertResult | null> {
   const result = await agentChannelUpsert({ aid, channel, mode });
   if (result.ok !== true) {
     console.error(`❌ ${(result as any).error || 'channel upsert failed'}`);
-    return;
+    return null;
   }
   console.log(`\n✓ 已写入 agents/${aid}/config.json`);
   console.log(result.reloaded
     ? '  ✓ 已热重载'
     : '  ⚠ 服务未运行（或热重载失败），下次 evolclaw start 时生效');
+  return result;
 }
 
 // ==================== Unified Credential Collector Dispatcher ====================

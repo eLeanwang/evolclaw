@@ -98,7 +98,7 @@ export async function getGroupIndex(client: AUNClient, groupId: string): Promise
   ```
   `safeCheckGroupIndex` 内部调坏 wrapper，`method_not_declared` 被 catch 后返回 `null`；`check === null` **必然为真**，`shouldPull = true`，进 forcePull 分支 → 坏 wrapper。
 
-**结论**：`getRules` facade 路径在代码里存在，但在当前 wrapper 坏的情况下**任何入口都到不了**。这与初稿"主路径未受影响"的说法**相反**。以下 §3.2 六处调用点全部是活的失败路径。
+**结论**：`getRules` facade 路径在代码里存在，但在当前 wrapper 坏的情况下**从两个入口都到不了**。这与初稿"主路径未受影响"的说法**相反**。以下 §3.2 六处调用点中，#1–#5 都是活的失败路径；#6 是潜在 fallback，当前因 §3.1 的控制流不可达，只有把 wrapper 修好后 `safeCheckGroupIndex` 才可能返回非 null、`shouldPull=false`，从而让 #6 变成真正的兜底位置。
 
 ### 3.2 六个受影响的调用点
 
@@ -163,7 +163,7 @@ grep `/home/evolclaw/logs/evolclaw*.log`（覆盖 2026-07-09 至今）：
 - `[GroupVenueSync] checkGroupIndex ignored`：0 条（debug 级别，默认可能被过滤）
 - `[GroupVenueSync] getRules fallback to getGroupIndex`：0 条
 
-**日志频次低是符合预期的**——更可能是 AUN 群规则同步触发少、debug 日志默认过滤、或相关入口使用频率低；不是因为 `getRules` 主路径稳定工作。1 条真实生产命中已足够定性。
+**日志频次低不能证明 bug 影响小**——低频次可能来自：AUN 群规则同步在生产触发次数本来就少（群规则不常改）、`[GroupVenueSync]` debug 级日志默认过滤、或相关入口使用频率低。**不能**据此推断"getRules 主路径稳定工作"（§3.1 已证明该路径不可达）。1 条真实生产命中已足够定性：只要触发就必然失败。
 
 ---
 

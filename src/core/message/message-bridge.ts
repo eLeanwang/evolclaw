@@ -6,7 +6,8 @@ import { buildEnvelope } from './message-utils.js';
 import { chatDirPath } from '../session/session-fs-store.js';
 import { tryParseChannelKey } from '../channel-loader.js';
 import { resolvePaths } from '../../paths.js';
-import { addStaticAgentOwner, hasStaticAgentOwner, resolvePeerRoleDetail, type ResolvedPeerRole } from '../../config/peer-role-resolver.js';
+import { resolvePeerRoleDetail, type ResolvedPeerRole } from '../../config/peer-role-resolver.js';
+import { handlePendingDingtalkContactBindMessage } from '../../channels/dingtalk.js';
 import { authorizeAccess, buildAuthSubject } from '../auth/auth-gateway.js';
 import type { SessionManager } from '../session/session-manager.js';
 import type { IMessageProcessor } from './message-processor-interface.js';
@@ -117,13 +118,28 @@ export class MessageBridge {
         const actorId = msg.peerId;
         const conversationId = chatType === 'group' ? (msg.groupId || msg.channelId) : msg.peerId;
         const selfAid = msg.selfAID || owningAgent?.aid || parsedChannelKey?.selfAID;
-        if (selfAid && actorId) {
-          await this.autoBindOwner(selfAid, channelKey, actorId);
+        const resolvedChannelType = msg.channelType || parsedChannelKey?.type || effectiveChannelType;
+
+        const contactBind = handlePendingDingtalkContactBindMessage({
+          selfAid,
+          channelName: channelKey,
+          channelType: resolvedChannelType,
+          chatType,
+          actorId,
+          content,
+        });
+        if (contactBind.handled) {
+          logger.info(`[MessageBridge] DingTalk contact bind handled: channel=${channelKey} actor=${actorId ?? '<none>'} status=${contactBind.status}`);
+          if (contactBind.reply) {
+            await sendReply(msg.channelId, contactBind.reply, msg.replyContext);
+          }
+          return;
         }
+
         const roleDetail = this.resolveInboundRole({
           selfAid,
           channelKey,
-          channelType: msg.channelType || parsedChannelKey?.type || effectiveChannelType,
+          channelType: resolvedChannelType,
           chatType,
           actorId,
           conversationId,
@@ -133,7 +149,7 @@ export class MessageBridge {
           selfAid,
           actorId,
           channel: channelName,
-          channelType: msg.channelType || parsedChannelKey?.type || effectiveChannelType,
+          channelType: resolvedChannelType,
           channelId: msg.channelId,
           chatType,
           conversationId,
@@ -564,7 +580,6 @@ export class MessageBridge {
     }
   }
 
-  /** 首次交互自动绑定 owner —— 通过 channel-routed self-agent 完成 */
   private async sendAccessDenied(
     adapter: ChannelAdapter | undefined,
     channel: string,
@@ -590,13 +605,6 @@ export class MessageBridge {
       return;
     }
     await sendReply(msg.channelId, text, msg.replyContext);
-  }
-
-  private async autoBindOwner(selfAid: string, channelKey: string, userId: string): Promise<void> {
-    if (hasStaticAgentOwner(selfAid)) return;
-    addStaticAgentOwner(selfAid, userId);
-    logger.info(`[Owner] Auto-bound ${channelKey} owner: ${userId}`);
-    this.eventBus.publish({ type: 'channel:owner-bound', channel: channelKey, userId });
   }
 
   private resolveInboundRole(ctx: {

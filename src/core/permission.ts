@@ -281,6 +281,12 @@ export function parseEvolclawSendCommand(command: string): EvolclawSendCommand |
   };
 }
 
+export function isEvolclawHandoffReturnCommand(command: string): boolean {
+  const trimmed = command.trim();
+  if (!trimmed || SHELL_CONTROL_RE.test(trimmed)) return false;
+  return /^(?:ec|evolclaw)\s+handoff\s+return(?:\s|$)/.test(trimmed);
+}
+
 export function isEvolclawSendCommandForSession(
   toolName: string,
   input: Record<string, unknown>,

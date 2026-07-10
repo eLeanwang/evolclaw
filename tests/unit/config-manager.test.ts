@@ -48,6 +48,7 @@ describe('schema-registry (v3)', () => {
     expect(loadSchema('defaults').permission).toBe('H');
     expect(loadSchema('evolclaw').permission).toBe('H');
     expect(loadSchema('relation-config').permission).toBe('H');
+    expect(loadSchema('contact-book').permission).toBe('H');
   });
 
   it('字段带 x-merge 语义', () => {

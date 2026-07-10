@@ -9,7 +9,7 @@
 import type { Config, InteractionRequest } from '../types.js';
 import type { AgentPlugin, AgentInstance, AgentCallbacks } from '../core/baseagent-loader.js';
 import type { AgentEvent, AgentRunnerFull, ModelSwitcher, PermissionContext, PermissionModeInfo } from './runner-types.js';
-import { checkBlacklist, checkReadonly, checkDangerousCommand, parseEvolclawSendCommand, requestDangerousCommandPermission, type PermissionGateway } from '../core/permission.js';
+import { checkBlacklist, checkReadonly, checkDangerousCommand, isEvolclawHandoffReturnCommand, parseEvolclawSendCommand, requestDangerousCommandPermission, type PermissionGateway } from '../core/permission.js';
 import { CodexAppServerClient, type CodexServerNotification, type CodexServerRequest, type CodexThreadResponse, type CodexTurnItem } from './codex-app-server-client.js';
 import { resolveOpenaiConfig, type OpenaiResolved } from './baseagent.js';
 import { logger } from '../utils/logger.js';
@@ -1047,7 +1047,7 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
     const blacklist = await checkBlacklist(toolName, toolInput);
     if (blacklist.behavior === 'deny') return 'deny';
 
-    if (toolName === 'Bash' && this.isEvolclawCtlSendOrFile(blacklist.updatedInput)) {
+    if (toolName === 'Bash' && this.isEvolclawInternalCommand(blacklist.updatedInput)) {
       return 'allow';
     }
 
@@ -1096,6 +1096,11 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
   private isEvolclawCtlSendOrFile(input: Record<string, unknown>): boolean {
     const command = typeof input.command === 'string' ? input.command : '';
     return parseEvolclawSendCommand(command)?.scope === 'ctl';
+  }
+
+  private isEvolclawInternalCommand(input: Record<string, unknown>): boolean {
+    const command = typeof input.command === 'string' ? input.command : '';
+    return this.isEvolclawCtlSendOrFile(input) || isEvolclawHandoffReturnCommand(command);
   }
 
   private toAppServerApprovalResponse(method: string, decision: 'allow' | 'always' | 'deny'): Record<string, unknown> {

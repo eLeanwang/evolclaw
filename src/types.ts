@@ -284,8 +284,6 @@ export interface SubMessage {
     };
     previousContent?: string;
     previousMessageId?: string | null;
-    replyCommand?: string;
-    continueCommand?: string;
   };
 }
 
@@ -336,7 +334,7 @@ export interface Message {
   replyContext?: ReplyContext;       // Channel 预构建的回复上下文（渠道无关）
   dispatchMode?: string;            // 群聊分发模式，由渠道适配器从服务器信封解析后注入（mention|broadcast）
   timestamp?: number;
-  source?: 'user' | 'card-trigger' | 'trigger' | 'owner-inject';
+  source?: 'user' | 'card-trigger' | 'trigger' | 'owner-inject' | 'handoff';
   triggerMeta?: {
     triggerId: string;
     runId?: string;

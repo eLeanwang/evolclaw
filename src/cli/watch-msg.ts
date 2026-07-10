@@ -27,7 +27,7 @@ export interface MessageLogEntry {
   usage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number } | null;
   encrypt?: boolean;
   chatmode?: string;
-  source?: 'daemon' | 'cli' | 'msg' | 'ctl' | 'owner-inject';
+  source?: 'daemon' | 'cli' | 'msg' | 'ctl' | 'owner-inject' | 'handoff';
 }
 
 export interface PeerInfo {

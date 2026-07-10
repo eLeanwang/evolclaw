@@ -11,7 +11,7 @@ export interface MessageLogEntry {
   chatType: 'private' | 'group';
   groupId: string | null;
   msgId: string | null;
-  msgType: 'text' | 'image' | 'file' | 'command' | 'thought' | 'handoff_state';
+  msgType: 'text' | 'image' | 'file' | 'command' | 'thought' | 'handoff_state' | 'handoff_result';
   content: string;
   replyTo: string | null;
   agent: string | null;
@@ -25,7 +25,7 @@ export interface MessageLogEntry {
   chatmode?: string;
   peerName?: string;
   peerType?: string;
-  source?: 'daemon' | 'cli' | 'msg' | 'ctl' | 'owner-inject';
+  source?: 'daemon' | 'cli' | 'msg' | 'ctl' | 'owner-inject' | 'handoff';
   handoff?: {
     kind?: 'request_to_target' | 'response_to_origin';
     event?: 'consumed';
@@ -41,6 +41,7 @@ export interface MessageLogEntry {
     };
     consumed_by_msg_id?: string;
     match?: 'ref' | 'inferred';
+    request_content?: string;
   };
 }
 
@@ -153,8 +154,8 @@ export function buildOutboundEntry(opts: {
   encrypt?: boolean;
   chatmode?: string;
   peerType?: string;
-  msgType?: 'text' | 'image' | 'file' | 'thought' | 'handoff_state';
-  source?: 'daemon' | 'cli' | 'msg' | 'ctl' | 'owner-inject';
+  msgType?: 'text' | 'image' | 'file' | 'thought' | 'handoff_state' | 'handoff_result';
+  source?: 'daemon' | 'cli' | 'msg' | 'ctl' | 'owner-inject' | 'handoff';
   handoff?: MessageLogEntry['handoff'];
 }): MessageLogEntry {
   const ts = opts.timestamp || Date.now();

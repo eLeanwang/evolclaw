@@ -565,6 +565,12 @@ describe('/status Git visibility', () => {
     await expect(statusText(repo, 'guest')).resolves.not.toMatch(/^Git: /m);
   });
 
+  it('shows current session role identity', async () => {
+    const dir = makeTempDir('evolclaw-status-role-');
+
+    await expect(statusText(dir, 'member')).resolves.toMatch(/^角色身份: member$/m);
+  });
+
   it('hides Git info from owner/admin when project path is not a Git work tree', async () => {
     const dir = makeTempDir('evolclaw-status-plain-');
 

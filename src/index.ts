@@ -32,7 +32,7 @@ import { WechatChannelPlugin } from './channels/wechat.js';
 import { AUNChannel, AUNChannelPlugin } from './channels/aun.js';
 import { startServiceProxy } from './aun/service-proxy.js';
 import { BindService, type BindRequestPayload } from './utils/aid-bind.js';
-import { DingtalkChannelPlugin } from './channels/dingtalk.js';
+import { DingtalkChannelPlugin, registerPendingDingtalkContactBind } from './channels/dingtalk.js';
 import { QQBotChannelPlugin } from './channels/qqbot.js';
 import { WecomChannelPlugin } from './channels/wecom.js';
 import type { IMessageProcessor } from './core/message/message-processor-interface.js';
@@ -1806,6 +1806,9 @@ async function main() {
 
   // M3: direct call (not cast) — wire EvolAgentRegistry into IPC for evolagent.* handlers
   ipcServer.setAgentRegistry(agentRegistry);
+  ipcServer.setDingtalkContactBindExecutor({
+    register: (cmd) => registerPendingDingtalkContactBind(cmd),
+  });
   ipcServer.setMenuExecutor((payload) => cmdHandler.execMenuForEcweb(payload));
   ipcServer.setConfigOperationExecutor((argv, sessionId, delegationToken) =>
     cmdHandler.handleConfigOperation(argv, sessionId, delegationToken));
@@ -1886,6 +1889,7 @@ async function main() {
     );
   });
   ipcServer.setTaskRuntimeContextProvider(({ sessionId }) => responseEngine.getTaskRuntimeContext(sessionId));
+  ipcServer.setHandoffReturnExecutor((params) => responseEngine.returnHandoffResult(params));
   ipcServer.setAunMsgSender(async (params) => {
     const inst = channelInstances.find((candidate) => {
       if (candidate.channelType !== 'aun') return false;

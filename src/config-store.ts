@@ -280,6 +280,7 @@ export interface AgentLoadIssue {
 export interface AgentLoadResult {
   agents: AgentConfig[];
   skipped: AgentLoadIssue[];
+  invalidAgents?: Array<{ agent: AgentConfig; reason: string }>;
 }
 
 function isGeneratedControlAid(aid: string): boolean {
@@ -305,9 +306,9 @@ function isControlAidStateDir(dirName: string, controlAid?: string): boolean {
  *
  * 不抛错——返回 skipped 列表交调用方决定是否继续。
  */
-export function loadAllAgents(): AgentLoadResult {
+export function loadAllAgents(opts: { includeInvalid?: boolean } = {}): AgentLoadResult {
   const agentsDir = resolvePaths().agentsDir;
-  const result: AgentLoadResult = { agents: [], skipped: [] };
+  const result: AgentLoadResult = { agents: [], skipped: [], invalidAgents: opts.includeInvalid ? [] : undefined };
   const controlAid = loadEvolclawConfig().aid;
 
   if (!fs.existsSync(agentsDir)) return result;
@@ -344,13 +345,28 @@ export function loadAllAgents(): AgentLoadResult {
       const errs = validateAgentConfig(cfg);
       if (errs.length > 0) {
         const reason = errs.join('; ');
-        result.skipped.push({ dirName, reason });
+        if (opts.includeInvalid) {
+          result.invalidAgents!.push({ agent: cfg, reason });
+        } else {
+          result.skipped.push({ dirName, reason });
+        }
         logger.warn(`[config] skip agents/${dirName}: ${reason}`);
         continue;
       }
       result.agents.push(cfg);
     } catch (e) {
       const reason = e instanceof Error ? e.message : String(e);
+      if (opts.includeInvalid) {
+        result.invalidAgents!.push({
+          agent: {
+            $schema_version: CONFIG_SCHEMA_VERSION,
+            aid: dirName,
+            enabled: true,
+            channels: [],
+          },
+          reason,
+        });
+      }
       result.skipped.push({ dirName, reason });
       logger.warn(`[config] skip agents/${dirName}: ${reason}`);
     }
