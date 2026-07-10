@@ -106,11 +106,11 @@ src/response-system/
 
 ```
 docs/response-system/
-├── README.md                          # 响应模式体系总览
-├── ARCHITECTURE.md                    # 本文档（体系架构）
+├── ARCHITECTURE.md                    # 本文档（体系架构，入口）
 │
 ├── dual-session/                      # dual-session 详细设计
-│   ├── README.md
+│   ├── INDEX.md                      # 文档索引
+│   ├── README.md                     # 总览和快速开始
 │   ├── architecture.md               # dual-session 内部架构
 │   ├── data-structures.md
 │   ├── config/

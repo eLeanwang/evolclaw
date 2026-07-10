@@ -226,7 +226,7 @@ A: 延迟机制两者相同（都带随机、公式一致），区别仅：
 
 ## 九、相关资源
 
-- **[响应模式体系架构](../RESPONSE-MODE-SYSTEM-ARCHITECTURE.md)** - 整体响应模式设计
+- **[响应模式体系架构](../ARCHITECTURE.md)** - 整体响应模式设计（入口文档）
 - **[旧版文档](../dual-session-lite/)** - dual-session-lite 历史文档（参考）
 
 ---

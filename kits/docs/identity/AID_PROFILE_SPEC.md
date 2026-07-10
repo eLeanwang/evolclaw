@@ -7,8 +7,7 @@
 | 类型 | 位置 | 说明 |
 |------|------|------|
 | 自身人格 | `$SELF_DIR/persona.md` | 行为规范、人格定义 |
-| 关系档案 | `$RELATIONS_DIR/<peer-aid>.md` | 对端关系记录 |
-| 场所档案 | `$VENUES_DIR/<venue-id>.md` | 群/场所的策略与记忆 |
+| 关系档案 | `$RELATIONS_DIR/<peerKey>/profile.md` | 对端关系记录（含具体群实例） |
 
 ## persona.md 结构
 

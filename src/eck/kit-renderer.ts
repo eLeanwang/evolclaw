@@ -180,6 +180,12 @@ export function renderKitSections(ctx: KitRenderContext, manifestFile: string = 
     }
 
     diag.used = anyUsed;
+    // 本段触发总闸但一个文件都没用上 → 也算"未加载"
+    if (capReached && !anyUsed && evaluateWhen(section.when, ctx.vars)) {
+      diag.skippedByTotalCap = true;
+      diag.whenPassed = true;
+      skippedByCap.push(section.id);
+    }
     diagnostics.push(diag);
   }
 
@@ -233,9 +239,7 @@ const PARAM_DESCRIPTIONS: Record<string, string> = {
   sameNetwork: '对端与本端在同一网络内',
   sameEgressIp: '对端与本端共享同一出口 IP',
   groupId: '群组 ID（群聊时）',
-  venueKey: '本地环境目录键（channel#urlEncode(groupId)）',
-  venueDir: '当前群环境本地目录',
-  groupRulesPath: '群规则本地物化文件',
+  groupRulesPath: '群规则本地物化文件（relations/<peerKey>/rules.md）',
   groupRulesStatus: '群规则同步状态（synced/cached/missing/forbidden/invalid_metadata/file_mismatch/too_large/unreadable/error）',
   groupRulesError: '群规则同步错误',
   chatType: '聊天类型（private=私聊 / group=群聊 / null=本地开发）',

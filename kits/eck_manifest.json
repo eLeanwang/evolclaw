@@ -116,21 +116,21 @@
       "description": "渠道+场景文档（如 feishu-group）"
     },
     {
-      "id": "venue-group-profile",
+      "id": "relation-group-profile",
       "type": "file",
-      "file": "$VENUES_DIR/{{channel}}#{{groupId}}/profile.md",
+      "file": "$RELATIONS_DIR/{{peerKey}}/profile.md",
       "order": 43,
       "needsInjection": false,
       "when": { "and": [
         { "var": "groupId", "neq": null },
         { "var": "lifecycle", "neq": "bootstrapping" }
       ] },
-      "description": "具体群环境文档"
+      "description": "具体群关系文档"
     },
     {
-      "id": "venue-group-rules",
+      "id": "relation-group-rules",
       "type": "file",
-      "file": "$VENUES_DIR/{{venueKey}}/rules.md",
+      "file": "$RELATIONS_DIR/{{peerKey}}/rules.md",
       "order": 43.2,
       "needsInjection": false,
       "when": { "and": [
