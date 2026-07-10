@@ -44,6 +44,8 @@ tests/**
 !tests/setup.ts
 !tests/config-routing.test.ts
 !tests/session-chatmode.test.ts
+!tests/unit/
+!tests/unit/group-index-wrapper.test.ts
 !tests/core/
 !tests/core/command/
 !tests/core/command/*.test.ts
@@ -130,6 +132,8 @@ src/experimental/
 !/tests/setup.ts
 !/tests/config-routing.test.ts
 !/tests/session-chatmode.test.ts
+!/tests/unit/
+!/tests/unit/group-index-wrapper.test.ts
 !/tests/core/
 !/tests/core/command/
 !/tests/core/command/*.test.ts
