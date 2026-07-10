@@ -35,7 +35,7 @@ import {
   updateCapabilityPolicy,
 } from '../capability/capability-manager.js';
 import { normalizeCliArgv, parseCliIntent, rawCliIntent, withDefaultRelationContext } from './cli-intent-parser.js';
-import { authorizeCommand, authorizeResolvedConfigOperation } from './command-permission.js';
+import { authorizeCommand, authorizeResolvedConfigCommand } from './command-permission.js';
 import { auditCommandAuthorization, hashArgv } from './command-audit.js';
 import type { CommandAuthorizationContext, CommandIntent, CommandScope } from '../../types.js';
 import { chatmodeFieldForPeer } from '../message/peer-mode.js';
@@ -2706,8 +2706,8 @@ export async function execMenuAction(this: any,
     if (parseResult.kind === 'invalid') {
       return { error: parseResult.reason, code: parseResult.code };
     }
-    if (parseResult.kind === 'recognized' && parseResult.resolvedConfigOp) {
-      argv = parseResult.resolvedConfigOp.canonicalArgv;
+    if (parseResult.kind === 'recognized' && parseResult.resolvedConfigCommand) {
+      argv = parseResult.resolvedConfigCommand.canonicalArgv;
     }
 
     // 构造授权上下文
@@ -2727,8 +2727,8 @@ export async function execMenuAction(this: any,
     const isDaemonOwner = authCtx.isDaemonOwner;
 
     // 授权检查
-    const decision = parseResult.kind === 'recognized' && parseResult.resolvedConfigOp
-      ? authorizeResolvedConfigOperation(parseResult.resolvedConfigOp, {
+    const decision = parseResult.kind === 'recognized' && parseResult.resolvedConfigCommand
+      ? authorizeResolvedConfigCommand(parseResult.resolvedConfigCommand, {
           actorId: authCtx.actorId,
           channel: authCtx.channel,
           channelId: authCtx.channelId,

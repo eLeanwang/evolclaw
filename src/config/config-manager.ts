@@ -464,6 +464,15 @@ export function validateConfig(target: ConfigTarget, value: unknown): string[] {
   });
 }
 
+export function validateConfigFile(
+  target: ConfigTarget,
+  sel?: Selector,
+): { exists: boolean; errors: string[] } {
+  const value = atomicReadJson<unknown>(targetPath(target, sel));
+  if (value === null) return { exists: false, errors: [] };
+  return { exists: true, errors: validateConfig(target, value) };
+}
+
 function fileCacheAvailable(): boolean {
   try { return !!fileCache; } catch { return false; }
 }

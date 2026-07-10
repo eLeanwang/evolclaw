@@ -2,12 +2,37 @@ import {
   ConfigError,
   ConfigTarget,
   ensureFile,
+  listFields,
   read,
   readFieldWithSource,
+  resolveEffectiveWithSources,
+  validateConfigFile,
   write,
+  type FieldRoute,
   type Selector,
 } from './config-manager.js';
-import type { ResolvedConfigOp } from './resolved-config-op.js';
+import {
+  collectConfigFiles,
+  diffVersions,
+  listAllVersions,
+  prune,
+  readCurrent,
+  restore,
+  snapshot,
+  type CurrentPointer,
+  type PruneResult,
+  type SnapshotMeta,
+  type SnapshotResult,
+  type VersionDiff,
+} from './snapshot.js';
+import { readBootLog, type BootLogEntry } from './boot-log.js';
+import { resolvePaths } from '../paths.js';
+import type {
+  ResolvedConfigCommand,
+  ResolvedConfigOp,
+  ResolvedGlobalConfigCommand,
+  ResolvedScopedConfigCommand,
+} from './resolved-config-op.js';
 
 export type ConfigExecutionResult =
   | {
@@ -34,7 +59,31 @@ export type ConfigExecutionResult =
       removed: boolean;
       scope: ResolvedConfigOp['configScope'];
     }
+  | { ok: true; subcommand: 'show'; scope: string; configs: Record<string, unknown> }
+  | { ok: true; subcommand: 'effective'; scope: string; effective: Record<string, unknown> }
+  | { ok: true; subcommand: 'fields'; scope: string; fields: FieldRoute[] }
+  | { ok: true; subcommand: 'validate'; valid: boolean; results: Array<{ target: string; ok: boolean; error?: string }> }
+  | { ok: true; subcommand: 'init'; scope: string }
+  | { ok: true; subcommand: 'list'; files: string[] }
+  | ({ ok: true; subcommand: 'snapshot' } & SnapshotResult)
+  | ({ ok: true; subcommand: 'prune'; dryRun: boolean } & PruneResult)
+  | { ok: true; subcommand: 'history'; versions: SnapshotMeta[] }
+  | ({ ok: true; subcommand: 'diff' } & VersionDiff)
+  | { ok: true; subcommand: 'restore'; version: string; appliedFiles: number }
+  | { ok: true; subcommand: 'current'; current: CurrentPointer | null; lastBoot: BootLogEntry | null }
+  | { ok: true; subcommand: 'boots'; boots: BootLogEntry[] }
   | { ok: false; code: string; error: string };
+
+export function executeResolvedConfigCommand(command: ResolvedConfigCommand): ConfigExecutionResult {
+  try {
+    if (command.kind === 'field') return executeResolvedConfigOperation(command);
+    if (command.kind === 'scoped') return executeScoped(command);
+    return executeGlobal(command);
+  } catch (error) {
+    if (error instanceof ConfigError) return { ok: false, code: error.code, error: error.message };
+    return { ok: false, code: 'CONFIG_ERROR', error: error instanceof Error ? error.message : String(error) };
+  }
+}
 
 export function executeResolvedConfigOperation(op: ResolvedConfigOp): ConfigExecutionResult {
   try {
@@ -45,6 +94,111 @@ export function executeResolvedConfigOperation(op: ResolvedConfigOp): ConfigExec
     if (error instanceof ConfigError) return { ok: false, code: error.code, error: error.message };
     return { ok: false, code: 'CONFIG_ERROR', error: error instanceof Error ? error.message : String(error) };
   }
+}
+
+function executeScoped(command: ResolvedScopedConfigCommand): ConfigExecutionResult {
+  const selector = selectorFor(command);
+  const target = targetForScope(command.configScope);
+  if (command.subcommand === 'show') {
+    return {
+      ok: true,
+      subcommand: 'show',
+      scope: command.configScope,
+      configs: { [target]: read(target, selector) || {} },
+    };
+  }
+  if (command.subcommand === 'effective') {
+    if (command.configScope === 'process') {
+      return {
+        ok: true,
+        subcommand: 'effective',
+        scope: command.configScope,
+        effective: read<Record<string, unknown>>(ConfigTarget.Process, selector) || {},
+      };
+    }
+    const effective: Record<string, unknown> = {};
+    for (const [key, item] of Object.entries(resolveEffectiveWithSources(selector))) {
+      effective[key] = { value: item.value, source: item.source.target };
+    }
+    return { ok: true, subcommand: 'effective', scope: command.configScope, effective };
+  }
+  if (command.subcommand === 'fields') {
+    let fields = listFields(command.configScope);
+    if (command.field) {
+      fields = fields.filter(route => route.field === command.field || route.field.startsWith(`${command.field}.`));
+    }
+    return { ok: true, subcommand: 'fields', scope: command.configScope, fields };
+  }
+  if (command.subcommand === 'validate') {
+    const validation = validateConfigFile(target, selector);
+    const errors = validation.errors;
+    return {
+      ok: true,
+      subcommand: 'validate',
+      valid: errors.length === 0,
+      results: [{
+        target,
+        ok: errors.length === 0,
+        ...(!validation.exists ? { error: '(not found, skipped)' } : {}),
+        ...(errors.length > 0 ? { error: errors.join('; ') } : {}),
+      }],
+    };
+  }
+
+  ensureFile(target, selector);
+  return { ok: true, subcommand: 'init', scope: command.configScope };
+}
+
+function executeGlobal(command: ResolvedGlobalConfigCommand): ConfigExecutionResult {
+  if (command.subcommand === 'list') {
+    return { ok: true, subcommand: 'list', files: collectConfigFiles(resolvePaths().root) };
+  }
+  if (command.subcommand === 'snapshot') {
+    return {
+      ok: true,
+      subcommand: 'snapshot',
+      ...snapshot('manual', { full: command.full, description: command.description }),
+    };
+  }
+  if (command.subcommand === 'prune') {
+    const dryRun = !command.yes;
+    return {
+      ok: true,
+      subcommand: 'prune',
+      dryRun,
+      ...prune({ keepFull: command.keepFull, keepDelta: command.keepDelta, dryRun }),
+    };
+  }
+  if (command.subcommand === 'history') {
+    return { ok: true, subcommand: 'history', versions: listAllVersions() };
+  }
+  if (command.subcommand === 'diff') {
+    const [first, second] = command.versions!;
+    const result = diffVersions(first, second);
+    if ('error' in result) return { ok: false, code: 'VERSION_NOT_FOUND', error: result.error };
+    return { ok: true, subcommand: 'diff', ...result };
+  }
+  if (command.subcommand === 'restore') {
+    const result = restore(command.version!);
+    if (!result.ok || !result.version) {
+      return { ok: false, code: 'RESTORE_FAILED', error: result.error || 'restore failed' };
+    }
+    return {
+      ok: true,
+      subcommand: 'restore',
+      version: result.version,
+      appliedFiles: result.appliedFiles ?? 0,
+    };
+  }
+  if (command.subcommand === 'current') {
+    return {
+      ok: true,
+      subcommand: 'current',
+      current: readCurrent(),
+      lastBoot: readBootLog(1)[0] ?? null,
+    };
+  }
+  return { ok: true, subcommand: 'boots', boots: readBootLog(command.count ?? 10) };
 }
 
 function executeGet(op: ResolvedConfigOp): ConfigExecutionResult {
@@ -122,11 +276,18 @@ function executeUnset(op: ResolvedConfigOp): ConfigExecutionResult {
   return { ok: true, subcommand: 'unset', field: op.field, removed, scope: op.configScope };
 }
 
-function selectorFor(op: ResolvedConfigOp): Selector {
+function selectorFor(command: Pick<ResolvedConfigCommand, 'self' | 'peerKey'>): Selector {
   return {
-    ...(op.self ? { self: op.self } : {}),
-    ...(op.peerKey ? { peerKey: op.peerKey } : {}),
+    ...(command.self ? { self: command.self } : {}),
+    ...(command.peerKey ? { peerKey: command.peerKey } : {}),
   };
+}
+
+function targetForScope(scope: ResolvedScopedConfigCommand['configScope']): ConfigTarget {
+  if (scope === 'process') return ConfigTarget.Process;
+  if (scope === 'defaults') return ConfigTarget.Defaults;
+  if (scope === 'agent') return ConfigTarget.Agent;
+  return ConfigTarget.Relation;
 }
 
 function setNested(object: Record<string, any>, dotPath: string, value: unknown): void {

@@ -1329,6 +1329,8 @@ export interface CommandAuthorizationAuditEvent {
   role: string;
   isDaemonOwner?: boolean;
   fromControlChannel?: boolean;
+  taskId?: string;
+  messageId?: string;
 
   decision: 'allow' | 'deny';
   code?: string;

@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { normalizeCliArgv, parseCliIntent, rawCliIntent, withDefaultRelationContext } from '../../../src/core/command/cli-intent-parser.js';
 import { parseConfigSelector } from '../../../src/cli/config-selector.js';
-import { resolveConfigOperation } from '../../../src/config/resolved-config-op.js';
+import { resolveConfigCommand, resolveConfigOperation } from '../../../src/config/resolved-config-op.js';
 
 describe('CLI Intent Parser', () => {
   describe('Model commands', () => {
@@ -227,7 +227,50 @@ describe('CLI Intent Parser', () => {
         if (result.kind === 'recognized') {
           expect(result.intent.scope).toBe('process');
           expect(result.intent.dangerous).toBe(true);
+          expect(result.intent.operation).toBe(`config.${argv[1]}`);
         }
+      }
+    });
+
+    it('strictly resolves every management command with idempotent canonical argv', () => {
+      const commands = [
+        ['config', 'show', '--self', 'agent1'],
+        ['config', 'effective', '--self', 'agent1', '--peer', 'aun#user1'],
+        ['config', 'fields', 'chatmode'],
+        ['config', 'validate', '--self', 'agent1'],
+        ['config', 'init', '--self', 'agent1', '--peer', 'aun#user1'],
+        ['config', 'list'],
+        ['config', 'snapshot', '--full', '--desc', 'before-change'],
+        ['config', 'prune', '--keep-full', '2', '--keep-delta', '4', '--yes'],
+        ['config', 'history'],
+        ['config', 'diff', 'v1', 'v2'],
+        ['config', 'restore', 'v1'],
+        ['config', 'current'],
+        ['config', 'boots', '--num', '5'],
+      ];
+
+      for (const argv of commands) {
+        const first = resolveConfigCommand(argv);
+        expect(first.ok).toBe(true);
+        if (!first.ok) continue;
+        expect(first.command.operationId).toBe(`config.${argv[1]}`);
+        expect(first.command.dangerous).toBe(true);
+        expect(resolveConfigCommand(first.command.canonicalArgv)).toEqual(first);
+      }
+    });
+
+    it('rejects loose management-command grammar', () => {
+      for (const testCase of [
+        { argv: ['config', 'history', 'extra'], code: 'INVALID_CONFIG_COMMAND' },
+        { argv: ['config', 'diff', 'v1'], code: 'MISSING_ARG' },
+        { argv: ['config', 'restore', 'v1', 'v2'], code: 'INVALID_CONFIG_COMMAND' },
+        { argv: ['config', 'snapshot', '--full', '--full'], code: 'SELECTOR_CONFLICT' },
+        { argv: ['config', 'prune', '--keep-full', '-1'], code: 'MISSING_FLAG_VALUE' },
+        { argv: ['config', 'boots', '-n', '0'], code: 'INVALID_CONFIG_VALUE' },
+        { argv: ['config', 'show'], code: 'SELECTOR_REQUIRED' },
+      ]) {
+        const result = resolveConfigCommand(testCase.argv);
+        expect(result).toMatchObject({ ok: false, code: testCase.code });
       }
     });
 

@@ -1,13 +1,15 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import {
   authorizeCommand,
+  authorizeResolvedConfigCommand,
   authorizeResolvedConfigOperation,
   USER_PLANE_CAPABILITY_CEILING,
 } from '../../../src/core/command/command-permission.js';
 import { ConfigTarget, write } from '../../../src/config/config-manager.js';
 import { clearRolesCache } from '../../../src/config/roles.js';
-import { resolveConfigOperation } from '../../../src/config/resolved-config-op.js';
+import { resolveConfigCommand, resolveConfigOperation } from '../../../src/config/resolved-config-op.js';
 import type { CommandAuthorizationContext } from '../../../src/types.js';
+import { authorizeAccess, buildAuthSubject } from '../../../src/core/auth/auth-gateway.js';
 
 describe('Command Permission', () => {
   beforeEach(() => {
@@ -368,6 +370,16 @@ describe('Command Permission', () => {
       return authorizeResolvedConfigOperation(resolveOp(argv), context);
     }
 
+    function authorizeConfigCommand(
+      argv: string[],
+      context: Omit<CommandAuthorizationContext, 'intent'>,
+    ) {
+      const resolved = resolveConfigCommand(argv);
+      expect(resolved.ok).toBe(true);
+      if (!resolved.ok) throw new Error(`${resolved.code}: ${resolved.reason}`);
+      return authorizeResolvedConfigCommand(resolved.command, context);
+    }
+
     it('fails closed when a field config intent has no resolved operation', () => {
       const decision = authorizeCommand(memberContext);
       expect(decision.allow).toBe(false);
@@ -473,7 +485,7 @@ describe('Command Permission', () => {
         'config', 'get', 'owners', '--self', 'agent1', '--peer', 'aun#group1',
       ]);
       expect(decision.allow).toBe(false);
-      if (!decision.allow) expect(decision.code).toBe('NOT_ALLOWED');
+      if (!decision.allow) expect(decision.code).toBe('DANGEROUS_NOT_GRANTED');
     });
 
     it('requires explicit config grants instead of category or global wildcards', () => {
@@ -541,7 +553,7 @@ describe('Command Permission', () => {
       if (!denied.allow) expect(denied.code).toBe('ARGUMENT_MISMATCH');
     });
 
-    it('protects critical identity and role fields from admin writes', () => {
+    it('treats daemon owner as the global permission superset', () => {
       const adminDecision = authorizeCommand({
         intent: {
           operation: 'config.write',
@@ -555,8 +567,7 @@ describe('Command Permission', () => {
         isDaemonOwner: true,
         source: 'menu.cli',
       });
-      expect(adminDecision.allow).toBe(false);
-      if (!adminDecision.allow) expect(adminDecision.code).toBe('NOT_ALLOWED');
+      expect(adminDecision.allow).toBe(true);
 
       const ownerWithoutDaemon = authorizeCommand({
         intent: {
@@ -589,6 +600,130 @@ describe('Command Permission', () => {
       }).allow).toBe(true);
     });
 
+    it('allows an agent owner full current-agent and current-relation config access', () => {
+      const ownerContext: Omit<CommandAuthorizationContext, 'intent'> = {
+        actorId: 'owner1',
+        chatType: 'private',
+        selfAid: 'agent1',
+        peerKey: 'aun#owner1',
+        role: 'owner',
+        isDaemonOwner: false,
+        source: 'agent-tool',
+      };
+      for (const argv of [
+        ['config', 'get', 'owners', '--self', 'agent1'],
+        ['config', 'set', 'owners', 'next-owner', '--self', 'agent1'],
+        ['config', 'unset', 'owners', '--self', 'agent1'],
+        ['config', 'show', '--self', 'agent1'],
+        ['config', 'validate', '--self', 'agent1', '--peer', 'aun#owner1'],
+      ]) {
+        expect(authorizeConfigCommand(argv, ownerContext).allow).toBe(true);
+      }
+
+      for (const [argv, code] of [
+        [['config', 'get', 'debug', '--process'], 'SCOPE_MISMATCH'],
+        [['config', 'show', '--default'], 'SCOPE_MISMATCH'],
+        [['config', 'history'], 'NOT_ALLOWED'],
+      ] as Array<[string[], 'SCOPE_MISMATCH' | 'NOT_ALLOWED']>) {
+        const decision = authorizeConfigCommand(argv, ownerContext);
+        expect(decision.allow).toBe(false);
+        if (!decision.allow) expect(decision.code).toBe(code);
+      }
+    });
+
+    it('allows a daemon owner private global access but preserves the group mutation ceiling', () => {
+      const privateContext: Omit<CommandAuthorizationContext, 'intent'> = {
+        actorId: 'daemon-owner',
+        chatType: 'private',
+        selfAid: 'agent1',
+        peerKey: 'aun#daemon-owner',
+        role: 'owner',
+        isDaemonOwner: true,
+        source: 'agent-tool',
+      };
+      for (const argv of [
+        ['config', 'get', 'debug', '--process'],
+        ['config', 'show', '--default'],
+        ['config', 'history'],
+        ['config', 'restore', 'v1'],
+      ]) {
+        expect(authorizeConfigCommand(argv, privateContext).allow).toBe(true);
+      }
+
+      const groupContext = { ...privateContext, chatType: 'group' as const, peerKey: 'aun#group1' };
+      for (const argv of [
+        ['config', 'set', 'chatmode.group', 'interactive', '--self', 'agent1'],
+        ['config', 'set', 'debug', 'true', '--process'],
+        ['config', 'restore', 'v1'],
+      ]) {
+        const decision = authorizeConfigCommand(argv, groupContext);
+        expect(decision.allow).toBe(false);
+        if (!decision.allow) expect(decision.code).toBe('SCOPE_MISMATCH');
+      }
+      expect(authorizeConfigCommand([
+        'config', 'set', 'chatmode.group', 'interactive',
+        '--self', 'agent1', '--peer', 'aun#group1',
+      ], groupContext).allow).toBe(true);
+    });
+
+    it('requires exact dangerous grants, explicit scopes, and config key allowlists', () => {
+      write(ConfigTarget.Agent, {
+        aid: 'danger.agentid.pub',
+        channels: [],
+        roles: {
+          definitions: {
+            exact: {
+              description: 'Exact dangerous config role',
+              allowAccess: true,
+              permissions: {},
+              commandPermissions: {
+                'config.write': {
+                  allow: true,
+                  dangerous: true,
+                  scopes: ['relation'],
+                  constraints: { allowedConfigKeys: ['roles.assigned'] },
+                },
+                'config.show': { allow: true, dangerous: true, scopes: ['relation'] },
+              },
+            },
+            broad: {
+              description: 'Broad dangerous config role',
+              allowAccess: true,
+              permissions: {},
+              commandPermissions: {
+                'config.*': { allow: true, dangerous: true, scopes: ['relation'] },
+                'dangerous:*': { allow: true, dangerous: true, scopes: ['relation'] },
+              },
+            },
+          },
+        },
+      }, { self: 'danger.agentid.pub' });
+      const context: Omit<CommandAuthorizationContext, 'intent'> = {
+        actorId: 'member1',
+        chatType: 'private',
+        selfAid: 'danger.agentid.pub',
+        peerKey: 'aun#member1',
+        role: 'exact',
+        source: 'agent-tool',
+      };
+      expect(authorizeConfigCommand([
+        'config', 'set', 'roles.assigned', 'member',
+        '--self', 'danger.agentid.pub', '--peer', 'aun#member1',
+      ], context).allow).toBe(true);
+      expect(authorizeConfigCommand([
+        'config', 'show', '--self', 'danger.agentid.pub', '--peer', 'aun#member1',
+      ], context).allow).toBe(true);
+
+      for (const argv of [
+        ['config', 'set', 'roles.assigned', 'member', '--self', 'danger.agentid.pub', '--peer', 'aun#member1'],
+        ['config', 'show', '--self', 'danger.agentid.pub', '--peer', 'aun#member1'],
+      ]) {
+        const denied = authorizeConfigCommand(argv, { ...context, role: 'broad' });
+        expect(denied.allow).toBe(false);
+        if (!denied.allow) expect(denied.code).toBe('DANGEROUS_NOT_GRANTED');
+      }
+    });
+
     it('includes field config operations in the user-plane ceiling only', () => {
       expect(USER_PLANE_CAPABILITY_CEILING.allowOperations.has('config.get')).toBe(true);
       expect(USER_PLANE_CAPABILITY_CEILING.allowOperations.has('config.set')).toBe(true);
@@ -617,6 +752,28 @@ describe('Command Permission', () => {
       if (!decision.allow) {
         expect(decision.code).toBe('ROLE_ACCESS_DENIED');
       }
+    });
+
+    it('maps a daemon owner to an effective owner before inbound access checks', () => {
+      const subject = buildAuthSubject({
+        selfAid: 'agent1',
+        actorId: 'daemon-owner',
+        channel: 'aun',
+        channelType: 'aun',
+        channelId: 'daemon-owner',
+        chatType: 'private',
+        processOwners: ['daemon-owner'],
+        roleDetail: {
+          effectiveRole: null,
+          source: 'none',
+          isAuthenticated: true,
+          allowAccess: false,
+          roleExists: false,
+        },
+      });
+      expect(subject).toMatchObject({ role: 'owner', isDaemonOwner: true, allowAccess: true });
+      expect(subject.identity.role).toBe('owner');
+      expect(authorizeAccess(subject).allow).toBe(true);
     });
   });
 

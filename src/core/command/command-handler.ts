@@ -30,11 +30,14 @@ import {
 } from '../../trigger/types.js';
 import { tryParseChannelKey } from '../channel-loader.js';
 import { displaySessionTitle } from '../session/session-title.js';
-import { resolveConfigOperation } from '../../config/resolved-config-op.js';
-import { executeResolvedConfigOperation } from '../../config/config-operation-service.js';
-import { authorizeResolvedConfigOperation } from './command-permission.js';
+import { resolveConfigCommand } from '../../config/resolved-config-op.js';
+import { executeResolvedConfigCommand } from '../../config/config-operation-service.js';
+import { authorizeResolvedConfigCommand } from './command-permission.js';
 import { auditCommandAuthorization, hashArgv } from './command-audit.js';
 import type { IpcConfigOpResponse } from '../../ipc.js';
+import type { AgentDelegationRegistry } from '../auth/agent-delegation.js';
+import { buildAuthSubject } from '../auth/auth-gateway.js';
+import { parsePeerKey } from '../relation/peer-identity.js';
 import { isQuickCommand } from './slash-gate.js';
 import { handleSlashCommand } from './slash-handler.js';
 import { resolveChatModeForPeer } from '../message/peer-mode.js';
@@ -116,6 +119,7 @@ export class CommandHandler {
   private triggerSchedulerFallback?: TriggerRuntimeScheduler;
   private triggerSchedulerFallbackAid?: string;
   private daemonStatusProvider?: () => any;
+  private agentDelegationRegistry?: AgentDelegationRegistry;
 
   /**
    * Get the runner for a (channel, baseagent) pair.
@@ -1818,64 +1822,86 @@ export class CommandHandler {
    * Agent managed CLI config entrypoint. Identity and relation are resolved
    * from the daemon-owned session rather than caller-provided flags.
    */
-  async handleConfigOperation(argv: string[], sessionId: string): Promise<IpcConfigOpResponse> {
-    const session = await this.sessionManager.getSessionById(sessionId);
-    if (!session) return { ok: false, code: 'INVALID_SESSION', error: '无效的 session' };
+  async handleConfigOperation(
+    argv: string[],
+    sessionId: string,
+    delegationToken?: string,
+  ): Promise<IpcConfigOpResponse> {
+    if (!this.agentDelegationRegistry) {
+      return { ok: false, code: 'DELEGATION_REQUIRED', error: 'Task delegation is not configured' };
+    }
+    const delegation = this.agentDelegationRegistry.validate(delegationToken, sessionId);
+    if (!delegation.ok) return { ok: false, code: delegation.code, error: delegation.reason };
 
-    const actorId = session.metadata?.peerId;
-    const identity = this.resolveCtlIdentity(session, actorId);
-    const parsedChannel = tryParseChannelKey(session.channel);
-    const selfAid = session.selfAID || this.getOwningAgent(session.channel)?.aid || parsedChannel?.selfAID;
-    const channelType = session.channelType || parsedChannel?.type || this.resolveChannelType(session.channel);
-    const chatType: 'private' | 'group' = session.chatType === 'group' ? 'group' : 'private';
-    const peerId = chatType === 'group'
-      ? (session.metadata?.groupId || session.channelId)
-      : actorId;
-    const peerKey = channelType && peerId ? formatPeerKey(channelType, peerId) : undefined;
-    const resolved = resolveConfigOperation(argv, {
-      defaultRelation: { self: selfAid, peerKey },
+    const session = await this.sessionManager.getSessionById(sessionId);
+    if (!session) return { ok: false, code: 'INVALID_SESSION', error: 'Invalid session' };
+
+    const grant = delegation.grant;
+    let conversationId: string;
+    try {
+      conversationId = parsePeerKey(grant.peerKey).channelId;
+    } catch {
+      return { ok: false, code: 'INVALID_DELEGATION', error: 'Delegation contains an invalid relation key' };
+    }
+    const subject = buildAuthSubject({
+      selfAid: grant.selfAid,
+      actorId: grant.actorId,
+      channel: grant.channel,
+      channelType: grant.channelType,
+      channelId: conversationId,
+      chatType: grant.chatType,
+      conversationId,
+    });
+    const resolved = resolveConfigCommand(argv, {
+      defaultRelation: { self: grant.selfAid, peerKey: grant.peerKey },
     });
     if (!resolved.ok) return { ok: false, code: resolved.code, error: resolved.reason };
 
     const authContext = {
-      actorId,
-      channel: session.channel,
-      channelId: session.channelId,
-      chatType,
-      selfAid,
-      peerKey,
-      role: identity.role,
-      isDaemonOwner: false,
+      actorId: grant.actorId,
+      channel: grant.channel,
+      channelId: conversationId,
+      chatType: grant.chatType,
+      selfAid: grant.selfAid,
+      peerKey: grant.peerKey,
+      role: subject.role,
+      isDaemonOwner: subject.isDaemonOwner,
       fromControlChannel: false,
       source: 'agent-tool' as const,
     };
-    const decision = authorizeResolvedConfigOperation(resolved.op, authContext);
+    const decision = authorizeResolvedConfigCommand(resolved.command, authContext);
     await auditCommandAuthorization({
       ts: Date.now(),
       source: 'agent-tool',
-      operation: resolved.op.operationId,
-      scope: resolved.op.commandScope,
+      operation: resolved.command.operationId,
+      scope: resolved.command.commandScope,
       dangerous: decision.dangerous ?? false,
-      actorId,
-      selfAid,
-      peerKey,
-      channel: session.channel,
-      channelId: session.channelId,
-      role: identity.role,
-      isDaemonOwner: false,
+      actorId: grant.actorId,
+      selfAid: grant.selfAid,
+      peerKey: grant.peerKey,
+      channel: grant.channel,
+      channelId: conversationId,
+      role: subject.role,
+      isDaemonOwner: subject.isDaemonOwner,
       fromControlChannel: false,
       decision: decision.allow ? 'allow' : 'deny',
       code: decision.allow ? undefined : decision.code,
       reason: decision.allow ? undefined : decision.reason,
       matchedRule: decision.matchedRule,
-      argvHash: hashArgv(resolved.op.canonicalArgv),
+      argvHash: hashArgv(resolved.command.canonicalArgv),
+      taskId: grant.taskId,
+      messageId: grant.messageId,
     });
     if (!decision.allow) return { ok: false, code: decision.code, error: decision.reason };
 
-    const result = executeResolvedConfigOperation(resolved.op);
+    const result = executeResolvedConfigCommand(resolved.command);
     return result.ok
       ? { ok: true, result }
       : { ok: false, code: result.code, error: result.error };
+  }
+
+  setAgentDelegationRegistry(registry: AgentDelegationRegistry): void {
+    this.agentDelegationRegistry = registry;
   }
 
   /**

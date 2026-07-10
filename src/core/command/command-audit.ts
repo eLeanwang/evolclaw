@@ -8,6 +8,7 @@ export async function auditCommandAuthorization(
   const shouldAudit =
     event.decision === 'deny' ||
     (event.decision === 'allow' && event.dangerous) ||
+    (event.source === 'agent-tool' && event.operation.startsWith('config.')) ||
     event.operation.startsWith('role.') ||
     event.operation === 'cli.exec.raw';
 
@@ -32,6 +33,8 @@ function buildAuditRecord(event: CommandAuthorizationAuditEvent): AuditRecord {
     role: event.role,
     isDaemonOwner: event.isDaemonOwner,
     fromControlChannel: event.fromControlChannel,
+    taskId: event.taskId,
+    messageId: event.messageId,
     decision: event.decision,
     code: event.code,
     reason: event.reason,
@@ -51,6 +54,8 @@ function logAuditEvent(record: AuditRecord): void {
     `operation=${record.operation}`,
     `role=${record.role}`,
     `actor=${record.actorId || 'unknown'}`,
+    record.taskId ? `task=${record.taskId}` : null,
+    record.messageId ? `message=${record.messageId}` : null,
     record.code ? `code=${record.code}` : null,
     record.matchedRule ? `rule=${record.matchedRule}` : null,
     record.dangerous ? 'dangerous=true' : null,
@@ -82,6 +87,8 @@ interface AuditRecord {
   role: string;
   isDaemonOwner?: boolean;
   fromControlChannel?: boolean;
+  taskId?: string;
+  messageId?: string;
   decision: 'allow' | 'deny';
   code?: string;
   reason?: string;

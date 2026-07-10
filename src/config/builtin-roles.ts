@@ -188,7 +188,7 @@ export function getManagementFieldPermissions(role: ManagementRole): Record<stri
     },
     'baseagents.claude.effort': { default: 'medium', allowOverride: true },
     chatmode: { default: { private: 'interactive', group: 'proactive', nothuman: 'proactive' }, allowOverride: true },
-    dispatch: { default: 'mention', allowOverride: true, allowedValues: ['mention', 'broadcast'] },
+    dispatch: { default: 'mention', allowOverride: true, allowedValues: ['mention'] },
     show_activities: { default: 'all', allowOverride: true },
     flush_delay: { default: 3, allowOverride: true },
     debounce: { default: 0, allowOverride: true },

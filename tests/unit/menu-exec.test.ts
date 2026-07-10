@@ -7,6 +7,7 @@ import { EventBus } from '../../src/core/event-bus.js';
 import { _resetRoot, agentRelationConfig } from '../../src/paths.js';
 import { formatPeerKey } from '../../src/core/relation/peer-identity.js';
 import { _resetSchemaCache } from '../../src/config/schema-registry.js';
+import { AgentDelegationRegistry } from '../../src/core/auth/agent-delegation.js';
 
 const TEST_AID = 'test.agentid.pub';
 let tmpRoot: string;
@@ -243,10 +244,12 @@ function createHandler(opts: { sessionManager?: any; agentRegistry?: any; messag
   const mq = opts.messageQueue ?? { isProcessing: vi.fn().mockReturnValue(false), getQueueLength: vi.fn().mockReturnValue(0), getQueueLengthByAgent: vi.fn().mockReturnValue(0), getProcessingCountByAgent: vi.fn().mockReturnValue(0) } as any;
   const eb = new EventBus();
   const handler = new CommandHandler(sm, agentRunner, cache, eb);
+  const delegationRegistry = new AgentDelegationRegistry();
+  handler.setAgentDelegationRegistry(delegationRegistry);
   handler.registerChannel('aun', {}, 'aun');
   handler.setMessageQueue(mq);
   handler.setAgentRegistry(opts.agentRegistry ?? createMockAgentRegistry());
-  return { handler, sm, eb, agentRunner };
+  return { handler, sm, eb, agentRunner, delegationRegistry };
 }
 
 describe('execMenuQuery', () => {
@@ -1205,6 +1208,7 @@ describe('/cli config authorization', () => {
   }
 
   it('authorizes and executes the same normalized relation argv for member', async () => {
+    ownersMock.value = [];
     const sm = createMockSessionManager({
       resolveIdentity: vi.fn().mockReturnValue({ role: 'member', mode: 'interactive' }),
     });
@@ -1228,6 +1232,7 @@ describe('/cli config authorization', () => {
   });
 
   it('does not spawn for denied fields or sensitive reads', async () => {
+    ownersMock.value = [];
     const sm = createMockSessionManager({
       resolveIdentity: vi.fn().mockReturnValue({ role: 'member', mode: 'interactive' }),
     });
@@ -1246,11 +1251,12 @@ describe('/cli config authorization', () => {
       { argv: ['config', 'get', 'owners'] },
       'aun', 'chat1', 'user1',
     ) as any;
-    expect(deniedRead.code).toBe('NOT_ALLOWED');
+    expect(deniedRead.code).toBe('DANGEROUS_NOT_GRANTED');
     expect(passthrough).not.toHaveBeenCalled();
   });
 
   it('keeps visitor config access read-only before spawn', async () => {
+    ownersMock.value = [];
     const sm = createMockSessionManager({
       resolveIdentity: vi.fn().mockReturnValue({ role: 'visitor', mode: 'interactive' }),
     });
@@ -1275,6 +1281,7 @@ describe('/cli config authorization', () => {
   });
 
   it('uses the current group relation without comparing it to the actor id', async () => {
+    ownersMock.value = [];
     const groupSession = {
       id: 'group-session', channel: 'aun', channelId: 'group1',
       projectPath: '/tmp/test', agentId: 'claude', baseagent: 'claude',
@@ -1327,6 +1334,7 @@ describe('managed agent config IPC', () => {
   }
 
   function createManagedHandler(role: 'member' | 'visitor') {
+    ownersMock.value = [];
     const session = managedSession();
     writeRelationConfig('user1', { roles: { assigned: role } });
     const sm = createMockSessionManager({
@@ -1335,11 +1343,59 @@ describe('managed agent config IPC', () => {
     return createHandler({ sessionManager: sm }).handler;
   }
 
+  function issueManagedToken(
+    handler: CommandHandler,
+    session: ReturnType<typeof managedSession>,
+    actorId = session.metadata.peerId,
+  ): string {
+    const chatType = session.chatType === 'group' ? 'group' : 'private';
+    const relationId = chatType === 'group'
+      ? ((session.metadata as any).groupId || session.channelId)
+      : actorId;
+    return ((handler as any).agentDelegationRegistry as AgentDelegationRegistry).issue({
+      sessionId: session.id,
+      taskId: `task-${session.id}`,
+      messageId: `message-${session.id}`,
+      actorId,
+      channel: session.channel,
+      channelType: session.channelType,
+      chatType,
+      selfAid: session.selfAID,
+      peerKey: formatPeerKey(session.channelType, relationId),
+      issuedRole: 'member',
+    });
+  }
+
+  it('rejects missing, forged, revoked, and cross-session delegation tokens', async () => {
+    ownersMock.value = [];
+    const first = managedSession('user1');
+    const second = { ...managedSession('user2'), id: 'managed-session-2' };
+    const sm = createMockSessionManager({
+      getSessionById: vi.fn(async (id: string) => id === first.id ? first : id === second.id ? second : null),
+    });
+    const { handler, delegationRegistry } = createHandler({ sessionManager: sm });
+    const token = issueManagedToken(handler, first);
+
+    expect(await handler.handleConfigOperation(['config', 'get', 'chatmode.private'], first.id))
+      .toMatchObject({ ok: false, code: 'DELEGATION_REQUIRED' });
+    expect(await handler.handleConfigOperation(['config', 'get', 'chatmode.private'], first.id, 'forged'))
+      .toMatchObject({ ok: false, code: 'INVALID_DELEGATION' });
+    expect(await handler.handleConfigOperation(['config', 'get', 'chatmode.private'], second.id, token))
+      .toMatchObject({ ok: false, code: 'INVALID_DELEGATION' });
+
+    delegationRegistry.revokeTask(first.id, `task-${first.id}`);
+    expect(await handler.handleConfigOperation(['config', 'get', 'chatmode.private'], first.id, token))
+      .toMatchObject({ ok: false, code: 'INVALID_DELEGATION' });
+  });
+
   it('resolves the trusted session relation and writes only its relation config', async () => {
     const handler = createManagedHandler('member');
+    const session = managedSession();
+    const token = issueManagedToken(handler, session);
     const result = await handler.handleConfigOperation(
       ['config', 'set', 'chatmode.private', 'proactive'],
       'managed-session',
+      token,
     );
 
     expect(result).toMatchObject({
@@ -1357,9 +1413,11 @@ describe('managed agent config IPC', () => {
 
   it('keeps visitor field access read-only', async () => {
     const handler = createManagedHandler('visitor');
+    const token = issueManagedToken(handler, managedSession());
     const readResult = await handler.handleConfigOperation(
       ['config', 'get', 'chatmode.private'],
       'managed-session',
+      token,
     );
     expect(readResult).toMatchObject({
       ok: true,
@@ -1369,6 +1427,7 @@ describe('managed agent config IPC', () => {
     const writeResult = await handler.handleConfigOperation(
       ['config', 'set', 'chatmode.private', 'proactive'],
       'managed-session',
+      token,
     );
     expect(writeResult).toMatchObject({ ok: false, code: 'NO_PERMISSION' });
     expect(readTestAgentConfig().chatmode.private).toBe('interactive');
@@ -1376,11 +1435,13 @@ describe('managed agent config IPC', () => {
 
   it('denies sensitive fields and selectors outside the current relation', async () => {
     const handler = createManagedHandler('member');
+    const token = issueManagedToken(handler, managedSession());
     const sensitive = await handler.handleConfigOperation(
       ['config', 'get', 'owners'],
       'managed-session',
+      token,
     );
-    expect(sensitive).toMatchObject({ ok: false, code: 'NOT_ALLOWED' });
+    expect(sensitive).toMatchObject({ ok: false, code: 'DANGEROUS_NOT_GRANTED' });
 
     const otherRelation = await handler.handleConfigOperation(
       [
@@ -1388,6 +1449,7 @@ describe('managed agent config IPC', () => {
         '--self', TEST_AID, '--peer', formatPeerKey('aun', 'other-user'),
       ],
       'managed-session',
+      token,
     );
     expect(otherRelation).toMatchObject({ ok: false, code: 'ARGUMENT_MISMATCH' });
     expect(fs.existsSync(relationConfigPathByKey(formatPeerKey('aun', 'other-user')))).toBe(false);
@@ -1408,18 +1470,20 @@ describe('managed agent config IPC', () => {
       getSessionById: vi.fn().mockResolvedValue(groupSession),
     });
     const { handler } = createHandler({ sessionManager: sm });
+    const token = issueManagedToken(handler, groupSession as ReturnType<typeof managedSession>, ownerId);
 
     for (const argv of [
       ['config', 'set', 'chatmode.group', 'interactive', '--self', TEST_AID],
       ['config', 'set', 'debug', 'true', '--process'],
     ]) {
-      expect(await handler.handleConfigOperation(argv, groupSession.id))
+      expect(await handler.handleConfigOperation(argv, groupSession.id, token))
         .toMatchObject({ ok: false, code: 'SCOPE_MISMATCH' });
     }
 
     expect(await handler.handleConfigOperation(
       ['config', 'set', 'chatmode.group', 'interactive'],
       groupSession.id,
+      token,
     )).toMatchObject({
       ok: true,
       result: { subcommand: 'set', field: 'chatmode.group', scope: 'relation' },
@@ -1428,11 +1492,96 @@ describe('managed agent config IPC', () => {
     expect(readTestAgentConfig().chatmode.group).toBe('proactive');
   });
 
+  it('uses the current group sender instead of a stale owner stored on the session', async () => {
+    ownersMock.value = [];
+    const staleOwner = 'stale-owner.agentid.pub';
+    const currentVisitor = 'current-visitor.agentid.pub';
+    writeTestAgentConfig({ owners: [staleOwner] });
+    writeRelationConfig('group-stale-owner', {
+      roles: { members: { [currentVisitor]: 'visitor' } },
+    });
+    const session = {
+      ...managedSession(staleOwner),
+      id: 'group-stale-owner-session',
+      channelId: 'group-stale-owner',
+      chatType: 'group',
+      metadata: { peerId: staleOwner, groupId: 'group-stale-owner' },
+    };
+    const sm = createMockSessionManager({ getSessionById: vi.fn().mockResolvedValue(session) });
+    const { handler } = createHandler({ sessionManager: sm });
+    const token = issueManagedToken(handler, session as ReturnType<typeof managedSession>, currentVisitor);
+
+    expect(await handler.handleConfigOperation(
+      ['config', 'set', 'chatmode.group', 'interactive'], session.id, token,
+    )).toMatchObject({ ok: false, code: 'NO_PERMISSION' });
+  });
+
+  it('allows the current group owner even when the session stores a stale visitor', async () => {
+    ownersMock.value = [];
+    const staleVisitor = 'stale-visitor.agentid.pub';
+    const currentOwner = 'current-owner.agentid.pub';
+    writeTestAgentConfig({ owners: [currentOwner] });
+    const session = {
+      ...managedSession(staleVisitor),
+      id: 'group-stale-visitor-session',
+      channelId: 'group-stale-visitor',
+      chatType: 'group',
+      metadata: { peerId: staleVisitor, groupId: 'group-stale-visitor' },
+    };
+    const sm = createMockSessionManager({ getSessionById: vi.fn().mockResolvedValue(session) });
+    const { handler } = createHandler({ sessionManager: sm });
+    const token = issueManagedToken(handler, session as ReturnType<typeof managedSession>, currentOwner);
+
+    expect(await handler.handleConfigOperation(
+      ['config', 'set', 'chatmode.group', 'interactive'], session.id, token,
+    )).toMatchObject({ ok: true, result: { scope: 'relation' } });
+    expect(readRelationConfigByKey(formatPeerKey('aun', 'group-stale-visitor')).chatmode.group).toBe('interactive');
+  });
+
+  it('allows a private agent owner to manage sensitive current-agent fields', async () => {
+    ownersMock.value = [];
+    const ownerId = 'agent-owner.agentid.pub';
+    writeTestAgentConfig({ owners: [ownerId], admins: [] });
+    const session = managedSession(ownerId);
+    const sm = createMockSessionManager({ getSessionById: vi.fn().mockResolvedValue(session) });
+    const { handler } = createHandler({ sessionManager: sm });
+    const token = issueManagedToken(handler, session);
+
+    expect(await handler.handleConfigOperation(
+      ['config', 'get', 'owners'], session.id, token,
+    )).toMatchObject({ ok: true, result: { value: [ownerId], scope: 'relation' } });
+    expect(await handler.handleConfigOperation(
+      ['config', 'set', 'admins', 'next-admin.agentid.pub', '--self', TEST_AID], session.id, token,
+    )).toMatchObject({ ok: true, result: { scope: 'agent' } });
+    expect(await handler.handleConfigOperation(
+      ['config', 'unset', 'admins', '--self', TEST_AID], session.id, token,
+    )).toMatchObject({ ok: true, result: { removed: true, scope: 'agent' } });
+  });
+
+  it('allows a private daemon owner to use process and global config commands', async () => {
+    const daemonOwner = 'daemon-owner.agentid.pub';
+    ownersMock.value = [daemonOwner];
+    const session = managedSession(daemonOwner);
+    const sm = createMockSessionManager({ getSessionById: vi.fn().mockResolvedValue(session) });
+    const { handler } = createHandler({ sessionManager: sm });
+    const token = issueManagedToken(handler, session);
+
+    expect(await handler.handleConfigOperation(
+      ['config', 'get', 'owners', '--process'], session.id, token,
+    )).toMatchObject({ ok: true, result: { scope: 'process' } });
+    expect(await handler.handleConfigOperation(
+      ['config', 'history'], session.id, token,
+    )).toMatchObject({ ok: true, result: { subcommand: 'history' } });
+  });
+
   it('rejects an invalid daemon session', async () => {
     const { handler } = createHandler();
+    const session = { ...managedSession(), id: 'missing-session' };
+    const token = issueManagedToken(handler, session);
     expect(await handler.handleConfigOperation(
       ['config', 'get', 'chatmode.private'],
       'missing-session',
+      token,
     )).toMatchObject({ ok: false, code: 'INVALID_SESSION' });
   });
 });

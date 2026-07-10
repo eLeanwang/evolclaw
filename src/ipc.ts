@@ -72,6 +72,7 @@ export interface IpcConfigOpRequest {
   type: 'config.op';
   argv: string[];
   sessionId: string;
+  delegationToken: string;
 }
 
 export interface IpcConfigOpResponse {
@@ -103,7 +104,7 @@ export interface IpcAunMsgSendLogRequest {
 
 type StatusProvider = () => IpcStatusResponse;
 type CommandExecutor = (cmd: string, sessionId: string) => Promise<IpcCtlResponse>;
-type ConfigOperationExecutor = (argv: string[], sessionId: string) => Promise<IpcConfigOpResponse>;
+type ConfigOperationExecutor = (argv: string[], sessionId: string, delegationToken: string) => Promise<IpcConfigOpResponse>;
 type AunAidProvider = () => AidConnectionState[];
 type AunAidStatsProvider = () => AidStatsSnapshot[];
 type AunAidStatsRecorder = (params: { aid: string; toPeer: string; text: string; encrypt?: boolean; chatmode?: string }) => void;
@@ -449,11 +450,14 @@ export class IpcServer {
       }
       case 'config.op': {
         if (!this.configOperationExecutor) return { ok: false, code: 'NOT_CONFIGURED', error: 'config.op not configured' };
-        const { argv, sessionId } = cmd as unknown as IpcConfigOpRequest;
+        const { argv, sessionId, delegationToken } = cmd as unknown as IpcConfigOpRequest;
         if (!Array.isArray(argv) || argv.some(value => typeof value !== 'string') || !sessionId) {
           return { ok: false, code: 'INVALID_REQUEST', error: 'missing argv or sessionId' };
         }
-        return await this.configOperationExecutor(argv, sessionId);
+        if (delegationToken !== undefined && typeof delegationToken !== 'string') {
+          return { ok: false, code: 'INVALID_DELEGATION', error: 'delegationToken must be a string' };
+        }
+        return await this.configOperationExecutor(argv, sessionId, delegationToken);
       }
       case 'trigger.list':
       case 'trigger.show':

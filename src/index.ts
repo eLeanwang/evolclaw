@@ -49,6 +49,7 @@ import { StatsCollector } from './utils/stats.js';
 import { AidStatsCollector } from './utils/stats.js';
 import { PermissionGateway } from './core/permission.js';
 import { InteractionRouter } from './core/interaction-router.js';
+import { AgentDelegationRegistry } from './core/auth/agent-delegation.js';
 import { ChannelLoader, type ChannelInstance, tryParseChannelKey } from './core/channel-loader.js';
 import { AgentLoader } from './core/baseagent-loader.js';
 import { EvolAgentRegistry, type ReloadHooks } from './core/evolagent-registry.js';
@@ -918,8 +919,11 @@ async function main() {
     : null;
   bindService?.startCleanup();
 
+  const agentDelegationRegistry = new AgentDelegationRegistry();
+
   // 创建命令处理器
   const cmdHandler = new CommandHandler(sessionManager, agentMap, messageCache, eventBus, primaryRunnerKey);
+  cmdHandler.setAgentDelegationRegistry(agentDelegationRegistry);
   cmdHandler.setPermissionGateway(permissionGateway);
   cmdHandler.setInteractionRouter(interactionRouter);
   cmdHandler.setStatsCollector(statsCollector);
@@ -948,6 +952,7 @@ async function main() {
     },
     primaryRunnerKey
   );
+  responseEngine.setAgentDelegationRegistry(agentDelegationRegistry);
   const processor: IMessageProcessor = responseEngine;
 
   // 回填 processor 和 messageQueue 的引用
@@ -1802,7 +1807,8 @@ async function main() {
   // M3: direct call (not cast) — wire EvolAgentRegistry into IPC for evolagent.* handlers
   ipcServer.setAgentRegistry(agentRegistry);
   ipcServer.setMenuExecutor((payload) => cmdHandler.execMenuForEcweb(payload));
-  ipcServer.setConfigOperationExecutor((argv, sessionId) => cmdHandler.handleConfigOperation(argv, sessionId));
+  ipcServer.setConfigOperationExecutor((argv, sessionId, delegationToken) =>
+    cmdHandler.handleConfigOperation(argv, sessionId, delegationToken));
   cmdHandler.setDaemonStatusProvider(() => {
     const aidState = controlChannel?.getAidState?.();
     return {

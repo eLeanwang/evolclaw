@@ -36,6 +36,7 @@ import { formatPeerKey } from '../relation/peer-identity.js';
 import type { IMessageProcessor } from './message-processor-interface.js';
 import { buildEnvelope, sendInteractionPayload } from './message-utils.js';
 import { isSystemOrServicePeer, resolveChatModeForPeer } from './peer-mode.js';
+import { AGENT_DELEGATION_TOKEN_ENV, type AgentDelegationRegistry } from '../auth/agent-delegation.js';
 
 // Re-export 工具函数（向后兼容，让其他模块可以从 response-engine 导入）
 export { buildEnvelope, sendInteractionPayload } from './message-utils.js';
@@ -315,6 +316,7 @@ export class ResponseEngine implements IMessageProcessor {
   private activeMonitors = new Map<string, StreamIdleMonitor>();
   /** sessionId → 当前正在处理任务的运行时上下文，供 in-task CLI 通过 IPC 查询。 */
   private activeTaskRuntimeContexts = new Map<string, TaskRuntimeContext>();
+  private agentDelegationRegistry?: AgentDelegationRegistry;
 
   /** 响应模式协调器（插件化机制中枢）。内置模式在构造时注册。 */
   private responseCoordinator: ResponseModeCoordinator;
@@ -437,6 +439,7 @@ export class ResponseEngine implements IMessageProcessor {
     this.eventBus.subscribe('task:interrupted', (event) => {
       if ('sessionId' in event && event.sessionId) {
         this.interruptedSessions.set(event.sessionId as string, (event as any).reason || 'unknown');
+        this.agentDelegationRegistry?.revokeSession(event.sessionId as string);
       }
     });
 
@@ -466,6 +469,10 @@ export class ResponseEngine implements IMessageProcessor {
 
   getTaskRuntimeContext(sessionId: string): TaskRuntimeContext | null {
     return this.activeTaskRuntimeContexts.get(sessionId) ?? null;
+  }
+
+  setAgentDelegationRegistry(registry: AgentDelegationRegistry): void {
+    this.agentDelegationRegistry = registry;
   }
 
   private agentRegistry?: EvolAgentRegistryHandle;
@@ -1765,6 +1772,21 @@ export class ResponseEngine implements IMessageProcessor {
         };
         this.activeTaskRuntimeContexts.set(session.id, taskRuntimeContext);
         runtimeEnv = buildTaskRuntimeEnv(taskRuntimeContext);
+        if (this.agentDelegationRegistry && message.peerId && selfAid && peerKey) {
+          const delegationToken = this.agentDelegationRegistry.issue({
+            sessionId: session.id,
+            taskId,
+            ...(message.messageId ? { messageId: message.messageId } : {}),
+            actorId: message.peerId,
+            channel: message.channel,
+            channelType: currentChannelType,
+            chatType: chatType === 'group' ? 'group' : 'private',
+            selfAid,
+            peerKey,
+            issuedRole: peerRole,
+          });
+          runtimeEnv[AGENT_DELEGATION_TOKEN_ENV] = delegationToken;
+        }
 
         if (consumedHandoff && handoffPromptRendered && !handoffConsumedRecorded && handoffChatDir) {
           appendHandoffConsumedEvent(
@@ -2098,6 +2120,7 @@ export class ResponseEngine implements IMessageProcessor {
       logger.info(`[ResponseEngine] agent.cleanupStream ok: session=${session.id} task=${taskId}`);
       this.sessionManager.clearProcessing(session.id);
       this.activeTaskRuntimeContexts.delete(session.id);
+      this.agentDelegationRegistry?.revokeTask(session.id, taskId);
       logger.info(`[ResponseEngine] session ${session.id} processing cleared task=${taskId}`);
 
       // 降级模型回复末尾追加标记（代码层硬注入，不依赖模型输出）
@@ -2400,6 +2423,7 @@ export class ResponseEngine implements IMessageProcessor {
       try {
         this.sessionManager.clearProcessing(session.id);
         this.activeTaskRuntimeContexts.delete(session.id);
+        this.agentDelegationRegistry?.revokeTask(session.id, taskId);
         logger.info(`[ResponseEngine] session ${session.id} processing cleared (on error) task=${taskId}`);
       } catch {}
       // 注意：不在此处清除 interruptedSessions，由下一条消息的 prompt 包装逻辑消费

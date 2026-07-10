@@ -58,8 +58,9 @@ export function buildAuthSubject(input: AuthSubjectInput): AuthSubject {
     conversationId,
     peerType: input.peerType,
   });
-  const role = roleDetail.effectiveRole || 'none';
   const processOwners = input.processOwners ?? loadEvolclawConfig().owners ?? [];
+  const isDaemonOwner = !!actorId && Array.isArray(processOwners) && processOwners.includes(actorId);
+  const role = isDaemonOwner ? 'owner' : roleDetail.effectiveRole || 'none';
 
   return {
     selfAid: input.selfAid,
@@ -71,11 +72,11 @@ export function buildAuthSubject(input: AuthSubjectInput): AuthSubject {
     conversationId,
     peerKey: input.channelType && conversationId ? formatPeerKey(input.channelType, conversationId) : undefined,
     role,
-    roleSource: roleDetail.source,
-    identity: roleToSessionIdentity(roleDetail.effectiveRole),
-    isDaemonOwner: !!actorId && Array.isArray(processOwners) && processOwners.includes(actorId),
+    roleSource: isDaemonOwner && !roleDetail.effectiveRole ? 'fallback' : roleDetail.source,
+    identity: roleToSessionIdentity(role === 'none' ? null : role),
+    isDaemonOwner,
     fromControlChannel: !!input.fromControlChannel,
-    allowAccess: roleDetail.allowAccess && checkRoleAccess(role, input.selfAid),
+    allowAccess: isDaemonOwner || (roleDetail.allowAccess && checkRoleAccess(role, input.selfAid)),
   };
 }
 

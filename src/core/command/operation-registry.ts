@@ -1,4 +1,27 @@
-import type { OperationMeta, CommandScope, OperationCategory, CommandSource } from '../../types.js';
+import type { OperationMeta, CommandScope, OperationCategory } from '../../types.js';
+
+const CONFIG_MANAGEMENT_OPERATIONS: OperationMeta[] = ([
+  ['config.show', 'Read one raw config layer', ['relation', 'agent', 'process']],
+  ['config.effective', 'Read effective config with sources', ['relation', 'agent', 'process']],
+  ['config.fields', 'List config schema fields', ['relation', 'agent', 'process']],
+  ['config.validate', 'Validate a config layer', ['relation', 'agent', 'process']],
+  ['config.init', 'Initialize a config layer', ['relation', 'agent', 'process']],
+  ['config.list', 'List all config files', ['process']],
+  ['config.snapshot', 'Create a config snapshot', ['process']],
+  ['config.prune', 'Prune config snapshots', ['process']],
+  ['config.history', 'List config snapshots', ['process']],
+  ['config.diff', 'Compare config snapshots', ['process']],
+  ['config.restore', 'Restore a config snapshot', ['process']],
+  ['config.current', 'Read the selected config snapshot', ['process']],
+  ['config.boots', 'Read config boot history', ['process']],
+] as Array<[string, string, CommandScope[]]>).map(([id, description, defaultScopes]) => ({
+  id,
+  category: 'dangerous',
+  dangerous: true,
+  defaultScopes,
+  description,
+  sources: ['menu.cli', 'agent-tool', 'control'],
+}));
 
 /**
  * Operation Registry - 所有命令操作的元数据定义
@@ -505,6 +528,7 @@ const OPERATIONS: OperationMeta[] = [
   // ── EC Command Operations ──
   // agent 在会话内通过 Bash 工具调用 `ec msg|group|ctl send|file` 时触发。
   // 参照设计文档 docs/权限配置化与通用接口鉴权设计.md
+  ...CONFIG_MANAGEMENT_OPERATIONS,
   {
     id: 'ec.msg.send',
     category: 'write-own',
@@ -585,6 +609,9 @@ const OPERATIONS: OperationMeta[] = [
 
 const operationMap = new Map<string, OperationMeta>();
 for (const op of OPERATIONS) {
+  if ((op.id === 'config.read' || op.id === 'config.write') && op.sources && !op.sources.includes('agent-tool')) {
+    op.sources = [...op.sources, 'agent-tool'];
+  }
   operationMap.set(op.id, op);
 }
 
