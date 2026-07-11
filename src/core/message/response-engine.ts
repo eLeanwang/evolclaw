@@ -1420,6 +1420,34 @@ export class ResponseEngine implements IMessageProcessor {
       const authPeerKey = session.channelType && authConversationId
         ? formatPeerKey(session.channelType, authConversationId)
         : undefined;
+      const owningAgentForAuth = this.agentRegistry?.resolveByChannel(channelKey);
+      const crossSessionApproval = (() => {
+        if (!owningAgentForAuth) return undefined;
+        const owners = Array.from(new Set((owningAgentForAuth.config.owners ?? []).filter(Boolean)));
+        if (owners.length === 0) return undefined;
+        const currentPeer = message.peerId || session.metadata?.peerId || session.channelId;
+        const ownerAid = owners.find(owner => owner !== currentPeer && owner.includes('.'));
+        if (!ownerAid) return undefined;
+        const aunAdapter = (owningAgentForAuth as any).channels?.get(`aun#${owningAgentForAuth.aid}#main`);
+        if (!aunAdapter?.capabilities?.interaction) return undefined;
+        return {
+          adapter: aunAdapter,
+          ownerAid,
+          owners,
+          selfAid: owningAgentForAuth.aid,
+          originSessionId: session.id,
+          originMessageId: message.messageId,
+          originChannel: currentChannelType,
+          originChannelId: session.channelId || capturedChannelId,
+          originPeerId: message.peerId || authConversationId,
+          originPeerName: peerName || undefined,
+          originPeerType: message.peerType || (session.metadata as any)?.peerType || undefined,
+          originRole: peerRole,
+          originThreadId: session.threadId || message.threadId || undefined,
+          originChatDir: this.sessionManager.getChatDir(session),
+          approvalTtlMs: 20 * 60 * 1000,
+        };
+      })();
 
       // 设置权限审批的交互上下文（支持交互卡片）
       agent.setPermissionContext?.(session.id, {
@@ -1436,6 +1464,7 @@ export class ResponseEngine implements IMessageProcessor {
         chatType: authChatType,
         selfAid: session.selfAID || message.selfAID,
         peerKey: authPeerKey,
+        crossSessionApproval,
         flushPending: async () => {
           await renderer.flush(false);
         },

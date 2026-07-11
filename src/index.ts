@@ -866,6 +866,11 @@ async function main() {
   // 权限审批网关
   const permissionGateway = new PermissionGateway();
   permissionGateway.setEventBus(eventBus);
+  eventBus.subscribe('task:interrupted', (event) => {
+    if ('sessionId' in event && event.sessionId) {
+      permissionGateway.cancelAll(event.sessionId as string, (event as any).reason || 'interrupted');
+    }
+  });
 
   // 交互路由器
   const interactionRouter = new InteractionRouter();

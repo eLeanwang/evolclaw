@@ -210,6 +210,31 @@ export interface ReplyContext {
   peerId?: string;  // 发送者 ID，出站时兜底 @ 补全用
 }
 
+export interface CrossSessionApprovalContext {
+  /** AUN owner 会话使用的 adapter。MVP 只允许 AUN private owner 审批。 */
+  adapter: ChannelAdapter;
+  /** 本次选定的 owner AID。 */
+  ownerAid: string;
+  /** 当前 agent 的 owner 候选，用于审计和后续扩展。 */
+  owners?: string[];
+  /** 当前 self agent AID。 */
+  selfAid?: string;
+  /** 原始受限会话上下文。grant 只应绑定这个上下文，而不是 owner 会话。 */
+  originSessionId: string;
+  originMessageId?: string;
+  originChannel?: string;
+  originChannelId?: string;
+  originPeerId?: string;
+  originPeerName?: string;
+  originPeerType?: string;
+  originRole?: string;
+  originThreadId?: string;
+  /** 原始会话 messages.jsonl 所在目录，用于追加 response_to_origin 审计事件。 */
+  originChatDir?: string;
+  /** 授权卡片可审批时长。 */
+  approvalTtlMs?: number;
+}
+
 export interface SessionIdentity {
   role: string;
   mode: 'interactive';
