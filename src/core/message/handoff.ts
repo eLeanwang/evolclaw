@@ -22,11 +22,12 @@ export interface HandoffOrigin {
 
 export interface HandoffMetadata {
   kind?: HandoffKind;
-  event?: 'consumed';
+  event?: 'consumed' | 'decided' | 'cancelled' | 'expired' | 'failed';
   origin?: HandoffOrigin;
   consumed_by_msg_id?: string;
   match?: HandoffMatchKind;
   request_content?: string;
+  auth?: Record<string, unknown>;
 }
 
 export interface ConsumedHandoffContext {
@@ -96,7 +97,8 @@ export function isHandoffOutbound(entry: MessageLogEntry, kinds?: HandoffKind[])
     entry.dir !== 'out' ||
     (entry.source !== 'msg' && entry.source !== 'handoff') ||
     isHandoffStateMessage(entry) ||
-    !isHandoffKind(handoff?.kind)
+    !isHandoffKind(handoff?.kind) ||
+    handoff.auth
   ) {
     return false;
   }

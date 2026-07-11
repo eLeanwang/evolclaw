@@ -4,7 +4,7 @@ import type { ShortConnectionOpts } from '../rpc/index.js';
 import { createShortConnection } from '../rpc/index.js';
 import { getAidStore, SLOT } from '../aid/store.js';
 import { uploadFileAndBuildPayload, type UploadProgress } from './upload.js';
-import { appendMessageLog, buildOutboundEntry } from '../../core/message/message-log.js';
+import { appendMessageLog, buildOutboundEntry, classifyAunPayloadForLog } from '../../core/message/message-log.js';
 import { readBestTaskRuntimeContext, resolveMsgSendHandoff, runtimeRefMessageIdForMsgSend } from '../../core/message/handoff.js';
 import type { TaskRuntimeContext } from '../../core/message/handoff.js';
 import { chatDirPath } from '../../core/session/session-fs-store.js';
@@ -128,15 +128,22 @@ function applyRoutingPayloadFields(
   if (refMessageId && !payload.ref_message_id) payload.ref_message_id = refMessageId;
 }
 
-function msgSendLogMetadata(args: MsgSendArgs, runtimeContext?: TaskRuntimeContext | null): {
+function msgSendLogMetadata(args: MsgSendArgs, payload?: unknown, runtimeContext?: TaskRuntimeContext | null): {
   content: string;
+  msgType?: ReturnType<typeof classifyAunPayloadForLog>['msgType'];
+  payloadType?: string;
+  payloadSummary?: ReturnType<typeof classifyAunPayloadForLog>['payloadSummary'];
   source: 'cli' | 'msg';
   handoff?: ReturnType<typeof resolveMsgSendHandoff>;
 } {
   const isInSession = !!process.env.EVOLCLAW_SESSION_ID || !!runtimeContext;
   const source = isInSession ? 'msg' : 'cli';
+  const classified = payload === undefined ? undefined : classifyAunPayloadForLog(payload);
   return {
-    content: messageLogContent(args.body),
+    content: classified?.content ?? messageLogContent(args.body),
+    msgType: classified?.msgType,
+    payloadType: classified?.payloadType,
+    payloadSummary: classified?.payloadSummary,
     source,
     handoff: resolveMsgSendHandoff({
       from: args.from,
@@ -161,7 +168,7 @@ async function tryDaemonMsgSend(args: MsgSendArgs, payload: Record<string, unkno
       to: args.to,
       payload,
       encrypt: args.encrypt === true,
-      log: msgSendLogMetadata(args, runtimeContext),
+      log: msgSendLogMetadata(args, payload, runtimeContext),
     },
     5000,
   );
@@ -169,13 +176,14 @@ async function tryDaemonMsgSend(args: MsgSendArgs, payload: Record<string, unkno
 }
 
 async function appendMsgSendOutboundLog(args: MsgSendArgs, result: MsgSendResult, opts: {
+  payload: unknown;
   runtimeContext?: TaskRuntimeContext | null;
   chatmode?: string;
   encrypt?: boolean;
 }): Promise<void> {
   const sessionsDir = resolvePaths().sessionsDir;
   const chatDir = chatDirPath(sessionsDir, 'aun', args.to, args.from);
-  const log = msgSendLogMetadata(args, opts.runtimeContext);
+  const log = msgSendLogMetadata(args, opts.payload, opts.runtimeContext);
 
   fs.mkdirSync(chatDir, { recursive: true });
   appendMessageLog(chatDir, buildOutboundEntry({
@@ -186,7 +194,9 @@ async function appendMsgSendOutboundLog(args: MsgSendArgs, result: MsgSendResult
     content: log.content,
     encrypt: opts.encrypt === true,
     chatmode: opts.chatmode,
-    msgType: 'text',
+    msgType: log.msgType,
+    payloadType: log.payloadType,
+    payloadSummary: log.payloadSummary,
     source: log.source,
     handoff: log.handoff,
   }));
@@ -235,6 +245,7 @@ export async function msgSend(args: MsgSendArgs): Promise<MsgSendResult | MsgErr
         };
         if (!daemonResult.log_written) {
           await appendMsgSendOutboundLog(args, sent, {
+            payload,
             runtimeContext,
             chatmode: daemonResult.chatmode,
             encrypt: daemonResult.encrypt ?? args.encrypt === true,
@@ -296,6 +307,7 @@ export async function msgSend(args: MsgSendArgs): Promise<MsgSendResult | MsgErr
     if (result?.message_id) {
       try {
         await appendMsgSendOutboundLog(args, { ok: true, message_id: result.message_id }, {
+          payload,
           runtimeContext,
           chatmode,
           encrypt: args.encrypt === true,

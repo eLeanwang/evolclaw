@@ -9,6 +9,7 @@ import { fileCache } from './core/daemon-file-cache.js';
 import type { FileCacheStats } from './core/daemon-file-cache.js';
 import type { BindBeginRequest, BindBeginResponse, BindErrorResponse, BindStatusResponse } from './utils/aid-bind.js';
 import type { HandoffMetadata, HandoffReturnIpcResponse, TaskRuntimeContext } from './core/message/handoff.js';
+import type { MessageLogPayloadSummary, MessageLogType } from './core/message/message-log.js';
 import type { ConfigExecutionResult } from './config/config-operation-service.js';
 import type {
   DingtalkContactBindRegisterRequest,
@@ -103,6 +104,9 @@ export interface IpcAunMsgSendResponse {
 
 export interface IpcAunMsgSendLogRequest {
   content: string;
+  msgType?: MessageLogType;
+  payloadType?: string;
+  payloadSummary?: MessageLogPayloadSummary;
   source?: 'daemon' | 'cli' | 'msg' | 'ctl' | 'owner-inject' | 'handoff';
   handoff?: HandoffMetadata;
 }
@@ -458,6 +462,9 @@ export class IpcServer {
         const log: IpcAunMsgSendLogRequest | undefined = typeof rawLog?.content === 'string'
           ? {
             content: rawLog.content,
+            msgType: rawLog.msgType as IpcAunMsgSendLogRequest['msgType'],
+            payloadType: typeof rawLog.payloadType === 'string' ? rawLog.payloadType : undefined,
+            payloadSummary: rawLog.payloadSummary as IpcAunMsgSendLogRequest['payloadSummary'],
             source: rawLog.source as IpcAunMsgSendLogRequest['source'],
             handoff: rawLog.handoff as IpcAunMsgSendLogRequest['handoff'],
           }

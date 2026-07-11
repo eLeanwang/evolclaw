@@ -205,7 +205,7 @@ export class MessageBridge {
               chatType: msg.chatType || 'private',
               groupId: msg.groupId ?? null,
               msgId: msg.messageId ?? null,
-              content,
+              content: msg.messageLogContent ?? content,
               replyTo: inboundReplyTo,
               permMode: null,
               timestamp: Date.now(),
@@ -213,6 +213,9 @@ export class MessageBridge {
               chatmode: inboundChatmode,
               peerName: msg.peerName,
               peerType: msg.peerType,
+              msgType: msg.msgType,
+              payloadType: msg.payloadType,
+              payloadSummary: msg.payloadSummary,
             }));
           } catch (e) {
             logger.debug(`[MessageBridge] Failed to log inbound command: ${e}`);
@@ -309,7 +312,7 @@ export class MessageBridge {
             chatType,
             groupId: msg.groupId ?? null,
             msgId: msg.messageId ?? null,
-            content,
+            content: msg.messageLogContent ?? content,
             replyTo: inboundReplyTo,
             permMode: session.identity?.role ?? null,
             timestamp: fullMessage.timestamp,
@@ -317,6 +320,9 @@ export class MessageBridge {
             chatmode: inboundChatmode,
             peerName: msg.peerName,
             peerType: msg.peerType,
+            msgType: msg.msgType,
+            payloadType: msg.payloadType,
+            payloadSummary: msg.payloadSummary,
           }));
         }
 

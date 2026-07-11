@@ -379,6 +379,10 @@ export interface InboundMessage {
   replyContext?: ReplyContext;       // Channel 预构建的回复上下文（渠道无关）
   dispatchMode?: string;            // 群聊分发模式（mention|broadcast）
   source?: 'user' | 'card-trigger';  // 消息来源：用户输入 / 卡片按钮触发
+  msgType?: import('./core/message/message-log.js').MessageLogType;
+  payloadType?: string;
+  payloadSummary?: import('./core/message/message-log.js').MessageLogPayloadSummary;
+  messageLogContent?: string;
   /** 来自控制 AID channel（evolclaw.json.aid）。控制面入口拥有全量权限（进程级 + 跨 agent），
    *  由 index.ts 的 controlChannel.onMessage 在构造 InboundMessage 时注入。普通 agent channel 不设。 */
   isControlChannel?: boolean;

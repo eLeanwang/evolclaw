@@ -17,6 +17,7 @@ export interface MessageLogEntry {
   groupId: string | null;
   msgId: string | null;
   msgType: string;
+  payloadType?: string;
   content: string;
   replyTo: string | null;
   agent: string | null;
@@ -379,7 +380,7 @@ function renderMessagesPanel(state: WatchMsgState, width: number, height: number
       const rawSource = (m as any).source as string | undefined;
       // 4 种来源: daemon | ctl | msg | cli
       const source = (rawSource === 'ctl' || rawSource === 'msg' || rawSource === 'cli') ? rawSource : 'daemon';
-      const method = m.msgType === 'thought' ? 'thought' : 'send';
+      const method = m.msgType === 'thought' ? 'thought' : (m.payloadType || m.msgType || 'send');
       typeTag = `${DIM}[${source}|${method}]${RST}`;
     }
     const byteLen = Buffer.byteLength(m.content, 'utf-8');

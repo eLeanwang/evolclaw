@@ -470,7 +470,7 @@ export class AidStatsCollector {
                 if (rec.msgType === 'thought') {
                   thoughtCount++;
                   if (rec.content) lastThoughtText = rec.content.length > 100 ? rec.content.slice(0, 100) + '…' : rec.content;
-                } else if (rec.msgType === 'text') {
+                } else if (rec.msgType !== 'handoff_state' && rec.msgType !== 'status' && rec.msgType !== 'event') {
                   msgCount++;
                   if (rec.content) lastMsgText = rec.content.length > 100 ? rec.content.slice(0, 100) + '…' : rec.content;
                 }

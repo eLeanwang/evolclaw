@@ -46,6 +46,7 @@ tests/**
 !tests/session-chatmode.test.ts
 !tests/unit/
 !tests/unit/group-index-wrapper.test.ts
+!tests/unit/aun-payload-log.test.ts
 !tests/core/
 !tests/core/command/
 !tests/core/command/*.test.ts
@@ -134,6 +135,7 @@ src/experimental/
 !/tests/session-chatmode.test.ts
 !/tests/unit/
 !/tests/unit/group-index-wrapper.test.ts
+!/tests/unit/aun-payload-log.test.ts
 !/tests/core/
 !/tests/core/command/
 !/tests/core/command/*.test.ts
