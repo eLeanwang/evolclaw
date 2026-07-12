@@ -6,6 +6,7 @@ import type { EventBus } from '../core/event-bus.js';
 import type { TriggerDefinitionManager } from './manager.js';
 import type { TriggerRunStateStore } from './state.js';
 import type { TriggerAuditLogger, TriggerRunStats } from './audit.js';
+import type { TriggerHistoryEvent } from './history.js';
 import type { TriggerScriptExecutor } from './script-executor.js';
 import type { TriggerFeedbackDispatcher, TriggerFeedbackDispatchResult } from './feedback.js';
 import type { DaemonChannel } from '../channels/daemon.js';
@@ -124,6 +125,10 @@ export class TriggerRuntimeScheduler {
     };
   }
 
+  history(triggerId?: string, limit = 100): TriggerHistoryEvent[] {
+    return this.manager.history.events(triggerId, limit);
+  }
+
   private scriptPreview(definition: TriggerDefinition): TriggerScriptPreview | undefined {
     if (definition.execution.type !== 'script' || !definition.execution.script) return undefined;
     const script = definition.execution.script;
@@ -163,7 +168,10 @@ export class TriggerRuntimeScheduler {
   }
 
   stats(triggerId: string): TriggerRunStats {
-    const merged = mergeStats(this.manager.legacyStats(triggerId), this.audit.stats(triggerId));
+    const historyStats = this.audit.stats(triggerId);
+    const merged = this.manager.history.hasLegacyArchive(triggerId)
+      ? historyStats
+      : mergeStats(this.manager.legacyStats(triggerId), historyStats);
     const schedule = this.state.readSchedule(triggerId);
     return accountScheduleMarker(merged, schedule, skipped => this.audit.hasSkippedSchedule(triggerId, skipped));
   }

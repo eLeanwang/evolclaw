@@ -40,6 +40,7 @@ import { buildEnvelope } from './core/message/message-utils.js';
 import { ResponseEngine } from './core/message/response-engine.js';
 import { MessageQueue } from './core/message/message-queue.js';
 import { MessageBridge } from './core/message/message-bridge.js';
+import { HandoffRuntime } from './core/handoff/runtime.js';
 import { BootstrapService } from './core/bootstrap-service.js';
 import { MessageCache } from './core/message/message-cache.js';
 import { CommandHandler, isProcessLevelOwner } from './core/command/command-handler.js';
@@ -72,7 +73,7 @@ import { DaemonChannel } from './channels/daemon.js';
 import { normalizeTriggerDefinition } from './trigger/validation.js';
 import type { TriggerDefinition } from './trigger/types.js';
 import { atomicWriteJson } from './core/session/session-fs-store.js';
-import { appendMessageLog, buildOutboundEntry } from './core/message/message-log.js';
+import { appendMessageLog, buildOutboundEntry, classifyAunPayloadForLog } from './core/message/message-log.js';
 import fs from 'fs';
 import os from 'os';
 import crypto from 'crypto';
@@ -1008,6 +1009,38 @@ async function main() {
   cmdHandler.setMessageQueue(messageQueue);
   processor.setMessageQueue(messageQueue);
 
+  const handoffRuntime = new HandoffRuntime(sessionManager, messageQueue, async (handoff) => {
+    const targetSession = await sessionManager.getSessionById(handoff.target_session_id);
+    if (!targetSession) return { ok: false, error: 'target session not found' };
+    const inst = channelInstances.find(candidate => (
+      candidate.channelType === 'aun' && (
+        candidate.adapter.channelKey === targetSession.metadata?.channelKey
+        || candidate.adapter.channelName === targetSession.channel
+        || tryParseChannelKey(candidate.adapter.channelKey)?.selfAID === targetSession.selfAID
+      )
+    ));
+    const channel = inst?.channel as any;
+    if (!channel || typeof channel.sendDaemonMsg !== 'function') {
+      return { ok: false, error: `AUN channel not found for ${targetSession.selfAID || '<unknown>'}` };
+    }
+    const classified = classifyAunPayloadForLog(handoff.request.payload);
+    const result = await channel.sendDaemonMsg({
+      to: targetSession.channelId,
+      payload: handoff.request.payload,
+      encrypt: handoff.request.encrypt,
+      log: {
+        content: classified.content,
+        msgType: classified.msgType,
+        payloadType: classified.payloadType,
+        payloadSummary: classified.payloadSummary,
+        source: 'msg',
+        handoffTrace: { version: 2, handoff_id: handoff.handoff_id },
+      },
+    });
+    return { ok: result.ok, message_id: result.message_id, error: result.error };
+  });
+  responseEngine.setHandoffRuntime(handoffRuntime);
+
   // Trigger runtime: daemon-level script + feedback scheduler.
   const triggerSchedulers = new Map<string, TriggerRuntimeScheduler>();
   const triggerAudit = new TriggerAuditLogger();
@@ -1080,6 +1113,7 @@ async function main() {
       removeLegacyAgentUpgradeCheck(manager);
     }
     const state = new TriggerRunStateStore(manager);
+    const agentTriggerAudit = triggerAudit.withHistory(manager.history);
     const dispatcher = new TriggerFeedbackDispatcher({
       getChannel: getTriggerChannel,
       sessionManager,
@@ -1089,7 +1123,7 @@ async function main() {
     const scheduler = new TriggerRuntimeScheduler(
       manager,
       state,
-      triggerAudit,
+      agentTriggerAudit,
       triggerScriptExecutor,
       dispatcher,
       daemonChannel,
@@ -1146,6 +1180,7 @@ async function main() {
   msgBridge.setAgentRegistry(agentRegistry);
   const bootstrapService = new BootstrapService(agentRegistry, eventBus);
   msgBridge.setBootstrapService(bootstrapService);
+  msgBridge.setHandoffRuntime(handoffRuntime);
 
   // ── Channel instance registration (shared by startup and hot-load) ──
 
@@ -1712,7 +1747,12 @@ async function main() {
   });
 
   // 先恢复消息队列。若某个 session 有原始 active/pending 消息，下面的泛化 resume 会跳过它。
-  messageQueue.restorePersisted(true);
+  messageQueue.restorePersisted(false);
+  const recoverHandoffsAndStartRestored = async () => {
+    await handoffRuntime.recover(agentRegistry.runnableAgents().map(agent => agent.aid));
+    messageQueue.startRestored();
+  };
+  void connectAllPromise.then(recoverHandoffsAndStartRestored, recoverHandoffsAndStartRestored);
 
   // 恢复重启前未完成的会话。这里是兜底路径：仅当队列文件没有原始消息时，才注入恢复提示。
   const pendingSessions = sessionManager.getPendingProcessingSessions();
@@ -1895,6 +1935,15 @@ async function main() {
   });
   ipcServer.setTaskRuntimeContextProvider(({ sessionId }) => responseEngine.getTaskRuntimeContext(sessionId));
   ipcServer.setHandoffReturnExecutor((params) => responseEngine.returnHandoffResult(params));
+  ipcServer.setHandoffStatusExecutor(async (params) => {
+    if (!params.sessionId) return { ok: false, code: 'HANDOFF_CALL_SESSION_REQUIRED', error: 'current session is required' };
+    const runtime = responseEngine.getTaskRuntimeContext(params.sessionId);
+    const session = await sessionManager.getSessionById(params.sessionId);
+    const selfAid = runtime?.selfAid || session?.selfAID;
+    if (!selfAid) return { ok: false, code: 'HANDOFF_NOT_FOUND', error: 'handoff not found' };
+    return handoffRuntime.status(selfAid, params.handoffId)
+      ?? { ok: false, code: 'HANDOFF_NOT_FOUND', error: 'handoff not found' };
+  });
   ipcServer.setAunMsgSender(async (params) => {
     const inst = channelInstances.find((candidate) => {
       if (candidate.channelType !== 'aun') return false;
@@ -1909,6 +1958,34 @@ async function main() {
     const ch = inst?.channel as any;
     if (!ch || typeof ch.sendDaemonMsg !== 'function') {
       return { ok: false, error: `AUN channel not found for ${params.aid}`, code: 'AUN_CHANNEL_NOT_FOUND' };
+    }
+    if (params.originSessionId && params.originMessageId) {
+      try {
+        const created = await handoffRuntime.createOutbound({
+          selfAid: params.aid,
+          to: params.to,
+          originSessionId: params.originSessionId,
+          originMessageId: params.originMessageId,
+          payload: params.payload,
+          encrypt: params.encrypt === true,
+          thread: params.thread,
+          explicitReturnPolicy: params.returnPolicy,
+        });
+        if (created.crossSession && created.handoff) {
+          return {
+            ok: true,
+            status: 'queued',
+            handoff_id: created.handoff.handoff_id,
+            target_session_id: created.targetSession.id,
+          };
+        }
+        if (!params.payload.ref_message_id) {
+          params.payload.ref_message_id = params.originMessageId;
+        }
+      } catch (error) {
+        const code = (error as { code?: string })?.code;
+        return { ok: false, error: error instanceof Error ? error.message : String(error), code };
+      }
     }
     return await ch.sendDaemonMsg({
       to: params.to,
@@ -1989,6 +2066,7 @@ async function main() {
 
     // 连接
     await channelLoader.connectAll(instances, { onConnected: markChannelConnected });
+    await handoffRuntime.recover([aid]);
     await ensureTriggerSchedulerStarted(agent);
     agentRuntimeState = 'running';
     agentRuntimeError = undefined;
@@ -2132,6 +2210,15 @@ async function main() {
         const agentAid = requireAgent(cmd.agentAid);
         if (!cmd.triggerId) throw new Error('missing triggerId');
         return { ok: true, ...schedulerFor(agentAid).show(cmd.triggerId) };
+      }
+      case 'trigger.history': {
+        const agentAid = requireAgent(cmd.agentAid);
+        const limit = cmd.limit === undefined ? 100 : Number(cmd.limit);
+        if (!Number.isInteger(limit) || limit <= 0 || limit > 10_000) throw new Error('invalid history limit');
+        if (cmd.triggerId !== undefined && (typeof cmd.triggerId !== 'string' || !cmd.triggerId)) {
+          throw new Error('invalid triggerId');
+        }
+        return { ok: true, events: schedulerFor(agentAid).history(cmd.triggerId, limit) };
       }
       case 'trigger.eventCatalog': {
         return { ok: true, ...getEventCatalog({ includeInternal: cmd.includeInternal === true }) };

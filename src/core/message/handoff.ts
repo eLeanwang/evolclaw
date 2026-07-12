@@ -58,6 +58,7 @@ export interface TaskRuntimeContext {
   peerRole?: string;
   threadId?: string;
   consumedHandoff?: ConsumedHandoffContext | null;
+  handoffIds?: string[];
 }
 
 export interface TaskRuntimeContextIpcResponse {

@@ -1,7 +1,7 @@
 import { randomBytes } from 'crypto';
 import { logger } from '../../utils/logger.js';
 import { StreamDebouncer } from './stream-debouncer.js';
-import { appendMessageLog, buildInboundEntry } from './message-log.js';
+import { appendMessageLog, appendMessageLogStrict, buildInboundEntry } from './message-log.js';
 import { buildEnvelope } from './message-utils.js';
 import { chatDirPath } from '../session/session-fs-store.js';
 import { tryParseChannelKey } from '../channel-loader.js';
@@ -15,6 +15,7 @@ import type { MessageQueue } from './message-queue.js';
 import type { CommandHandler as CmdHandler } from '../command/command-handler.js';
 import type { EventBus } from '../event-bus.js';
 import type { BootstrapService } from '../bootstrap-service.js';
+import type { HandoffRuntime } from '../handoff/runtime.js';
 import type { Message, InboundMessage, ChannelAdapter, ReplyContext, EvolAgentRegistryHandle, OutboundPayload, MenuListRequest, MenuQueryRequest, MenuOptionsRequest, MenuUpdateRequest, MenuActionRequest, MenuResponse, SessionIdentity } from '../../types.js';
 
 /**
@@ -29,6 +30,7 @@ export class MessageBridge {
   private defaultDebounce: number;
   private agentRegistry?: EvolAgentRegistryHandle;
   private bootstrapService?: BootstrapService;
+  private handoffRuntime?: HandoffRuntime;
 
   constructor(
     private defaultProjectPath: string,
@@ -49,6 +51,10 @@ export class MessageBridge {
 
   setBootstrapService(service: BootstrapService): void {
     this.bootstrapService = service;
+  }
+
+  setHandoffRuntime(runtime: HandoffRuntime): void {
+    this.handoffRuntime = runtime;
   }
 
   private getDebouncer(channelName: string, channelType?: string): StreamDebouncer {
@@ -298,15 +304,14 @@ export class MessageBridge {
           dispatchMode: msg.dispatchMode,
         };
 
-        // 5.5 写入消息记录（入方向）。
-        {
+        const inboundEntry = (() => {
           const chatDir = this.sessionManager.getChatDir(session);
           const inboundEncrypt = msg.replyContext?.metadata?.encrypted != null ? !!(msg.replyContext.metadata.encrypted) : undefined;
           const inboundChatmode = msg.replyContext?.metadata?.chatmode as string | undefined;
           const inboundReplyTo = typeof msg.replyContext?.metadata?.refMessageId === 'string'
             ? msg.replyContext.metadata.refMessageId
             : null;
-          appendMessageLog(chatDir, buildInboundEntry({
+          return { chatDir, entry: buildInboundEntry({
             from: msg.peerId || 'unknown',
             to: msg.selfAID || 'self',
             chatType,
@@ -323,8 +328,36 @@ export class MessageBridge {
             msgType: msg.msgType,
             payloadType: msg.payloadType,
             payloadSummary: msg.payloadSummary,
-          }));
+          }) };
+        })();
+
+        let handoffCandidate = false;
+        if (
+          this.handoffRuntime &&
+          chatType === 'private' &&
+          (msg.channelType || effectiveChannelType) === 'aun' &&
+          session.selfAID &&
+          fullMessage.messageId
+        ) {
+          const refMessageId = typeof msg.replyContext?.metadata?.refMessageId === 'string'
+            ? msg.replyContext.metadata.refMessageId
+            : null;
+          const bound = await this.handoffRuntime.bindReply({
+            selfAid: session.selfAID,
+            targetSessionId: session.id,
+            responseMessageId: fullMessage.messageId,
+            refMessageId,
+            persistReply: () => appendMessageLogStrict(inboundEntry.chatDir, {
+              ...inboundEntry.entry,
+              handoff_trace: { version: 2, reply_candidate: true },
+            }),
+          });
+          handoffCandidate = bound.candidate;
+          if (bound.handoffId) {
+            fullMessage.handoffDelivery = { direction: 'target', handoffId: bound.handoffId };
+          }
         }
+        if (!handoffCandidate) appendMessageLog(inboundEntry.chatDir, inboundEntry.entry);
 
         // 6. ACK + debounce/enqueue
         //    ACK 在到达时立即做（每条独立 ACK），不等合并
@@ -335,21 +368,31 @@ export class MessageBridge {
           adapter?.acknowledge?.(fullMessage.messageId).catch(() => {});
         }
 
-        const isInterrupt = chatType !== 'group';
+        const isInterrupt = chatType !== 'group' && !handoffCandidate;
         const enqueueAgentName = owningAgent?.name ?? '<unknown>';
         const selfAID = session.selfAID;
         const doEnqueue = async (m: Message) => {
-          return this.messageQueue.enqueue(session.id, m, session.projectPath, {
+          const enqueue = handoffCandidate ? this.messageQueue.enqueuePersisted.bind(this.messageQueue) : this.messageQueue.enqueue.bind(this.messageQueue);
+          try {
+            return await enqueue(session.id, m, session.projectPath, {
             interruptible: isInterrupt,
             interruptSamePeer: !isInterrupt,  // 群聊：同人连发且队列无他人时打断
             agentName: enqueueAgentName,
             role: !isInterrupt ? (session.identity?.role ?? 'none') : undefined,
             sessionKeyField: session.sessionKey,
             selfAID,  // ← 传递 selfAID，用于队列隔离
-          });
+            });
+          } catch (error) {
+            if (handoffCandidate && m.handoffDelivery?.handoffId && session.selfAID) {
+              this.handoffRuntime?.markBindingIncomplete(session.selfAID, m.handoffDelivery.handoffId);
+            }
+            throw error;
+          }
         };
 
-        if (isInterrupt) {
+        if (handoffCandidate) {
+          await doEnqueue(fullMessage);
+        } else if (isInterrupt) {
           const debouncer = this.getDebouncer(channelName, effectiveChannelType);
           if (debouncer.enabled) {
             const debounceKey = msg.peerId ? `${session.id}:${msg.peerId}` : session.id;

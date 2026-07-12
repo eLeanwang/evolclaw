@@ -291,12 +291,12 @@ export class CommandHandler {
     try {
       schedulerDetails = scheduler?.show(definition.id);
     } catch { /* trigger state is best-effort for views */ }
-    // 运行统计（fireCount/failCount/lastFiredAt/lastResult）不再存进 trigger.json
-    // （定义是不可变配置），改从审计日志按需汇总。受日志保留期限制，是保留窗口内的统计。
+    // 运行统计（fireCount/failCount/lastFiredAt/lastResult）不写入 trigger.json，
+    // 按需从 append-only trigger history 汇总。
     let stats: { fireCount: number; failCount: number; lastFiredAt?: number; lastResult?: string } = { fireCount: 0, failCount: 0 };
     try {
       if (scheduler?.stats) stats = scheduler.stats(definition.id);
-    } catch { /* 审计日志缺失/损坏时退回零值 */ }
+    } catch { /* trigger history 缺失/损坏时退回零值 */ }
     return {
       id: definition.id,
       name: definition.name,

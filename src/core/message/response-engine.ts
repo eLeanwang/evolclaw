@@ -18,6 +18,8 @@ import {
 import { IMRenderer } from './im-renderer.js';
 import { MessageCache } from './message-cache.js';
 import type { MessageQueue } from './message-queue.js';
+import type { HandoffRuntime } from '../handoff/runtime.js';
+import type { HandoffReturnResponse } from '../handoff/types.js';
 import { StreamIdleMonitor } from './stream-idle-monitor.js';
 import { logger } from '../../utils/logger.js';
 import { getErrorMessage, classifyError, ErrorType, ERROR_PREFIX, isInfraError, prefixErrorType, isRetryableError, isContextTooLongText } from '../../utils/error-utils.js';
@@ -313,6 +315,7 @@ export class ResponseEngine implements IMessageProcessor {
   }>();
   private interactionRouter?: InteractionRouter;
   private messageQueue?: MessageQueue;
+  private handoffRuntime?: HandoffRuntime;
   /** sessionId → 活跃的空闲监控器，用于等待用户交互期间暂停/恢复计时 */
   private activeMonitors = new Map<string, StreamIdleMonitor>();
   /** sessionId → 当前正在处理任务的运行时上下文，供 in-task CLI 通过 IPC 查询。 */
@@ -468,6 +471,10 @@ export class ResponseEngine implements IMessageProcessor {
     this.messageQueue = queue;
   }
 
+  setHandoffRuntime(runtime: HandoffRuntime): void {
+    this.handoffRuntime = runtime;
+  }
+
   getTaskRuntimeContext(sessionId: string): TaskRuntimeContext | null {
     return this.activeTaskRuntimeContexts.get(sessionId) ?? null;
   }
@@ -476,7 +483,21 @@ export class ResponseEngine implements IMessageProcessor {
     this.agentDelegationRegistry = registry;
   }
 
-  async returnHandoffResult(params: { sessionId?: string; content: string }): Promise<HandoffReturnIpcResponse> {
+  async returnHandoffResult(params: { sessionId?: string; handoffId?: string; content: string }): Promise<HandoffReturnIpcResponse | HandoffReturnResponse> {
+    if (this.handoffRuntime) {
+      const runtime = params.sessionId ? this.activeTaskRuntimeContexts.get(params.sessionId) : undefined;
+      if (!params.sessionId) return { ok: false, code: 'HANDOFF_ID_REQUIRED', error: 'current session is required' };
+      const session = await this.sessionManager.getSessionById(params.sessionId);
+      const selfAid = runtime?.selfAid || session?.selfAID;
+      if (!selfAid) return { ok: false, code: 'HANDOFF_NOT_FOUND', error: 'self agent not found' };
+      return this.handoffRuntime.returnHandoff({
+        selfAid,
+        currentSessionId: params.sessionId,
+        handoffId: params.handoffId,
+        currentTaskHandoffIds: runtime?.handoffIds,
+        content: params.content,
+      });
+    }
     const runtime = params.sessionId
       ? this.activeTaskRuntimeContexts.get(params.sessionId)
       : undefined;
@@ -1532,6 +1553,8 @@ export class ResponseEngine implements IMessageProcessor {
       let skipEvolclawModel = false;
       let agentModel: string | undefined;
       let consumedHandoff: ConsumedHandoffContext | null = null;
+      let v2HandoffId: string | undefined;
+      let v2HandoffDirection: 'target' | 'origin' | undefined;
       let handoffPromptRendered = false;
       let handoffConsumedRecorded = false;
       let handoffChatDir: string | undefined;
@@ -1776,6 +1799,15 @@ export class ResponseEngine implements IMessageProcessor {
                 mentionAids: message.mentionAids,
               }];
           const peerItems: SubMessage[] = (() => {
+            if (message.handoffDelivery && this.handoffRuntime) {
+              const item = this.handoffRuntime.buildPromptItem(message);
+              if (item) {
+                v2HandoffId = message.handoffDelivery.handoffId;
+                v2HandoffDirection = message.handoffDelivery.direction;
+                return [item];
+              }
+            }
+            if (this.handoffRuntime) return rawPeerItems;
             const isAunPrivateHandoffCandidate = currentChannelType === 'aun' && chatType === 'private';
             const isInternalHandoffCandidate = message.source === 'handoff';
             if (!isAunPrivateHandoffCandidate && !isInternalHandoffCandidate) return rawPeerItems;
@@ -1866,6 +1898,7 @@ export class ResponseEngine implements IMessageProcessor {
           if (consumedHandoff && !handoffPromptRendered) {
             consumedHandoff = null;
           }
+          if (v2HandoffId && renderResult?.body.trim()) handoffPromptRendered = true;
         }
 
         // 空消息防护：在 agent 调用之前检查 prompt 是否为空
@@ -1873,6 +1906,10 @@ export class ResponseEngine implements IMessageProcessor {
         if (!effectivePrompt.trim()) {
           logger.info(`[ResponseEngine] Skip agent call: empty prompt after render. session=${session.id} task=${taskId}`);
           return;
+        }
+
+        if (v2HandoffId && v2HandoffDirection === 'origin' && handoffPromptRendered && this.handoffRuntime && selfAid) {
+          this.handoffRuntime.completeOriginContext(selfAid, v2HandoffId);
         }
 
         const taskRuntimeContext: TaskRuntimeContext = {
@@ -1888,6 +1925,7 @@ export class ResponseEngine implements IMessageProcessor {
           peerRole,
           threadId: session.threadId || undefined,
           consumedHandoff,
+          handoffIds: v2HandoffId && v2HandoffDirection === 'target' ? [v2HandoffId] : undefined,
         };
         this.activeTaskRuntimeContexts.set(session.id, taskRuntimeContext);
         runtimeEnv = buildTaskRuntimeEnv(taskRuntimeContext);

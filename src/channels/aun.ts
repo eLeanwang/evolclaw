@@ -154,6 +154,10 @@ export interface AunDaemonMsgSendArgs {
       match?: 'ref' | 'inferred';
       request_content?: string;
     };
+    handoffTrace?: {
+      version: 2;
+      handoff_id: string;
+    };
   };
 }
 
@@ -2924,6 +2928,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
           payloadSummary: classified.payloadSummary ?? args.log.payloadSummary,
           source: args.log.source ?? 'msg',
           handoff: args.log.handoff,
+          handoff_trace: args.log.handoffTrace,
         }));
         this.aidStatsCollector?.recordOutbound(
           this.config.aid,

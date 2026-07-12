@@ -33,7 +33,7 @@ import type {
   ChannelInstance,
   ChatmodeBlock,
   ShowActivitiesMode,
-  DebugBlock,
+  ProcessDebugBlock,
 } from './types.js';
 import { CONFIG_SCHEMA_VERSION } from './types.js';
 import { ConfigTarget, read as cfgRead, write as cfgWrite, resolveAgentConfig, resolveEffective } from './config/config-manager.js';
@@ -84,7 +84,7 @@ export interface EvolclawConfig {
   $schema_version?: number;
   aid?: string;
   owners?: string[];          // 进程级控制面鉴权名单（AID）：谁能远程管理本 daemon（/agent /system）
-  debug?: DebugBlock;
+  debug?: ProcessDebugBlock;
   tunnel?: TunnelConfig;
   aun?: EvolclawAunConfig;   // 从旧 config.json 迁入
   serviceProxy?: ServiceProxyConfig;  // AUN Service Proxy：把本地服务暴露到 AUN 网络
@@ -105,6 +105,10 @@ export interface EvolclawConfig {
 export function loadEvolclawConfig(): EvolclawConfig {
   const raw = atomicReadJson<EvolclawConfig>(resolvePaths().evolclawJson);
   return raw ?? {};
+}
+
+export function isEckSnapshotsEnabled(): boolean {
+  return loadEvolclawConfig().debug?.eckSnapshots ?? true;
 }
 
 /** 原子写入 {root}/evolclaw.json。调用方负责传完整对象（含要保留的字段）。 */

@@ -27,7 +27,7 @@ describe('role selector runtime behavior', () => {
     expect(resolvePermissionMode({ self: aid, peerKey })).toBe('bypass');
   });
 
-  it('uses sel.role for model constraints', () => {
+  it('does not use sel.role to override model configuration', () => {
     // v3: RelationBehavior → Relation
     write(
       ConfigTarget.Relation,
@@ -36,18 +36,18 @@ describe('role selector runtime behavior', () => {
     );
 
     expect(resolveEffectiveModel({ self: aid, peerKey, role: 'owner' }, 'claude').model).toBe('claude-opus-4-8');
-    expect(resolveEffectiveModel({ self: aid, peerKey, role: 'member' }, 'claude').model).toBe('claude-sonnet-4-6');
-    expect(resolveEffectiveModel({ self: aid, peerKey, role: 'visitor' }, 'claude').model).toBe('claude-haiku-4-5-20251001');
+    expect(resolveEffectiveModel({ self: aid, peerKey, role: 'member' }, 'claude').model).toBe('claude-opus-4-8');
+    expect(resolveEffectiveModel({ self: aid, peerKey, role: 'visitor' }, 'claude').model).toBe('claude-opus-4-8');
   });
 
-  it('applies role defaults even when relation model config is empty', () => {
+  it('leaves model unset when agent and relation model config are empty', () => {
     expect(resolveEffectiveModel({ self: aid, peerKey, role: 'visitor' }, 'claude')).toMatchObject({
-      model: 'claude-haiku-4-5-20251001',
-      effort: 'low',
+      model: undefined,
+      effort: undefined,
     });
   });
 
-  it('validates nested relation behavior config using the selector role', () => {
+  it('allows nested relation model config regardless of selector role', () => {
     // v3: RelationBehavior → Relation
     const validation = validateConfigWrite(
       ConfigTarget.Relation,
@@ -55,7 +55,7 @@ describe('role selector runtime behavior', () => {
       { self: aid, peerKey, role: 'visitor' },
     );
 
-    expect(validation.valid).toBe(false);
-    expect(validation.violations.some(v => v.field === 'baseagents.claude.model')).toBe(true);
+    expect(validation.valid).toBe(true);
+    expect(validation.effectiveConfig.baseagents?.claude?.model).toBe('claude-opus-4-8');
   });
 });

@@ -299,6 +299,7 @@ export interface SubMessage {
   /** handoff 专用：跨会话上下文渲染数据。 */
   handoff?: {
     kind: 'request_to_target' | 'response_to_origin';
+    handoffId?: string;
     origin?: {
       channel?: string;
       peerId?: string;
@@ -360,6 +361,10 @@ export interface Message {
   dispatchMode?: string;            // 群聊分发模式，由渠道适配器从服务器信封解析后注入（mention|broadcast）
   timestamp?: number;
   source?: 'user' | 'card-trigger' | 'trigger' | 'owner-inject' | 'handoff';
+  handoffDelivery?: {
+    direction: 'target' | 'origin';
+    handoffId: string;
+  };
   triggerMeta?: {
     triggerId: string;
     runId?: string;
@@ -816,6 +821,10 @@ export interface DebugBlock {
   upmsg?: boolean;
 }
 
+export interface ProcessDebugBlock extends DebugBlock {
+  eckSnapshots?: boolean;
+}
+
 export type ShowActivitiesMode = 'all' | 'text' | 'none';
 
 export interface ProactiveBehaviorBlock {
@@ -903,7 +912,7 @@ export interface ProcessConfig {
   aid?: string;
   owners?: string[];
   admins?: string[];
-  debug?: DebugBlock;
+  debug?: ProcessDebugBlock;
   tunnel?: { targets: Array<{ name: string; port: number; pathPrefix?: string }> };
   aun?: { encryptionSeed?: string | null };
   serviceProxy?: {

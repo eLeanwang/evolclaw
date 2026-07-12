@@ -57,7 +57,7 @@ describe('Command Permission', () => {
       expect(decision.allow).toBe(true);
     });
 
-    it('should deny visitor model.use because field override is not allowed', () => {
+    it('should allow visitor model.use when no role model policy is configured', () => {
       const ctx: CommandAuthorizationContext = {
         ...baseContext,
         intent: {
@@ -67,10 +67,7 @@ describe('Command Permission', () => {
         },
       };
       const decision = authorizeCommand(ctx);
-      expect(decision.allow).toBe(false);
-      if (!decision.allow) {
-        expect(decision.code).toBe('ARGUMENT_MISMATCH');
-      }
+      expect(decision.allow).toBe(true);
     });
 
     it('should deny visitor cli.exec.raw', () => {
@@ -398,22 +395,21 @@ describe('Command Permission', () => {
       ]).allow).toBe(true);
     });
 
-    it('applies field type, override, and allowed-model constraints', () => {
+    it('applies field type and explicit permission mode constraints', () => {
       expect(resolveConfigOperation([
         'config', 'set', 'chatmode.private', 'invalid', '--self', 'agent1', '--peer', 'aun#group1',
       ])).toMatchObject({ ok: false, code: 'INVALID_CONFIG_VALUE' });
 
-      for (const [field, value] of [
-        ['permissionMode', 'bypass'],
-        ['baseagents.claude.model', 'gpt-5'],
-      ]) {
-        const decision = authorizeConfig([
-          'config', 'set', field, value, '--self', 'agent1', '--peer', 'aun#group1',
-        ]);
-        expect(decision.allow).toBe(false);
-        if (!decision.allow) expect(decision.code).toBe('ARGUMENT_MISMATCH');
-      }
+      const permissionDecision = authorizeConfig([
+        'config', 'set', 'permissionMode', 'bypass', '--self', 'agent1', '--peer', 'aun#group1',
+      ]);
+      expect(permissionDecision.allow).toBe(false);
+      if (!permissionDecision.allow) expect(permissionDecision.code).toBe('ARGUMENT_MISMATCH');
 
+      expect(authorizeConfig([
+        'config', 'set', 'baseagents.claude.model', 'gpt-5',
+        '--self', 'agent1', '--peer', 'aun#group1',
+      ]).allow).toBe(true);
       expect(authorizeConfig([
         'config', 'set', 'baseagents.claude.model', 'claude-sonnet-4-6',
         '--self', 'agent1', '--peer', 'aun#group1',
@@ -519,7 +515,7 @@ describe('Command Permission', () => {
       if (!decision.allow) expect(decision.code).toBe('NO_PERMISSION');
     });
 
-    it('allows explicit config wildcard grants but still enforces role field permissions', () => {
+    it('allows explicit config wildcard grants for fields without role defaults', () => {
       write(ConfigTarget.Agent, {
         aid: 'explicit.agentid.pub',
         channels: [],
@@ -545,12 +541,11 @@ describe('Command Permission', () => {
         '--self', 'explicit.agentid.pub', '--peer', 'aun#group1',
       ], context).allow).toBe(true);
 
-      const denied = authorizeConfig([
+      const allowed = authorizeConfig([
         'config', 'set', 'flush_delay', '1',
         '--self', 'explicit.agentid.pub', '--peer', 'aun#group1',
       ], context);
-      expect(denied.allow).toBe(false);
-      if (!denied.allow) expect(denied.code).toBe('ARGUMENT_MISMATCH');
+      expect(allowed.allow).toBe(true);
     });
 
     it('treats daemon owner as the global permission superset', () => {

@@ -264,6 +264,11 @@ export interface MessageLogEntry {
     request_content?: string;
     auth?: Record<string, unknown>;
   };
+  handoff_trace?: {
+    version: 2;
+    reply_candidate?: boolean;
+    handoff_id?: string;
+  };
 }
 
 const MESSAGE_LOG_FILE = 'messages.jsonl';
@@ -272,15 +277,24 @@ const MESSAGE_LOG_FILE = 'messages.jsonl';
 const recentMsgIds = new Set<string>();
 const DEDUP_MAX = 200;
 
-function isDuplicate(msgId: string | null): boolean {
+function messageLogDedupKey(chatDir: string, msgId: string): string {
+  return `${path.resolve(chatDir)}\u0000${msgId}`;
+}
+
+function hasDuplicate(chatDir: string, msgId: string | null): boolean {
   if (!msgId) return false;
-  if (recentMsgIds.has(msgId)) return true;
+  return recentMsgIds.has(messageLogDedupKey(chatDir, msgId));
+}
+
+function rememberMessageId(chatDir: string, msgId: string | null): void {
+  if (!msgId) return;
+  const dedupKey = messageLogDedupKey(chatDir, msgId);
+  if (recentMsgIds.has(dedupKey)) return;
   if (recentMsgIds.size >= DEDUP_MAX) {
     const first = recentMsgIds.values().next().value!;
     recentMsgIds.delete(first);
   }
-  recentMsgIds.add(msgId);
-  return false;
+  recentMsgIds.add(dedupKey);
 }
 
 function formatTimestampMs(epochMs: number): string {
@@ -304,15 +318,22 @@ export function resolveChatDir(sessionsDir: string, channelType: string, channel
 }
 
 export function appendMessageLog(chatDir: string, entry: MessageLogEntry): void {
-  if (entry.dir === 'in' && isDuplicate(entry.msgId)) {
+  if (entry.dir === 'in' && hasDuplicate(chatDir, entry.msgId)) {
     logger.debug(`[MessageLog] Duplicate msgId skipped: ${entry.msgId}`);
     return;
   }
   try {
     appendJsonl(messageLogPath(chatDir), entry);
+    if (entry.dir === 'in') rememberMessageId(chatDir, entry.msgId);
   } catch (e) {
     logger.warn(`[MessageLog] Failed to write message log: ${e}`);
   }
+}
+
+export function appendMessageLogStrict(chatDir: string, entry: MessageLogEntry): void {
+  if (entry.dir === 'in' && hasDuplicate(chatDir, entry.msgId)) return;
+  appendJsonl(messageLogPath(chatDir), entry);
+  if (entry.dir === 'in') rememberMessageId(chatDir, entry.msgId);
 }
 
 export function buildInboundEntry(opts: {
@@ -386,6 +407,7 @@ export function buildOutboundEntry(opts: {
   payloadSummary?: MessageLogPayloadSummary;
   source?: 'daemon' | 'cli' | 'msg' | 'ctl' | 'owner-inject' | 'handoff';
   handoff?: MessageLogEntry['handoff'];
+  handoff_trace?: MessageLogEntry['handoff_trace'];
 }): MessageLogEntry {
   const ts = opts.timestamp || Date.now();
   return {
@@ -414,6 +436,7 @@ export function buildOutboundEntry(opts: {
     peerType: opts.peerType,
     source: opts.source ?? 'daemon',
     handoff: opts.handoff,
+    handoff_trace: opts.handoff_trace,
   };
 }
 

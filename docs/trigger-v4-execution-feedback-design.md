@@ -21,6 +21,7 @@
 4. 删除 feedback 多 target 和分支 target 能力，仅保留单一反馈策略。
 5. 增加一次性立即执行 source：`once`。
 6. 权限边界清晰：非 admin 不能通过 trigger 跨渠道、跨会话或提权执行。
+7. 保留长期 append-only 审计，可复查定义变更、删除记录和完整 run 结果。
 
 ## Source
 
@@ -42,6 +43,46 @@ type TriggerSource =
 - 执行结束后自动设置 `enabled=false`。
 - 保留 definition 与 audit，便于历史查询。
 - 不参与下一次调度计算。
+
+## 持久化历史与审计
+
+Trigger 的运行态和长期审计分开存储：
+
+```text
+data/triggers/<aid>/
+├── <triggerId>/
+│   ├── trigger.json
+│   └── active.json
+└── history.jsonl
+
+logs/
+└── trigger-runs.log
+```
+
+职责：
+
+- `trigger.json`：当前 definition。
+- `active.json`：当前 open runs、调度游标和 limits runtime state。
+- `history.jsonl`：长期 append-only 审计真相源，默认不自动清理，不参与调度决策。
+- `trigger-runs.log`：短期运维日志，按天轮转并保留 7 天，可用于 `tail` 和近期排障。
+
+`history.jsonl` 记录：
+
+- `trigger.created`：创建时的完整 definition snapshot。
+- `trigger.updated`：更新后的完整 definition snapshot，同时记录 previous revision。
+- `trigger.enabled` / `trigger.disabled`：启停后的完整 definition snapshot。
+- `trigger.deleted`：删除 tombstone 和删除前完整 definition snapshot。
+- `run.completed` / `run.noop` / `run.failed` / `run.skipped`：完整 `TriggerAuditRecord`。
+
+查询与删除语义：
+
+- `ec trigger show` 的 recent runs 和运行统计读取 `history.jsonl`。
+- `ec trigger history --agent <aid> [triggerId]` 按时间倒序查询定义与运行事件。
+- 删除只删除 `<triggerId>/` 运行态目录；agent 根目录的 `history.jsonl` 保留。
+- 启动时把仍在 7 天保留窗口内的 `trigger-runs*.log` 幂等补导入 `history.jsonl`。
+- 升级时若现有 trigger 尚无 definition history，首次加载补写 `migration_snapshot`。
+
+长期历史不替代日志：日志用于运维观察，history 用于审计复查和全生命周期统计。
 
 示例：
 
@@ -668,6 +709,13 @@ interface TriggerOrigin {
 
 不保留运行时兼容 alias。旧 definition 需要一次性迁移，否则按 schema validation error 处理。
 
+审计迁移：
+
+- 保留已有 `data/triggers/<aid>/history.jsonl`，新事件继续 append，不再把该文件视为废弃输入。
+- 旧格式 done 归档行保持原样可查询，其累计 fire/fail 计数作为 V4 run 事件之前的历史基线。
+- 现存 `logs/trigger-runs.log` 和 `trigger-runs-YYYYMMDD.log` 在 scheduler 启动时按 `runId` 去重导入。
+- 已存在的 per-trigger definition 在首次加载时补一条完整 snapshot，之后所有 update/enable/disable/delete 都写历史。
+
 建议迁移映射：
 
 | 旧结构 | 新结构 |
@@ -696,6 +744,8 @@ interface TriggerOrigin {
 - `src/trigger/validation.ts`：实现 V4 normalize/validate，拒绝旧参数与旧 schema。
 - `src/trigger/parser.ts`：重做 `/trigger set/update` 参数解析。
 - `src/trigger/scheduler.ts`：增加 `once` 调度、`target_session` 执行分支、完成后自动 disable。
+- `src/trigger/history.ts`：长期 append-only definition/run 审计、日志导入和查询统计。
+- `src/trigger/audit.ts`：短期日志与长期 history 双写；recent/stats 读取长期 history。
 - `src/trigger/feedback.ts`：删除 `kind/targets[]` 运行时模型，改为 strategy dispatch。
 - `src/core/command/command-handler.ts`：更新 slash trigger 注册、更新、展示字段。
 - `src/core/command/menu-handler.ts`：更新 menu action/update args。
@@ -713,3 +763,7 @@ interface TriggerOrigin {
 - `script` 分支模板渲染正确。
 - 非 admin 跨 target 被拒绝。
 - 非 admin `permissionMode=bypass` 被拒绝。
+- definition update 保留更新前后完整快照。
+- delete 后 trigger 目录消失但 tombstone、definition snapshot 和 run history 仍可查询。
+- 删除 `trigger-runs*.log` 后 recent/stats 仍能从长期 history 返回。
+- 旧 `trigger-runs*.log` 重复启动导入不产生重复 run。

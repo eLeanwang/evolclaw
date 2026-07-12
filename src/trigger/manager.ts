@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import { agentTriggersDir } from '../paths.js';
 import {
+  definitionRevision,
   normalizeTriggerDefinition,
   resolveScriptPath,
   safeRelativePath,
@@ -12,6 +13,7 @@ import type {
 } from './types.js';
 import { atomicWriteJson } from '../core/session/session-fs-store.js';
 import type { TriggerRunStats } from './audit.js';
+import { TriggerHistoryStore } from './history.js';
 
 export interface TriggerListOptions {
   all?: boolean;
@@ -20,11 +22,17 @@ export interface TriggerListOptions {
 type LegacyTriggerStats = TriggerRunStats;
 
 export class TriggerDefinitionManager {
+  readonly history: TriggerHistoryStore;
+
   constructor(
     readonly agentAid: string,
     readonly rootDir = agentTriggersDir(agentAid),
   ) {
     fs.mkdirSync(this.rootDir, { recursive: true });
+    this.history = new TriggerHistoryStore(rootDir, agentAid);
+    for (const definition of this.list({ all: true })) {
+      this.history.ensureDefinitionSnapshot(definition);
+    }
   }
 
   list(opts: TriggerListOptions = {}): TriggerDefinition[] {
@@ -67,6 +75,7 @@ export class TriggerDefinitionManager {
     this.validateScriptFile(definition, dir);
     this.writeDefinition(definition);
     this.clearActive(definition.id);
+    this.history.recordDefinition('trigger.created', definition);
     return definition;
   }
 
@@ -89,6 +98,9 @@ export class TriggerDefinitionManager {
     this.writeFiles(dir, files);
     this.validateScriptFile(updated, dir);
     this.writeDefinition(updated);
+    this.history.recordDefinition('trigger.updated', updated, {
+      previousRevision: definitionRevision(existing),
+    });
     return updated;
   }
 
@@ -97,6 +109,7 @@ export class TriggerDefinitionManager {
     definition.enabled = enabled;
     definition.updatedAt = Date.now();
     this.writeDefinition(definition);
+    this.history.recordDefinition(enabled ? 'trigger.enabled' : 'trigger.disabled', definition);
     return definition;
   }
 
@@ -106,6 +119,7 @@ export class TriggerDefinitionManager {
 
   delete(triggerId: string): TriggerDefinition {
     const definition = this.require(triggerId);
+    this.history.recordDefinition('trigger.deleted', definition);
     fs.rmSync(this.triggerDir(triggerId), { recursive: true, force: true });
     return definition;
   }

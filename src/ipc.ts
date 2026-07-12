@@ -9,6 +9,7 @@ import { fileCache } from './core/daemon-file-cache.js';
 import type { FileCacheStats } from './core/daemon-file-cache.js';
 import type { BindBeginRequest, BindBeginResponse, BindErrorResponse, BindStatusResponse } from './utils/aid-bind.js';
 import type { HandoffMetadata, HandoffReturnIpcResponse, TaskRuntimeContext } from './core/message/handoff.js';
+import type { HandoffReturnResponse, HandoffStatusResponse } from './core/handoff/types.js';
 import type { MessageLogPayloadSummary, MessageLogType } from './core/message/message-log.js';
 import type { ConfigExecutionResult } from './config/config-operation-service.js';
 import type {
@@ -91,6 +92,8 @@ export interface IpcConfigOpResponse {
 export interface IpcAunMsgSendResponse {
   ok: boolean;
   message_id?: string;
+  handoff_id?: string;
+  target_session_id?: string;
   seq?: number;
   timestamp?: number;
   status?: string;
@@ -109,6 +112,7 @@ export interface IpcAunMsgSendLogRequest {
   payloadSummary?: MessageLogPayloadSummary;
   source?: 'daemon' | 'cli' | 'msg' | 'ctl' | 'owner-inject' | 'handoff';
   handoff?: HandoffMetadata;
+  handoffTrace?: { version: 2; handoff_id: string };
 }
 
 type StatusProvider = () => IpcStatusResponse;
@@ -136,8 +140,9 @@ type QueueSnapshotProvider = (params: { agent: string }) => Array<{ status: stri
 type QueueActionExecutor = (params: { agent: string; action: 'clear' | 'cancel' | 'interrupt'; messageId?: string; sessionKey?: string }) => Promise<{ ok: boolean; cleared?: number; cancelled?: boolean; interrupted?: boolean; error?: string }>;
 type TriggerExecutor = (cmd: { type: string; [key: string]: any }) => Promise<any>;
 type TaskRuntimeContextProvider = (params: { sessionId: string }) => TaskRuntimeContext | null | undefined;
-type AunMsgSender = (params: { aid: string; to: string; payload: Record<string, unknown>; encrypt?: boolean; log?: IpcAunMsgSendLogRequest }) => Promise<IpcAunMsgSendResponse>;
-type HandoffReturnExecutor = (params: { sessionId?: string; content: string }) => Promise<HandoffReturnIpcResponse>;
+type AunMsgSender = (params: { aid: string; to: string; payload: Record<string, unknown>; encrypt?: boolean; thread?: string; returnPolicy?: 'required' | 'none'; originSessionId?: string; originMessageId?: string; log?: IpcAunMsgSendLogRequest }) => Promise<IpcAunMsgSendResponse>;
+type HandoffReturnExecutor = (params: { sessionId?: string; handoffId?: string; content: string }) => Promise<HandoffReturnIpcResponse | HandoffReturnResponse>;
+type HandoffStatusExecutor = (params: { sessionId?: string; handoffId: string }) => Promise<HandoffStatusResponse | { ok: false; code: string; error: string }>;
 type BindExecutor = {
   begin: (cmd: BindBeginRequest) => BindBeginResponse | BindErrorResponse;
   status: (taskId: string) => BindStatusResponse | BindErrorResponse;
@@ -163,6 +168,7 @@ export class IpcServer {
   private taskRuntimeContextProvider?: TaskRuntimeContextProvider;
   private aunMsgSender?: AunMsgSender;
   private handoffReturnExecutor?: HandoffReturnExecutor;
+  private handoffStatusExecutor?: HandoffStatusExecutor;
   private bindExecutor?: BindExecutor;
   private configOperationExecutor?: ConfigOperationExecutor;
   private dingtalkContactBindExecutor?: DingtalkContactBindExecutor;
@@ -251,6 +257,10 @@ export class IpcServer {
   /** Inject internal handoff result return executor for `ec handoff return`. */
   setHandoffReturnExecutor(executor: HandoffReturnExecutor): void {
     this.handoffReturnExecutor = executor;
+  }
+
+  setHandoffStatusExecutor(executor: HandoffStatusExecutor): void {
+    this.handoffStatusExecutor = executor;
   }
 
   /** Inject bootstrap QR bind executor for init/init aun. */
@@ -475,6 +485,10 @@ export class IpcServer {
             to: cmd.to,
             payload: cmd.payload as Record<string, unknown>,
             encrypt: cmd.encrypt === true,
+            thread: typeof cmd.thread === 'string' ? cmd.thread : undefined,
+            returnPolicy: cmd.returnPolicy === 'required' || cmd.returnPolicy === 'none' ? cmd.returnPolicy : undefined,
+            originSessionId: typeof cmd.originSessionId === 'string' ? cmd.originSessionId : undefined,
+            originMessageId: typeof cmd.originMessageId === 'string' ? cmd.originMessageId : undefined,
             log,
           });
         } catch (e: any) {
@@ -483,15 +497,24 @@ export class IpcServer {
       }
       case 'handoff-return': {
         if (!this.handoffReturnExecutor) return { ok: false, error: 'handoff return not configured' };
-        if (!cmd.content || typeof cmd.content !== 'string') return { ok: false, error: 'missing content' };
+        if (typeof cmd.content !== 'string') return { ok: false, code: 'HANDOFF_RETURN_CONTENT_REQUIRED', error: 'missing content' };
         try {
           return await this.handoffReturnExecutor({
             sessionId: typeof cmd.sessionId === 'string' ? cmd.sessionId : undefined,
+            handoffId: typeof cmd.handoffId === 'string' ? cmd.handoffId : undefined,
             content: cmd.content,
           });
         } catch (e: any) {
           return { ok: false, error: e?.message || String(e) };
         }
+      }
+      case 'handoff-status': {
+        if (!this.handoffStatusExecutor) return { ok: false, code: 'HANDOFF_STATUS_UNAVAILABLE', error: 'handoff status not configured' };
+        if (!cmd.handoffId || typeof cmd.handoffId !== 'string') return { ok: false, code: 'INVALID_HANDOFF_ID', error: 'missing handoff_id' };
+        return this.handoffStatusExecutor({
+          sessionId: typeof cmd.sessionId === 'string' ? cmd.sessionId : undefined,
+          handoffId: cmd.handoffId,
+        });
       }
       case 'ctl': {
         if (!this.commandExecutor) return { ok: false, error: 'ctl not configured' };
@@ -512,6 +535,7 @@ export class IpcServer {
       }
       case 'trigger.list':
       case 'trigger.show':
+      case 'trigger.history':
       case 'trigger.eventCatalog':
       case 'trigger.create':
       case 'trigger.update':

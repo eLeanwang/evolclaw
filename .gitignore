@@ -48,6 +48,13 @@ tests/**
 !tests/unit/group-index-wrapper.test.ts
 !tests/unit/aun-payload-log.test.ts
 !tests/unit/cross-session-permission.test.ts
+!tests/unit/eck-snapshots.test.ts
+!tests/unit/handoff-v2-cli.test.ts
+!tests/unit/handoff-v2-dispatcher.test.ts
+!tests/unit/handoff-v2-message-log.test.ts
+!tests/unit/handoff-v2-message-queue.test.ts
+!tests/unit/handoff-v2-p2p.test.ts
+!tests/unit/handoff-v2-store.test.ts
 !tests/core/
 !tests/core/command/
 !tests/core/command/*.test.ts
@@ -138,6 +145,13 @@ src/experimental/
 !/tests/unit/group-index-wrapper.test.ts
 !/tests/unit/aun-payload-log.test.ts
 !/tests/unit/cross-session-permission.test.ts
+!/tests/unit/eck-snapshots.test.ts
+!/tests/unit/handoff-v2-cli.test.ts
+!/tests/unit/handoff-v2-dispatcher.test.ts
+!/tests/unit/handoff-v2-message-log.test.ts
+!/tests/unit/handoff-v2-message-queue.test.ts
+!/tests/unit/handoff-v2-p2p.test.ts
+!/tests/unit/handoff-v2-store.test.ts
 !/tests/core/
 !/tests/core/command/
 !/tests/core/command/*.test.ts
