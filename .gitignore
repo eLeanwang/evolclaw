@@ -54,6 +54,7 @@ tests/**
 !tests/unit/handoff-v2-message-log.test.ts
 !tests/unit/handoff-v2-message-queue.test.ts
 !tests/unit/handoff-v2-p2p.test.ts
+!tests/unit/handoff-v2-reload.test.ts
 !tests/unit/handoff-v2-store.test.ts
 !tests/core/
 !tests/core/command/
@@ -151,7 +152,12 @@ src/experimental/
 !/tests/unit/handoff-v2-message-log.test.ts
 !/tests/unit/handoff-v2-message-queue.test.ts
 !/tests/unit/handoff-v2-p2p.test.ts
+!/tests/unit/handoff-v2-reload.test.ts
+!/tests/unit/handoff-v2-rendering.test.ts
 !/tests/unit/handoff-v2-store.test.ts
+!/tests/unit/msg-history.test.ts
+!/tests/unit/session-renew.test.ts
+!/tests/unit/task-runtime-context.test.ts
 !/tests/core/
 !/tests/core/command/
 !/tests/core/command/*.test.ts
