@@ -251,7 +251,30 @@ function migrateConfig(oldConfig: any): ResponseModeConfig {
 
 ---
 
-### Task 2.5：V2 引擎集成（2天）
+### Task 2.5：队列持久化（2天）
+
+**实现**：`src/response-system/engines/v2/queue-persistence.ts`
+
+> 规格 SSOT：data-structures.md §3.1。
+
+**核心功能**：
+- 话题级双文件存储：`relations/<peerKey>/_threads/<threadId>/_queues/{main-queue,auxiliary-queue}.json`
+- 原子写（tmp + rename，复用单会话 message-queue.json 的既有做法）
+- 懒加载（启动打标志、首次操作时按需加载）
+- 恢复流程：辅助队列 `rebuildExpiryOnRestart()`；主队列 `processing` 非空则放回队首重处理
+- 损坏降级：解析失败 → 改名 `*.corrupt-<时间戳>` 留证 → 空队列启动 → 日志告警
+
+**测试**：
+- [ ] 队列变化即落盘；进程 kill 后重启，队列内容不丢
+- [ ] 原子性：写入中途 kill，正式文件仍是完整 JSON（旧版或新版）
+- [ ] 恢复：崩溃时的在飞批次重启后位于队首、被重新处理
+- [ ] 恢复：DELAY/HOLD 消息按 expireAt 正确重建（过期立即投、未过期重挂）
+- [ ] 损坏：手工写坏一个文件 → 该队列空启动 + corrupt 文件留存，另一队列不受影响
+- [ ] 话题隔离：两个 thread 的队列互不干扰
+
+---
+
+### Task 2.6：V2 引擎集成（2天）
 
 **实现**：`src/response-system/engines/v2/engine.ts`
 
@@ -273,6 +296,7 @@ function migrateConfig(oldConfig: any): ResponseModeConfig {
 - [ ] 辅助会话实现
 - [ ] 主队列实现
 - [ ] 主会话实现
+- [ ] 队列持久化实现
 - [ ] V2 引擎实现
 - [ ] 集成测试通过
 - [ ] 性能测试通过
@@ -290,12 +314,18 @@ function migrateConfig(oldConfig: any): ResponseModeConfig {
 **功能**：
 - 实现延迟公式：`baseDelayMs + random(0, baseLevelMs(delayLevel) × 对端系数)`（单聊/群聊相同）
 - 实现对端系数判定（含 agent→×1.0，全是人→×0.5）
-- 实现延迟到期扫描（triggerDelayExpired）与期间新消息重判
+- 实现 DELAY/HOLD 统一到期机制（`triggerExpiredScan` + `armExpiryTimer`）：
+  批次统一 `expireAt`（批内无 skew）、全队列单个定时器、扫描 `expireAt<=now` 整体转投后重挂
+- HOLD 超时兜底（默认 1 小时，`expireReason='hold-timeout'`）由同一定时器驱动，不依赖新消息
+- 重启恢复：按消息 `expireAt` 重建（过期立即投、未过期重挂），不持久化定时器
 
 **测试**：
 - [ ] 延迟公式正确（单聊、群聊都带随机）
 - [ ] 对端系数判定正确（人 ×0.5 / agent ×1.0）
 - [ ] 延迟到期转投、期间新消息重判正确
+- [ ] 批内 expireAt 一致（无 skew）；相近到期一次扫描全部带走、不漏投
+- [ ] HOLD 队列全程安静满 1 小时仍能按时兜底投递（不依赖新消息触发）
+- [ ] 重启后按 expireAt 重建：已过期立即投、未过期重挂定时器
 
 ---
 
@@ -305,13 +335,16 @@ function migrateConfig(oldConfig: any): ResponseModeConfig {
 
 **功能**：
 - 实现硬打断（调用 SDK abort，旧 process() 抛错中止，不 completeBatch/feedback）
-- 实现打断场景特殊提取（一次性提取全部，≤100/20k）
-- 实现打断信息注入（previousMessageStrategy 三策略，提示词层）
+- 实现 generation 守卫（开始新批次/打断时 +1；所有 await 后状态写入点先验代，过期续体静默退出——interrupt-mechanism.md §8.2）
+- 实现主队列批次调度（interrupt 批次优先、跳过批作 reference 留队列、FIFO 兜底）
+- 实现 ignore 的队列侧移除（未处理批次真实移除；在飞批次靠提示词提示忽略）
+- 实现打断信息注入（previousMessageStrategy 三策略：ignore/defer/continue）
 - 优化打断策略
 
 **测试**：
 - [ ] 硬打断生效（abort 中止 callModel）
-- [ ] 打断场景全量提取（紧急消息一定在批次内）
+- [ ] 批次调度正确（interrupt 批优先、reference 注入、被跳过批仍按序处理）
+- [ ] generation 守卫：被打断旧续体不重试、不回灌、不踩新批次状态（含 catch/finally 路径）
 - [ ] 打断信息正确注入
 - [ ] 副作用无法撤回（符合预期）
 

@@ -214,7 +214,7 @@ A: 单聊、群聊公式相同：`baseDelayMs + random(0, 等级时长 × 对端
 
 ### Q: 什么时候会打断主会话？
 
-A: 辅助会话判断紧急消息到达、且主会话当前批次 < 50 条时，会硬打断（调用 SDK abort）并**一次性提取主队列全部消息**（上限 100 条 / 20k 字节，确保紧急消息一定在新批次中）。被打断批次的旧消息不回灌队列，仅保留在主会话上下文。完整机制见 [interrupt-mechanism.md](./interrupt-mechanism.md)。
+A: 辅助会话判断需要打断（批次携带 `interrupt: true`）、主会话正在处理且在飞批次 < 50 条时，会硬打断（调用 SDK abort）。主队列以**同角色批次**为调度单位：interrupt 批次被优先处理，被跳过的更早批次作为只读 reference 注入（本体留队列排队）。被打断批次的旧消息不回灌队列，仅保留在主会话上下文。完整机制见 [interrupt-mechanism.md](./interrupt-mechanism.md)。
 
 ### Q: 单聊和群聊有什么区别？
 

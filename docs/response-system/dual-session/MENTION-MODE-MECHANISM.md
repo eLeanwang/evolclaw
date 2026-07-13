@@ -432,20 +432,32 @@ class AuxiliaryQueue {
 
 ### 4.4 辅助会话输入格式
 
+沿用基础的 `items + kind` 批次模型（见 [data-structures.md](./data-structures.md) §1.3、
+[auxiliary-queue-processing.md](./auxiliary-queue-processing.md) §1.3）：一次触发的批次是带 `kind`
+标记的项列表，message 项与 feedback 项平级。mention 模式**不新增顶层类型**，只在 message 项上加一个
+`role` 字段区分「被 @ 的主消息」与「仅供参考的引用消息」——mention 是消息的属性，抬不到 kind 维度，
+非 mention 模式也无需认识 `reference`（缺省视作 `primary`）。
+
 ```typescript
 interface AuxiliaryInput {
-  type: 'aun-messages';
-  aunMessages: {
-    primaryMessages: Message[];    // 主消息（需要处理）
-    referenceMessages: Message[];  // 引用消息（仅供参考）
-    remainingInQueue: number;      // 【信号A】去掉本批次后辅助队列剩余数
-  };
+  items: AuxItem[];                // 消息项 + 反馈项混合（基础模型）
+  remainingInQueue: number;        // 【信号A】去掉本批次后辅助队列剩余数（只数待判断消息）
   mainSession: {
     status: 'idle' | 'processing';
     pendingCount: number;          // 【信号B】主队列待处理数（=queueSize）
   };
 }
+
+// mention 模式对 AuxItem 的唯一扩展：message 项带 role
+type AuxItem =
+  | { kind: 'message'; role: 'primary' | 'reference'; message: Message }
+      // primary：被 @ 的主消息（需判断）；reference：仅供参考的引用消息（缺省 primary）
+  | { kind: 'feedback'; feedback: MainFeedback };   // 主会话反馈，只读上下文，不产出决策
 ```
+
+> **role 与主会话批次的关系**：辅助会话在 message 项上看到的 `role`，正对应主会话 `process()`
+> 入参里的 `primary` / `references` 二分（见 §4.5）。辅助侧只透传这个标记，不据它做角色权限判断
+> （角色一致性仍由主队列负责，见 auxiliary-queue-processing.md §7.3）。
 
 ---
 

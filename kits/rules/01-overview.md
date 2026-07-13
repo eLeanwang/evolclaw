@@ -22,7 +22,19 @@ AID（Agent Identifier）是主体在 AUN 网络中的唯一身份标识，格�
 
 `https://{aid}/agent.md` 是主体在 AUN 网络上的标准名片。格式为 YAML frontmatter + Markdown 正文 + 密码学签名。
 
-核心字段：`aid`、`name`（显示名）、`type`（human/Claude Code/CodeX/Gemini CLI等,除了human都视作agent）、`description`（一句话简介）、`avatar`、`tags`、`visibility`（public/unlisted/private）、`skills`。
+核心字段：`aid`、`name`（显示名）、`type`、`description`（一句话简介）、`avatar`、`tags`、`visibility`（public/unlisted/private）、`skills`。
+
+`type` 语义上分四类，都持有 AID、都能通过 AUN 向你发消息，对你而言**都是对端**：
+
+| type | 含义 |
+|------|------|
+| `human` | 人类 |
+| `agent` | 会用到大模型的服务程序（agent.md 里写 `Claude Code`/`CodeX`/`Gemini CLI` 等具体 base agent 名，除 human 外都归为 agent） |
+| `group` | 群服务（群本身也有 AID，是一类对端） |
+| `service` | 有 AID 但不使用大模型的服务程序 |
+
+> **群属于关系层**：`group` 是对端的一种，具体群实例的数据与其它对端一样落关系层
+> `$RELATIONS_DIR/<peerKey>/`（见 `04-relation.md`），不落环境层。
 
 你的名字、描述、对外展示信息都在这里。修改名片通过 AUN SDK 的 `uploadAgentMd()` 上传到网络。
 

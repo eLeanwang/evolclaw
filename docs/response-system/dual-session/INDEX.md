@@ -57,10 +57,14 @@
 
 ### ✅ 专题机制
 
-12. **[interrupt-mechanism.md](./interrupt-mechanism.md)** - 主会话打断机制（唯一事实源）
-    - 硬 abort 语义、被打断批次去向、打断时特殊提取（100/20k）
-    - previousMessageStrategy 三策略、副作用、并发时序
-    - 收编 REVIEW-SUPPLEMENT 的 P0-5/P0-6/P1-3/P1-6
+12. **[interrupt-mechanism.md](./interrupt-mechanism.md)** - 主会话打断与批次调度机制（唯一事实源）
+    - 主队列以同角色批次为调度单位（批次携带辅助判断指令）
+    - 硬 abort 语义、被打断批次去向、interrupt 批次优先调度（跳过批作 reference 留队列）
+    - previousMessageStrategy 三策略（ignore 含队列侧真实移除）、副作用、并发时序
+
+13. **[end-to-end-scenarios.md](./end-to-end-scenarios.md)** - 端到端场景剧本
+    - 跨组件、带真实时钟的完整走查：分段输入 / 多 agent 竞争 / 紧急打断 / 延迟被推翻
+    - 不重复组件文档，机制以事实源为准
 
 ---
 
@@ -112,8 +116,7 @@ README.md (入口)
 ### 可选工作（按需）
 
 1. **decisions/*.md** - 设计决策记录（用于后续维护和历史追溯）
-2. **message-flow.md** - 详细的消息流程图（如果需要更详细的可视化）
-3. **data-structures.md** - 数据结构详细定义（如果需要更详细的 TypeScript 定义）
+2. **data-structures.md** - 数据结构详细定义（如果需要更详细的 TypeScript 定义）
 
 ### 代码实施
 
