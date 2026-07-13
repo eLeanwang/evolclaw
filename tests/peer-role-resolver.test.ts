@@ -27,6 +27,10 @@ describe('peer role resolver', () => {
     });
   }
 
+  function writeContacts(value: Record<string, unknown>) {
+    write(ConfigTarget.Contact, value, { self: aid });
+  }
+
   it('uses static agent owners and admins before relation roles', () => {
     const owner = 'root.agentid.pub';
     const admin = 'ops.agentid.pub';
@@ -62,6 +66,121 @@ describe('peer role resolver', () => {
       actorId: 'alice.agentid.pub',
       conversationId: 'alice.agentid.pub',
     })).toMatchObject({ effectiveRole: 'owner', source: 'agent-config-owner' });
+  });
+
+  it('maps channel aliases to static agent owners through contact.json', () => {
+    writeAgent({ owners: ['elean.agentid.pub'] });
+    writeContacts({
+      $schema_version: 1,
+      contacts: {
+        'elean.agentid.pub': {
+          aliases: [
+            'aun:elean.agentid.pub',
+            'feishu:ou_2114acae0d376b26dfbc14bbca5b1f7e',
+            'wechat:wxid_xxx',
+          ],
+        },
+      },
+    });
+
+    const detail = resolvePeerRoleDetail({
+      selfAid: aid,
+      channelType: 'feishu',
+      chatType: 'private',
+      actorId: 'ou_2114acae0d376b26dfbc14bbca5b1f7e',
+      conversationId: 'ou_2114acae0d376b26dfbc14bbca5b1f7e',
+    });
+
+    expect(detail).toMatchObject({
+      effectiveRole: 'owner',
+      source: 'agent-config-owner',
+      isAuthenticated: true,
+    });
+  });
+
+  it('maps channel aliases to static agent admins through contact.json', () => {
+    writeAgent({ admins: ['ops.agentid.pub'] });
+    writeContacts({
+      $schema_version: 1,
+      contacts: {
+        'ops.agentid.pub': {
+          aliases: ['wechat:wxid_ops'],
+        },
+      },
+    });
+
+    expect(resolvePeerRoleDetail({
+      selfAid: aid,
+      channelType: 'wechat',
+      chatType: 'private',
+      actorId: 'wxid_ops',
+      conversationId: 'wxid_ops',
+    })).toMatchObject({
+      effectiveRole: 'admin',
+      source: 'agent-config-admin',
+      isAuthenticated: true,
+    });
+  });
+
+  it('does not grant static roles for unmapped channel ids', () => {
+    writeAgent({ owners: ['elean.agentid.pub'] });
+
+    const detail = resolvePeerRoleDetail({
+      selfAid: aid,
+      channelType: 'feishu',
+      chatType: 'private',
+      actorId: 'ou_unknown',
+      conversationId: 'ou_unknown',
+    });
+
+    expect(detail.effectiveRole).toBeNull();
+    expect(detail.source).toBe('none');
+    expect(detail.isAuthenticated).toBe(false);
+  });
+
+  it('fails closed when contact aliases conflict', () => {
+    writeAgent({ owners: ['alice.agentid.pub', 'bob.agentid.pub'] });
+    writeContacts({
+      $schema_version: 1,
+      contacts: {
+        'alice.agentid.pub': { aliases: ['feishu:ou_conflict'] },
+        'bob.agentid.pub': { aliases: ['feishu:ou_conflict'] },
+      },
+    });
+
+    const detail = resolvePeerRoleDetail({
+      selfAid: aid,
+      channelType: 'feishu',
+      chatType: 'private',
+      actorId: 'ou_conflict',
+      conversationId: 'ou_conflict',
+    });
+
+    expect(detail.effectiveRole).toBeNull();
+    expect(detail.source).toBe('none');
+    expect(detail.isAuthenticated).toBe(false);
+  });
+
+  it('does not remap authenticated AID actors through contact.json', () => {
+    writeAgent({ owners: ['alice.agentid.pub'] });
+    writeContacts({
+      $schema_version: 1,
+      contacts: {
+        'alice.agentid.pub': { aliases: ['aun:bob.agentid.pub'] },
+      },
+    });
+
+    const detail = resolvePeerRoleDetail({
+      selfAid: aid,
+      channelType: 'aun',
+      chatType: 'private',
+      actorId: 'bob.agentid.pub',
+      conversationId: 'bob.agentid.pub',
+    });
+
+    expect(detail.effectiveRole).toBeNull();
+    expect(detail.source).toBe('none');
+    expect(detail.isAuthenticated).toBe(true);
   });
 
   it('uses private relation assigned role as explicit private role source', () => {

@@ -142,6 +142,23 @@ describe('Operation Registry', () => {
       expect(hasOperation('system.upgrade')).toBe(true);
     });
 
+    it('should separate field config operations from dangerous management operations', () => {
+      for (const operation of ['config.get', 'config.set', 'config.unset']) {
+        expect(getOperationMeta(operation)).toMatchObject({
+          dangerous: false,
+          defaultScopes: ['relation', 'agent'],
+          sources: ['menu.cli', 'agent-tool'],
+        });
+      }
+      for (const operation of ['config.read', 'config.write']) {
+        expect(getOperationMeta(operation)).toMatchObject({
+          dangerous: true,
+          defaultScopes: ['relation', 'agent', 'process'],
+        });
+        expect(getOperationMeta(operation)?.sources).toContain('menu.cli');
+      }
+    });
+
     it('should have ec command operations', () => {
       expect(hasOperation('ec.msg.send')).toBe(true);
       expect(hasOperation('ec.msg.file')).toBe(true);

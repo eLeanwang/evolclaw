@@ -16,6 +16,7 @@ import path from 'path';
 import {
   resolvePaths,
   agentConfig as agentConfigPath,
+  agentContactConfig,
   agentRelationConfig,
   agentDir,
   agentRelationsDir,
@@ -40,6 +41,7 @@ import type {
   RelationConfig,
   EffectiveAgentConfig,
 } from '../types.js';
+import { isBehaviorConfigFieldPath } from './config-field-policy.js';
 
 const USER_ROLE_NAME_RE = /^[a-z0-9_-]+$/;
 const ROLE_USAGE_COST_BASIS = new Set(['gateway', 'official']);
@@ -52,6 +54,7 @@ export enum ConfigTarget {
   Defaults = 'defaults',                // agents/defaults.json
   Agent = 'agent',                      // agents/{aid}/config.json
   Relation = 'relation',                // agents/{aid}/relations/{peerKey}/config.json
+  Contact = 'contact',                  // agents/{aid}/contact.json
 }
 
 export interface Selector {
@@ -65,6 +68,7 @@ const TARGET_SCHEMA: Record<ConfigTarget, LogicalSchemaName> = {
   [ConfigTarget.Defaults]: 'defaults',
   [ConfigTarget.Agent]: 'agent-config',
   [ConfigTarget.Relation]: 'relation-config',
+  [ConfigTarget.Contact]: 'contact-book',
 };
 
 export class ConfigError extends Error {
@@ -124,6 +128,9 @@ function targetPath(target: ConfigTarget, sel?: Selector): string {
     case ConfigTarget.Relation:
       requirePeer(sel, target);
       return agentRelationConfig(sel!.self!, sel!.peerKey!);
+    case ConfigTarget.Contact:
+      requireSelf(sel, target);
+      return agentContactConfig(sel!.self!);
   }
 }
 
@@ -214,6 +221,9 @@ function groupFor(target: ConfigTarget, sel?: Selector): string {
   }
   if (target === ConfigTarget.Relation) {
     return 'relation-prefs';
+  }
+  if (sel?.self && target === ConfigTarget.Contact) {
+    return `contact:${sel.self}`;
   }
   return 'config';
 }
@@ -461,6 +471,15 @@ export function validateConfig(target: ConfigTarget, value: unknown): string[] {
       : '';
     return `${e.instancePath || '/'} ${e.message}${extra}`;
   });
+}
+
+export function validateConfigFile(
+  target: ConfigTarget,
+  sel?: Selector,
+): { exists: boolean; errors: string[] } {
+  const value = atomicReadJson<unknown>(targetPath(target, sel));
+  if (value === null) return { exists: false, errors: [] };
+  return { exists: true, errors: validateConfig(target, value) };
 }
 
 function fileCacheAvailable(): boolean {
@@ -728,20 +747,6 @@ export interface FieldRoute {
 
 type ConfigScope = 'process' | 'defaults' | 'agent' | 'relation';
 
-const BEHAVIOR_TOP_FIELDS = new Set([
-  'active_baseagent',
-  'chatmode',
-  'flush_delay',
-  'debounce',
-  'dispatch',
-  'show_activities',
-  'proactive',
-  'render',
-  'sessionManifests',
-  'enable_rich_content',
-  'permissionMode',
-]);
-
 const EFFECTIVE_BEHAVIOR_FIELDS = [
   'active_baseagent',
   'baseagents',
@@ -757,18 +762,6 @@ const EFFECTIVE_BEHAVIOR_FIELDS = [
   'permissionMode',
   'roles',
 ];
-
-const BASEAGENT_BEHAVIOR_FIELDS = new Set([
-  'model',
-  'effort',
-  'reasoning',
-  'agentProgressSummaries',
-  'excludeDynamicSections',
-  'enableRequestUserInput',
-  'approvalsReviewer',
-  'mode',
-  'useVertex',
-]);
 
 /**
  * 缁欏畾 selector 浣滅敤鍩?+ 椤跺眰瀛楁鍚嶏紝鍒ゅ畾鍐欏叆钀界偣銆?
@@ -792,13 +785,13 @@ export function routeFieldPath(
   const topField = fieldPath.split('.')[0];
   if (scope === 'process') return routeIn('evolclaw', ConfigTarget.Process, topField);
   if (scope === 'defaults') {
-    if (isBehaviorFieldPath(fieldPath)) {
+    if (isBehaviorConfigFieldPath(fieldPath)) {
       throw new ConfigError('DEFAULT_BEHAVIOR_REJECT', `--default 不支持行为字段: ${fieldPath}`);
     }
     return routeIn('defaults', ConfigTarget.Defaults, topField);
   }
 
-  if (isBehaviorFieldPath(fieldPath)) {
+  if (isBehaviorConfigFieldPath(fieldPath)) {
     // v3 璁捐锛氳涓哄瓧娈垫寜浣滅敤鍩熻矾鐢卞埌瀵瑰簲鐨?schema
     if (scope === 'agent') {
       return routeIn('agent-config', ConfigTarget.Agent, topField);
@@ -809,16 +802,6 @@ export function routeFieldPath(
 
   if (scope === 'agent') return routeIn('agent-config', ConfigTarget.Agent, topField);
   return routeIn('relation-config', ConfigTarget.Relation, topField);
-}
-
-function isBehaviorFieldPath(fieldPath: string): boolean {
-  const parts = fieldPath.split('.');
-  const top = parts[0];
-  if (top === 'baseagents') {
-    const field = parts[2];
-    return !!field && BASEAGENT_BEHAVIOR_FIELDS.has(field);
-  }
-  return BEHAVIOR_TOP_FIELDS.has(top);
 }
 
 function routeIn(name: LogicalSchemaName, target: ConfigTarget, topField: string): FieldRoute {

@@ -14,7 +14,7 @@ import type { ReplyContext, AunChannelInstance as AunInst, AidConnectionState, A
 import { resolvePaths, getPackageRoot, agentMdPath as agentMdPathFn, agentDir as agentDirPath, resolveRoot } from '../paths.js';
 import { saveToUploads, sanitizeFileName, bufferToInboundImage, safeFetch, type InboundImage } from '../utils/media-cache.js';
 import { appendAidEvent } from '../utils/instance-registry.js';
-import { appendMessageLog, buildOutboundEntry, buildInboundEntry } from '../core/message/message-log.js';
+import { appendMessageLog, buildOutboundEntry, buildInboundEntry, classifyAunPayloadForLog, type MessageLogPayloadSummary, type MessageLogType } from '../core/message/message-log.js';
 import { chatDirPath } from '../core/session/session-fs-store.js';
 import { appendHintAdd, appendHintRemove, parseInjectRequest } from '../core/message/pending-hints.js';
 import { appendAidLifecycle } from '../aun/aid/identity.js';
@@ -110,6 +110,10 @@ export interface AUNDispatchOptions {
   images?: Array<{ data: string; mimeType: string }>;
   /** 群聊分发模式（mention/broadcast），透传到上下文注入。 */
   dispatchMode?: string;
+  msgType?: MessageLogType;
+  payloadType?: string;
+  payloadSummary?: MessageLogPayloadSummary;
+  messageLogContent?: string;
 }
 
 export interface AUNMessageHandler {
@@ -129,7 +133,10 @@ export interface AunDaemonMsgSendArgs {
   encrypt?: boolean;
   log?: {
     content: string;
-    source?: 'daemon' | 'cli' | 'msg' | 'ctl' | 'owner-inject';
+    msgType?: MessageLogType;
+    payloadType?: string;
+    payloadSummary?: MessageLogPayloadSummary;
+    source?: 'daemon' | 'cli' | 'msg' | 'ctl' | 'owner-inject' | 'handoff';
     handoff?: {
       kind?: 'request_to_target' | 'response_to_origin';
       event?: 'consumed';
@@ -145,6 +152,11 @@ export interface AunDaemonMsgSendArgs {
       };
       consumed_by_msg_id?: string;
       match?: 'ref' | 'inferred';
+      request_content?: string;
+    };
+    handoffTrace?: {
+      version: 2;
+      handoff_id: string;
     };
   };
 }
@@ -395,7 +407,7 @@ export class AUNChannel {
                 type: 'interaction.response',
                 id: cardInfo.requestId,
                 action: actionValue,
-                values: { text, action_label: obj.label ?? obj.action_label, behavior: obj.behavior },
+                values: { text, action_label: obj.label ?? obj.action_label, behavior: obj.behavior, card_message_id: cardMsgId },
                 operatorId: cardClickerAid || undefined,
               });
             } else {
@@ -1360,6 +1372,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     const env = (msg.envelope && typeof msg.envelope === 'object') ? msg.envelope as Record<string, any> : {};
     const fromAid = env.from ?? '';
     const payload = msg.payload ?? '';
+    const logDescriptor = classifyAunPayloadForLog(payload);
     const text = this.extractTextPayload(payload, fromAid, fromAid);
     const threadId = typeof payload === 'object' && payload !== null ? (payload as any).thread_id : undefined;
     const refMessageId = typeof payload === 'object' && payload !== null && typeof (payload as any).ref_message_id === 'string'
@@ -1420,16 +1433,24 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     logger.info(`${this.logPrefix()} P2P dispatch decision: mid=${messageId} from=${shortAid}(${displayName}) peerType=${peerIdentity.type} payloadType=${p2pPayloadType} chatId=${chatId} encrypt=${msgEncrypted} textPreview=${JSON.stringify(text.slice(0, 80))}`);
 
     // action_card_reply 已在 extractTextPayload 中消费，不分发给 agent
-    if (p2pPayloadType === 'action_card_reply') return;
+    if (p2pPayloadType === 'action_card_reply') {
+      this.appendInboundPayloadJsonl(chatId, fromAid, messageId, msgEncrypted, false, logDescriptor);
+      return;
+    }
     // menu.* 协议：自定义消息快速路径，需要原始 payload JSON 传递给 bridge
     if (AUNChannel.MENU_REQUEST_TYPES.has(p2pPayloadType)) {
       this.acknowledgeImmediately(messageId, seq);
+      this.appendInboundPayloadJsonl(chatId, fromAid, messageId, msgEncrypted, false, logDescriptor);
       this.dispatchMessage({
         channelId: chatId, userId: fromAid,
         text: JSON.stringify(payload),
         chatType: 'private', messageId, seq,
         peerName: displayName || undefined,
         peerType: peerIdentity.type,
+        msgType: logDescriptor.msgType,
+        payloadType: logDescriptor.payloadType,
+        payloadSummary: logDescriptor.payloadSummary,
+        messageLogContent: logDescriptor.content,
       });
       return;
     }
@@ -1445,6 +1466,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     // 透传 encrypted：bind.response 须与请求的加密/明文对称（见 onMessage 处理）。
     if (p2pPayloadType === AUNChannel.BIND_REQUEST_TYPE) {
       this.acknowledgeImmediately(messageId, seq);
+      this.appendInboundPayloadJsonl(chatId, fromAid, messageId, msgEncrypted, false, logDescriptor);
       this.dispatchMessage({
         channelId: chatId, userId: fromAid,
         text: JSON.stringify(payload),
@@ -1452,12 +1474,17 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
         peerName: displayName || undefined,
         peerType: peerIdentity.type,
         encrypted: msgEncrypted,
+        msgType: logDescriptor.msgType,
+        payloadType: logDescriptor.payloadType,
+        payloadSummary: logDescriptor.payloadSummary,
+        messageLogContent: logDescriptor.content,
       });
       return;
     }
     // payload 类型白名单：信号类消息（status / event / thought 等）不进 Agent
     if (p2pPayloadType && !AUNChannel.PROACTIVE_ALLOW_TYPES.has(p2pPayloadType)) {
       this.acknowledgeImmediately(messageId, seq);
+      this.appendInboundPayloadJsonl(chatId, fromAid, messageId, msgEncrypted, false, logDescriptor);
       logger.info(`${this.logPrefix()} P2P dropped (type deny): type=${p2pPayloadType} from=${shortAid}(${displayName}) mid=${messageId}`);
       return;
     }
@@ -1492,6 +1519,10 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       encrypted: msgEncrypted,
       replyContext,
       images: inboundImages.length > 0 ? inboundImages : undefined,
+      msgType: logDescriptor.msgType,
+      payloadType: logDescriptor.payloadType,
+      payloadSummary: logDescriptor.payloadSummary,
+      messageLogContent: logDescriptor.msgType === 'text' ? finalText : logDescriptor.content,
     });
   }
 
@@ -1505,6 +1536,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     const groupId = env.group_id ?? '';
     const senderAid = env.from ?? '';
     const payload = msg.payload ?? '';
+    const logDescriptor = classifyAunPayloadForLog(payload);
     const text = this.extractTextPayload(payload, groupId, senderAid);
     const threadId = typeof payload === 'object' && payload !== null ? (payload as any).thread_id : undefined;
     const topicName = (typeof payload === 'object' && payload !== null)
@@ -1569,7 +1601,10 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     // action_card_reply 已在 extractTextPayload 中消费，不分发给 agent
     {
       const payloadType = (payload && typeof payload === 'object') ? (payload as any).type ?? '' : '';
-      if (payloadType === 'action_card_reply') return;
+      if (payloadType === 'action_card_reply') {
+        this.appendInboundPayloadJsonl(groupId, senderAid, messageId, !!env.encrypted, true, logDescriptor);
+        return;
+      }
     }
 
     // ── payload 类型白名单（所有模式生效） ──
@@ -1580,15 +1615,21 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       // menu.* 协议：自定义消息快速路径
       if (AUNChannel.MENU_REQUEST_TYPES.has(payloadType)) {
         this.acknowledgeImmediately(messageId, seq);
+        this.appendInboundPayloadJsonl(groupId, senderAid, messageId, !!env.encrypted, true, logDescriptor);
         this.dispatchMessage({
           channelId: groupId, userId: senderAid,
           text: JSON.stringify(payload),
           chatType: 'group', messageId, seq, groupId,
+          msgType: logDescriptor.msgType,
+          payloadType: logDescriptor.payloadType,
+          payloadSummary: logDescriptor.payloadSummary,
+          messageLogContent: logDescriptor.content,
         });
         return;
       }
       if (payloadType && !AUNChannel.PROACTIVE_ALLOW_TYPES.has(payloadType)) {
         this.acknowledgeImmediately(messageId, seq);
+        this.appendInboundPayloadJsonl(groupId, senderAid, messageId, !!env.encrypted, true, logDescriptor);
         logger.info(`${this.logPrefix()} Group dropped (type deny): type=${payloadType} group=${groupId} sender=${senderAid} mid=${messageId}`);
         return;
       }
@@ -1738,6 +1779,10 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       replyContext: this.buildGroupReplyContext(threadId, senderAid, msgEncrypted, messageId, msgChatmode, topicName),
       dispatchMode: serverDispatchMode,
       images: inboundImages.length > 0 ? inboundImages : undefined,
+      msgType: logDescriptor.msgType,
+      payloadType: logDescriptor.payloadType,
+      payloadSummary: logDescriptor.payloadSummary,
+      messageLogContent: logDescriptor.msgType === 'text' ? finalText : logDescriptor.content,
     });
   }
 
@@ -1755,6 +1800,10 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     source?: 'user' | 'card-trigger';
     dispatchMode?: string;
     images?: Array<{ data: string; mimeType: string }>;
+    msgType?: MessageLogType;
+    payloadType?: string;
+    payloadSummary?: MessageLogPayloadSummary;
+    messageLogContent?: string;
   }): void {
     // Dedup
     if (event.messageId) {
@@ -1833,9 +1882,40 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       source: event.source,
       dispatchMode: event.dispatchMode,
       images: event.images,
+      msgType: event.msgType,
+      payloadType: event.payloadType,
+      payloadSummary: event.payloadSummary,
+      messageLogContent: event.messageLogContent,
     }).catch(err => {
       logger.error(`${this.logPrefix()} Message handler error:`, err);
     });
+  }
+
+  private appendInboundPayloadJsonl(
+    channelId: string,
+    fromAid: string,
+    msgId: string,
+    encrypt: boolean,
+    isGroup: boolean,
+    descriptor: ReturnType<typeof classifyAunPayloadForLog>,
+  ): void {
+    try {
+      const chatDir = chatDirPath(resolvePaths().sessionsDir, 'aun', channelId, this.config.aid);
+      appendMessageLog(chatDir, buildInboundEntry({
+        from: fromAid,
+        to: this.config.aid,
+        chatType: isGroup ? 'group' : 'private',
+        groupId: isGroup ? channelId : null,
+        msgId,
+        content: descriptor.content,
+        encrypt,
+        msgType: descriptor.msgType,
+        payloadType: descriptor.payloadType,
+        payloadSummary: descriptor.payloadSummary,
+      }));
+    } catch (e) {
+      logger.debug(`${this.logPrefix()} appendInboundPayloadJsonl failed: ${e}`);
+    }
   }
 
   // ── 观察者模式（Observer Mode） ──────────────────────────────
@@ -2580,8 +2660,10 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       encrypt,
       context?.metadata?.chatmode as string | undefined,
     );
-    const source = (context?.metadata?.source as 'daemon' | 'cli' | 'msg' | 'ctl' | undefined) ?? 'daemon';
-    this.appendOutboundJsonl(channelId, logText, messageId, encrypt, context, isGroup, 'text', source);
+    const source = (context?.metadata?.source as 'daemon' | 'cli' | 'msg' | 'ctl' | 'handoff' | undefined) ?? 'daemon';
+    this.appendOutboundJsonl(channelId, {
+      ...classifyAunPayloadForLog(payload), msgId: messageId, encrypt, context, isGroup, source,
+    });
     this.forwardOutbound(result);
   }
 
@@ -2830,6 +2912,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       this.forwardOutbound(result);
       let logWritten = false;
       if (args.log?.content !== undefined) {
+        const classified = classifyAunPayloadForLog(finalPayload);
         const chatDir = chatDirPath(resolvePaths().sessionsDir, 'aun', args.to, this.config.aid);
         fs.mkdirSync(chatDir, { recursive: true });
         appendMessageLog(chatDir, buildOutboundEntry({
@@ -2837,18 +2920,21 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
           to: args.to,
           chatType: 'private',
           msgId: messageId,
-          content: args.log.content,
+          content: classified.content || args.log.content,
           encrypt,
           chatmode,
-          msgType: 'text',
+          msgType: classified.msgType ?? args.log.msgType,
+          payloadType: classified.payloadType ?? args.log.payloadType,
+          payloadSummary: classified.payloadSummary ?? args.log.payloadSummary,
           source: args.log.source ?? 'msg',
           handoff: args.log.handoff,
+          handoff_trace: args.log.handoffTrace,
         }));
         this.aidStatsCollector?.recordOutbound(
           this.config.aid,
           args.to,
-          Buffer.byteLength(args.log.content, 'utf-8'),
-          args.log.content,
+          Buffer.byteLength(classified.content || args.log.content, 'utf-8'),
+          classified.content || args.log.content,
           false,
           encrypt,
           chatmode,
@@ -2967,7 +3053,9 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
           logger.info(`${this.logPrefix()} group.send ok: group=${channelId} mid=${mid} encrypt=${encrypt} text=${finalText.slice(0, 60)}`);
           appendAidEvent({ ts: Date.now(), iso: new Date().toISOString(), event: 'message_out', aid: this.config.aid, to: channelId, msgId: mid, kind: 'text', len: finalText.length, groupId: channelId });
           this.aidStatsCollector?.recordOutbound(this.config.aid, channelId, Buffer.byteLength(finalText, 'utf-8'), finalText, false, encrypt, context?.metadata?.chatmode as string | undefined, 'send');
-          this.appendOutboundJsonl(channelId, finalText, mid, encrypt, context, true, 'text', source);
+          this.appendOutboundJsonl(channelId, {
+            ...classifyAunPayloadForLog(payload), msgId: mid, encrypt, context, isGroup: true, source,
+          });
           // Observer forward: outbound (group) — 原样转发 SDK SendResult（含 envelope + payload）
           this.forwardOutbound(result);
         }
@@ -2981,7 +3069,9 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
           logger.info(`${this.logPrefix()} message.send ok: to=${this.peerLabel(targetAid)} mid=${result.message_id} encrypt=${encrypt} text=${finalText.slice(0, 60)}`);
           appendAidEvent({ ts: Date.now(), iso: new Date().toISOString(), event: 'message_out', aid: this.config.aid, to: targetAid, msgId: result.message_id, kind: 'text', len: finalText.length });
           this.aidStatsCollector?.recordOutbound(this.config.aid, targetAid, Buffer.byteLength(finalText, 'utf-8'), finalText, false, encrypt, context?.metadata?.chatmode as string | undefined, 'send');
-          this.appendOutboundJsonl(targetAid, finalText, result.message_id, encrypt, context, false, 'text', source);
+          this.appendOutboundJsonl(targetAid, {
+            ...classifyAunPayloadForLog(payload), msgId: result.message_id, encrypt, context, isGroup: false, source,
+          });
           // Observer forward: outbound (private) — 原样转发 SDK SendResult（含 envelope + payload）
           this.forwardOutbound(result);
         }
@@ -3004,7 +3094,9 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
             }
             appendAidEvent({ ts: Date.now(), iso: new Date().toISOString(), event: 'message_out', aid: this.config.aid, to: channelId, msgId: mid, kind: 'text', len: finalText.length, groupId: channelId });
             this.aidStatsCollector?.recordOutbound(this.config.aid, channelId, Buffer.byteLength(finalText, 'utf-8'), finalText, false, false, context?.metadata?.chatmode as string | undefined);
-            this.appendOutboundJsonl(channelId, finalText, mid, false, context, true, 'text', source);
+            this.appendOutboundJsonl(channelId, {
+              ...classifyAunPayloadForLog(payload), msgId: mid, encrypt: false, context, isGroup: true, source,
+            });
             this.forwardOutbound(result as any);
           } else {
             this.trace('OUT', 'message.send.fallback', params);
@@ -3017,7 +3109,9 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
             }
             appendAidEvent({ ts: Date.now(), iso: new Date().toISOString(), event: 'message_out', aid: this.config.aid, to: targetAid, msgId: mid, kind: 'text', len: finalText.length });
             this.aidStatsCollector?.recordOutbound(this.config.aid, targetAid, Buffer.byteLength(finalText, 'utf-8'), finalText, false, false, context?.metadata?.chatmode as string | undefined);
-            this.appendOutboundJsonl(targetAid, finalText, mid, false, context, false, 'text', source);
+            this.appendOutboundJsonl(targetAid, {
+              ...classifyAunPayloadForLog(payload), msgId: mid, encrypt: false, context, isGroup: false, source,
+            });
             this.forwardOutbound(result as any);
           }
           return true;
@@ -3068,19 +3162,33 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
   }
 
   /** 出站消息写入 messages.jsonl（message.send/group.send/thought.put 成功后调用） */
-  private appendOutboundJsonl(channelId: string, text: string, msgId: string, encrypt: boolean, context?: ReplyContext, isGroup?: boolean, msgType: 'text' | 'thought' = 'text', source: 'daemon' | 'cli' | 'msg' | 'ctl' = 'daemon'): void {
+  private appendOutboundJsonl(channelId: string, descriptor: {
+    content: string;
+    msgType: MessageLogType;
+    payloadType?: string;
+    payloadSummary?: MessageLogPayloadSummary;
+    msgId: string;
+    encrypt: boolean;
+    context?: ReplyContext;
+    isGroup?: boolean;
+    source?: 'daemon' | 'cli' | 'msg' | 'ctl' | 'handoff';
+  }): void {
     try {
+      const { content, msgType, payloadType, payloadSummary, msgId, encrypt, context, isGroup, source = 'daemon' } = descriptor;
       const sessionsDir = resolvePaths().sessionsDir;
       const selfAID = this.config.aid;
       const chatDir = chatDirPath(sessionsDir, 'aun', channelId, selfAID);
       const chatmode = context?.metadata?.chatmode as string | undefined;
+      const handoff = context?.metadata?.handoff && typeof context.metadata.handoff === 'object'
+        ? context.metadata.handoff as any
+        : undefined;
       appendMessageLog(chatDir, buildOutboundEntry({
         from: selfAID,
         to: channelId,
         chatType: isGroup ? 'group' : 'private',
         groupId: isGroup ? channelId : null,
         msgId,
-        content: text,
+        content,
         replyTo: null,
         agent: null,
         model: null,
@@ -3088,7 +3196,10 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
         encrypt,
         chatmode,
         msgType,
+        payloadType,
+        payloadSummary,
         source,
+        handoff,
       }));
     } catch (e) {
       logger.debug(`${this.logPrefix()} appendOutboundJsonl failed: ${e}`);
@@ -3156,7 +3267,10 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
         this.forwardOutbound(putRes);
         if (thoughtText) {
           this.aidStatsCollector?.recordOutbound(this.config.aid, channelId, Buffer.byteLength(thoughtText, 'utf-8'), thoughtText, false, encrypt, context?.metadata?.chatmode as string | undefined ?? 'proactive', 'thought');
-          this.appendOutboundJsonl(channelId, thoughtText, tid ?? `thought-${Date.now()}`, encrypt, context, true, 'thought', 'daemon');
+          this.appendOutboundJsonl(channelId, {
+            content: thoughtText, msgType: 'thought', payloadType: 'thought',
+            msgId: tid ?? `thought-${Date.now()}`, encrypt, context, isGroup: true, source: 'daemon',
+          });
         }
       } else {
         params.to = targetId;
@@ -3167,7 +3281,10 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
         this.forwardOutbound(putRes);
         if (thoughtText) {
           this.aidStatsCollector?.recordOutbound(this.config.aid, targetId, Buffer.byteLength(thoughtText, 'utf-8'), thoughtText, false, encrypt, context?.metadata?.chatmode as string | undefined ?? 'proactive', 'thought');
-          this.appendOutboundJsonl(channelId, thoughtText, tid ?? `thought-${Date.now()}`, encrypt, context, false, 'thought', 'daemon');
+          this.appendOutboundJsonl(channelId, {
+            content: thoughtText, msgType: 'thought', payloadType: 'thought',
+            msgId: tid ?? `thought-${Date.now()}`, encrypt, context, isGroup: false, source: 'daemon',
+          });
         }
       }
     } catch (e) {
@@ -3400,7 +3517,10 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
         appendAidEvent({ ts: Date.now(), iso: new Date().toISOString(), event: 'message_out', aid: this.config.aid, to: channelId, msgId: sentMid, kind: 'file', len: fileText.length, ...(isGroup && { groupId: channelId }) });
         this.aidStatsCollector?.recordOutbound(this.config.aid, channelId, Buffer.byteLength(fileText, 'utf-8'), fileText, false, !!params.encrypt, context?.metadata?.chatmode as string | undefined);
         const source = (context?.metadata?.source as 'daemon' | 'cli' | 'msg' | 'ctl' | undefined) ?? 'daemon';
-        this.appendOutboundJsonl(channelId, fileText, sentMid, !!params.encrypt, context, isGroup, 'text', source);
+        this.appendOutboundJsonl(channelId, {
+          ...classifyAunPayloadForLog(filePayload), msgId: sentMid, encrypt: !!params.encrypt,
+          context, isGroup, source,
+        });
       }
       if (sendResult) this.forwardOutbound(sendResult);
       return true;

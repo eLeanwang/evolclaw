@@ -1,4 +1,4 @@
-import type { ChannelAdapter, ReplyContext, InteractionRequest, Message } from '../types.js';
+import type { ChannelAdapter, ReplyContext, InteractionRequest, Message, CrossSessionApprovalContext } from '../types.js';
 import type { InteractionRouter } from '../core/interaction-router.js';
 
 export const BASEAGENT_RUNNER_UNAVAILABLE = 'BASEAGENT_RUNNER_UNAVAILABLE';
@@ -40,6 +40,8 @@ export interface PermissionContext {
   chatType?: 'private' | 'group';
   selfAid?: string;
   peerKey?: string;
+  /** Optional owner-approval path for non-owner sessions. */
+  crossSessionApproval?: CrossSessionApprovalContext;
   /** proactive 模式行为策略钩子：PreToolUse 阶段调用，返回 block 则拒绝工具调用 */
   policyHook?: (toolName: string, toolInput: Record<string, unknown>) => { block: boolean; reason?: string } | undefined;
   /** 发送交互卡片前刷新当前 renderer 队列，避免卡片早于事件消息到达 */

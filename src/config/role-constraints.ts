@@ -97,9 +97,10 @@ export function mergeWithRoleConstraints(
 
 export function isModelAllowedForRole(role: string, model: string, baseagent = 'claude', selfAid?: string): boolean {
   const roleDef = getRoleDefinitionForConstraints(role, selfAid);
+  if (!roleDef) return false;
   const perm = roleDef?.permissions?.[`baseagents.${baseagent}.model`] ?? null;
   if (!perm || !perm.allowedModels) {
-    return baseagent !== 'claude';
+    return true;
   }
   return isModelAllowedByPatterns(model, perm.allowedModels);
 }

@@ -9,6 +9,7 @@
   "additionalProperties": true,
   "properties": {
     "$schema_version": { "type": "number", "default": 2, "x-merge": "scalar" },
+    "active_baseagent": { "type": "string", "x-merge": "scalar" },
     "models": { "type": "object", "x-merge": "dict" },
     "baseagents": { "type": "object", "x-merge": "dict" },
     "chatmode": { "type": "object", "x-merge": "dict" },
@@ -21,6 +22,7 @@
     "proactive": { "type": "object", "x-merge": "dict" },
     "group_venue_sync": { "type": "object", "x-merge": "dict" },
     "render": { "type": "object", "x-merge": "dict" },
+    "sessionManifests": { "type": "object", "x-merge": "dict" },
     "permissionMode": {
       "type": "string",
       "enum": ["auto", "bypass", "readonly", "request", "edit", "plan", "noask"],

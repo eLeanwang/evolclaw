@@ -1,3 +1,4 @@
+import { randomInt } from 'crypto';
 import { logger } from '../utils/logger.js';
 import { requireOptional } from '../utils/npm-ops.js';
 import type { ChannelPlugin, ChannelInstance, ChannelBuildContext } from '../core/channel-loader.js';
@@ -7,6 +8,8 @@ import type { DingtalkChannelInstance as DingtalkInst, ThoughtItem } from '../ty
 import { formatItemsAsText } from '../core/message/items-formatter.js';
 import type { FirstInteractionWelcomeManager } from '../utils/welcome.js';
 import { initWelcomeManager, sendWelcomeIfNeeded } from '../utils/welcome.js';
+import { isValidAid } from '../aun/aid/validation.js';
+import { bindContactAlias } from '../config/contact-book.js';
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -28,6 +31,193 @@ export interface DingtalkMessageEvent {
 }
 
 type DingtalkMessageHandler = (event: DingtalkMessageEvent) => Promise<void>;
+
+export const DINGTALK_BIND_CODE_TTL_MS = 10 * 60 * 1000;
+export const DINGTALK_BIND_MAX_FAILED_ATTEMPTS = 5;
+
+export interface DingtalkContactBindRegisterRequest {
+  selfAid: string;
+  channelName: string;
+  primaryId: string;
+  code?: string;
+  now?: number;
+}
+
+export interface PendingDingtalkContactBind {
+  selfAid: string;
+  channelName: string;
+  primaryId: string;
+  code: string;
+  createdAt: number;
+  expiresAt: number;
+  failedAttempts: number;
+  maxFailedAttempts: number;
+}
+
+export interface DingtalkContactBindRegisterResponse {
+  ok: true;
+  code: string;
+  expiresAt: number;
+  replaced: boolean;
+}
+
+export interface DingtalkContactBindErrorResponse {
+  ok: false;
+  error: string;
+}
+
+export interface DingtalkContactBindMessageContext {
+  selfAid?: string;
+  channelName: string;
+  channelType: string;
+  chatType: 'private' | 'group';
+  actorId?: string;
+  content: string;
+  now?: number;
+}
+
+export interface DingtalkContactBindMessageResult {
+  handled: boolean;
+  reply?: string;
+  status?: 'format' | 'wrong-code' | 'failed' | 'expired' | 'bound' | 'write-failed' | 'missing-actor';
+  remainingAttempts?: number;
+}
+
+const pendingContactBinds = new Map<string, PendingDingtalkContactBind>();
+
+export function registerPendingDingtalkContactBind(
+  req: DingtalkContactBindRegisterRequest,
+): DingtalkContactBindRegisterResponse | DingtalkContactBindErrorResponse {
+  const selfAid = String(req.selfAid || '').trim();
+  const channelName = String(req.channelName || '').trim();
+  const primaryId = String(req.primaryId || '').trim();
+  const now = req.now ?? Date.now();
+  const code = req.code ? String(req.code).trim() : generateDingtalkBindCode();
+
+  if (!isValidAid(selfAid)) return { ok: false, error: `invalid selfAid: ${req.selfAid}` };
+  if (!channelName) return { ok: false, error: 'missing channelName' };
+  if (!isValidAid(primaryId)) return { ok: false, error: `invalid primaryId: ${req.primaryId}` };
+  if (!/^\d{6}$/.test(code)) return { ok: false, error: 'binding code must be 6 digits' };
+
+  const key = pendingBindKey(selfAid, channelName);
+  const replaced = pendingContactBinds.has(key);
+  const item: PendingDingtalkContactBind = {
+    selfAid,
+    channelName,
+    primaryId,
+    code,
+    createdAt: now,
+    expiresAt: now + DINGTALK_BIND_CODE_TTL_MS,
+    failedAttempts: 0,
+    maxFailedAttempts: DINGTALK_BIND_MAX_FAILED_ATTEMPTS,
+  };
+  pendingContactBinds.set(key, item);
+  return { ok: true, code, expiresAt: item.expiresAt, replaced };
+}
+
+export function handlePendingDingtalkContactBindMessage(
+  ctx: DingtalkContactBindMessageContext,
+): DingtalkContactBindMessageResult {
+  if (ctx.channelType !== 'dingtalk') return { handled: false };
+  const selfAid = String(ctx.selfAid || '').trim();
+  const channelName = String(ctx.channelName || '').trim();
+  if (!selfAid || !channelName) return { handled: false };
+
+  const key = pendingBindKey(selfAid, channelName);
+  const item = pendingContactBinds.get(key);
+  if (!item) return { handled: false };
+
+  const now = ctx.now ?? Date.now();
+  if (now >= item.expiresAt) {
+    pendingContactBinds.delete(key);
+    return {
+      handled: true,
+      status: 'expired',
+      remainingAttempts: 0,
+      reply: '钉钉身份绑定码已超时，本次绑定失败。请重新执行 ec init dingtalk 并再次扫码绑定。',
+    };
+  }
+
+  if (ctx.chatType !== 'private') return { handled: false };
+
+  const input = String(ctx.content ?? '').trim();
+  if (!/^\d+$/.test(input) || !/^\d{6}$/.test(input)) {
+    return {
+      handled: true,
+      status: 'format',
+      reply: '请直接发送 6 位数字绑定码。格式错误不计入错误次数。',
+      remainingAttempts: item.maxFailedAttempts - item.failedAttempts,
+    };
+  }
+
+  if (input !== item.code) {
+    item.failedAttempts += 1;
+    const remaining = Math.max(0, item.maxFailedAttempts - item.failedAttempts);
+    if (remaining === 0) {
+      pendingContactBinds.delete(key);
+      return {
+        handled: true,
+        status: 'failed',
+        remainingAttempts: 0,
+        reply: '绑定码错误次数已达上限，本次钉钉身份绑定失败。请重新执行 ec init dingtalk 并再次扫码绑定。',
+      };
+    }
+    return {
+      handled: true,
+      status: 'wrong-code',
+      remainingAttempts: remaining,
+      reply: `绑定码错误，请重新发送 6 位数字绑定码。剩余 ${remaining} 次机会。`,
+    };
+  }
+
+  const actorId = String(ctx.actorId || '').trim();
+  if (!actorId) {
+    return {
+      handled: true,
+      status: 'missing-actor',
+      remainingAttempts: item.maxFailedAttempts - item.failedAttempts,
+      reply: '无法识别当前钉钉发送者身份，未建立绑定。请重新发送绑定码或重新执行绑定流程。',
+    };
+  }
+
+  try {
+    bindContactAlias(item.selfAid, item.primaryId, 'dingtalk', actorId);
+    pendingContactBinds.delete(key);
+    return {
+      handled: true,
+      status: 'bound',
+      reply: `钉钉身份绑定成功：dingtalk:${actorId} -> ${item.primaryId}`,
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return {
+      handled: true,
+      status: 'write-failed',
+      remainingAttempts: item.maxFailedAttempts - item.failedAttempts,
+      reply: `钉钉身份绑定写入失败：${message}`,
+    };
+  }
+}
+
+export function getPendingDingtalkContactBind(
+  selfAid: string,
+  channelName: string,
+): PendingDingtalkContactBind | null {
+  const item = pendingContactBinds.get(pendingBindKey(selfAid, channelName));
+  return item ? { ...item } : null;
+}
+
+export function clearPendingDingtalkContactBinds(): void {
+  pendingContactBinds.clear();
+}
+
+function generateDingtalkBindCode(): string {
+  return String(randomInt(0, 1_000_000)).padStart(6, '0');
+}
+
+function pendingBindKey(selfAid: string, channelName: string): string {
+  return `${String(selfAid || '').trim()}\u0000${String(channelName || '').trim()}`;
+}
 
 // ── Webhook SSRF validation ────────────────────────────────────────────────────
 

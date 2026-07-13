@@ -3,13 +3,13 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 
-vi.mock('../../src/ipc.js', () => ({
-  ipcQuery: vi.fn().mockRejectedValue(new Error('daemon offline')),
-}));
+const ipcMock = vi.hoisted(() => ({ query: vi.fn() }));
+vi.mock('../../src/ipc.js', () => ({ ipcQuery: ipcMock.query }));
 
 import { cmdConfig } from '../../src/cli/config.js';
 import { _resetRoot } from '../../src/paths.js';
 import { _resetSchemaCache } from '../../src/config/schema-registry.js';
+import { AGENT_DELEGATION_TOKEN_ENV } from '../../src/core/auth/agent-delegation.js';
 
 const AID = 'bot.agentid.pub';
 
@@ -17,6 +17,7 @@ function setupHome(): string {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'evolclaw-cfgcli-'));
   process.env.EVOLCLAW_HOME = root;
   delete process.env.EVOLCLAW_SESSION_ID;
+  delete process.env[AGENT_DELEGATION_TOKEN_ENV];
   _resetRoot();
   _resetSchemaCache();
   // 最小 agent 配置（v3）
@@ -29,6 +30,7 @@ function cleanup(root: string): void {
   try { fs.rmSync(root, { recursive: true, force: true }); } catch { /* */ }
   delete process.env.EVOLCLAW_HOME;
   delete process.env.EVOLCLAW_SESSION_ID;
+  delete process.env[AGENT_DELEGATION_TOKEN_ENV];
   _resetRoot();
 }
 
@@ -47,7 +49,10 @@ async function runJson(args: string[]): Promise<any> {
 
 describe('integration: ec config CLI', () => {
   let root: string;
-  beforeEach(() => { root = setupHome(); });
+  beforeEach(() => {
+    root = setupHome();
+    ipcMock.query.mockReset().mockRejectedValue(new Error('daemon offline'));
+  });
   afterEach(() => cleanup(root));
 
   it('set 字段到 config.json；get 读回', async () => {
@@ -86,20 +91,75 @@ describe('integration: ec config CLI', () => {
     expect(r.code).toBe('DEFAULT_BEHAVIOR_REJECT');
   });
 
-  it('agent 托管环境写 H 字段 → 拒绝', async () => {
+  it('agent 托管环境字段操作通过 daemon IPC 执行', async () => {
     process.env.EVOLCLAW_SESSION_ID = 'sess-1';
-    const r = await runJson(['set', 'observable', 'true', '--self', AID]);
-    expect(r.ok).toBe(false);
-    expect(r.code).toBe('FORBIDDEN_H_WRITE');
+    process.env[AGENT_DELEGATION_TOKEN_ENV] = 'task-token';
+    ipcMock.query.mockResolvedValue({
+      ok: true,
+      result: {
+        ok: true,
+        subcommand: 'set',
+        field: 'show_activities',
+        value: 'none',
+        scope: 'relation',
+        permission: 'HA',
+        file: 'relation-config',
+      },
+    });
+
+    const r = await runJson([
+      'set', 'show_activities', 'none', '--self', AID, '--peer', 'aun#user1',
+    ]);
+    expect(r).toMatchObject({ ok: true, field: 'show_activities', scope: 'relation' });
+    expect(ipcMock.query).toHaveBeenCalledWith(expect.any(String), {
+      type: 'config.op',
+      argv: ['config', 'set', 'show_activities', 'none', '--self', AID, '--peer', 'aun#user1', '--format', 'json'],
+      sessionId: 'sess-1',
+      delegationToken: 'task-token',
+    }, 10_000);
+
+    const agentConfig = JSON.parse(fs.readFileSync(path.join(root, 'agents', AID, 'config.json'), 'utf-8'));
+    expect(agentConfig.show_activities).toBeUndefined();
   });
 
-  it('agent 托管环境写 H 字段 → 拒绝（包括行为字段）', async () => {
+  it('agent 托管环境 daemon 不可用时 fail-closed', async () => {
     process.env.EVOLCLAW_SESSION_ID = 'sess-1';
-    // v3 当前实现：所有字段都在 agent-config（H），托管环境统一禁止写入
-    // TODO: 未来应迁移到字段级权限控制
+    process.env[AGENT_DELEGATION_TOKEN_ENV] = 'task-token';
     const r = await runJson(['set', 'show_activities', 'none', '--self', AID]);
     expect(r.ok).toBe(false);
-    expect(r.code).toBe('FORBIDDEN_H_WRITE');
+    expect(r.code).toBe('DAEMON_UNAVAILABLE');
+  });
+
+  it('agent 托管环境透传 daemon 的授权拒绝', async () => {
+    process.env.EVOLCLAW_SESSION_ID = 'sess-1';
+    process.env[AGENT_DELEGATION_TOKEN_ENV] = 'task-token';
+    ipcMock.query.mockResolvedValue({ ok: false, code: 'NO_PERMISSION', error: 'visitor is read-only' });
+    const r = await runJson(['set', 'show_activities', 'none']);
+    expect(r).toMatchObject({ ok: false, code: 'NO_PERMISSION', error: 'visitor is read-only' });
+  });
+
+  it('agent managed environment sends management commands through IPC', async () => {
+    process.env.EVOLCLAW_SESSION_ID = 'sess-1';
+    process.env[AGENT_DELEGATION_TOKEN_ENV] = 'task-token';
+    ipcMock.query.mockResolvedValue({
+      ok: true,
+      result: { ok: true, subcommand: 'history', versions: [] },
+    });
+    const r = await runJson(['history']);
+    expect(r).toMatchObject({ ok: true, versions: [] });
+    expect(ipcMock.query).toHaveBeenCalledWith(expect.any(String), {
+      type: 'config.op',
+      argv: ['config', 'history', '--format', 'json'],
+      sessionId: 'sess-1',
+      delegationToken: 'task-token',
+    }, 10_000);
+  });
+
+  it('agent managed environment requires a task delegation token', async () => {
+    process.env.EVOLCLAW_SESSION_ID = 'sess-1';
+    const r = await runJson(['get', 'owners']);
+    expect(r).toMatchObject({ ok: false, code: 'DELEGATION_REQUIRED' });
+    expect(ipcMock.query).not.toHaveBeenCalled();
   });
 
   it('--process 读写 evolclaw.json（链外单 H）', async () => {
@@ -126,6 +186,18 @@ describe('integration: ec config CLI', () => {
     // v3: 所有字段在顶层（不再有 effective.behavior 子树）
     expect(r.effective.chatmode.value.private).toBe('proactive');
     expect(r.effective.chatmode.source).toBe('agent');
+  });
+
+  it('validate is read-only and does not rewrite or touch the config file', async () => {
+    const file = path.join(root, 'agents', AID, 'config.json');
+    const beforeContent = fs.readFileSync(file, 'utf-8');
+    const beforeMtime = fs.statSync(file).mtimeMs;
+
+    const result = await runJson(['validate', '--self', AID]);
+
+    expect(result.ok).toBe(true);
+    expect(fs.readFileSync(file, 'utf-8')).toBe(beforeContent);
+    expect(fs.statSync(file).mtimeMs).toBe(beforeMtime);
   });
 
   it('snapshot → history → restore 周期', async () => {

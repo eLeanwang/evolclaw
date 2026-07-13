@@ -30,6 +30,14 @@ import {
 } from '../../trigger/types.js';
 import { tryParseChannelKey } from '../channel-loader.js';
 import { displaySessionTitle } from '../session/session-title.js';
+import { resolveConfigCommand } from '../../config/resolved-config-op.js';
+import { executeResolvedConfigCommand } from '../../config/config-operation-service.js';
+import { authorizeResolvedConfigCommand } from './command-permission.js';
+import { auditCommandAuthorization, hashArgv } from './command-audit.js';
+import type { IpcConfigOpResponse } from '../../ipc.js';
+import type { AgentDelegationRegistry } from '../auth/agent-delegation.js';
+import { buildAuthSubject } from '../auth/auth-gateway.js';
+import { parsePeerKey } from '../relation/peer-identity.js';
 import { isQuickCommand } from './slash-gate.js';
 import { handleSlashCommand } from './slash-handler.js';
 import { resolveChatModeForPeer } from '../message/peer-mode.js';
@@ -111,6 +119,7 @@ export class CommandHandler {
   private triggerSchedulerFallback?: TriggerRuntimeScheduler;
   private triggerSchedulerFallbackAid?: string;
   private daemonStatusProvider?: () => any;
+  private agentDelegationRegistry?: AgentDelegationRegistry;
 
   /**
    * Get the runner for a (channel, baseagent) pair.
@@ -282,12 +291,12 @@ export class CommandHandler {
     try {
       schedulerDetails = scheduler?.show(definition.id);
     } catch { /* trigger state is best-effort for views */ }
-    // 运行统计（fireCount/failCount/lastFiredAt/lastResult）不再存进 trigger.json
-    // （定义是不可变配置），改从审计日志按需汇总。受日志保留期限制，是保留窗口内的统计。
+    // 运行统计（fireCount/failCount/lastFiredAt/lastResult）不写入 trigger.json，
+    // 按需从 append-only trigger history 汇总。
     let stats: { fireCount: number; failCount: number; lastFiredAt?: number; lastResult?: string } = { fireCount: 0, failCount: 0 };
     try {
       if (scheduler?.stats) stats = scheduler.stats(definition.id);
-    } catch { /* 审计日志缺失/损坏时退回零值 */ }
+    } catch { /* trigger history 缺失/损坏时退回零值 */ }
     return {
       id: definition.id,
       name: definition.name,
@@ -1807,6 +1816,92 @@ export class CommandHandler {
     } catch {
       return resolveChatModeForPeer({ chatType: session.chatType, peerType });
     }
+  }
+
+  /**
+   * Agent managed CLI config entrypoint. Identity and relation are resolved
+   * from the daemon-owned session rather than caller-provided flags.
+   */
+  async handleConfigOperation(
+    argv: string[],
+    sessionId: string,
+    delegationToken?: string,
+  ): Promise<IpcConfigOpResponse> {
+    if (!this.agentDelegationRegistry) {
+      return { ok: false, code: 'DELEGATION_REQUIRED', error: 'Task delegation is not configured' };
+    }
+    const delegation = this.agentDelegationRegistry.validate(delegationToken, sessionId);
+    if (!delegation.ok) return { ok: false, code: delegation.code, error: delegation.reason };
+
+    const session = await this.sessionManager.getSessionById(sessionId);
+    if (!session) return { ok: false, code: 'INVALID_SESSION', error: 'Invalid session' };
+
+    const grant = delegation.grant;
+    let conversationId: string;
+    try {
+      conversationId = parsePeerKey(grant.peerKey).channelId;
+    } catch {
+      return { ok: false, code: 'INVALID_DELEGATION', error: 'Delegation contains an invalid relation key' };
+    }
+    const subject = buildAuthSubject({
+      selfAid: grant.selfAid,
+      actorId: grant.actorId,
+      channel: grant.channel,
+      channelType: grant.channelType,
+      channelId: conversationId,
+      chatType: grant.chatType,
+      conversationId,
+    });
+    const resolved = resolveConfigCommand(argv, {
+      defaultRelation: { self: grant.selfAid, peerKey: grant.peerKey },
+    });
+    if (!resolved.ok) return { ok: false, code: resolved.code, error: resolved.reason };
+
+    const authContext = {
+      actorId: grant.actorId,
+      channel: grant.channel,
+      channelId: conversationId,
+      chatType: grant.chatType,
+      selfAid: grant.selfAid,
+      peerKey: grant.peerKey,
+      role: subject.role,
+      isDaemonOwner: subject.isDaemonOwner,
+      fromControlChannel: false,
+      source: 'agent-tool' as const,
+    };
+    const decision = authorizeResolvedConfigCommand(resolved.command, authContext);
+    await auditCommandAuthorization({
+      ts: Date.now(),
+      source: 'agent-tool',
+      operation: resolved.command.operationId,
+      scope: resolved.command.commandScope,
+      dangerous: decision.dangerous ?? false,
+      actorId: grant.actorId,
+      selfAid: grant.selfAid,
+      peerKey: grant.peerKey,
+      channel: grant.channel,
+      channelId: conversationId,
+      role: subject.role,
+      isDaemonOwner: subject.isDaemonOwner,
+      fromControlChannel: false,
+      decision: decision.allow ? 'allow' : 'deny',
+      code: decision.allow ? undefined : decision.code,
+      reason: decision.allow ? undefined : decision.reason,
+      matchedRule: decision.matchedRule,
+      argvHash: hashArgv(resolved.command.canonicalArgv),
+      taskId: grant.taskId,
+      messageId: grant.messageId,
+    });
+    if (!decision.allow) return { ok: false, code: decision.code, error: decision.reason };
+
+    const result = executeResolvedConfigCommand(resolved.command);
+    return result.ok
+      ? { ok: true, result }
+      : { ok: false, code: result.code, error: result.error };
+  }
+
+  setAgentDelegationRegistry(registry: AgentDelegationRegistry): void {
+    this.agentDelegationRegistry = registry;
   }
 
   /**

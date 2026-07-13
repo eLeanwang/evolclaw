@@ -28,7 +28,7 @@ describe('resolveEffective role constraints', () => {
     expect(effective.baseagents?.claude?.model).toBe('claude-opus-4-8');
   });
 
-  it('constrains visitor relation behavior when role is explicit', () => {
+  it('only constrains visitor permission mode when role is explicit', () => {
     // v3: RelationBehavior → Relation
     write(
       ConfigTarget.Relation,
@@ -42,8 +42,8 @@ describe('resolveEffective role constraints', () => {
 
     const effective = resolveEffective({ self: aid, peerKey, role: 'visitor' });
     expect(effective.permissionMode).toBe('readonly');
-    expect(effective.dispatch).toBe('mention');
-    expect(effective.baseagents?.claude?.model).toBe('claude-haiku-4-5-20251001');
+    expect(effective.dispatch).toBe('broadcast');
+    expect(effective.baseagents?.claude?.model).toBe('claude-opus-4-8');
   });
 
   it('keeps raw relation behavior when role is not supplied', () => {

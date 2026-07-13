@@ -37,24 +37,39 @@ export function getBuiltinUserRoleDefinitions(): Record<string, RoleDefinition> 
       },
       permissions: {
         permissionMode: { default: 'auto', allowOverride: false },
-        'baseagents.claude.model': {
-          default: 'claude-sonnet-4-6',
-          allowOverride: true,
-          allowedModels: ['claude-sonnet-*', 'claude-haiku-*'],
-        },
-        'baseagents.claude.effort': { default: 'medium', allowOverride: true },
-        chatmode: { default: { private: 'interactive', group: 'proactive', nothuman: 'proactive' }, allowOverride: true },
-        dispatch: { default: 'mention', allowOverride: false },
-        show_activities: { default: 'all', allowOverride: true },
-        flush_delay: { default: 3, allowOverride: true },
-        debounce: { default: 0, allowOverride: true },
-        enable_rich_content: { default: false, allowOverride: true },
       },
       commandPermissions: {
         'role.assign': { allow: false },
         'role.revoke': { allow: false },
         'category:read': { allow: true },
         'category:write-own': { allow: true },
+        'config.get': {
+          allow: true,
+          scopes: ['relation'],
+          constraints: {
+            currentRelationOnly: true,
+            targetCurrentAgentOnly: true,
+            configFieldPolicy: 'behavior-read',
+          },
+        },
+        'config.set': {
+          allow: true,
+          scopes: ['relation'],
+          constraints: {
+            currentRelationOnly: true,
+            targetCurrentAgentOnly: true,
+            configFieldPolicy: 'role-overridable-write',
+          },
+        },
+        'config.unset': {
+          allow: true,
+          scopes: ['relation'],
+          constraints: {
+            currentRelationOnly: true,
+            targetCurrentAgentOnly: true,
+            configFieldPolicy: 'role-overridable-write',
+          },
+        },
         'model.*': { allow: true, scopes: ['relation'], constraints: { ownPeerOnly: true, targetCurrentAgentOnly: true } },
         'permission.current': { allow: true, scopes: ['relation'], constraints: { ownPeerOnly: true, targetCurrentAgentOnly: true } },
         'permission.answer': { allow: true, scopes: ['relation'], constraints: { ownPeerOnly: true, targetCurrentAgentOnly: true } },
@@ -85,28 +100,25 @@ export function getBuiltinUserRoleDefinitions(): Record<string, RoleDefinition> 
       },
       permissions: {
         permissionMode: { default: 'readonly', allowOverride: false },
-        'baseagents.claude.model': {
-          default: 'claude-haiku-4-5-20251001',
-          allowOverride: false,
-          allowedModels: ['claude-haiku-*'],
-        },
-        'baseagents.claude.effort': { default: 'low', allowOverride: false },
-        chatmode: { default: { private: 'proactive', group: 'proactive', nothuman: 'proactive' }, allowOverride: false },
-        dispatch: { default: 'mention', allowOverride: false },
-        show_activities: { default: 'none', allowOverride: false },
-        flush_delay: { default: 5, allowOverride: false },
-        debounce: { default: 0, allowOverride: false },
-        enable_rich_content: { default: false, allowOverride: false },
       },
       commandPermissions: {
         'role.assign': { allow: false },
         'role.revoke': { allow: false },
+        'config.get': {
+          allow: true,
+          scopes: ['relation'],
+          constraints: {
+            currentRelationOnly: true,
+            targetCurrentAgentOnly: true,
+            configFieldPolicy: 'behavior-read',
+          },
+        },
         'model.list': { allow: true, scopes: ['relation'], constraints: { ownPeerOnly: true, targetCurrentAgentOnly: true } },
         'model.current': { allow: true, scopes: ['relation'], constraints: { ownPeerOnly: true, targetCurrentAgentOnly: true } },
         'model.use': {
           allow: true,
           scopes: ['relation'],
-          constraints: { ownPeerOnly: true, targetCurrentAgentOnly: true, requireFieldOverride: 'baseagents.claude.model' },
+          constraints: { ownPeerOnly: true, targetCurrentAgentOnly: true },
         },
         'permission.current': { allow: true, scopes: ['relation'], constraints: { ownPeerOnly: true, targetCurrentAgentOnly: true } },
         'permission.answer': { allow: true, scopes: ['relation'], constraints: { ownPeerOnly: true, targetCurrentAgentOnly: true } },
@@ -132,31 +144,11 @@ export function getManagementFieldPermissions(role: ManagementRole): Record<stri
   if (role === 'owner') {
     return {
       permissionMode: { default: 'bypass', allowOverride: false },
-      'baseagents.claude.model': { default: 'claude-opus-4-8', allowOverride: true, allowedModels: ['*'] },
-      'baseagents.claude.effort': { default: 'high', allowOverride: true },
-      chatmode: { default: { private: 'interactive', group: 'proactive', nothuman: 'proactive' }, allowOverride: true },
-      dispatch: { default: 'broadcast', allowOverride: true },
-      show_activities: { default: 'all', allowOverride: true },
-      flush_delay: { default: 3, allowOverride: true },
-      debounce: { default: 0, allowOverride: true },
-      enable_rich_content: { default: true, allowOverride: true },
     };
   }
 
   return {
     permissionMode: { default: 'request', allowOverride: false },
-    'baseagents.claude.model': {
-      default: 'claude-sonnet-4-6',
-      allowOverride: true,
-      allowedModels: ['claude-opus-*', 'claude-sonnet-*', 'claude-haiku-*'],
-    },
-    'baseagents.claude.effort': { default: 'medium', allowOverride: true },
-    chatmode: { default: { private: 'interactive', group: 'proactive', nothuman: 'proactive' }, allowOverride: true },
-    dispatch: { default: 'mention', allowOverride: true, allowedValues: ['mention', 'broadcast'] },
-    show_activities: { default: 'all', allowOverride: true },
-    flush_delay: { default: 3, allowOverride: true },
-    debounce: { default: 0, allowOverride: true },
-    enable_rich_content: { default: true, allowOverride: true },
   };
 }
 

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { ConfigError, ConfigTarget, write, read } from '../src/config/config-manager.js';
+import { ConfigTarget, write, read } from '../src/config/config-manager.js';
 import { clearRolesCache } from '../src/config/roles.js';
 
 vi.mock('../src/core/model/model-catalog.js', () => ({
@@ -20,7 +20,7 @@ describe('model CLI role inference', () => {
     clearRolesCache();
   });
 
-  it('filters model list by role inferred from --self and --peer', async () => {
+  it('does not filter model list by inferred role', async () => {
     const selfAid = 'frontend-peer.agentid.pub';
     const currentAid = 'current-user.aid.pub';
     write(ConfigTarget.Agent, { aid: selfAid, channels: [] }, { self: selfAid });
@@ -37,6 +37,8 @@ describe('model CLI role inference', () => {
     const payload = JSON.parse(logs.at(-1) || '{}');
     expect(payload.role).toBe('visitor');
     expect(payload.models.map((model: any) => model.id)).toEqual([
+      'claude-opus-4-8',
+      'claude-sonnet-4-6',
       'claude-haiku-4-5-20251001',
     ]);
   });
@@ -88,7 +90,7 @@ describe('model CLI role inference', () => {
     expect(catalog.getCatalog).not.toHaveBeenCalled();
   });
 
-  it('rejects relation model overrides that violate a provided role by default', () => {
+  it('allows relation model overrides regardless of provided role', () => {
     const selfAid = 'reject-violating-write.agentid.pub';
     const currentAid = 'current-user.aid.pub';
     write(ConfigTarget.Agent, { aid: selfAid, channels: [] }, { self: selfAid });
@@ -98,7 +100,7 @@ describe('model CLI role inference', () => {
       ConfigTarget.Relation,
       { roles: { assigned: 'visitor' }, baseagents: { claude: { model: 'claude-opus-4-8' } } },
       { self: selfAid, peerKey: `aun#${currentAid}`, role: 'visitor' },
-    )).toThrow(ConfigError);
+    )).not.toThrow();
   });
 
   it('returns effective model without leaking scope diagnostics', async () => {
@@ -123,9 +125,9 @@ describe('model CLI role inference', () => {
     await cmdModel(['list', '--self', selfAid, '--peer', currentAid, '--format', 'json']);
 
     const payload = JSON.parse(logs.at(-1) || '{}');
-    // effective 字段通过 resolveEffective 应用了角色约束，返回降级后的 haiku
+    // effective 字段保留关系级模型，不再应用角色模型约束
     expect(payload.effective).toEqual({
-      model: 'claude-haiku-4-5-20251001',
+      model: 'claude-opus-4-8',
       source: 'relation',
     });
     expect(payload.scopes).toBeUndefined();
@@ -134,7 +136,7 @@ describe('model CLI role inference', () => {
     expect(relationConfig?.baseagents?.claude?.model).toBe('claude-opus-4-8');
   });
 
-  it('rejects disallowed model use by inferred role', async () => {
+  it('allows model use independently of inferred role model policy', async () => {
     const selfAid = 'frontend-peer.agentid.pub';
     const currentAid = 'current-user.aid.pub';
     write(ConfigTarget.Agent, { aid: selfAid, channels: [] }, { self: selfAid });
@@ -149,12 +151,10 @@ describe('model CLI role inference', () => {
     }) as never);
 
     const { cmdModel } = await import('../src/cli/model.js');
-    await expect(cmdModel(['use', 'claude-opus-4-8', '--self', selfAid, '--peer', currentAid, '--format', 'json']))
-      .rejects.toThrow('process.exit:1');
+    await cmdModel(['use', 'claude-opus-4-8', '--self', selfAid, '--peer', currentAid, '--format', 'json']);
 
     const payload = JSON.parse(logs.at(-1) || '{}');
-    expect(payload.ok).toBe(false);
-    expect(payload.code).toBe('ARGUMENT_MISMATCH');
-    expect(payload.error).toContain('cannot override');
+    expect(payload.ok).toBe(true);
+    expect(payload.model).toBe('claude-opus-4-8');
   });
 });

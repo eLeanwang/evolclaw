@@ -16,6 +16,9 @@ import { InteractionRouter } from '../../src/core/interaction-router.js';
 import { resolvePaths } from '../../src/paths.js';
 import { fileCache } from '../../src/core/daemon-file-cache.js';
 import type { OutboundEnvelope, OutboundPayload } from '../../src/types.js';
+import { AgentRunner as ClaudeRunner } from '../../src/agents/claude-runner.js';
+import { GeminiRunner } from '../../src/agents/gemini-runner.js';
+import { AGENT_DELEGATION_TOKEN_ENV } from '../../src/core/auth/agent-delegation.js';
 
 function makeRunner() {
   const runner = new CodexRunner({ agents: { codex: { apiKey: 'test-key', model: 'gpt-5.4', effort: 'high' } } } as any, { onSessionIdUpdate: vi.fn() } as any);
@@ -95,6 +98,31 @@ describe('IMRenderer Codex streaming newline preservation', () => {
 });
 
 describe('CodexRunner Claude alignment capabilities', () => {
+  it('propagates per-task delegation through Claude, Codex, and Gemini environments', () => {
+    const runtimeEnv = { [AGENT_DELEGATION_TOKEN_ENV]: 'delegation-token' };
+
+    const claude = new ClaudeRunner('test-key');
+    expect((claude as any).getAgentEnv(runtimeEnv)[AGENT_DELEGATION_TOKEN_ENV]).toBe('delegation-token');
+
+    const { runner: codex } = makeRunner();
+    const codexConfig = (codex as any).mergeThreadConfig(
+      (codex as any).buildEvolclawShellEnvironmentConfig('session-1'),
+      { shell_environment_policy: { set: runtimeEnv } },
+    );
+    expect(codexConfig.shell_environment_policy.set).toMatchObject({
+      EVOLCLAW_SESSION_ID: 'session-1',
+      [AGENT_DELEGATION_TOKEN_ENV]: 'delegation-token',
+    });
+
+    const gemini = new GeminiRunner({
+      agents: { gemini: { apiKey: 'test-key', cliPath: 'gemini' } },
+    } as any, { onSessionIdUpdate: vi.fn() } as any);
+    expect((gemini as any).buildAgentEnv('session-1', runtimeEnv)).toMatchObject({
+      EVOLCLAW_SESSION_ID: 'session-1',
+      [AGENT_DELEGATION_TOKEN_ENV]: 'delegation-token',
+    });
+  });
+
   it('advertises compact and fork support', () => {
     const { runner } = makeRunner();
     expect(runner.capabilities.compact).toBe(true);

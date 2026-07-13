@@ -20,9 +20,13 @@ ec trigger list --agent <aid>
 ec trigger list --agent <aid> --all
 ec trigger show --agent <aid> <triggerId>
 ec trigger show --agent <aid> <triggerId> --json
+ec trigger history --agent <aid> [triggerId]
+ec trigger history --agent <aid> [triggerId] --limit 500 --json
 ```
 
 `list` 默认只显示 enabled trigger。排查历史、禁用项或已达到 limits 的 trigger 时加 `--all`。
+
+`history` 查询 `data/triggers/<aid>/history.jsonl` 中的长期审计事件，包括定义创建、完整更新快照、启停、删除 tombstone 和 run 终态。删除 trigger 目录后，历史仍保留。
 
 ## 创建
 
@@ -174,7 +178,7 @@ ec trigger delete --agent <aid> <triggerId>
 | 命令 | 定义文件 | 后续调度 | 当前 run | 可恢复 |
 | --- | --- | --- | --- | --- |
 | `disable` / `cancel` | 保留，写 `enabled: false` | 清理 | 不中断 | 可 `enable` |
-| `delete` | 删除整个 trigger 目录 | 清理 | 不中断 | 不可恢复 |
+| `delete` | 删除整个 trigger 运行态目录，保留 history tombstone | 清理 | 不中断 | 定义不可恢复，审计可复查 |
 
 `delete` 不需要先执行 `disable/cancel`；它内部会先清理 timer/event/schedule，再删除定义。
 
@@ -186,6 +190,21 @@ ec trigger run --agent <aid> <triggerId> --dry-run
 ```
 
 `--dry-run` 不写 active 状态、不写正式 audit、不执行真实副作用，适合验证 prompt/template。
+
+## 审计存储
+
+```text
+data/triggers/<aid>/<triggerId>/trigger.json
+data/triggers/<aid>/<triggerId>/active.json
+data/triggers/<aid>/history.jsonl
+logs/trigger-runs.log
+```
+
+- `history.jsonl` 是长期 append-only 审计真相源，默认不自动清理。
+- 旧版 done 归档行保持可读，不会在升级时重写。
+- `trigger-runs.log` 是短期运维日志，按天轮转并保留 7 天。
+- `show` 的 recent runs、运行统计和 `history` 命令读取长期历史。
+- 启动时会把仍保留的旧 `trigger-runs*.log` 幂等补导入 `history.jsonl`。
 
 ## 从文件导入
 

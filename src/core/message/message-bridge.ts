@@ -1,12 +1,13 @@
 import { randomBytes } from 'crypto';
 import { logger } from '../../utils/logger.js';
 import { StreamDebouncer } from './stream-debouncer.js';
-import { appendMessageLog, buildInboundEntry } from './message-log.js';
+import { appendMessageLog, appendMessageLogStrict, buildInboundEntry } from './message-log.js';
 import { buildEnvelope } from './message-utils.js';
 import { chatDirPath } from '../session/session-fs-store.js';
 import { tryParseChannelKey } from '../channel-loader.js';
 import { resolvePaths } from '../../paths.js';
-import { addStaticAgentOwner, hasStaticAgentOwner, resolvePeerRoleDetail, type ResolvedPeerRole } from '../../config/peer-role-resolver.js';
+import { resolvePeerRoleDetail, type ResolvedPeerRole } from '../../config/peer-role-resolver.js';
+import { handlePendingDingtalkContactBindMessage } from '../../channels/dingtalk.js';
 import { authorizeAccess, buildAuthSubject } from '../auth/auth-gateway.js';
 import type { SessionManager } from '../session/session-manager.js';
 import type { IMessageProcessor } from './message-processor-interface.js';
@@ -14,6 +15,7 @@ import type { MessageQueue } from './message-queue.js';
 import type { CommandHandler as CmdHandler } from '../command/command-handler.js';
 import type { EventBus } from '../event-bus.js';
 import type { BootstrapService } from '../bootstrap-service.js';
+import type { HandoffRuntime } from '../handoff/runtime.js';
 import type { Message, InboundMessage, ChannelAdapter, ReplyContext, EvolAgentRegistryHandle, OutboundPayload, MenuListRequest, MenuQueryRequest, MenuOptionsRequest, MenuUpdateRequest, MenuActionRequest, MenuResponse, SessionIdentity } from '../../types.js';
 
 /**
@@ -28,6 +30,7 @@ export class MessageBridge {
   private defaultDebounce: number;
   private agentRegistry?: EvolAgentRegistryHandle;
   private bootstrapService?: BootstrapService;
+  private handoffRuntime?: HandoffRuntime;
 
   constructor(
     private defaultProjectPath: string,
@@ -48,6 +51,10 @@ export class MessageBridge {
 
   setBootstrapService(service: BootstrapService): void {
     this.bootstrapService = service;
+  }
+
+  setHandoffRuntime(runtime: HandoffRuntime): void {
+    this.handoffRuntime = runtime;
   }
 
   private getDebouncer(channelName: string, channelType?: string): StreamDebouncer {
@@ -117,13 +124,28 @@ export class MessageBridge {
         const actorId = msg.peerId;
         const conversationId = chatType === 'group' ? (msg.groupId || msg.channelId) : msg.peerId;
         const selfAid = msg.selfAID || owningAgent?.aid || parsedChannelKey?.selfAID;
-        if (selfAid && actorId) {
-          await this.autoBindOwner(selfAid, channelKey, actorId);
+        const resolvedChannelType = msg.channelType || parsedChannelKey?.type || effectiveChannelType;
+
+        const contactBind = handlePendingDingtalkContactBindMessage({
+          selfAid,
+          channelName: channelKey,
+          channelType: resolvedChannelType,
+          chatType,
+          actorId,
+          content,
+        });
+        if (contactBind.handled) {
+          logger.info(`[MessageBridge] DingTalk contact bind handled: channel=${channelKey} actor=${actorId ?? '<none>'} status=${contactBind.status}`);
+          if (contactBind.reply) {
+            await sendReply(msg.channelId, contactBind.reply, msg.replyContext);
+          }
+          return;
         }
+
         const roleDetail = this.resolveInboundRole({
           selfAid,
           channelKey,
-          channelType: msg.channelType || parsedChannelKey?.type || effectiveChannelType,
+          channelType: resolvedChannelType,
           chatType,
           actorId,
           conversationId,
@@ -133,7 +155,7 @@ export class MessageBridge {
           selfAid,
           actorId,
           channel: channelName,
-          channelType: msg.channelType || parsedChannelKey?.type || effectiveChannelType,
+          channelType: resolvedChannelType,
           channelId: msg.channelId,
           chatType,
           conversationId,
@@ -189,7 +211,7 @@ export class MessageBridge {
               chatType: msg.chatType || 'private',
               groupId: msg.groupId ?? null,
               msgId: msg.messageId ?? null,
-              content,
+              content: msg.messageLogContent ?? content,
               replyTo: inboundReplyTo,
               permMode: null,
               timestamp: Date.now(),
@@ -197,6 +219,9 @@ export class MessageBridge {
               chatmode: inboundChatmode,
               peerName: msg.peerName,
               peerType: msg.peerType,
+              msgType: msg.msgType,
+              payloadType: msg.payloadType,
+              payloadSummary: msg.payloadSummary,
             }));
           } catch (e) {
             logger.debug(`[MessageBridge] Failed to log inbound command: ${e}`);
@@ -279,21 +304,20 @@ export class MessageBridge {
           dispatchMode: msg.dispatchMode,
         };
 
-        // 5.5 写入消息记录（入方向）。
-        {
+        const inboundEntry = (() => {
           const chatDir = this.sessionManager.getChatDir(session);
           const inboundEncrypt = msg.replyContext?.metadata?.encrypted != null ? !!(msg.replyContext.metadata.encrypted) : undefined;
           const inboundChatmode = msg.replyContext?.metadata?.chatmode as string | undefined;
           const inboundReplyTo = typeof msg.replyContext?.metadata?.refMessageId === 'string'
             ? msg.replyContext.metadata.refMessageId
             : null;
-          appendMessageLog(chatDir, buildInboundEntry({
+          return { chatDir, entry: buildInboundEntry({
             from: msg.peerId || 'unknown',
             to: msg.selfAID || 'self',
             chatType,
             groupId: msg.groupId ?? null,
             msgId: msg.messageId ?? null,
-            content,
+            content: msg.messageLogContent ?? content,
             replyTo: inboundReplyTo,
             permMode: session.identity?.role ?? null,
             timestamp: fullMessage.timestamp,
@@ -301,8 +325,39 @@ export class MessageBridge {
             chatmode: inboundChatmode,
             peerName: msg.peerName,
             peerType: msg.peerType,
-          }));
+            msgType: msg.msgType,
+            payloadType: msg.payloadType,
+            payloadSummary: msg.payloadSummary,
+          }) };
+        })();
+
+        let handoffCandidate = false;
+        if (
+          this.handoffRuntime &&
+          chatType === 'private' &&
+          (msg.channelType || effectiveChannelType) === 'aun' &&
+          session.selfAID &&
+          fullMessage.messageId
+        ) {
+          const refMessageId = typeof msg.replyContext?.metadata?.refMessageId === 'string'
+            ? msg.replyContext.metadata.refMessageId
+            : null;
+          const bound = await this.handoffRuntime.bindReply({
+            selfAid: session.selfAID,
+            targetSessionId: session.id,
+            responseMessageId: fullMessage.messageId,
+            refMessageId,
+            persistReply: () => appendMessageLogStrict(inboundEntry.chatDir, {
+              ...inboundEntry.entry,
+              handoff_trace: { version: 2, reply_candidate: true },
+            }),
+          });
+          handoffCandidate = bound.candidate;
+          if (bound.handoffId) {
+            fullMessage.handoffDelivery = { direction: 'target', handoffId: bound.handoffId };
+          }
         }
+        if (!handoffCandidate) appendMessageLog(inboundEntry.chatDir, inboundEntry.entry);
 
         // 6. ACK + debounce/enqueue
         //    ACK 在到达时立即做（每条独立 ACK），不等合并
@@ -313,21 +368,31 @@ export class MessageBridge {
           adapter?.acknowledge?.(fullMessage.messageId).catch(() => {});
         }
 
-        const isInterrupt = chatType !== 'group';
+        const isInterrupt = chatType !== 'group' && !handoffCandidate;
         const enqueueAgentName = owningAgent?.name ?? '<unknown>';
         const selfAID = session.selfAID;
         const doEnqueue = async (m: Message) => {
-          return this.messageQueue.enqueue(session.id, m, session.projectPath, {
+          const enqueue = handoffCandidate ? this.messageQueue.enqueuePersisted.bind(this.messageQueue) : this.messageQueue.enqueue.bind(this.messageQueue);
+          try {
+            return await enqueue(session.id, m, session.projectPath, {
             interruptible: isInterrupt,
             interruptSamePeer: !isInterrupt,  // 群聊：同人连发且队列无他人时打断
             agentName: enqueueAgentName,
             role: !isInterrupt ? (session.identity?.role ?? 'none') : undefined,
             sessionKeyField: session.sessionKey,
             selfAID,  // ← 传递 selfAID，用于队列隔离
-          });
+            });
+          } catch (error) {
+            if (handoffCandidate && m.handoffDelivery?.handoffId && session.selfAID) {
+              this.handoffRuntime?.markBindingIncomplete(session.selfAID, m.handoffDelivery.handoffId);
+            }
+            throw error;
+          }
         };
 
-        if (isInterrupt) {
+        if (handoffCandidate) {
+          await doEnqueue(fullMessage);
+        } else if (isInterrupt) {
           const debouncer = this.getDebouncer(channelName, effectiveChannelType);
           if (debouncer.enabled) {
             const debounceKey = msg.peerId ? `${session.id}:${msg.peerId}` : session.id;
@@ -564,7 +629,6 @@ export class MessageBridge {
     }
   }
 
-  /** 首次交互自动绑定 owner —— 通过 channel-routed self-agent 完成 */
   private async sendAccessDenied(
     adapter: ChannelAdapter | undefined,
     channel: string,
@@ -590,13 +654,6 @@ export class MessageBridge {
       return;
     }
     await sendReply(msg.channelId, text, msg.replyContext);
-  }
-
-  private async autoBindOwner(selfAid: string, channelKey: string, userId: string): Promise<void> {
-    if (hasStaticAgentOwner(selfAid)) return;
-    addStaticAgentOwner(selfAid, userId);
-    logger.info(`[Owner] Auto-bound ${channelKey} owner: ${userId}`);
-    this.eventBus.publish({ type: 'channel:owner-bound', channel: channelKey, userId });
   }
 
   private resolveInboundRole(ctx: {

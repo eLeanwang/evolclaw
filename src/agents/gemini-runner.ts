@@ -95,6 +95,16 @@ export class GeminiRunner implements AgentRunnerFull, ModelSwitcher {
   setSendPrompt(_fn: (text: string) => Promise<void>): void {}
   setPermissionGateway(_gw: any): void {}
 
+  private buildAgentEnv(sessionId: string, runtimeEnv?: Record<string, string>): Record<string, string> {
+    const env: Record<string, string> = {
+      ...process.env as Record<string, string>,
+      EVOLCLAW_SESSION_ID: sessionId,
+      ...(runtimeEnv ?? {}),
+    };
+    if (this.resolved.apiKey) env.GOOGLE_API_KEY = this.resolved.apiKey;
+    return env;
+  }
+
   // ── Stream management ──
 
   registerStream(key: string, stream: AsyncIterable<any>): void {
@@ -175,14 +185,7 @@ export class GeminiRunner implements AgentRunnerFull, ModelSwitcher {
     }
 
     // Spawn subprocess
-    const env: Record<string, string> = {
-      ...process.env as Record<string, string>,
-      EVOLCLAW_SESSION_ID: sessionId,
-      ...(runtimeEnv ?? {}),
-    };
-    if (this.resolved.apiKey) {
-      env.GOOGLE_API_KEY = this.resolved.apiKey;
-    }
+    const env = this.buildAgentEnv(sessionId, runtimeEnv);
 
     const child = spawn(this.resolved.cliPath, args, {
       cwd: projectPath,

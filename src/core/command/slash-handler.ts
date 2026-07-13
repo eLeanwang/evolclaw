@@ -2122,11 +2122,13 @@ export async function handleSlashCommand(this: any,
 
     const lines: string[] = [];
     const chatMode = getAgentChatmode(session);
+    const sessionRole = session.identity?.role || identity.role || 'none';
+    const sessionRoleLine = `角色身份: ${sessionRole}`;
     const dispatchTarget = resolveSlashDispatchTarget.call(this, {
       session,
       channel,
       selfAID,
-      role: session.identity?.role || identity.role,
+      role: sessionRole,
     });
     const dispatchFallback = session.metadata?.dispatchMode === 'mention' || session.metadata?.dispatchMode === 'broadcast'
       ? session.metadata.dispatchMode
@@ -2149,6 +2151,7 @@ export async function handleSlashCommand(this: any,
       }
       lines.push(
         `会话状态: ${sessionStatus} / 轮数: ${sessionTurns}`,
+        sessionRoleLine,
         chatModeLine,
         ...(dispatchModeLine ? [dispatchModeLine] : []),
       );
@@ -2168,6 +2171,7 @@ export async function handleSlashCommand(this: any,
       );
       lines.push(
         `状态: ${sessionStatus} / 轮数: ${sessionTurns}`,
+        sessionRoleLine,
         chatModeLine,
         ...(dispatchModeLine ? [dispatchModeLine] : []),
         `最后活跃: ${timeStr}`

@@ -20,14 +20,9 @@ describe('model permission helpers', () => {
     'deepseek-v4-pro',
   ];
 
-  it('filters model catalog by role allowedModels', () => {
-    expect(filterModelsForRole('member', 'claude', catalog)).toEqual([
-      'claude-sonnet-4-6',
-      'claude-haiku-4-5-20251001',
-    ]);
-    expect(filterModelsForRole('visitor', 'claude', catalog)).toEqual([
-      'claude-haiku-4-5-20251001',
-    ]);
+  it('does not filter the model catalog by role', () => {
+    expect(filterModelsForRole('member', 'claude', catalog)).toEqual(catalog);
+    expect(filterModelsForRole('visitor', 'claude', catalog)).toEqual(catalog);
     expect(filterModelsForRole('owner', 'claude', catalog)).toEqual(catalog);
   });
 
@@ -43,28 +38,28 @@ describe('model permission helpers', () => {
     })).toMatchObject({ ok: true, model: 'claude-sonnet-4-6' });
   });
 
-  it('rejects disallowed model selections', () => {
+  it('allows model selections independently of role', () => {
     expect(validateModelSelectionForRole({
       role: 'member',
       baseagent: 'claude',
       requestedModel: 'claude-opus-4-8',
       models: catalog,
-    })).toMatchObject({ ok: false, code: 'MODEL_NOT_ALLOWED' });
+    })).toMatchObject({ ok: true, model: 'claude-opus-4-8' });
   });
 
-  it('rejects model switching when override is disabled', () => {
-    expect(filterModelsForRole('visitor', 'claude', catalog)).toEqual(['claude-haiku-4-5-20251001']);
+  it('does not constrain resolved models by role', () => {
+    expect(filterModelsForRole('visitor', 'claude', catalog)).toEqual(catalog);
     expect(validateModelSelectionForRole({
       role: 'visitor',
       baseagent: 'claude',
       requestedModel: 'claude-haiku-4-5-20251001',
       models: catalog,
-    })).toMatchObject({ ok: false, code: 'MODEL_OVERRIDE_DISABLED' });
+    })).toMatchObject({ ok: true, model: 'claude-haiku-4-5-20251001' });
     expect(constrainResolvedModelForRole({
       role: 'visitor',
       baseagent: 'claude',
       model: 'claude-opus-4-8',
-    })).toEqual({ model: 'claude-haiku-4-5-20251001', constrained: true });
+    })).toEqual({ model: 'claude-opus-4-8', constrained: false });
   });
 
   it('lists all allowed models even when override is disabled', () => {

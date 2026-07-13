@@ -4,7 +4,7 @@ import type { ShortConnectionOpts } from '../rpc/index.js';
 import { createShortConnection } from '../rpc/index.js';
 import { getAidStore, SLOT } from '../aid/store.js';
 import { uploadFileAndBuildPayload, type UploadProgress } from './upload.js';
-import { appendMessageLog, buildOutboundEntry } from '../../core/message/message-log.js';
+import { appendMessageLog, buildOutboundEntry, classifyAunPayloadForLog } from '../../core/message/message-log.js';
 import { readBestTaskRuntimeContext, resolveMsgSendHandoff, runtimeRefMessageIdForMsgSend } from '../../core/message/handoff.js';
 import type { TaskRuntimeContext } from '../../core/message/handoff.js';
 import { chatDirPath } from '../../core/session/session-fs-store.js';
@@ -16,12 +16,14 @@ import { ipcQuery, type IpcAunMsgSendResponse } from '../../ipc.js';
 export interface MsgError {
   ok: false;
   error: string;
-  code?: number;
+  code?: string | number;
 }
 
 export interface MsgSendResult {
   ok: true;
   message_id: string;
+  handoff_id?: string;
+  target_session_id?: string;
   seq?: number;
   timestamp?: number;
   status?: string;
@@ -92,6 +94,7 @@ export interface MsgSendArgs extends MsgCommonOpts {
   body: MsgSendBody;
   encrypt?: boolean;
   thread?: string;  // 话题 ID（用于多话题路由）
+  returnPolicy?: 'required' | 'none';
   /** 文件上传进度回调（仅 body.mode==='file' 时触发）。 */
   onUploadProgress?: (info: UploadProgress) => void;
 }
@@ -122,21 +125,30 @@ function applyRoutingPayloadFields(
   payload: Record<string, unknown>,
   args: Pick<MsgSendArgs, 'from' | 'thread'>,
   runtimeContext?: TaskRuntimeContext | null,
+  includeRuntimeRef = true,
 ): void {
-  if (args.thread) payload.thread_id = args.thread;
+  if (args.thread && !payload.thread_id) payload.thread_id = args.thread;
+  if (!includeRuntimeRef) return;
   const refMessageId = runtimeRefMessageIdForMsgSend({ from: args.from, runtime: runtimeContext });
   if (refMessageId && !payload.ref_message_id) payload.ref_message_id = refMessageId;
 }
 
-function msgSendLogMetadata(args: MsgSendArgs, runtimeContext?: TaskRuntimeContext | null): {
+function msgSendLogMetadata(args: MsgSendArgs, payload?: unknown, runtimeContext?: TaskRuntimeContext | null): {
   content: string;
+  msgType?: ReturnType<typeof classifyAunPayloadForLog>['msgType'];
+  payloadType?: string;
+  payloadSummary?: ReturnType<typeof classifyAunPayloadForLog>['payloadSummary'];
   source: 'cli' | 'msg';
   handoff?: ReturnType<typeof resolveMsgSendHandoff>;
 } {
   const isInSession = !!process.env.EVOLCLAW_SESSION_ID || !!runtimeContext;
   const source = isInSession ? 'msg' : 'cli';
+  const classified = payload === undefined ? undefined : classifyAunPayloadForLog(payload);
   return {
-    content: messageLogContent(args.body),
+    content: classified?.content ?? messageLogContent(args.body),
+    msgType: classified?.msgType,
+    payloadType: classified?.payloadType,
+    payloadSummary: classified?.payloadSummary,
     source,
     handoff: resolveMsgSendHandoff({
       from: args.from,
@@ -150,8 +162,10 @@ async function tryDaemonMsgSend(args: MsgSendArgs, payload: Record<string, unkno
   if (!runtimeContext) return null;
   if (runtimeContext.channel !== 'aun' || runtimeContext.chatType !== 'private') return null;
   if (!runtimeContext.selfAid || runtimeContext.selfAid !== args.from) return null;
-  if (args.body.mode === 'file') return null;
   if (args.slotId || args.aunPath) return null;
+  const payloadThread = typeof payload.thread_id === 'string' && payload.thread_id.trim()
+    ? payload.thread_id.trim()
+    : undefined;
 
   const response = await ipcQuery<IpcAunMsgSendResponse>(
     resolvePaths().socket,
@@ -161,7 +175,11 @@ async function tryDaemonMsgSend(args: MsgSendArgs, payload: Record<string, unkno
       to: args.to,
       payload,
       encrypt: args.encrypt === true,
-      log: msgSendLogMetadata(args, runtimeContext),
+      thread: args.thread || payloadThread,
+      returnPolicy: args.returnPolicy,
+      originSessionId: runtimeContext.sessionId,
+      originMessageId: runtimeContext.messageId,
+      log: msgSendLogMetadata(args, payload, runtimeContext),
     },
     5000,
   );
@@ -169,13 +187,14 @@ async function tryDaemonMsgSend(args: MsgSendArgs, payload: Record<string, unkno
 }
 
 async function appendMsgSendOutboundLog(args: MsgSendArgs, result: MsgSendResult, opts: {
+  payload: unknown;
   runtimeContext?: TaskRuntimeContext | null;
   chatmode?: string;
   encrypt?: boolean;
 }): Promise<void> {
   const sessionsDir = resolvePaths().sessionsDir;
   const chatDir = chatDirPath(sessionsDir, 'aun', args.to, args.from);
-  const log = msgSendLogMetadata(args, opts.runtimeContext);
+  const log = msgSendLogMetadata(args, opts.payload, opts.runtimeContext);
 
   fs.mkdirSync(chatDir, { recursive: true });
   appendMessageLog(chatDir, buildOutboundEntry({
@@ -186,7 +205,9 @@ async function appendMsgSendOutboundLog(args: MsgSendArgs, result: MsgSendResult
     content: log.content,
     encrypt: opts.encrypt === true,
     chatmode: opts.chatmode,
-    msgType: 'text',
+    msgType: log.msgType,
+    payloadType: log.payloadType,
+    payloadSummary: log.payloadSummary,
     source: log.source,
     handoff: log.handoff,
   }));
@@ -205,13 +226,20 @@ async function appendMsgSendOutboundLog(args: MsgSendArgs, result: MsgSendResult
 }
 
 export async function msgSend(args: MsgSendArgs): Promise<MsgSendResult | MsgError> {
+  if (args.returnPolicy === 'none') {
+    return {
+      ok: false,
+      code: 'HANDOFF_RETURN_POLICY_UNSUPPORTED',
+      error: 'return policy none is not supported in handoff v2 phase 1',
+    };
+  }
   const runtimeContext = await readBestTaskRuntimeContext();
   let conn;
   try {
     let payload: Record<string, unknown> | undefined;
     if (args.body.mode !== 'file') {
       payload = buildSimplePayload(args.body);
-      applyRoutingPayloadFields(payload, args, runtimeContext);
+      applyRoutingPayloadFields(payload, args, runtimeContext, false);
 
       const daemonResult = await tryDaemonMsgSend(args, payload, runtimeContext);
       if (daemonResult) {
@@ -219,22 +247,25 @@ export async function msgSend(args: MsgSendArgs): Promise<MsgSendResult | MsgErr
           return {
             ok: false,
             error: daemonResult.error || 'daemon AUN message send failed',
-            code: typeof daemonResult.code === 'number' ? daemonResult.code : undefined,
+            code: daemonResult.code,
           };
         }
-        if (!daemonResult.message_id) {
+        if (!daemonResult.message_id && !daemonResult.handoff_id) {
           return { ok: false, error: 'daemon AUN message send returned no message_id' };
         }
         const sent: MsgSendResult = {
           ok: true,
-          message_id: daemonResult.message_id,
+          message_id: daemonResult.message_id || daemonResult.handoff_id || '',
+          handoff_id: daemonResult.handoff_id,
+          target_session_id: daemonResult.target_session_id,
           seq: daemonResult.seq,
           timestamp: daemonResult.timestamp,
           status: daemonResult.status,
           delivery_mode: daemonResult.delivery_mode,
         };
-        if (!daemonResult.log_written) {
+        if (!daemonResult.handoff_id && !daemonResult.log_written) {
           await appendMsgSendOutboundLog(args, sent, {
+            payload,
             runtimeContext,
             chatmode: daemonResult.chatmode,
             encrypt: daemonResult.encrypt ?? args.encrypt === true,
@@ -282,6 +313,20 @@ export async function msgSend(args: MsgSendArgs): Promise<MsgSendResult | MsgErr
     payload.chatmode = chatmode;
 
     // 5. 写入 payload.thread_id/ref_message_id（如果指定）
+    applyRoutingPayloadFields(payload, args, runtimeContext, false);
+
+    const daemonResult = await tryDaemonMsgSend(args, payload, runtimeContext);
+    if (daemonResult) {
+      if (!daemonResult.ok) return { ok: false, error: daemonResult.error || 'daemon AUN message send failed', code: daemonResult.code };
+      return {
+        ok: true,
+        message_id: daemonResult.message_id || daemonResult.handoff_id || '',
+        handoff_id: daemonResult.handoff_id,
+        target_session_id: daemonResult.target_session_id,
+        status: daemonResult.status,
+      };
+    }
+
     applyRoutingPayloadFields(payload, args, runtimeContext);
 
     const sendParams: Record<string, unknown> = { to: args.to, payload };
@@ -296,6 +341,7 @@ export async function msgSend(args: MsgSendArgs): Promise<MsgSendResult | MsgErr
     if (result?.message_id) {
       try {
         await appendMsgSendOutboundLog(args, { ok: true, message_id: result.message_id }, {
+          payload,
           runtimeContext,
           chatmode,
           encrypt: args.encrypt === true,

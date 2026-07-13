@@ -764,6 +764,7 @@ Options:
   --encrypt             启用端到端加密（密文发送）
   --no-encrypt          强制明文发送（优先于 --encrypt）
   --thread <id>         指定话题 ID（用于多话题路由）
+  --return <required|none> 跨会话回流策略（一期仅支持 required；跨会话默认 required）
   --content-type <mime> 显式覆盖 MIME（仅 --file 模式）
   --text <说明>          附件说明文字（仅 --file 模式）
   --transcript <text>   语音转写（仅 --as voice）
@@ -877,6 +878,11 @@ Options:
     // 模型自主发送时由系统提示规则要求按入站消息加密态显式带参。--no-encrypt 优先于 --encrypt。
     const encrypt = args.includes('--encrypt') && !args.includes('--no-encrypt');
     const thread = getArgValue(args, '--thread');
+    const returnPolicyRaw = getArgValue(args, '--return');
+    if (returnPolicyRaw && returnPolicyRaw !== 'required' && returnPolicyRaw !== 'none') {
+      console.error(`❌ --return 仅支持 required|none: ${returnPolicyRaw}`);
+      process.exit(1);
+    }
 
     // 文件上传进度展示（非 JSON 输出时）。仅在大文件降级到 HTTP PUT 阶段会逐块更新。
     let lastPctShown = -1;
@@ -896,7 +902,7 @@ Options:
       }
     };
 
-    const result = await msgSend({ from, to, body, encrypt, thread, onUploadProgress, ...commonOpts });
+    const result = await msgSend({ from, to, body, encrypt, thread, returnPolicy: returnPolicyRaw as 'required' | 'none' | undefined, onUploadProgress, ...commonOpts });
     if (!result.ok) {
       if (formatJson) { console.log(JSON.stringify(result)); }
       else { console.error(`❌ 发送失败: ${result.error}`); }
@@ -905,7 +911,8 @@ Options:
     if (formatJson) {
       console.log(JSON.stringify(result));
     } else {
-      console.log(`✓ 已发送 ${result.message_id ?? ''} seq=${result.seq ?? '-'} status=${result.status ?? '-'}`);
+      if (result.handoff_id) console.log(`✓ 已排队 handoff ${result.handoff_id}`);
+      else console.log(`✓ 已发送 ${result.message_id ?? ''} seq=${result.seq ?? '-'} status=${result.status ?? '-'}`);
     }
     return;
   }
@@ -1762,7 +1769,7 @@ const VALUE_FLAGS = new Set([
   '--payload', '--title', '--description', '--text', '--transcript',
   '--as', '--content-type', '--mention', '--visibility', '--join-mode',
   '--group-id', '--name', '--message', '--answer', '--page', '--size',
-  '--aun-path', '--thread',
+  '--aun-path', '--thread', '--return',
 ]);
 const BOOLEAN_FLAGS = new Set([
   '--encrypt', '--no-encrypt', '--mention-all',

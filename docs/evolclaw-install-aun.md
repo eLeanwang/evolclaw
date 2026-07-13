@@ -13,7 +13,7 @@ EvolClaw 是一个开源的 AI Agent 网关，将 Claude/Codex 等 AI 后端连�
 - Node.js >= 18，npm >= 8（使用 codex baseagent 时建议 >= 22.5 以获得完整 session 列表查询；低版本会自动降级为 rollout 文件查询）
 - 一款 baseagent CLI：`claude` / `codex` / `gemini` 任一在 PATH 中
 - 一个 AUN Agent ID（AID）——标识你的 Agent
-- 一个 Owner AID（可选）——接收欢迎消息和管理权限；不填则首次通信者自动绑定
+- 一个 Owner AID（推荐）——接收欢迎消息和管理权限；不填不会自动绑定，需后续显式配置
 
 ---
 
@@ -92,7 +92,7 @@ evolclaw status
 | 用户消息模式 | 命令参数 |
 |---|---|
 | `你要使用的AID是:X` / `agent AID:X` / `bot AID is X` | 位置参数 `<aid>`（**必填**——若用户消息没提供，停下问用户） |
-| `你的主人AID是:X` / `owner AID:X` / `owner is X` | `--owner X`（可选，缺则不带 flag，首次通信者自动绑定） |
+| `你的主人AID是:X` / `owner AID:X` / `owner is X` | `--owner X`（推荐提供；缺则不带 flag，后续需显式配置 owner） |
 | `你的昵称是:X` / `叫 X` / `name X` / `the bot is named X` | `--name "X"`（可选，缺则不带 flag，agent new 自动用 AID 首段） |
 
 **注意**：`<aid>` 和 `--owner` 必须不同的 AID（Agent 需要独立身份，不能与 Owner 相同）。
@@ -174,7 +174,7 @@ cat $EVOLCLAW_HOME/agents/<aid>/config.json
 检查关键字段：
 
 - `aid` — 你的 AID
-- `owners` — Owner AID 数组（可为空，留给自动绑定）
+- `owners` — Owner AID 数组（可为空，但不会自动绑定；为空时需后续显式配置）
 - `active_baseagent` — `claude` / `codex` / `gemini`
 - `projects.defaultPath` — 项目路径（目录需存在）
 - `channels` — 数组，初始为空（AUN 隐式上线，无需在此配置）
@@ -226,7 +226,7 @@ EvolClaw 首次连接 AUN 网络时自动：
    - 生成完整 agent.md（含基于 owner 的 display name）并发布到 AUN 网络
    - 向 Owner 发送欢迎消息
    - 把 `config.json` 中的 `initialized` 更新为 `true`
-3. 若 `owners[]` 为空（自动绑定模式）：跳过欢迎消息，`initialized` 维持 `false`；首次有人和该 agent 私聊时自动绑定为 owner，**自动绑定后立即补发欢迎消息**并把 `initialized` 置 `true`（订阅 `channel:owner-bound` 事件实现）
+3. 若 `owners[]` 为空：跳过欢迎消息，`initialized` 维持 `false`；系统不会把首条消息发送者自动绑定为 owner，需后续通过 AUN 绑定流程或手工配置 Owner AID。
 
 无需手动触发，连接成功后自动完成。
 

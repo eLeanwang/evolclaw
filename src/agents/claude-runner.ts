@@ -10,7 +10,7 @@ import path from 'path';
 import fs from 'fs';
 import os from 'os';
 import { logger } from '../utils/logger.js';
-import { checkBlacklist, checkReadonly, checkHClassWrite, parseEvolclawSendCommand, summarizeToolInput, requestDangerousCommandPermission } from '../core/permission.js';
+import { checkBlacklist, checkReadonly, checkHClassWrite, isEvolclawHandoffReturnCommand, parseEvolclawSendCommand, summarizeToolInput, requestDangerousCommandPermission } from '../core/permission.js';
 import { authorizeEcCommand } from '../core/command/ec-command-permission.js';
 import { encodePath } from '../utils/cross-platform.js';
 import { resolveEffective } from '../config/config-manager.js';
@@ -1279,6 +1279,9 @@ export class AgentRunner {
       // 优先于只读模式检查，因为 ec 命令有独立的角色权限策略（commandPermissions）
       if (input.tool_name === 'Bash') {
         const command = typeof input.tool_input?.command === 'string' ? input.tool_input.command : '';
+        if (isEvolclawHandoffReturnCommand(command)) {
+          return {};
+        }
         const permCtx = this.permissionContexts.get(sessionId);
         const ecAuthCtx = {
           actorId: permCtx?.userId,
@@ -1415,7 +1418,7 @@ export class AgentRunner {
       // 任何权限模式下都不应拦截，否则 agent 无法回复用户
       if (toolName === 'Bash') {
         const cmd = typeof input.command === 'string' ? input.command : '';
-        if (parseEvolclawSendCommand(cmd)?.scope === 'ctl') {
+        if (parseEvolclawSendCommand(cmd)?.scope === 'ctl' || isEvolclawHandoffReturnCommand(cmd)) {
           return { behavior: 'allow' as const, updatedInput: input, decisionClassification: 'user_permanent' as const };
         }
       }

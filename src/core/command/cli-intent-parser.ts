@@ -1,7 +1,19 @@
 import type { CommandIntent, CommandScope, CommandSource } from '../../types.js';
+import { normalizeCliArgv } from '../../cli/cli-argv.js';
+import {
+  resolveConfigCommand,
+  type ResolvedConfigCommand,
+  type ResolvedConfigOp,
+} from '../../config/resolved-config-op.js';
+export { normalizeCliArgv } from '../../cli/cli-argv.js';
 
 export type CliIntentParseResult =
-  | { kind: 'recognized'; intent: CommandIntent }
+  | {
+      kind: 'recognized';
+      intent: CommandIntent;
+      resolvedConfigCommand?: ResolvedConfigCommand;
+      resolvedConfigOp?: ResolvedConfigOp;
+    }
   | { kind: 'raw'; intent: CommandIntent; reason: string }
   | { kind: 'invalid'; code: string; reason: string };
 
@@ -13,12 +25,12 @@ export interface DefaultRelationContext {
 const MODEL_RELATION_DEFAULT_SUBCOMMANDS = new Set(['list', 'current', 'info', 'use', 'effort', 'reset']);
 
 export function withDefaultRelationContext(
-  argv: string[],
+  inputArgv: string[],
   defaults: DefaultRelationContext
 ): string[] {
-  if (!argv || argv[0] !== 'model' || !MODEL_RELATION_DEFAULT_SUBCOMMANDS.has(argv[1] || '')) {
-    return argv;
-  }
+  const argv = normalizeCliArgv(inputArgv);
+  const isModelCommand = argv[0] === 'model' && MODEL_RELATION_DEFAULT_SUBCOMMANDS.has(argv[1] || '');
+  if (!isModelCommand) return argv;
   if (!defaults.self || !defaults.peer) return argv;
 
   const parsed = parseArgs(argv.slice(2));
@@ -30,15 +42,18 @@ export function withDefaultRelationContext(
 }
 
 export function parseCliIntent(
-  argv: string[],
-  source: CommandSource = 'menu.cli'
+  inputArgv: string[],
+  source: CommandSource = 'menu.cli',
+  options: { defaultRelation?: DefaultRelationContext } = {},
 ): CliIntentParseResult {
-  if (!argv || argv.length === 0) {
+  if (!inputArgv || inputArgv.length === 0) {
     return { kind: 'invalid', code: 'MISSING_ARGV', reason: 'Missing command argv' };
   }
+  const argv = normalizeCliArgv(inputArgv);
 
   const cmd = argv[0];
   if (cmd === 'model') return parseModelCommand(argv, source);
+  if (cmd === 'config') return parseConfigCommand(argv, source, options.defaultRelation);
   if (cmd === 'stats') return parseStatsCommand(argv, source);
   if (cmd === 'agent') return parseAgentCommand(argv, source);
   if (cmd === 'aid') return parseAidCommand(argv, source);
@@ -103,6 +118,45 @@ function parseModelCommand(argv: string[], source: CommandSource): CliIntentPars
     default:
       return raw(source, argv, `Unknown model subcommand: ${subcmd}`);
   }
+}
+
+function parseConfigCommand(
+  argv: string[],
+  source: CommandSource,
+  defaultRelation?: DefaultRelationContext,
+): CliIntentParseResult {
+  const resolved = resolveConfigCommand(argv, {
+    ...(defaultRelation ? { defaultRelation: { self: defaultRelation.self, peerKey: defaultRelation.peer } } : {}),
+  });
+  if (!resolved.ok) return { kind: 'invalid', code: resolved.code, reason: resolved.reason };
+  return recognizedConfig(resolved.command, source);
+}
+
+function recognizedConfig(command: ResolvedConfigCommand, source: CommandSource): CliIntentParseResult {
+  return {
+    kind: 'recognized',
+    resolvedConfigCommand: command,
+    ...(command.kind === 'field' ? { resolvedConfigOp: command } : {}),
+    intent: {
+      operation: command.operationId,
+      scope: command.commandScope,
+      source,
+      args: {
+        ...(command.kind === 'field' ? {
+          field: command.field,
+          ...(command.subcommand === 'set' ? { value: command.value } : {}),
+        } : {}),
+        ...(command.kind === 'scoped' && command.field ? { field: command.field } : {}),
+        configScope: command.configScope,
+        ...(command.self ? { self: command.self } : {}),
+        ...(command.peerKey ? { peer: command.peerKey, peerKey: command.peerKey } : {}),
+        ...(command.configScope === 'process' ? { process: true } : {}),
+        ...(command.configScope === 'defaults' ? { default: true } : {}),
+      },
+      rawArgv: command.canonicalArgv,
+      ...(command.dangerous ? { dangerous: true } : {}),
+    },
+  };
 }
 
 function parseStatsCommand(argv: string[], source: CommandSource): CliIntentParseResult {

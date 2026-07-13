@@ -13,9 +13,10 @@ import {
   agentEnable, agentDisable, agentDelete, agentRename,
   agentSyncAids, agentReload,
 } from '../../src/cli/agent.js';
-import { saveAgent, ensureAgentDirSkeleton } from '../../src/config-store.js';
+import { saveAgent, ensureAgentDirSkeleton, loadAllAgents } from '../../src/config-store.js';
 import { ConfigTarget, write as cfgWrite } from '../../src/config/config-manager.js';
-import { _resetRoot } from '../../src/paths.js';
+import { _resetRoot, resolvePaths } from '../../src/paths.js';
+import { EvolAgentRegistry } from '../../src/core/evolagent-registry.js';
 import type { AgentConfig } from '../../src/types.js';
 
 function setupHome(): string {
@@ -78,6 +79,39 @@ describe('agent module', () => {
         expect(result.agents.map(a => a.aid)).toContain('alice.agentid.pub');
         expect(result.agents.map(a => a.aid)).toContain('bob.agentid.pub');
       }
+    });
+
+    it('keeps invalid agent configs visible as registry error agents', () => {
+      const aid = 'bad.agentid.pub';
+      const agentDir = path.join(process.env.EVOLCLAW_HOME!, 'agents', aid);
+      fs.mkdirSync(agentDir, { recursive: true });
+      fs.writeFileSync(path.join(agentDir, 'config.json'), JSON.stringify({
+        $schema_version: 3,
+        aid,
+        enabled: true,
+        owners: ['owner.agentid.pub', 'ou_not_an_aid'],
+        channels: [],
+        active_baseagent: 'claude',
+        baseagents: { claude: { model: 'opus' } },
+        projects: { defaultPath: process.env.EVOLCLAW_HOME },
+      }, null, 2));
+
+      const defaultLoad = loadAllAgents();
+      expect(defaultLoad.agents).toHaveLength(0);
+      expect(defaultLoad.skipped[0]?.reason).toContain('owners[1] invalid aid');
+
+      const registry = new EvolAgentRegistry(resolvePaths().agentsDir);
+      registry.loadAll();
+
+      const infos = registry.list();
+      expect(infos).toHaveLength(1);
+      expect(infos[0]).toMatchObject({
+        aid,
+        status: 'error',
+        baseagent: 'claude',
+      });
+      expect(infos[0].error).toContain('owners[1] invalid aid');
+      expect(registry.runnableAgents()).toHaveLength(0);
     });
   });
 
@@ -278,5 +312,4 @@ describe('agent module', () => {
     });
   });
 });
-
 

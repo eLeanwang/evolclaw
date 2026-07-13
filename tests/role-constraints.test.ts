@@ -67,25 +67,24 @@ describe('Role Constraints', () => {
     });
   });
 
-  describe('model whitelist constraint', () => {
-    it('should prevent visitor from using opus', () => {
+  describe('model configuration', () => {
+    it('should preserve visitor model configuration', () => {
       const result = mergeWithRoleConstraints('visitor', {
         'baseagents.claude.model': 'claude-opus-4-8'
       });
 
-      expect(result.valid).toBe(false);
-      expect(result.violations[0].reason).toBe('override_not_allowed');
-      expect(result.violations[0].field).toBe('baseagents.claude.model');
-      expect(result.effectiveConfig.baseagents?.claude?.model).toBe('claude-haiku-4-5-20251001');
+      expect(result.valid).toBe(true);
+      expect(result.violations).toHaveLength(0);
+      expect(result.effectiveConfig.baseagents?.claude?.model).toBe('claude-opus-4-8');
     });
 
-    it('should prevent visitor from using sonnet', () => {
+    it('should preserve visitor sonnet configuration', () => {
       const result = mergeWithRoleConstraints('visitor', {
         'baseagents.claude.model': 'claude-sonnet-4-6'
       });
 
-      expect(result.valid).toBe(false);
-      expect(result.violations[0].reason).toBe('override_not_allowed');
+      expect(result.valid).toBe(true);
+      expect(result.effectiveConfig.baseagents?.claude?.model).toBe('claude-sonnet-4-6');
     });
 
     it('should allow visitor to use haiku', () => {
@@ -97,13 +96,13 @@ describe('Role Constraints', () => {
       expect(result.violations).toHaveLength(0);
     });
 
-    it('should prevent member from using opus', () => {
+    it('should preserve member opus configuration', () => {
       const result = mergeWithRoleConstraints('member', {
         'baseagents.claude.model': 'claude-opus-4-8'
       });
 
-      expect(result.valid).toBe(false);
-      expect(result.violations[0].reason).toBe('model_not_allowed');
+      expect(result.valid).toBe(true);
+      expect(result.effectiveConfig.baseagents?.claude?.model).toBe('claude-opus-4-8');
     });
 
     it('should allow member to use sonnet', () => {
@@ -159,24 +158,23 @@ describe('Role Constraints', () => {
     });
   });
 
-  describe('dispatch constraint', () => {
-    it('should prevent member from using broadcast', () => {
+  describe('dispatch configuration', () => {
+    it('should preserve member broadcast', () => {
       const result = mergeWithRoleConstraints('member', {
         dispatch: 'broadcast'
       });
 
-      expect(result.valid).toBe(false);
-      expect(result.violations[0].reason).toBe('override_not_allowed');
-      expect(result.effectiveConfig.dispatch).toBe('mention');
+      expect(result.valid).toBe(true);
+      expect(result.effectiveConfig.dispatch).toBe('broadcast');
     });
 
-    it('should prevent visitor from changing dispatch', () => {
+    it('should preserve visitor dispatch', () => {
       const result = mergeWithRoleConstraints('visitor', {
         dispatch: 'broadcast'
       });
 
-      expect(result.valid).toBe(false);
-      expect(result.effectiveConfig.dispatch).toBe('mention');
+      expect(result.valid).toBe(true);
+      expect(result.effectiveConfig.dispatch).toBe('broadcast');
     });
 
     it('should allow admin to use mention', () => {
@@ -187,13 +185,13 @@ describe('Role Constraints', () => {
       expect(result.valid).toBe(true);
     });
 
-    it('should prevent admin from using broadcast due to allowedValues', () => {
+    it('should preserve admin broadcast', () => {
       const result = mergeWithRoleConstraints('admin', {
         dispatch: 'broadcast'
       });
 
-      expect(result.valid).toBe(false);
-      expect(result.violations[0].reason).toBe('value_not_allowed');
+      expect(result.valid).toBe(true);
+      expect(result.effectiveConfig.dispatch).toBe('broadcast');
     });
 
     it('should allow owner to use broadcast', () => {
@@ -206,7 +204,7 @@ describe('Role Constraints', () => {
   });
 
   describe('chatmode constraint', () => {
-    it('should prevent visitor from overriding chatmode', () => {
+    it('should preserve visitor chatmode', () => {
       const result = mergeWithRoleConstraints('visitor', {
         chatmode: {
           private: 'interactive',
@@ -214,9 +212,8 @@ describe('Role Constraints', () => {
         }
       });
 
-      expect(result.valid).toBe(false);
-      expect(result.violations[0].field).toBe('chatmode');
-      expect(result.effectiveConfig.chatmode.private).toBe('proactive');
+      expect(result.valid).toBe(true);
+      expect(result.effectiveConfig.chatmode.private).toBe('interactive');
     });
 
     it('should allow owner to customize chatmode', () => {
@@ -243,7 +240,7 @@ describe('Role Constraints', () => {
   });
 
   describe('multiple violations', () => {
-    it('should record all violations', () => {
+    it('should only report permission mode violations', () => {
       const result = mergeWithRoleConstraints('visitor', {
         permissionMode: 'bypass',
         'baseagents.claude.model': 'claude-opus-4-8',
@@ -252,31 +249,31 @@ describe('Role Constraints', () => {
       });
 
       expect(result.valid).toBe(false);
-      expect(result.violations.length).toBeGreaterThan(1);
+      expect(result.violations).toHaveLength(1);
 
       const fields = result.violations.map(v => v.field);
       expect(fields).toContain('permissionMode');
-      expect(fields).toContain('baseagents.claude.model');
+      expect(fields).not.toContain('baseagents.claude.model');
     });
 
-    it('should apply defaults for all violated fields', () => {
+    it('should apply only the permission mode default', () => {
       const result = mergeWithRoleConstraints('visitor', {
         permissionMode: 'bypass',
         'baseagents.claude.model': 'claude-opus-4-8'
       });
 
       expect(result.effectiveConfig.permissionMode).toBe('readonly');
-      expect(result.effectiveConfig.baseagents?.claude?.model).toBe('claude-haiku-4-5-20251001');
+      expect(result.effectiveConfig.baseagents?.claude?.model).toBe('claude-opus-4-8');
     });
   });
 
   describe('undefined fields', () => {
-    it('should use role defaults when relation config is empty', () => {
+    it('should use only the role permission default when relation config is empty', () => {
       const result = mergeWithRoleConstraints('owner', {});
 
       expect(result.valid).toBe(true);
       expect(result.effectiveConfig.permissionMode).toBe('bypass');
-      expect(result.effectiveConfig.baseagents?.claude?.model).toBe('claude-opus-4-8');
+      expect(result.effectiveConfig.baseagents?.claude?.model).toBeUndefined();
     });
 
     it('should preserve undefined fields not in role definition', () => {
@@ -300,15 +297,15 @@ describe('Role Constraints', () => {
       expect(isModelAllowedForRole('admin', 'claude-haiku-4-5-20251001')).toBe(true);
     });
 
-    it('should check member can only use sonnet/haiku', () => {
-      expect(isModelAllowedForRole('member', 'claude-opus-4-8')).toBe(false);
+    it('should allow member to use any configured model', () => {
+      expect(isModelAllowedForRole('member', 'claude-opus-4-8')).toBe(true);
       expect(isModelAllowedForRole('member', 'claude-sonnet-4-6')).toBe(true);
       expect(isModelAllowedForRole('member', 'claude-haiku-4-5-20251001')).toBe(true);
     });
 
-    it('should check visitor can only use haiku', () => {
-      expect(isModelAllowedForRole('visitor', 'claude-opus-4-8')).toBe(false);
-      expect(isModelAllowedForRole('visitor', 'claude-sonnet-4-6')).toBe(false);
+    it('should allow visitor to use any configured model', () => {
+      expect(isModelAllowedForRole('visitor', 'claude-opus-4-8')).toBe(true);
+      expect(isModelAllowedForRole('visitor', 'claude-sonnet-4-6')).toBe(true);
       expect(isModelAllowedForRole('visitor', 'claude-haiku-4-5-20251001')).toBe(true);
     });
 

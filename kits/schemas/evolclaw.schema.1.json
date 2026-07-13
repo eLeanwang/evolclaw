@@ -17,7 +17,18 @@
       "description": "进程控制面鉴权名单（谁能远程管 daemon）",
       "x-merge": "list"
     },
-    "debug": { "type": "object", "x-merge": "dict" },
+    "debug": {
+      "type": "object",
+      "description": "进程级调试配置",
+      "x-merge": "dict",
+      "properties": {
+        "eckSnapshots": {
+          "type": "boolean",
+          "default": true,
+          "description": "是否写入 ECK 上下文与消息渲染旁路快照"
+        }
+      }
+    },
     "tunnel": {
       "type": "object",
       "description": "内网穿透配置",

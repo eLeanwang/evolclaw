@@ -44,6 +44,7 @@
     "proactive": { "type": "object", "x-merge": "dict" },
     "group_venue_sync": { "type": "object", "x-merge": "dict" },
     "render": { "type": "object", "x-merge": "dict" },
+    "sessionManifests": { "type": "object", "x-merge": "dict" },
     "enable_rich_content": { "type": "boolean", "x-merge": "scalar" },
     "permissionMode": {
       "type": "string",
