@@ -34,11 +34,12 @@ import {
   resolveCapabilityContext,
   updateCapabilityPolicy,
 } from '../capability/capability-manager.js';
-import { normalizeCliArgv, parseCliIntent, rawCliIntent, withDefaultRelationContext } from './cli-intent-parser.js';
+import { normalizeCliArgv, parseCliIntent, parseLegacyCliCommand, validateCliArgv, withDefaultRelationContext } from './cli-intent-parser.js';
 import { authorizeCommand, authorizeResolvedConfigCommand } from './command-permission.js';
 import { auditCommandAuthorization, hashArgv } from './command-audit.js';
 import type { CommandAuthorizationContext, CommandIntent, CommandScope } from '../../types.js';
 import { chatmodeFieldForPeer } from '../message/peer-mode.js';
+import { menuFailure, menuSuccess, normalizeMenuError, validateMenuRequest } from '../message/menu-control-protocol.js';
 
 /**
  * 获取 baseagent CLI 的版本号（claude/gemini/codex）。
@@ -1048,13 +1049,13 @@ async function authorizeMenuIntent(
 
 
 function ecwebErr(id: string, name: string | undefined, code: string, message: string): import('../../types.js').MenuResponse {
-  return { type: 'menu.response', id, ...(name ? { name } : {}), error: { code, message } };
+  return menuFailure({ id, ...(name ? { name } : {}) }, normalizeMenuError({ code, message }));
 }
 
 function ecwebResp(id: string, name: string | undefined, result: { data: any } | { error: string; code?: string }): import('../../types.js').MenuResponse {
   return 'error' in result
-    ? { type: 'menu.response', id, ...(name ? { name } : {}), error: { code: result.code ?? 'EXEC_FAILED', message: result.error } }
-    : { type: 'menu.response', id, ...(name ? { name } : {}), data: result.data };
+    ? menuFailure({ id, ...(name ? { name } : {}) }, normalizeMenuError(result))
+    : menuSuccess({ id, ...(name ? { name } : {}) }, result.data);
 }
 
 function parseScheduleDurationMs(value: string): number {
@@ -2680,10 +2681,13 @@ export async function execMenuAction(this: any,
   if (cmdBase === '/cli') {
     if (action !== 'exec') return { error: `不支持的 cli action: ${action}`, code: 'NOT_SUPPORTED' };
 
-    let argv = Array.isArray(args?.argv) ? args.argv.map((x: any) => String(x))
-               : typeof args?.command === 'string' ? [args.command]
-               : null;
-    if (!argv || argv.length === 0) return { error: '缺少 argv 或 command', code: 'MISSING_VALUE' };
+    const argvValidation = Array.isArray(args?.argv)
+      ? validateCliArgv(args.argv)
+      : typeof args?.command === 'string'
+        ? parseLegacyCliCommand(args.command)
+        : { ok: false as const, reason: 'CLI exec requires args.argv' };
+    if (!argvValidation.ok) return { error: argvValidation.reason, code: 'INVALID_ARGUMENT' };
+    let argv = argvValidation.argv;
 
     argv = normalizeCliArgv(argv);
 
@@ -2700,11 +2704,18 @@ export async function execMenuAction(this: any,
     }
 
     // 解析 CLI intent
-    const parseResult = Array.isArray(args?.argv)
-      ? parseCliIntent(argv, 'menu.cli', { defaultRelation: { self: cliSelfAid, peer: cliPeerKey } })
-      : { kind: 'raw' as const, intent: rawCliIntent(argv, 'menu.cli'), reason: 'command string is always treated as raw CLI' };
+    const parseResult = parseCliIntent(argv, 'menu.cli', { defaultRelation: { self: cliSelfAid, peer: cliPeerKey } });
     if (parseResult.kind === 'invalid') {
       return { error: parseResult.reason, code: parseResult.code };
+    }
+    if (parseResult.kind === 'raw') {
+      await auditCommandAuthorization({
+        ts: Date.now(), source: 'menu.cli', operation: parseResult.intent.operation,
+        scope: parseResult.intent.scope, dangerous: true, actorId: userId,
+        channel, channelId, role: identity.role, decision: 'deny', code: 'NOT_ALLOWED',
+        reason: 'Unrecognized CLI command', taskId: requestId, argvHash: hashArgv(argv),
+      });
+      return { error: 'CLI command is not allowed', code: 'NOT_ALLOWED' };
     }
     if (parseResult.kind === 'recognized' && parseResult.resolvedConfigCommand) {
       argv = parseResult.resolvedConfigCommand.canonicalArgv;
@@ -2764,30 +2775,18 @@ export async function execMenuAction(this: any,
       return { error: decision.reason, code: decision.code };
     }
 
-    // 审计 dangerous 操作
-    if (decision.dangerous) {
-      await auditCommandAuthorization({
-        ts: Date.now(),
-        source: 'menu.cli',
-        operation: parseResult.intent.operation,
-        scope: parseResult.intent.scope,
-        dangerous: true,
-        actorId: userId,
-        selfAid,
-        peerKey,
-        channel,
-        channelId,
-        role: identity.role,
-        isDaemonOwner,
-        fromControlChannel: fromControlChannel ?? false,
-        decision: 'allow',
-        matchedRule: decision.matchedRule,
-        argvHash: hashArgv(argv),
-      });
-    }
-
-    // 执行
-    return await this.execCliPassthrough(argv);
+    const execution = await this.execCliPassthrough(argv);
+    const executionData = 'data' in execution ? execution.data : undefined;
+    await auditCommandAuthorization({
+      ts: Date.now(), source: 'menu.cli', operation: parseResult.intent.operation,
+      scope: parseResult.intent.scope, dangerous: parseResult.intent.dangerous ?? false,
+      actorId: userId, selfAid, peerKey, channel, channelId, role: identity.role,
+      isDaemonOwner, fromControlChannel: fromControlChannel ?? false,
+      decision: 'allow', matchedRule: decision.matchedRule, taskId: requestId,
+      argvHash: hashArgv(argv), durationMs: executionData?.durationMs,
+      exitCode: executionData?.exitCode,
+    });
+    return execution;
   }
 
   // ── name=file action=list/fetch：目录浏览 / 拉取文件 ──
@@ -2832,7 +2831,7 @@ export async function execMenuAction(this: any,
         buildEnvelope({ channel: adapter.channelName, channelId, replyContext: replyCtx }),
         { kind: 'result.file', filePath: realPath, correlationId: requestId },
       );
-      return { data: { action: 'fetch', success: true, size: stat.size } };
+      return { data: { accepted: true } };
     } catch (e: any) {
       return { error: `文件发送失败: ${e?.message ?? e}`, code: 'EXEC_FAILED' };
     }
@@ -2845,6 +2844,8 @@ export async function execMenuAction(this: any,
 export async function execMenuForEcweb(this: any, payload: any): Promise<import('../../types.js').MenuResponse> {
   const id = payload?.id ?? '';
   const name = payload?.name;
+  const validationError = validateMenuRequest(payload ?? {});
+  if (validationError) return menuFailure({ id, ...(name ? { name } : {}) }, validationError);
 
   if (name === 'cli' || payload?.cmd === '/cli') {
     return { type: 'menu.response', id, name, error: { code: 'NOT_SUPPORTED', message: 'cli 不在 ECWeb 控制范围' } };
@@ -2882,7 +2883,7 @@ export async function execMenuForEcweb(this: any, payload: any): Promise<import(
   try {
     switch (payload?.type) {
       case 'menu.list':
-        return { type: 'menu.response', id, data: this.getMenuItems('owner', 'private', 'control') };
+        return menuSuccess({ id }, this.getMenuItems('owner', 'private', 'control'));
 
       case 'menu.query': {
         if (!cmd) return ecwebErr(id, name, 'MISSING_CMD', '缺少 name/cmd');
@@ -2893,7 +2894,7 @@ export async function execMenuForEcweb(this: any, payload: any): Promise<import(
       case 'menu.options': {
         if (!cmd) return ecwebErr(id, name, 'MISSING_CMD', '缺少 name/cmd');
         const data = await this.getSubMenuItems(cmd, agentChannelKey, agentChannelKey, userId, payload.args, ownerIdentity, undefined, true) ?? [];
-        return { type: 'menu.response', id, name, data };
+        return menuSuccess({ id, ...(name ? { name } : {}) }, data);
       }
 
       case 'menu.update': {
@@ -2911,7 +2912,7 @@ export async function execMenuForEcweb(this: any, payload: any): Promise<import(
       }
 
       default:
-        return ecwebErr(id, name, 'NOT_SUPPORTED', `未知类型: ${payload?.type}`);
+        return ecwebErr(id, name, 'METHOD_NOT_FOUND', `未知类型: ${payload?.type}`);
     }
   } catch (e: any) {
     return ecwebErr(id, name, 'INTERNAL', e?.message ?? String(e));
@@ -2924,10 +2925,12 @@ export async function execMenuForEcweb(this: any, payload: any): Promise<import(
 export async function execMenuForControl(this: any, payload: any, peerId: string): Promise<import('../../types.js').MenuResponse> {
   const id = payload?.id ?? '';
   const name = payload?.name;
+  const validationError = validateMenuRequest(payload ?? {});
+  if (validationError) return menuFailure({ id, ...(name ? { name } : {}) }, validationError);
 
   const owners = loadEvolclawConfig().owners ?? [];
   if (!isProcessLevelOwner(peerId, owners)) {
-    return { type: 'menu.response', id, ...(name ? { name } : {}), error: { code: 'FORBIDDEN', message: '控制 channel 操作需要 owner 权限' } };
+    return menuFailure({ id, ...(name ? { name } : {}) }, { code: 'ROLE_ACCESS_DENIED', message: '控制 channel 操作需要 owner 权限' });
   }
 
   if (name === 'cli' || payload?.cmd === '/cli') {
@@ -2950,7 +2953,7 @@ export async function execMenuForControl(this: any, payload: any, peerId: string
   try {
     switch (payload?.type) {
       case 'menu.list':
-        return { type: 'menu.response', id, data: this.getMenuItems('owner', 'private', 'control') };
+        return menuSuccess({ id }, this.getMenuItems('owner', 'private', 'control'));
 
       case 'menu.query': {
         if (!cmd) return ecwebErr(id, name, 'MISSING_CMD', '缺少 name/cmd');
@@ -2961,7 +2964,7 @@ export async function execMenuForControl(this: any, payload: any, peerId: string
       case 'menu.options': {
         if (!cmd) return ecwebErr(id, name, 'MISSING_CMD', '缺少 name/cmd');
         const data = await this.getSubMenuItems(cmd, CONTROL_CHANNEL, CONTROL_CHANNEL, peerId, payload.args, ownerIdentity, undefined, true) ?? [];
-        return { type: 'menu.response', id, name, data };
+        return menuSuccess({ id, ...(name ? { name } : {}) }, data);
       }
 
       case 'menu.update': {
@@ -2979,7 +2982,7 @@ export async function execMenuForControl(this: any, payload: any, peerId: string
       }
 
       default:
-        return ecwebErr(id, name, 'NOT_SUPPORTED', `未知类型: ${payload?.type}`);
+        return ecwebErr(id, name, 'METHOD_NOT_FOUND', `未知类型: ${payload?.type}`);
     }
   } catch (e: any) {
     return ecwebErr(id, name, 'INTERNAL', e?.message ?? String(e));

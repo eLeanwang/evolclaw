@@ -40,6 +40,7 @@ import { buildEnvelope } from './core/message/message-utils.js';
 import { ResponseEngine } from './core/message/response-engine.js';
 import { MessageQueue } from './core/message/message-queue.js';
 import { MessageBridge } from './core/message/message-bridge.js';
+import { MenuRequestDeduper, hasValidMenuId, menuFailure, menuPayloadFingerprint, parseMenuControl, validateMenuRequest } from './core/message/menu-control-protocol.js';
 import { BootstrapService } from './core/bootstrap-service.js';
 import { MessageCache } from './core/message/message-cache.js';
 import { CommandHandler, isProcessLevelOwner } from './core/command/command-handler.js';
@@ -80,6 +81,8 @@ import { fileURLToPath } from 'url';
 import readline from 'readline';
 import { spawn } from 'child_process';
 import * as platform from './utils/cross-platform.js';
+
+const controlMenuDeduper = new MenuRequestDeduper<import('./types.js').MenuResponse>();
 
 /** 出站 payload 摘要（用于 channel-out.log） */
 function summarizeOutboundPayload(payload: any): Record<string, any> {
@@ -1615,6 +1618,23 @@ async function main() {
           }
           return;
         }
+        const menuControl = parseMenuControl(text);
+        if (menuControl.isMenu && !hasValidMenuId(menuControl)) {
+          logger.warn(`[ControlMenu] dropped malformed request without id type=${menuControl.type}`);
+          return;
+        }
+        if (menuControl.isMenu && !isProcessLevelOwner(opts.peerId, processLevelOwners)) {
+          const response = menuFailure(
+            { id: menuControl.id, ...(menuControl.name?.trim() ? { name: menuControl.name } : {}) },
+            { code: 'ROLE_ACCESS_DENIED', message: 'Current identity cannot access the control channel' },
+          );
+          await controlChannel!.sendStructured(
+            opts.channelId,
+            response as unknown as Record<string, any>,
+            { metadata: { encrypted: opts.encrypted } },
+          );
+          return;
+        }
         if (!isProcessLevelOwner(opts.peerId, processLevelOwners)) {
           logger.debug(`控制 AID 收到非 owner 消息，忽略: from=${opts.peerId}`);
           return;
@@ -1633,8 +1653,30 @@ async function main() {
           return;
         }
         // menu.* JSON 路由：owner 已在上方校验，转交 execMenuForControl（fromControlChannel=true）
-        if (parsed && typeof parsed === 'object' && typeof parsed.type === 'string' && parsed.type.startsWith('menu.')) {
-          const response = await cmdHandler.execMenuForControl(parsed, opts.peerId);
+        if (menuControl.isMenu) {
+          const validationError = validateMenuRequest(menuControl.request);
+          if (validationError) {
+            await controlChannel!.sendStructured(
+              opts.channelId,
+              menuFailure(
+                { id: menuControl.id, ...(menuControl.name?.trim() ? { name: menuControl.name } : {}) },
+                validationError,
+              ) as unknown as Record<string, any>,
+              { metadata: { encrypted: opts.encrypted } },
+            );
+            return;
+          }
+          const deduped = await controlMenuDeduper.execute(
+            [opts.channelId, opts.peerId, menuControl.id].join('\u001f'),
+            menuPayloadFingerprint(menuControl.raw),
+            () => cmdHandler.execMenuForControl(parsed, opts.peerId),
+          );
+          const response = 'conflict' in deduped
+            ? menuFailure(
+                { id: menuControl.id, ...(menuControl.name?.trim() ? { name: menuControl.name } : {}) },
+                { code: 'CONFLICT', message: 'Request ID was already used with a different payload' },
+              )
+            : deduped.value;
           // 同 bind.response：sendStructured 直发 typed payload（payload.type='menu.response'），
           // 不能用 sendMessage（会包成 {type:'text',...}）；encrypted 跟随入站请求保持对称。
           await controlChannel!.sendStructured(

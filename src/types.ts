@@ -1187,13 +1187,27 @@ export interface MenuActionRequest {
   cmd?: string;
 }
 
-export interface MenuResponse {
-  type: 'menu.response';
-  id: string;
-  name?: string;         // 回显 name（menu.list 无 name）
-  data?: any;            // 成功（与 error 互斥）
-  error?: { code: string; message: string };  // 失败（与 data 互斥）
+export interface MenuResponseError {
+  code: string;
+  message: string;
+  data?: unknown;
 }
+
+export type MenuResponse =
+  | {
+      type: 'menu.response';
+      id: string;
+      name?: string;
+      data: unknown;
+      error?: never;
+    }
+  | {
+      type: 'menu.response';
+      id: string;
+      name?: string;
+      data?: never;
+      error: MenuResponseError;
+    };
 
 // ── Command Authorization Types ──
 

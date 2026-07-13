@@ -8,6 +8,7 @@ import { _resetRoot, agentRelationConfig } from '../../src/paths.js';
 import { formatPeerKey } from '../../src/core/relation/peer-identity.js';
 import { _resetSchemaCache } from '../../src/config/schema-registry.js';
 import { AgentDelegationRegistry } from '../../src/core/auth/agent-delegation.js';
+import { buildAunFilePayload } from '../../src/channels/aun.js';
 
 const TEST_AID = 'test.agentid.pub';
 let tmpRoot: string;
@@ -1231,6 +1232,45 @@ describe('/cli config authorization', () => {
     ]);
   });
 
+  it('rejects unknown raw CLI before spawn', async () => {
+    const { handler } = createHandler();
+    const passthrough = installPassthroughSpy(handler);
+
+    const result = await handler.execMenuAction(
+      '/cli', 'exec', { argv: ['totally-unknown', '--token', 'secret'] },
+      'aun', 'chat1', 'user1', { role: 'owner', mode: 'interactive' },
+    ) as any;
+
+    expect(result.code).toBe('NOT_ALLOWED');
+    expect(passthrough).not.toHaveBeenCalled();
+  });
+
+  it('supports the deprecated command string through safe tokenization', async () => {
+    const { handler } = createHandler();
+    const passthrough = installPassthroughSpy(handler);
+
+    const result = await handler.execMenuAction(
+      '/cli', 'exec', { command: 'status --format "json"' },
+      'aun', 'chat1', 'user1', { role: 'owner', mode: 'interactive' },
+    );
+
+    expect(result).toEqual({ data: { ok: true } });
+    expect(passthrough).toHaveBeenCalledWith(['status', '--format', 'json']);
+  });
+
+  it('rejects malformed argv before spawn', async () => {
+    const { handler } = createHandler();
+    const passthrough = installPassthroughSpy(handler);
+
+    const result = await handler.execMenuAction(
+      '/cli', 'exec', { argv: ['status', 123] },
+      'aun', 'chat1', 'user1', { role: 'owner', mode: 'interactive' },
+    ) as any;
+
+    expect(result.code).toBe('INVALID_ARGUMENT');
+    expect(passthrough).not.toHaveBeenCalled();
+  });
+
   it('does not spawn for denied fields or sensitive reads', async () => {
     ownersMock.value = [];
     const sm = createMockSessionManager({
@@ -1308,6 +1348,76 @@ describe('/cli config authorization', () => {
       'config', 'set', 'chatmode.group', 'proactive',
       '--self', TEST_AID, '--peer', formatPeerKey('aun', 'group1'),
     ]);
+  });
+});
+
+describe('/file fetch control response', () => {
+  it('builds result.file with snake_case correlation', () => {
+    const attachment = {
+      owner_aid: TEST_AID,
+      object_key: 'shared/id/result.json',
+      filename: 'result.json',
+      size_bytes: 12,
+      sha256: 'hash',
+      content_type: 'application/json',
+    };
+
+    expect(buildAunFilePayload({
+      filename: 'result.json', size: 12, contentType: 'application/json', attachment,
+      context: { metadata: { correlationId: 'file-fetch-1' } },
+    })).toEqual({
+      type: 'result.file', text: expect.any(String), correlation_id: 'file-fetch-1',
+      name: 'result.json', content_type: 'application/json', attachments: [attachment],
+    });
+
+    expect(buildAunFilePayload({
+      filename: 'result.json', size: 12, contentType: 'application/json', attachment,
+    })).not.toHaveProperty('correlation_id');
+  });
+
+  it('sends one correlated file payload and returns accepted', async () => {
+    const projectPath = path.join(tmpRoot, 'project');
+    fs.mkdirSync(projectPath, { recursive: true });
+    const filePath = path.join(projectPath, 'result.json');
+    fs.writeFileSync(filePath, '{"ok":true}');
+    const session = {
+      ...createMockSessionManager().getActiveSessionSync(),
+      projectPath,
+    };
+    const sm = createMockSessionManager({
+      getActiveSession: vi.fn().mockResolvedValue(session),
+      getActiveSessionSync: vi.fn().mockReturnValue(session),
+    });
+    const { handler } = createHandler({ sessionManager: sm });
+    const send = vi.fn().mockResolvedValue(undefined);
+    handler.registerAdapter({
+      channelName: 'aun', channelKey: 'aun', capabilities: { file: true }, send,
+    } as any);
+
+    const result = await handler.execMenuAction(
+      '/file', 'fetch', { path: 'result.json' }, 'aun', 'chat1', 'user1',
+      { role: 'owner', mode: 'interactive' }, 'private', 'file-fetch-1',
+    );
+
+    expect(result).toEqual({ data: { accepted: true } });
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(send.mock.calls[0][1]).toEqual({
+      kind: 'result.file', filePath: fs.realpathSync(filePath), correlationId: 'file-fetch-1',
+    });
+  });
+
+  it('denies file fetch before touching the filesystem', async () => {
+    const { handler } = createHandler();
+    const existsSpy = vi.spyOn(fs, 'existsSync');
+
+    const result = await handler.execMenuAction(
+      '/file', 'fetch', { path: 'secret.txt' }, 'aun', 'chat1', 'user1',
+      { role: 'visitor', mode: 'interactive' }, 'private', 'file-denied-1',
+    ) as any;
+
+    expect(result.code).toMatch(/NO_PERMISSION|NOT_ALLOWED/);
+    expect(existsSpy.mock.calls.some(([checkedPath]) => String(checkedPath).endsWith('secret.txt'))).toBe(false);
+    existsSpy.mockRestore();
   });
 });
 

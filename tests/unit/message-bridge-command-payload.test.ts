@@ -3,7 +3,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { MessageBridge } from '../../src/core/message/message-bridge.js';
-import { ConfigTarget, write } from '../../src/config/config-manager.js';
+import { ConfigTarget, read, write } from '../../src/config/config-manager.js';
 import { formatPeerKey } from '../../src/core/relation/peer-identity.js';
 import { _resetRoot } from '../../src/paths.js';
 import { _resetSchemaCache } from '../../src/config/schema-registry.js';
@@ -123,7 +123,8 @@ function makeInbound(over: Partial<InboundMessage> = {}): InboundMessage {
 function parseCustomResponse(sendMock: ReturnType<typeof vi.fn>) {
   const [, payload] = sendMock.mock.calls[0] as [OutboundEnvelope, OutboundPayload];
   expect(payload.kind).toBe('custom');
-  return JSON.parse((payload as any).payload);
+  const value = (payload as any).payload;
+  return typeof value === 'string' ? JSON.parse(value) : value;
 }
 
 const MEMBER_IDENTITY = { role: 'member', mode: 'interactive' };
@@ -369,7 +370,7 @@ describe('MessageBridge — menu 协议', () => {
       type: 'menu.response',
       id: 'u2',
       name: 'chatmode',
-      error: { code: 'INVALID_VALUE', message: '无效模式: invalid' },
+      error: { code: 'INVALID_ARGUMENT', message: '无效模式: invalid' },
     });
   });
 
@@ -419,7 +420,7 @@ describe('MessageBridge — menu 协议', () => {
     });
   });
 
-  it('menu.query unknown name 返回 UNKNOWN_NAME 错误', async () => {
+  it('menu.query unknown name 返回 NOT_SUPPORTED 错误', async () => {
     const sendMock = vi.fn().mockResolvedValue(undefined);
     const h = makeBridge({ adapterSend: sendMock });
 
@@ -429,26 +430,159 @@ describe('MessageBridge — menu 协议', () => {
     expect(response.type).toBe('menu.response');
     expect(response.id).toBe('q-x');
     expect(response.name).toBe('nonexistent');
-    expect(response.error.code).toBe('UNKNOWN_NAME');
+    expect(response.error.code).toBe('NOT_SUPPORTED');
   });
 
-  it('menu.update 缺少 value 返回 MISSING_VALUE 错误', async () => {
+  it('menu.update 缺少 value 返回 INVALID_ARGUMENT 错误', async () => {
     const sendMock = vi.fn().mockResolvedValue(undefined);
     const h = makeBridge({ adapterSend: sendMock });
 
     await h.triggerInbound(makeInbound({ content: JSON.stringify({ type: 'menu.update', id: 'u-x', name: 'chatmode', value: '' }) }));
 
     const response = parseCustomResponse(sendMock);
-    expect(response.error.code).toBe('MISSING_VALUE');
+    expect(response.error.code).toBe('INVALID_ARGUMENT');
+    expect(h.cmdHandler.execMenuUpdate).not.toHaveBeenCalled();
   });
 
-  it('menu.action 缺少 action 返回 MISSING_VALUE 错误', async () => {
+  it('menu.action 缺少 action 返回 INVALID_ARGUMENT 错误', async () => {
     const sendMock = vi.fn().mockResolvedValue(undefined);
     const h = makeBridge({ adapterSend: sendMock });
 
     await h.triggerInbound(makeInbound({ content: JSON.stringify({ type: 'menu.action', id: 'a-x', name: 'session', action: '' }) }));
 
     const response = parseCustomResponse(sendMock);
-    expect(response.error.code).toBe('MISSING_VALUE');
+    expect(response.error.code).toBe('INVALID_ARGUMENT');
+    expect(h.cmdHandler.execMenuAction).not.toHaveBeenCalled();
+  });
+
+  it('全局鉴权拒绝返回关联 menu.response 且不调用 handler', async () => {
+    const sendMock = vi.fn().mockResolvedValue(undefined);
+    const h = makeBridge({ adapterSend: sendMock });
+    write(ConfigTarget.Relation, { roles: { assigned: null } }, {
+      self: BRIDGE_AID,
+      peerKey: formatPeerKey('test-type', BRIDGE_PEER),
+    });
+
+    await h.triggerInbound(makeInbound({
+      content: JSON.stringify({ type: 'menu.action', id: 'denied-1', name: 'cli', action: 'exec', args: { argv: ['status'] } }),
+    }));
+
+    expect(parseCustomResponse(sendMock)).toEqual({
+      type: 'menu.response',
+      id: 'denied-1',
+      name: 'cli',
+      error: expect.objectContaining({ code: 'ROLE_ACCESS_DENIED' }),
+    });
+    expect(h.cmdHandler.execMenuAction).not.toHaveBeenCalled();
+    expect(sendMock.mock.calls[0][1]).toMatchObject({ kind: 'custom' });
+  });
+
+  it('缺失 id 的 menu 请求静默丢弃且不执行', async () => {
+    const sendMock = vi.fn().mockResolvedValue(undefined);
+    const h = makeBridge({ adapterSend: sendMock });
+
+    await h.triggerInbound(makeInbound({ content: JSON.stringify({ type: 'menu.query', name: 'model' }) }));
+
+    expect(sendMock).not.toHaveBeenCalled();
+    expect(h.sendReply).not.toHaveBeenCalled();
+    expect(h.cmdHandler.execMenuQuery).not.toHaveBeenCalled();
+  });
+
+  it('缺少 name 返回 INVALID_ARGUMENT 且 data/error 互斥', async () => {
+    const sendMock = vi.fn().mockResolvedValue(undefined);
+    const h = makeBridge({ adapterSend: sendMock });
+
+    await h.triggerInbound(makeInbound({ content: JSON.stringify({ type: 'menu.query', id: 'missing-name-1' }) }));
+
+    const response = parseCustomResponse(sendMock);
+    expect(response).toEqual({
+      type: 'menu.response', id: 'missing-name-1',
+      error: { code: 'INVALID_ARGUMENT', message: 'Menu request name is required' },
+    });
+    expect(response).not.toHaveProperty('data');
+    expect(h.cmdHandler.execMenuQuery).not.toHaveBeenCalled();
+  });
+
+  it('handler 异常归一化为 INTERNAL_ERROR 并保留 id/name', async () => {
+    const sendMock = vi.fn().mockResolvedValue(undefined);
+    const h = makeBridge({ adapterSend: sendMock });
+    h.cmdHandler.execMenuQuery.mockRejectedValue(new Error('boom'));
+
+    await h.triggerInbound(makeInbound({ content: JSON.stringify({ type: 'menu.query', id: 'error-1', name: 'model' }) }));
+
+    expect(parseCustomResponse(sendMock)).toEqual({
+      type: 'menu.response', id: 'error-1', name: 'model',
+      error: { code: 'INTERNAL_ERROR', message: 'boom' },
+    });
+  });
+
+  it('Menu 请求不会触发首次 owner 自动绑定', async () => {
+    const sendMock = vi.fn().mockResolvedValue(undefined);
+    const h = makeBridge({ adapterSend: sendMock });
+    write(ConfigTarget.Agent, { aid: BRIDGE_AID, owners: [], channels: [] }, { self: BRIDGE_AID });
+    write(ConfigTarget.Relation, { roles: { assigned: null } }, {
+      self: BRIDGE_AID,
+      peerKey: formatPeerKey('test-type', BRIDGE_PEER),
+    });
+
+    await h.triggerInbound(makeInbound({ content: JSON.stringify({ type: 'menu.list', id: 'no-bind-1' }) }));
+
+    expect((read(ConfigTarget.Agent, { self: BRIDGE_AID }) as any)?.owners).toEqual([]);
+    expect(parseCustomResponse(sendMock).error.code).toBe('ROLE_ACCESS_DENIED');
+  });
+
+  it('未知 menu operation 返回 METHOD_NOT_FOUND 且不进入聊天管线', async () => {
+    const sendMock = vi.fn().mockResolvedValue(undefined);
+    const h = makeBridge({ adapterSend: sendMock });
+
+    await h.triggerInbound(makeInbound({ content: JSON.stringify({ type: 'menu.future', id: 'future-1', name: 'model' }) }));
+
+    expect(parseCustomResponse(sendMock)).toEqual({
+      type: 'menu.response',
+      id: 'future-1',
+      name: 'model',
+      error: { code: 'METHOD_NOT_FOUND', message: 'Unknown menu request type: menu.future' },
+    });
+    expect(h.cmdHandler.handle).not.toHaveBeenCalled();
+  });
+
+  it('相同 scope 和 id 的重复 action 只执行一次并重放响应', async () => {
+    const sendMock = vi.fn().mockResolvedValue(undefined);
+    const h = makeBridge({ adapterSend: sendMock });
+    h.cmdHandler.execMenuAction.mockResolvedValue({ data: { stopped: true } });
+    const request = makeInbound({ content: JSON.stringify({ type: 'menu.action', id: 'dedup-1', name: 'session', action: 'stop' }) });
+
+    await Promise.all([h.triggerInbound(request), h.triggerInbound(request)]);
+
+    expect(h.cmdHandler.execMenuAction).toHaveBeenCalledTimes(1);
+    expect(sendMock).toHaveBeenCalledTimes(2);
+    expect(parseCustomResponse(sendMock)).toEqual({ type: 'menu.response', id: 'dedup-1', name: 'session', data: { stopped: true } });
+  });
+
+  it('相同 scope 和 id 但 payload 不同返回 CONFLICT', async () => {
+    const sendMock = vi.fn().mockResolvedValue(undefined);
+    const h = makeBridge({ adapterSend: sendMock });
+    h.cmdHandler.execMenuAction.mockResolvedValue({ data: { stopped: true } });
+
+    await h.triggerInbound(makeInbound({ content: JSON.stringify({ type: 'menu.action', id: 'conflict-1', name: 'session', action: 'stop' }) }));
+    await h.triggerInbound(makeInbound({ content: JSON.stringify({ type: 'menu.action', id: 'conflict-1', name: 'session', action: 'delete' }) }));
+
+    expect(h.cmdHandler.execMenuAction).toHaveBeenCalledTimes(1);
+    const [, secondPayload] = sendMock.mock.calls[1] as [OutboundEnvelope, OutboundPayload];
+    expect((secondPayload as any).payload.error.code).toBe('CONFLICT');
+  });
+
+  it('相同 id 在不同 group scope 独立执行', async () => {
+    const sendMock = vi.fn().mockResolvedValue(undefined);
+    const h = makeBridge({ adapterSend: sendMock });
+    h.cmdHandler.execMenuQuery.mockResolvedValue({ data: { value: 'ok' } });
+    const content = JSON.stringify({ type: 'menu.query', id: 'shared-id', name: 'model' });
+
+    await h.triggerInbound(makeInbound({ content, chatType: 'group', channelId: 'group-1', groupId: 'group-1' }));
+    await h.triggerInbound(makeInbound({ content, chatType: 'group', channelId: 'group-2', groupId: 'group-2' }));
+
+    expect(h.cmdHandler.execMenuQuery).toHaveBeenCalledTimes(2);
+    expect((sendMock.mock.calls[0][0] as OutboundEnvelope).channelId).toBe('group-1');
+    expect((sendMock.mock.calls[1][0] as OutboundEnvelope).channelId).toBe('group-2');
   });
 });

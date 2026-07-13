@@ -5,7 +5,7 @@ import {
   type ResolvedConfigCommand,
   type ResolvedConfigOp,
 } from '../../config/resolved-config-op.js';
-export { normalizeCliArgv } from '../../cli/cli-argv.js';
+export { normalizeCliArgv, parseLegacyCliCommand, validateCliArgv } from '../../cli/cli-argv.js';
 
 export type CliIntentParseResult =
   | {
