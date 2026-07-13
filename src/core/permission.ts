@@ -262,17 +262,21 @@ export interface EvolclawSendCommand {
 }
 
 const SHELL_CONTROL_RE = /[;&|`]|[$][(]|\r|\n/;
+const TRAILING_FD_DUPLICATION_RE = /(?:\s+\d*>&\d+)+\s*$/;
 
 export function parseEvolclawSendCommand(command: string): EvolclawSendCommand | null {
   const trimmed = command.trim();
-  if (!trimmed || SHELL_CONTROL_RE.test(trimmed)) return null;
+  if (!trimmed) return null;
 
-  const ctlMatch = trimmed.match(/^(?:ec|evolclaw)\s+ctl\s+(send|file)(?:\s|$)/);
+  const parseable = trimmed.replace(TRAILING_FD_DUPLICATION_RE, '').trimEnd();
+  if (!parseable || SHELL_CONTROL_RE.test(parseable)) return null;
+
+  const ctlMatch = parseable.match(/^(?:ec|evolclaw)\s+ctl\s+(send|file)(?:\s|$)/);
   if (ctlMatch) {
     return { scope: 'ctl', action: ctlMatch[1] as 'send' | 'file' };
   }
 
-  const sessionMatch = trimmed.match(/^(?:ec|evolclaw)\s+(msg|group)\s+(send|file)\s+\S+\s+(\S+)(?:\s|$)/);
+  const sessionMatch = parseable.match(/^(?:ec|evolclaw)\s+(msg|group)\s+(send|file)\s+\S+\s+(\S+)(?:\s|$)/);
   if (!sessionMatch) return null;
   return {
     scope: sessionMatch[1] as 'msg' | 'group',
