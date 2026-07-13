@@ -180,7 +180,8 @@ tr:hover td { background: var(--bg2); }
 .msg-col { overflow-y: auto; height: 100%; }
 .msg-aids { width: 220px; border-right: 1px solid var(--border); flex-shrink: 0; }
 .msg-peers { width: 240px; border-right: 1px solid var(--border); flex-shrink: 0; }
-.msg-stream { flex: 1; padding: 12px; }
+.msg-stream { flex: 1; padding: 0; }
+.msg-stream-body { padding: 12px; }
 .list-item {
   padding: 8px 12px; cursor: pointer; border-bottom: 1px solid var(--border);
 }
@@ -218,6 +219,22 @@ tr:hover td { background: var(--bg2); }
 .bubble.in .body { border-left: 2px solid var(--green); }
 .bubble.out .body { border-left: 2px solid var(--blue); }
 .msg-tag { display: inline-block; padding: 0 5px; border-radius: 3px; font-size: 10px; margin-left: 4px; background: var(--bg3); color: var(--magenta); font-weight: 400; line-height: 1.4; vertical-align: baseline; }
+
+.msg-session-header { height: 44px; min-height: 44px; padding: 12px 16px; box-sizing: border-box; z-index: 2; }
+.msg-session-header .sh-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.msg-session-context-row { display: flex; align-items: baseline; gap: 28px; min-width: 0; }
+.msg-session-id-row { display: flex; align-items: baseline; gap: 10px; min-width: 0; flex-shrink: 0; }
+.msg-session-id { color: var(--fg); font-family: ui-monospace, "SF Mono", Consolas, monospace; font-size: 12px; line-height: 1.35; white-space: nowrap; }
+.msg-session-grid { display: grid; grid-template-columns: repeat(6, max-content); justify-content: space-between; gap: 16px; min-width: 0; flex: 1; }
+.msg-session-stat { display: flex; align-items: baseline; min-width: 0; gap: 8px; }
+.msg-session-label { color: var(--dim); font-size: 10px; line-height: 1.2; flex-shrink: 0; }
+.msg-session-value { overflow: hidden; color: var(--fg); font-size: 12px; line-height: 1.35; text-overflow: ellipsis; white-space: nowrap; }
+.msg-session-value.mono { font-family: ui-monospace, "SF Mono", Consolas, monospace; }
+.msg-session-value.status { display: inline-flex; align-items: center; gap: 5px; }
+.msg-session-value.status.processing { color: var(--green); }
+.msg-session-value .dot { width: 7px; height: 7px; margin: 0; flex-shrink: 0; }
+.msg-session-empty { display: flex; align-items: center; }
+.msg-session-empty .sh-title { margin-bottom: 0; }
 
 /* ── Sessions ── */
 .sess-list { width: 360px; border-right: 1px solid var(--border); flex-shrink: 0; display: flex; flex-direction: column; overflow: hidden; }

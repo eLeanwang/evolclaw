@@ -115,12 +115,26 @@ export interface MessageLogEntry {
   permMode: string | null; durationMs: number | null;
   numTurns?: number | null;
   usage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number } | null;
+  payloadType?: string;
   encrypt?: boolean; chatmode?: string; source?: string;
   channelType?: string; selfAID?: string; peerName?: string | null; peerType?: string; groupName?: string | null;
 }
 
-export function isHandoffStateMessage(entry: Pick<MessageLogEntry, 'msgType'> | null | undefined): boolean {
-  return entry?.msgType === 'handoff_state';
+export function isTransientProtocolMessage(
+  entry: Pick<MessageLogEntry, 'msgType' | 'payloadType'> | null | undefined,
+): boolean {
+  if (!entry) return false;
+  const transient = (value?: string): boolean => {
+    const type = value?.trim().toLowerCase();
+    if (!type) return false;
+    return [
+      'status', 'event', 'events', 'task.status', 'activity', 'thought',
+      'handoff_state', 'handoff_result',
+    ].includes(type)
+      || ['menu.', 'status.', 'event.', 'events.', 'task.status.', 'activity.']
+        .some(prefix => type.startsWith(prefix));
+  };
+  return transient(entry.payloadType) || transient(entry.msgType);
 }
 
 export interface PeerInfo {
@@ -155,7 +169,7 @@ export function listPeers(aunDir: string, localAid: string): string[] {
 export function readMessages(aunDir: string, localAid: string, peerId: string): MessageLogEntry[] {
   return readAllJsonlLines<MessageLogEntry>(
     path.join(aunDir, encodeSegment(localAid), encodeSegment(peerId), 'messages.jsonl'),
-  ).filter(m => !isHandoffStateMessage(m));
+  ).filter(m => !isTransientProtocolMessage(m));
 }
 
 function readPeerName(aunDir: string, localAid: string, peerId: string): string | null {

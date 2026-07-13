@@ -221,6 +221,18 @@ const translations = {
     'messages.msgType.command': '命令',
     'messages.groupCount': '群 {count}',
     'messages.privateCount': '单 {count}',
+    'messages.session.aggregateTitle': '全部会话',
+    'messages.session.field.sessionId': '会话 ID',
+    'messages.session.field.baseagent': 'Baseagent',
+    'messages.session.field.chatMode': '模式',
+    'messages.session.field.permissionMode': '权限',
+    'messages.session.field.role': '角色',
+    'messages.session.field.turns': '轮数',
+    'messages.session.field.status': '状态',
+    'messages.session.status.processing': '处理中',
+    'messages.session.status.idle': '空闲',
+    'messages.session.mode.interactive': '响应',
+    'messages.session.mode.proactive': '自主',
 
     // Sessions view
     'sessions.filter.normal': '🔍 仅有效',
@@ -913,6 +925,18 @@ const translations = {
     'messages.msgType.command': 'Command',
     'messages.groupCount': '{count} groups',
     'messages.privateCount': '{count} private',
+    'messages.session.aggregateTitle': 'All chats',
+    'messages.session.field.sessionId': 'Session ID',
+    'messages.session.field.baseagent': 'Baseagent',
+    'messages.session.field.chatMode': 'Mode',
+    'messages.session.field.permissionMode': 'Perm',
+    'messages.session.field.role': 'Role',
+    'messages.session.field.turns': 'Turns',
+    'messages.session.field.status': 'Status',
+    'messages.session.status.processing': 'Processing',
+    'messages.session.status.idle': 'Idle',
+    'messages.session.mode.interactive': 'Interactive',
+    'messages.session.mode.proactive': 'Proactive',
 
     // Sessions view
     'sessions.filter.normal': '🔍 Valid Only',
@@ -2258,6 +2282,7 @@ function renderMsg(data) {
   const aids = data.scopes || data.aids || [];
   const peers = data.peers || [];
   const messages = data.messages || [];
+  const sessionContext = data.sessionContext || null;
   if (data.scope && data.scope !== msgSel.aid) msgSel.aid = data.scope;
 
   // 左：AID 列表
@@ -2308,7 +2333,7 @@ function renderMsg(data) {
   const stream = $('#msg-stream');
   if (!msgSel.aid) { stream.innerHTML = `<div class="empty">${t('messages.empty.selectToView')}</div>`; return; }
   const atBottom = stream.scrollHeight - stream.scrollTop - stream.clientHeight < 60;
-  let msgHtml = '';
+  let msgHtml = '<div class="msg-stream-body">';
   for (const m of messages) {
     const cls = m.dir === 'in' ? 'in' : 'out';
     const arrow = m.dir === 'in' ? '↓' : '↑';
@@ -2327,8 +2352,46 @@ function renderMsg(data) {
       `<div class="meta">${fmtTime(m.ts)} ${arrow} ${esc(from)}→${esc(to)}${tagHtml}</div>` +
       `<div class="body">${esc(m.content)}</div></div>`;
   }
-  stream.innerHTML = msgHtml || `<div class="empty">${t('messages.empty.noMessages')}</div>`;
+  msgHtml += messages.length ? '</div>' : `<div class="empty">${t('messages.empty.noMessages')}</div></div>`;
+  stream.innerHTML = renderMsgSessionHeader(sessionContext) + msgHtml;
   if (atBottom) stream.scrollTop = stream.scrollHeight;
+}
+
+function renderMsgSessionHeader(context) {
+  if (!context) {
+    return '<div class="sess-header msg-session-header msg-session-empty">' +
+      `<div class="sh-title">${t('messages.session.aggregateTitle')}</div>` +
+      '</div>';
+  }
+  const status = context.status === 'processing' ? 'processing' : 'idle';
+  const statusLabel = t(`messages.session.status.${status}`);
+  const modeKey = context.chatMode === 'proactive' ? 'proactive' : (context.chatMode === 'interactive' ? 'interactive' : '');
+  const chatMode = modeKey ? t(`messages.session.mode.${modeKey}`) : (context.chatMode || '—');
+  const values = [
+    ['baseagent', context.baseagent || '—', ''],
+    ['chatMode', chatMode, ''],
+    ['permissionMode', context.permissionMode || '—', ''],
+    ['role', context.role || '—', ''],
+    ['turns', context.turns == null ? '—' : String(context.turns), ''],
+    ['status', statusLabel, `status ${status}`],
+  ];
+  const stats = values.map(([key, value, cls]) =>
+    '<span class="msg-session-stat">' +
+      `<span class="msg-session-label">${t(`messages.session.field.${key}`)}</span>` +
+      `<span class="msg-session-value ${cls}" title="${esc(value)}">` +
+        (key === 'status' ? `<span class="dot ${status === 'processing' ? 'on' : 'idle'}"></span>` : '') +
+        `${esc(value)}</span>` +
+    '</span>'
+  ).join('');
+  return '<div class="sess-header msg-session-header">' +
+    '<div class="msg-session-context-row">' +
+      '<div class="msg-session-id-row">' +
+        `<span class="msg-session-label">${t('messages.session.field.sessionId')}</span>` +
+        `<span class="msg-session-id" title="${esc(context.sessionId || '—')}">${esc(context.sessionId || '—')}</span>` +
+      '</div>' +
+      `<div class="msg-session-grid">${stats}</div>` +
+    '</div>' +
+    '</div>';
 }
 
 // ── Sessions 视图 ──
