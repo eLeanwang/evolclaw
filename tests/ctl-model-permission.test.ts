@@ -60,6 +60,8 @@ describe('ctl model permissions', () => {
 
     const payload = JSON.parse(result.result || '{}');
     expect(payload.models.data.map((model: any) => model.id)).toEqual([
+      'claude-opus-4-8',
+      'claude-sonnet-4-6',
       'claude-haiku-4-5-20251001',
     ]);
     expect(sessionManager.resolveIdentity).not.toHaveBeenCalled();

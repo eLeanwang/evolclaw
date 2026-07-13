@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import { isEckSnapshotsEnabled } from '../config-store.js';
 import { eckDebugDir } from '../paths.js';
 import { logger } from '../utils/logger.js';
 import {
@@ -208,8 +209,10 @@ export function renderKitSections(ctx: KitRenderContext, manifestFile: string = 
 export function cleanEckDebug(): void {
   const dir = eckDebugDir();
   const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+  const snapshotsEnabled = isEckSnapshotsEnabled();
   try {
     for (const f of fs.readdirSync(dir)) {
+      if (!snapshotsEnabled && /^(vars|context|fragments|manifest|msg-render)-/.test(f)) continue;
       const fp = path.join(dir, f);
       try { if (fs.statSync(fp).mtimeMs < cutoff) fs.unlinkSync(fp); } catch { /* skip */ }
     }
@@ -281,6 +284,8 @@ const PARAM_DESCRIPTIONS: Record<string, string> = {
 };
 
 function writeDebugFiles(ctx: KitRenderContext, output: string, fragmentsOutput: string, diagnostics: SectionDiagnostic[]): void {
+  if (!isEckSnapshotsEnabled()) return;
+
   const now = new Date();
   const ts = now.toISOString().replace(/[T:.]/g, '-').slice(0, 19);
   const dir = eckDebugDir();

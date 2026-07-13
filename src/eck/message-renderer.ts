@@ -9,6 +9,7 @@
 import fs from 'fs';
 import path from 'path';
 import { randomUUID } from 'crypto';
+import { isEckSnapshotsEnabled } from '../config-store.js';
 import { eckDebugDir } from '../paths.js';
 import { logger } from '../utils/logger.js';
 import type { SubMessage } from '../types.js';
@@ -105,6 +106,7 @@ function renderOneItem(
     // msg send 跨会话一次性上下文
     isHandoff,
     handoffKind: item.handoff?.kind,
+    handoffId: item.handoff?.handoffId,
     handoffOriginChannel: item.handoff?.origin?.channel,
     handoffOriginPeerId: item.handoff?.origin?.peerId,
     handoffOriginThreadId: item.handoff?.origin?.threadId,
@@ -113,8 +115,6 @@ function renderOneItem(
     handoffOriginRole: item.handoff?.origin?.role,
     handoffPreviousMessageId: item.handoff?.previousMessageId ?? undefined,
     handoffPreviousContent: item.handoff ? handoffPreviousSentinel : undefined,
-    handoffReplyCommand: item.handoff?.replyCommand,
-    handoffContinueCommand: item.handoff?.continueCommand,
     // content held as a per-call random sentinel, swapped back post-render.
     // Using a UUID means no real message can collide with it.
     content: contentSentinel,
@@ -204,6 +204,8 @@ function wrapBatch(renderedParts: string[], sessionVars: Vars, sessionCache: Map
 // ── Debug ──
 
 function writeMessageDebug(sessionId: string, items: SubMessage[], body: string): void {
+  if (!isEckSnapshotsEnabled()) return;
+
   try {
     const ts = new Date().toISOString().replace(/[T:.]/g, '-').slice(0, 19);
     const out = [

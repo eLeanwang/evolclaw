@@ -1,8 +1,8 @@
 # msg send 跨会话 handoff 追加式设计
 
 > 状态：已实现
-> 最后更新：2026-07-09
-> 范围：AUN 私聊 `ec msg send` 触发的跨会话上下文传递
+> 最后更新：2026-07-10
+> 范围：agent 会话内 `ec msg send` 发往 AUN target 触发的跨会话上下文传递；来源会话可为 AUN、Feishu 等已建会话
 > 约束：不新增记录文件；不修改历史 JSONL 行；不新增查询命令
 
 ## 1. 背景
@@ -12,7 +12,7 @@
 本方案解决三个问题：
 
 1. target 会话处理回复时，需要知道本端此前通过 `msg send` 发过什么。
-2. 原会话不通过查询命令拿结果，而由子会话必要时通过 `msg send` 回到原会话。
+2. 原会话不通过查询命令拿结果，而由子会话必要时通过 `ec handoff return` 把结果交回原会话处理。
 3. 多个 requester 同时让本端联系同一个 target 时，不能因为 target 相同而串话。
 
 ## 2. 设计原则
@@ -71,7 +71,7 @@
 - `handoff.origin.session_id` 是发起 `msg send` 的父会话 session id。
 - `handoff.origin.message_id` 是触发本次 `msg send` 的父会话消息 id。
 - `handoff.origin.threadId` 是来源会话 thread；来源会话无 thread 时可省略。
-- `handoff.origin.channel/peerName/peerType/role` 用于子会话注入提示词展示来源端信息。
+- `handoff.origin.channel/peerName/peerType/role` 用于子会话注入提示词展示来源端信息；`channel` 不限于 AUN。
 - `request_to_target` 的标记目的，是让 target 后续回复进入 `self ↔ target` 会话时，系统能从被回复的 out
   消息反查“这是谁让本端发出的请求、结果应回到哪里”。没有这个标记，`ref_message_id` 只能指向一条本端
   out 消息，不能恢复来源会话。
@@ -121,9 +121,11 @@ target 回复被成功注入子会话 prompt 后，追加一条状态事件，�
 
 不设置 `handoff.consumed`，因为 `event: "consumed"` 已表达同一语义。
 
-### 3.3 response_to_origin 出站消息
+### 3.3 response_to_origin 回流消息
 
-子会话处理 target 回复后，如果需要回到原会话，通过 `ec msg send` 发给来源端。该 out 消息写入 `self ↔ sourcePeer` 的 `messages.jsonl`。
+子会话处理 target 回复后，如果需要回到原会话，使用 `ec handoff return "<回流内容>"`。
+daemon 根据已消费的 `request_to_target.handoff.origin.session_id` 找到来源会话，在来源会话的 `messages.jsonl`
+追加一条 `handoff_result` out 记录，并把同一内容作为内部消息放入来源会话队列，由父会话自行决策如何处理。
 
 ```jsonc
 {
@@ -131,21 +133,22 @@ target 回复被成功注入子会话 prompt 后，追加一条状态事件，�
   "time": "2026-07-07 20:16:40.000",
   "dir": "out",
   "from": "self.agentid.pub",
-  "to": "alice.agentid.pub",
+  "to": "origin-channel-id",
   "chatType": "private",
   "groupId": null,
-  "msgId": "msg_to_origin_789",
-  "msgType": "text",
+  "msgId": "handoff-return:msg_to_target_123:target_reply_456",
+  "msgType": "handoff_result",
   "content": "target 的回复是：...",
-  "replyTo": null,
+  "replyTo": "parent_msg_xxx",
   "agent": null,
   "model": null,
   "permMode": null,
   "cmdParsed": null,
   "durationMs": null,
-  "source": "msg",
+  "source": "handoff",
   "handoff": {
     "kind": "response_to_origin",
+    "request_content": "请确认这个接口设计是否合理",
     "origin": {
       "session_id": "meta_child_xxx",
       "message_id": "target_reply_456",
@@ -159,9 +162,12 @@ target 回复被成功注入子会话 prompt 后，追加一条状态事件，�
 }
 ```
 
-父会话后续收到来源端消息时，可以消费这条 `response_to_origin`，把子会话回流结果注入当前父会话 prompt。
+父会话处理这条内部 handoff 消息时，可以消费这条 `response_to_origin`，把子会话回流结果注入当前父会话 prompt。
 `response_to_origin` 必须写 handoff，因为这条子会话返回消息对父会话同样是“缺失上下文”；没有该标记，
 父会话无法知道这条 out 消息是哪个 target 会话回流的结果。父会话注入提示词不能再次要求“回复原会话”。
+
+内部 handoff 消息由 daemon 写入已存在的来源会话队列，不代表新的外部 actor 入站，因此不重复执行外部角色
+访问检查；会话身份、chatmode、排队/打断策略和最终出站渠道仍沿用来源会话当前配置。
 
 ### 3.4 运行时 handoff 上下文
 
@@ -173,10 +179,10 @@ target 回复被成功注入子会话 prompt 后，追加一条状态事件，�
 - 当前 EvolClaw session id。
 - 当前入站 message id。
 - 当前 channel / peerId / peerName / peerType / role / threadId。
-- 被回流来源会话的 channel / peer AID / threadId（若存在）。第一阶段只使用来源会话 thread，用于回到来源端；
+- 被回流来源会话的 channel / peerId / threadId（若存在）。第一阶段只使用来源会话 thread，用于回到来源端；
   不自动创建 target thread。
-- 如果本轮消息已经消费了一个 handoff，则提供被消费的 handoff 上下文，用于后续 `ec msg send` 回到来源端时写
-  `handoff.kind: "response_to_origin"`。
+- 如果本轮消息已经消费了一个 handoff，则提供被消费的 handoff 上下文，用于后续 `ec handoff return`
+  找到来源会话并写 `handoff.kind: "response_to_origin"`。
 
 TaskRuntimeContext 的用途是让独立执行的 `ec msg send` CLI 知道“当前发送属于哪一轮任务、当前对端是谁、
 本轮是否消费了 handoff”。它只用于本轮发送判定和落盘，不是新的记录文件，也不能通过扫描最近消息临时推断。
@@ -200,12 +206,12 @@ TaskRuntimeContext 的用途是让独立执行的 `ec msg send` CLI 知道“当
 }
 ```
 
-`ec msg send` 发送成功后按以下优先级决定是否写 `handoff`：
+`ec msg send` 发送成功后按以下规则决定是否写 `handoff`：
 
-1. 如果本轮消费了 `request_to_target`，且发送目标 `to === consumedHandoff.origin.peerId`，写
-   `response_to_origin`。
-2. 否则，如果这是 agent 任务中的 AUN 私聊发送，且发送目标 `to !== currentPeerId`，写 `request_to_target`。
-3. 否则，手动 CLI 发送、缺少当前任务 message id、或只是发送给当前会话对端本身的普通回复，不写 handoff。
+1. 如果本轮消费了 `request_to_target`，且发送目标 `to === consumedHandoff.origin.peerId`，不写 handoff；
+   子会话应使用 `ec handoff return` 交回来源会话。
+2. 如果这是 agent 任务中的发送，且发送目标 `to !== currentPeerId`，写 `request_to_target`。
+3. 手动 CLI 发送、缺少当前任务 message id、或只是发送给当前会话对端本身的普通回复，不写 handoff。
 
 不要通过 `--thread` 是否存在推断 handoff 语义；`--thread` 只表示目标会话话题路由。
 第一阶段不自动为 target 生成 thread，也不使用 target thread 做 handoff fallback。
@@ -238,7 +244,7 @@ flowchart LR
     Runtime <-->|handoff replay / prompt render / TaskRuntimeContext| TargetSession
     TargetSession <-->|AUN message.send / received| BotB
 
-    Origin -.->|"messages.jsonl<br/>response_to_origin out"| Runtime
+    Origin -.->|"messages.jsonl<br/>handoff_result out<br/>response_to_origin"| Runtime
     TargetSession -.->|"messages.jsonl<br/>request_to_target out<br/>handoff_state consumed"| Runtime
 ```
 
@@ -270,12 +276,10 @@ sequenceDiagram
     Runtime->>TargetSession: prompt 构造成功后追加 handoff_state consumed
 
     alt 需要反馈回来源端
-        TargetSession->>Runtime: agent 根据提示调用 ec msg send 回复 peer A
-        Runtime->>Cli: 注入 consumedHandoff 到 TaskRuntimeContext
-        Cli->>Cli: 判定 to == consumedHandoff.origin.peerId
-        Cli->>PeerA: AUN message.send（origin.threadId 存在时带 --thread）
-        Cli->>Origin: 发送成功后写 messages.jsonl(out, handoff.kind=response_to_origin)
-        Note over Origin: 父会话后续收到 peer A 消息时，可消费 response_to_origin 注入回流结果
+        TargetSession->>Runtime: agent 根据提示调用 ec handoff return
+        Runtime->>Origin: 根据 consumedHandoff.origin.session_id 写 handoff_result(response_to_origin)
+        Runtime->>Origin: 将回流内容作为内部 handoff 消息入来源会话队列
+        Note over Origin: 父会话消费 response_to_origin，结合当前上下文决策处理
     else 不需要反馈
         TargetSession-->>Runtime: 不产生 response_to_origin
     end
@@ -289,7 +293,7 @@ sequenceDiagram
 关键边界：
 
 - target 会话第一阶段不自动建 thread；`origin.threadId` 只用于回到来源会话。
-- `request_to_target` 和 `response_to_origin` 都写在各自实际发送目标的 chat `messages.jsonl` 中。
+- `request_to_target` 写在 target chat；`response_to_origin` 写在来源会话 chat，作为内部 `handoff_result`。
 - `handoff_state consumed` 只写在被消费的 request/response 所在 chat 中，不发送给对端。
 - TaskRuntimeContext 是运行时传递给 CLI 的当前任务上下文，不是持久化记录。
 
@@ -300,7 +304,7 @@ sequenceDiagram
 1. 按 JSONL 文件行顺序读取所有行；`ts/time` 只用于展示和调试，不作为 replay 排序依据。
 2. 普通 handoff 出站候选：
    - `dir === "out"`
-   - `source === "msg"`
+   - `source === "msg"` 或 `source === "handoff"`
    - `msgType !== "handoff_state"`
    - `handoff.kind` 为 `request_to_target` 或 `response_to_origin`
 3. consumed 状态事件：
@@ -309,6 +313,8 @@ sequenceDiagram
    - `replyTo` 指向某条 handoff 出站消息的 `msgId`
 4. 如果某条 handoff 出站消息存在对应 consumed 事件，则 replay 后视为已消费。
 5. 如果不存在 consumed 事件，则视为未消费。
+6. 普通渠道入站只允许消费 `request_to_target`；`source: "handoff"` 的 daemon 内部回流只允许消费
+   `response_to_origin`。两类候选不能互相参与 ref 匹配或无 ref 推断。
 
 重复 consumed 事件按 `msgId` 去重；即使重复写入，也不改变最终状态。
 
@@ -342,7 +348,7 @@ handoff prompt 注入采用 ECK 的 **message 层 vars + manifest** 机制，不
   “跨会话上下文块是本轮一次性上下文，按其中给出的 AID/thread/命令处理”，不能包含具体来源 AID、threadId、
   原请求内容或回流内容。
 - **message prompt**：放本轮 handoff 的全部动态信息，包括 handoff kind、来源 channel、来源 AID、来源 threadId、
-  来源名称/身份、此前发给当前对端的内容、回流内容、以及本轮可执行的 `ec msg send` 命令。
+  来源身份、此前发给当前对端的内容、回流内容、以及本轮可执行的 `ec handoff return` 命令。
 
 原因：
 
@@ -357,10 +363,9 @@ handoff prompt 注入采用 ECK 的 **message 层 vars + manifest** 机制，不
 3. 由 message manifest / message fragment 渲染最终提示词正文。
 4. 渲染出的 handoff 提示只进入本轮 user prompt；不写入 persona、working memory 或 system prompt。
 5. `handoff_state` 状态事件不得作为普通消息 item 进入 message-renderer。
-6. 如果提示中要求模型可通过 `ec msg send` 回流结果，必须展示可路由的 AID 和完整命令格式；只展示 `peerName`
-   不足以可靠发送。
-7. 如果来源会话有 thread，来源信息必须展示该 threadId，且回复命令必须带 `--thread`；如果没有 thread，则只渲染
-   不带 `--thread` 的命令。这个分支由 vars + manifest 条件选择，最终提示词里只出现一种命令。
+6. 如果提示中要求模型回流结果，直接展示 `ec handoff return "<回流内容>"`；不再要求模型拼接来源 AID 或 thread。
+7. 如果来源会话有 thread，来源信息必须展示该 threadId；该信息用于父会话回流定位和人工排查，不作为
+   `ec handoff return` 参数。
 8. handoff fragment 包含“当前对端回复内容”时，必须替代普通单条消息渲染，不能再让当前入站消息被普通
    message fragment 额外渲染一次。
 
@@ -368,26 +373,20 @@ handoff prompt 注入采用 ECK 的 **message 层 vars + manifest** 机制，不
 
 ## 8. 子会话注入提示词
 
-子会话注入面向 target 回复。提示词不展示 session id 和 message id，但必须展示来源端 AID 和必要的 thread
-路由信息，使模型能够直接构造 `ec msg send`。
-
-message fragment 根据 `handoff.origin.threadId` 是否存在选择下面两个模板之一，最终只渲染一个。
-
-无来源 thread 时：
+子会话注入面向 target 回复。提示词不展示 session id 和 message id；来源参数只展示渠道、AID、Thread（如有）、
+身份。回流命令固定为 `ec handoff return "<回流内容>"`。
 
 ```text
-[跨会话请求上下文，仅本端可见]
-
 说明：
-- 这条消息是当前对端对本端此前主动 `ec msg send` 的回复。
-- 请结合下方“此前发给当前对端的内容”和“当前对端回复内容”理解当前回复。
-- 需要把结果反馈给来源端时，使用：`ec msg send self.agentid.pub alice.agentid.pub "<反馈内容>"`
+- 跨会话请求回复，仅本端可见。
+- 请结合下方内容理解当前对端回复。
+- 如需交回来源会话处理，使用：`ec handoff return "<回流内容>"`
 
 来源：
-- 来源渠道：aun
-- 来源 AID：alice.agentid.pub
-- 来源名称：Alice
-- 来源身份：human / owner
+- 渠道：aun
+- AID：alice.agentid.pub
+- Thread：parent-thread-id
+- 身份：human / owner
 
 此前发给当前对端的内容：
 请确认这个接口设计是否合理
@@ -396,68 +395,26 @@ message fragment 根据 `handoff.origin.threadId` 是否存在选择下面两个
 这里渲染当前入站消息正文。
 ```
 
-有来源 thread 时：
-
-```text
-[跨会话请求上下文，仅本端可见]
-
-说明：
-- 这条消息是当前对端对本端此前主动 `ec msg send` 的回复。
-- 请结合下方“此前发给当前对端的内容”和“当前对端回复内容”理解当前回复。
-- 需要把结果反馈给来源端时，使用：`ec msg send self.agentid.pub alice.agentid.pub "<反馈内容>" --thread "parent-thread-id"`
-
-来源：
-- 来源渠道：aun
-- 来源 AID：alice.agentid.pub
-- 来源 Thread：parent-thread-id
-- 来源名称：Alice
-- 来源身份：human / owner
-
-此前发给当前对端的内容：
-请确认这个接口设计是否合理
-
-当前对端回复内容：
-这里渲染当前入站消息正文。
-```
-
-注入时，系统应根据 `handoff.origin.session_id` 解析来源会话，得到来源 peer AID 和原 threadId。渲染模板时：
-
-- `self.agentid.pub` 必须替换为当前本端 AID。
-- `alice.agentid.pub` 必须替换为来源端 peer AID。
-- `parent-thread-id` 必须替换为来源会话的原 threadId。
-- 原会话无 thread 时，只渲染无 thread 模板。
-- 原会话有 thread 时，只渲染有 thread 模板，确保回到原父会话。
+注入时，系统使用 `handoff.origin` 填充来源参数。`Thread` 行由 vars + manifest 条件渲染：有 thread 才显示，
+无 thread 不显示。
 
 ## 9. 父会话注入提示词
 
-子会话通过 `ec msg send` 回到来源端后，父会话后续处理来源端消息时，可以消费未消费的 `response_to_origin`。
+子会话通过 `ec handoff return` 回流后，父会话处理内部 handoff 消息时，可以消费未消费的 `response_to_origin`。
 
-父会话注入提示词必须不同，不能再次要求“回复原会话”。它可以展示结果来源 AID，便于用户明确要求继续追问时
-构造新的 `ec msg send`。
-
-如果结果来源会话有 thread，父会话模板也必须在来源信息中展示该 threadId，并由 message manifest 渲染带
-`--thread` 的继续追问命令；无 thread 时只渲染不带 `--thread` 的命令。
+父会话注入提示词必须不同，不能再次要求“回复原会话”。它只说明这是此前本会话请求的返回结果，并提供
+此前跨会话请求内容和回流内容。
 
 ```text
-[跨会话回复上下文，仅本端可见]
-
 说明：
-- 另一会话已经根据此前的 `ec msg send` 得到回复。
-- 这是给当前会话的跨会话结果回流，请结合下方内容和当前用户消息继续处理。
-- 不要再次提示“需要通过 msg send 回复原会话”，除非用户明确要求继续追问结果来源。
-- 如果用户明确要求继续追问结果来源，使用：`ec msg send self.agentid.pub target.agentid.pub "<追问内容>"`
+- 跨会话结果回流，仅本端可见。
+- 这是此前本会话请求的返回结果，请结合当前上下文决定如何处理。
 
-来源：
-- 结果来源渠道：aun
-- 结果来源 AID：target.agentid.pub
-- 结果来源名称：Target
-- 结果来源身份：agent / guest
+此前跨会话请求内容：
+请确认这个接口设计是否合理
 
 回流内容：
 target 的回复是：...
-
-当前用户消息内容：
-这里渲染当前入站消息正文。
 ```
 
 ## 10. ref_message_id 要求
@@ -557,11 +514,12 @@ handoff-consumed:<target_msg_id>:<consumed_by_msg_id>
 
 ### 12.6 非 AUN 来源会话
 
-当前实现限定 AUN 私聊来源和 target。若来源是 Feishu/WeChat 等非 AUN 渠道，`ec msg send` 可以发往 AUN target，
-但不会写 `request_to_target`，也无法通过当前 `ec msg send` 模型自动回到原非 AUN 来源端。
+当前实现支持非 AUN 来源会话通过 AUN target 做跨会话协作。`request_to_target.handoff.origin`
+保存来源 `session_id/channel/peerId/threadId`；子会话 `ec handoff return` 时通过 `origin.session_id`
+把回流结果投递到来源会话队列。因此来源可以是 AUN 私聊、Feishu 私聊或群聊等已建会话。
 
-要支持“非 AUN 来源会话通过 AUN target 做跨会话协作”，需要把 `handoff.origin` 从 AUN peer AID 扩展为通用来源路由，
-并提供经 daemon 调用原通道 `adapter.send` 的回源命令或内部 IPC。本扩展不属于当前已实现范围。
+`ref_message_id` 仍只属于 AUN payload 路由语义；非 AUN 来源不会把来源消息 id 写入发往 target 的 AUN payload。
+handoff 回流不依赖这个来源 payload 字段，而依赖本端 target chat 中的 `request_to_target` 日志和来源 session id。
 
 ## 13. 当前实现对应关系
 
@@ -569,11 +527,22 @@ handoff-consumed:<target_msg_id>:<consumed_by_msg_id>
 
 - `src/core/message/handoff.ts`：handoff 类型、replay、消费状态事件、TaskRuntimeContext、`ec msg send` handoff 判定。
 - `src/aun/msg/p2p.ts`：AUN `ec msg send` payload 路由字段、出站日志 handoff 元数据。
-- `src/core/message/response-engine.ts`：AUN 私聊 handoff replay、message prompt 注入、consumed 状态事件追加、TaskRuntimeContext 注入。
+- `src/core/message/response-engine.ts`：AUN target handoff replay、内部 handoff 回流、message prompt 注入、consumed 状态事件追加、TaskRuntimeContext 注入。
 - `src/core/message/message-log.ts`：`MessageLogEntry.handoff` 与 `handoff_state` 消息类型。
 - `kits/eck_message_manifest.json`：handoff message fragment 选择。
 - `kits/templates/message-fragments/handoff-request-to-target.md`：子会话 request handoff 提示词。
 - `kits/templates/message-fragments/handoff-response-to-origin.md`：父会话 response handoff 提示词。
+
+### 13.1 E2E 验证
+
+2026-07-10 已在当前开发环境使用 `eleanbot.agentid.pub` 与 `eleanai.agentid.pub` 完成端到端验证：
+
+1. 父会话内 `ec msg send` 写入 `request_to_target`。
+2. target 普通回复按 `ref_message_id` 精确消费，并追加 `handoff_state`。
+3. 子会话执行 `ec handoff return`，来源会话写入 `handoff_result/response_to_origin`。
+4. 回流按来源会话当前设置进入队列并由父会话处理。
+5. 父会话随后向原对端执行普通 `ec msg send` 时不再误写新的 handoff 标记。
+6. 普通后续入站不会误消费未处理的 `response_to_origin`。
 
 ## 14. 结论
 

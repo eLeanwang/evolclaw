@@ -144,13 +144,30 @@ export class MessageQueue {
   private shouldProcess(sessionKey: string, message: Message): boolean {
     if (!message.messageId) return true; // 无 ID 的消息不去重
     const dedupKey = `${sessionKey}:${message.messageId}`;
-    if (this.recentMessageIds.has(dedupKey)) {
+    if (this.recentMessageIds.has(dedupKey) || this.hasEnqueuedMessage(sessionKey, message.messageId)) {
       logger.debug(`[Queue] Duplicate message ${dedupKey}, skipping`);
       return false;
     }
     this.recentMessageIds.add(dedupKey);
     setTimeout(() => this.recentMessageIds.delete(dedupKey), this.DEDUP_WINDOW);
     return true;
+  }
+
+  private hasEnqueuedMessage(sessionKey: string, messageId: string): boolean {
+    for (const [queueKey, queue] of this.queues) {
+      if (!this.matchesSession(queueKey, sessionKey)) continue;
+      if (queue.some(item => this.messageIdsFor(item).includes(messageId))) return true;
+    }
+    for (const [queueKey, active] of this.activeBatches) {
+      if (!this.matchesSession(queueKey, sessionKey)) continue;
+      if (this.messageIdsFor(active).includes(messageId)) return true;
+    }
+    return false;
+  }
+
+  private forgetProcessed(sessionKey: string, message: Message): void {
+    if (!message.messageId) return;
+    this.recentMessageIds.delete(`${sessionKey}:${message.messageId}`);
   }
 
   /**
@@ -355,8 +372,8 @@ export class MessageQueue {
    * 写盘队列状态。每次队列结构变化（入队/出队/取消/清理）后调用。
    * 仅在内容真正变化时写盘，文件小（数 KB），renameSync 原子替换保证崩溃一致性。
    */
-  private persistQueues(): void {
-    this.persistQueuesSync();
+  private persistQueues(): boolean {
+    return this.persistQueuesSync();
   }
 
   /** 立即同步写盘（语义同 persistQueues，保留供进程退出钩子显式调用） */
@@ -364,8 +381,8 @@ export class MessageQueue {
     this.persistQueuesSync();
   }
 
-  private persistQueuesSync(): void {
-    if (!this.persistencePath) return;
+  private persistQueuesSync(): boolean {
+    if (!this.persistencePath) return true;
     try {
       const buckets: PersistedQueueBucket[] = [];
       const activeBuckets: PersistedQueueBucket[] = [];
@@ -387,7 +404,7 @@ export class MessageQueue {
       fs.mkdirSync(path.dirname(this.persistencePath), { recursive: true });
       if (buckets.length === 0 && activeBuckets.length === 0) {
         try { fs.unlinkSync(this.persistencePath); } catch {}
-        return;
+        return true;
       }
 
       const data: PersistedQueueFile = {
@@ -397,10 +414,18 @@ export class MessageQueue {
         active: activeBuckets,
       };
       const tmp = `${this.persistencePath}.tmp-${process.pid}-${Date.now()}`;
-      fs.writeFileSync(tmp, JSON.stringify(data), 'utf-8');
+      const fd = fs.openSync(tmp, 'w');
+      try {
+        fs.writeSync(fd, JSON.stringify(data));
+        fs.fsyncSync(fd);
+      } finally {
+        fs.closeSync(fd);
+      }
       fs.renameSync(tmp, this.persistencePath);
+      return true;
     } catch (error) {
       logger.error('[Queue] Failed to persist queue state:', error);
+      return false;
     }
   }
 
@@ -451,7 +476,9 @@ export class MessageQueue {
       if (rawParts.length === 0) continue;
 
       const first = rawParts[0];
-      const submittedPart = this.restoreSubmittedPart(first);
+      const submittedPart = first.message.handoffDelivery
+        ? this.restoredPart(first)
+        : this.restoreSubmittedPart(first);
       const submittedItem = this.itemFromPart(submittedPart);
       submittedItem.message.timestamp = first.message.timestamp;
       queue.push(submittedItem);
@@ -509,9 +536,16 @@ export class MessageQueue {
     return restored;
   }
 
-  async enqueue(sessionKey: string, message: Message, projectPath: string, options?: { interruptible?: boolean; interruptSamePeer?: boolean; agentName?: string; role?: SessionIdentity['role']; sessionKeyField?: string; selfAID?: string }): Promise<void> {
+  startRestored(): void {
+    for (const [queueKey, queue] of this.queues) {
+      if (queue.length > 0 && !this.processing.has(queueKey)) void this.processNext(queueKey);
+    }
+  }
+
+  async enqueue(sessionKey: string, message: Message, projectPath: string, options?: { interruptible?: boolean; interruptSamePeer?: boolean; agentName?: string; role?: SessionIdentity['role']; sessionKeyField?: string; selfAID?: string; resolveOnPersist?: boolean; onPersisted?: () => void }): Promise<void> {
     // 消息去重检查
     if (!this.shouldProcess(sessionKey, message)) {
+      options?.onPersisted?.();
       return Promise.resolve();
     }
 
@@ -540,9 +574,31 @@ export class MessageQueue {
       }
 
       const queue = this.queues.get(queueKey)!;
-      queue.push({ message, projectPath, agentName, role: options?.role, resolve, reject });
+      const queuedResolve = options?.resolveOnPersist ? () => {} : resolve;
+      const queuedReject = options?.resolveOnPersist ? () => {} : reject;
+      const queuedItem = { message, projectPath, agentName, role: options?.role, resolve: queuedResolve, reject: queuedReject };
+      queue.push(queuedItem);
       this.logicalQueue.enqueue(queueKey, message);  // 通知逻辑队列记录出队顺序
-      this.persistQueues();
+      if (!this.persistQueues()) {
+        const index = queue.indexOf(queuedItem);
+        if (index >= 0) queue.splice(index, 1);
+        this.logicalQueue.removeProcessed(queueKey, message.messageId ? [message.messageId] : []);
+        this.forgetProcessed(sessionKey, message);
+        reject(new Error('failed to persist message queue'));
+        return;
+      }
+      try {
+        options?.onPersisted?.();
+      } catch (error) {
+        const index = queue.indexOf(queuedItem);
+        if (index >= 0) queue.splice(index, 1);
+        this.logicalQueue.removeProcessed(queueKey, message.messageId ? [message.messageId] : []);
+        this.forgetProcessed(sessionKey, message);
+        this.persistQueues();
+        reject(error as Error);
+        return;
+      }
+      if (options?.resolveOnPersist) resolve();
 
       if (this.processing.has(queueKey)) {
         // 打断判定：
@@ -581,9 +637,13 @@ export class MessageQueue {
         }
       } else {
         logger.debug(`[Queue] Starting to process ${queueKey}`);
-        this.processNext(queueKey);
+        void this.processNext(queueKey);
       }
     });
+  }
+
+  enqueuePersisted(sessionKey: string, message: Message, projectPath: string, options?: { interruptible?: boolean; interruptSamePeer?: boolean; agentName?: string; role?: SessionIdentity['role']; sessionKeyField?: string; selfAID?: string; onPersisted?: () => void }): Promise<void> {
+    return this.enqueue(sessionKey, message, projectPath, { ...options, resolveOnPersist: true });
   }
 
   /**
@@ -702,6 +762,7 @@ export class MessageQueue {
   private dequeueGreedy(queue: QueuedMessage[]): QueuedMessage[] {
     const first = queue.shift()!;
     const result = [first];
+    if (first.message.handoffDelivery) return result;
     const mergeSubmittedResume = first.message.restartResume?.submitted === true;
     const mergeGroupTimeline = first.role !== undefined;
     const mergeKey = mergeGroupTimeline ? '<group-timeline>' : first.message.peerId;
@@ -735,7 +796,7 @@ export class MessageQueue {
       queue.push(...remaining);
       result.sort((a, b) => this.firstTimestamp(a) - this.firstTimestamp(b));
     } else {
-      while (queue.length > 0 && queue[0].message.peerId === mergeKey) {
+      while (queue.length > 0 && !queue[0].message.handoffDelivery && queue[0].message.peerId === mergeKey) {
         result.push(queue.shift()!);
       }
     }

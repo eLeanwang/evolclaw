@@ -4,7 +4,6 @@ import { EvolAgent } from './evolagent.js';
 import { logger } from '../utils/logger.js';
 import { agentMdPath, agentPersonalDir } from '../paths.js';
 import {
-  loadDefaults,
   loadAllAgents,
   ensureAgentDirSkeleton,
   loadAgent,
@@ -15,7 +14,6 @@ import type {
   AgentInfo,
   AgentConfig,
   EffectiveAgentConfig,
-  DefaultsConfig,
   ChannelInstance,
   ShowActivitiesMode,
 } from '../types.js';
@@ -128,8 +126,7 @@ export class EvolAgentRegistry {
     this.channelIndex.clear();
     this.skipped = [];
 
-    const defaults = loadDefaults();
-    const { agents: rawAgents, skipped } = loadAllAgents();
+    const { agents: rawAgents, skipped, invalidAgents = [] } = loadAllAgents({ includeInvalid: true });
     this.skipped = skipped;
 
     for (const raw of rawAgents) {
@@ -143,12 +140,54 @@ export class EvolAgentRegistry {
       }
     }
 
+    for (const { agent: raw, reason } of invalidAgents) {
+      this.registerErrorAgent(raw, reason);
+    }
+
     this.detectAndFlagConflicts();
     this.buildChannelIndex();
   }
 
+  private registerErrorAgent(raw: AgentConfig, reason: string): EvolAgent | null {
+    try {
+      const merged = this.resolveMergedForErrorAgent(raw, reason);
+      const agent = new EvolAgent(raw, merged);
+      agent.status = 'error';
+      agent.error = reason;
+      ensureAgentDirSkeleton(raw.aid);
+      this.agents.set(agent.aid, agent);
+      logger.warn(`[EvolAgentRegistry] loaded invalid agent ${raw.aid} as error: ${reason}`);
+      return agent;
+    } catch (e) {
+      logger.warn(`[EvolAgentRegistry] failed to register invalid agent ${raw.aid}: ${e}`);
+      return null;
+    }
+  }
+
+  private resolveMergedForErrorAgent(raw: AgentConfig, reason: string): EffectiveAgentConfig {
+    try {
+      return resolveEffective({ self: raw.aid });
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      logger.warn(`[EvolAgentRegistry] fallback effective config for invalid agent ${raw.aid}: ${message}; original error: ${reason}`);
+      return {
+        ...raw,
+        $schema_version: raw.$schema_version ?? 1,
+        aid: raw.aid,
+        enabled: raw.enabled,
+        owners: raw.owners,
+        admins: raw.admins,
+        channels: Array.isArray(raw.channels) ? raw.channels : [],
+        active_baseagent: raw.active_baseagent,
+        baseagents: raw.baseagents,
+        projects: raw.projects,
+        chatmode: raw.chatmode,
+      };
+    }
+  }
+
   private detectAndFlagConflicts(): void {
-    const dups = detectDuplicates([...this.agents.values()]);
+    const dups = detectDuplicates([...this.agents.values()].filter(a => a.status !== 'error' && a.status !== 'disabled'));
     for (const d of dups) {
       const owners = d.agents.map(o => `${o.aid}(${o.channelName})`).join(', ');
       const msg = `Channel conflict: ${d.fingerprint} claimed by ${owners}`;
@@ -248,21 +287,34 @@ export class EvolAgentRegistry {
       return this.agents.get(aid)!;
     }
 
-    const raw = loadAgent(aid);
+    let raw: AgentConfig | null = null;
+    try {
+      raw = loadAgent(aid);
+    } catch (e) {
+      const reason = e instanceof Error ? e.message : String(e);
+      logger.warn(`[EvolAgentRegistry] loadNewAgent ${aid}: ${reason}`);
+      return this.registerErrorAgent({
+        $schema_version: 1,
+        aid,
+        enabled: true,
+        channels: [],
+      }, reason);
+    }
     if (!raw) {
       logger.warn(`[EvolAgentRegistry] loadNewAgent: ${aid}/config.json not found`);
       return null;
     }
     const errs = validateAgentConfig(raw);
     if (errs.length > 0) {
-      logger.warn(`[EvolAgentRegistry] loadNewAgent ${aid}: ${errs.join('; ')}`);
-      return null;
+      const reason = errs.join('; ');
+      logger.warn(`[EvolAgentRegistry] loadNewAgent ${aid}: ${reason}`);
+      return this.registerErrorAgent(raw, reason);
     }
 
     const conflict = this.checkConflictForReload(raw, aid);
     if (conflict) {
       logger.warn(`[EvolAgentRegistry] loadNewAgent ${aid}: ${conflict}`);
-      return null;
+      return this.registerErrorAgent(raw, `Channel conflict: ${conflict}`);
     }
 
     const merged = resolveEffective({ self: aid });
@@ -391,6 +443,7 @@ export class EvolAgentRegistry {
     const agent = this.agents.get(aidOrName);
     if (!agent) throw new Error(`Agent "${aidOrName}" not found`);
     if (agent.status === 'disabled') throw new Error('Agent is disabled; use enable instead');
+    if (agent.status === 'error') throw new Error(`Agent is in error state: ${agent.error ?? 'unknown error'}`);
     if (agent.status === 'running') return;
     for (const ch of agent.channelInstanceNames()) {
       await hooks.startChannel(agent, ch);
@@ -488,6 +541,11 @@ export class EvolAgentRegistry {
     const responseModePrivate = rmConfig?.default_private || 'interactive';
     const responseModeGroup = rmConfig?.default_group || 'proactive';
     const owners = Array.from(new Set(agent.config.owners ?? []));
+    const channels = safeInfoValue(() => agent.channelInstanceNames(), []);
+    const projectPath = safeInfoValue(() => agent.projectPath, '');
+    const baseagent = safeInfoValue(() => agent.baseagent, agent.config.active_baseagent ?? '');
+    const model = baseagent ? safeInfoValue(() => agent.model, undefined) : undefined;
+    const effort = baseagent ? safeInfoValue(() => agent.effort, undefined) : undefined;
 
     return {
       name: displayName || agent.name || agent.aid,
@@ -495,11 +553,11 @@ export class EvolAgentRegistry {
       personalName,
       aid: agent.aid,
       status: agent.status,
-      channels: agent.channelInstanceNames(),
-      projectPath: agent.projectPath,
-      baseagent: agent.baseagent,
-      model: agent.model,
-      effort: agent.effort,
+      channels,
+      projectPath,
+      baseagent,
+      model,
+      effort,
       owners,
       lastActivity: agent.lastActivity,
       activeSessions: agent.activeSessions,
@@ -510,7 +568,14 @@ export class EvolAgentRegistry {
   }
 }
 
+function safeInfoValue<T>(fn: () => T, fallback: T): T {
+  try {
+    return fn();
+  } catch {
+    return fallback;
+  }
+}
+
 function findInstanceByKey(raw: AgentConfig, agent: EvolAgent, channelKey: string): ChannelInstance | null {
   return raw.channels.find(c => agent.effectiveChannelName(c.type, c.name) === channelKey) ?? null;
 }
-

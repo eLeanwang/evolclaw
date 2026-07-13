@@ -46,7 +46,7 @@ export type ToolEvent =
 // ── 权限事件 ──
 export type PermissionEvent =
   | { type: 'permission:requested'; sessionId: string; requestId: string; toolName: string; input: string }
-  | { type: 'permission:resolved'; sessionId: string; requestId: string; approved: boolean }
+  | { type: 'permission:resolved'; sessionId: string; requestId: string; approved: boolean; toolName?: string; reason?: string }
   | { type: 'permission:cancelled'; sessionId: string; requestId: string; toolName?: string; reason?: string };
 
 // ── Runner 运行事件（AI 后端执行流） ──

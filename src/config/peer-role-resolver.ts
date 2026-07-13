@@ -2,6 +2,7 @@ import { formatPeerKey } from '../core/relation/peer-identity.js';
 import { ConfigTarget, read, write } from './config-manager.js';
 import { isManagementRole } from './builtin-roles.js';
 import { normalizeDefaultRole, roleExists, getRoleDefinition } from './roles.js';
+import { resolvePrimaryId } from './contact-book.js';
 import type { AgentConfig, RelationConfig, RelationRolesConfig } from '../types.js';
 
 export interface PeerRoleContext {
@@ -67,12 +68,13 @@ export function hasStaticAgentOwner(aid: string): boolean {
 }
 
 export function resolvePeerRoleDetail(ctx: PeerRoleContext): ResolvedPeerRole {
-  const auth = isAuthenticated(ctx.actorId);
+  const checkId = resolvePrimaryId(ctx.selfAid, ctx.channelType, ctx.actorId);
+  const auth = isAuthenticated(checkId);
 
-  if (isStaticAgentOwner(ctx.selfAid, ctx.actorId)) {
+  if (isStaticAgentOwner(ctx.selfAid, checkId)) {
     return resultFor('owner', 'agent-config-owner', auth, ctx.selfAid, true);
   }
-  if (isStaticAgentAdmin(ctx.selfAid, ctx.actorId)) {
+  if (isStaticAgentAdmin(ctx.selfAid, checkId)) {
     return resultFor('admin', 'agent-config-admin', auth, ctx.selfAid, true);
   }
 

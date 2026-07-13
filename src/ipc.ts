@@ -8,8 +8,15 @@ import type { AidStatsSnapshot, StatsSnapshot } from './utils/stats.js';
 import { fileCache } from './core/daemon-file-cache.js';
 import type { FileCacheStats } from './core/daemon-file-cache.js';
 import type { BindBeginRequest, BindBeginResponse, BindErrorResponse, BindStatusResponse } from './utils/aid-bind.js';
-import type { HandoffMetadata, TaskRuntimeContext } from './core/message/handoff.js';
+import type { HandoffMetadata, HandoffReturnIpcResponse, TaskRuntimeContext } from './core/message/handoff.js';
+import type { HandoffReturnResponse, HandoffStatusResponse } from './core/handoff/types.js';
+import type { MessageLogPayloadSummary, MessageLogType } from './core/message/message-log.js';
 import type { ConfigExecutionResult } from './config/config-operation-service.js';
+import type {
+  DingtalkContactBindRegisterRequest,
+  DingtalkContactBindRegisterResponse,
+  DingtalkContactBindErrorResponse,
+} from './channels/dingtalk.js';
 
 const isWindows = process.platform === 'win32';
 const isNamedPipe = (p: string) => isWindows && p.startsWith('\\\\.\\pipe\\');
@@ -85,6 +92,8 @@ export interface IpcConfigOpResponse {
 export interface IpcAunMsgSendResponse {
   ok: boolean;
   message_id?: string;
+  handoff_id?: string;
+  target_session_id?: string;
   seq?: number;
   timestamp?: number;
   status?: string;
@@ -98,8 +107,12 @@ export interface IpcAunMsgSendResponse {
 
 export interface IpcAunMsgSendLogRequest {
   content: string;
-  source?: 'daemon' | 'cli' | 'msg' | 'ctl' | 'owner-inject';
+  msgType?: MessageLogType;
+  payloadType?: string;
+  payloadSummary?: MessageLogPayloadSummary;
+  source?: 'daemon' | 'cli' | 'msg' | 'ctl' | 'owner-inject' | 'handoff';
   handoff?: HandoffMetadata;
+  handoffTrace?: { version: 2; handoff_id: string };
 }
 
 type StatusProvider = () => IpcStatusResponse;
@@ -127,11 +140,17 @@ type QueueSnapshotProvider = (params: { agent: string }) => Array<{ status: stri
 type QueueActionExecutor = (params: { agent: string; action: 'clear' | 'cancel' | 'interrupt'; messageId?: string; sessionKey?: string }) => Promise<{ ok: boolean; cleared?: number; cancelled?: boolean; interrupted?: boolean; error?: string }>;
 type TriggerExecutor = (cmd: { type: string; [key: string]: any }) => Promise<any>;
 type TaskRuntimeContextProvider = (params: { sessionId: string }) => TaskRuntimeContext | null | undefined;
-type AunMsgSender = (params: { aid: string; to: string; payload: Record<string, unknown>; encrypt?: boolean; log?: IpcAunMsgSendLogRequest }) => Promise<IpcAunMsgSendResponse>;
+type AunMsgSender = (params: { aid: string; to: string; payload: Record<string, unknown>; encrypt?: boolean; thread?: string; returnPolicy?: 'required' | 'none'; originSessionId?: string; originMessageId?: string; log?: IpcAunMsgSendLogRequest }) => Promise<IpcAunMsgSendResponse>;
+type HandoffReturnExecutor = (params: { sessionId?: string; handoffId?: string; content: string }) => Promise<HandoffReturnIpcResponse | HandoffReturnResponse>;
+type HandoffStatusExecutor = (params: { sessionId?: string; handoffId: string }) => Promise<HandoffStatusResponse | { ok: false; code: string; error: string }>;
 type BindExecutor = {
   begin: (cmd: BindBeginRequest) => BindBeginResponse | BindErrorResponse;
   status: (taskId: string) => BindStatusResponse | BindErrorResponse;
   cancel: (taskId: string) => BindStatusResponse | BindErrorResponse;
+};
+type DingtalkContactBindExecutor = {
+  register: (cmd: DingtalkContactBindRegisterRequest) =>
+    DingtalkContactBindRegisterResponse | DingtalkContactBindErrorResponse;
 };
 
 export class IpcServer {
@@ -148,8 +167,11 @@ export class IpcServer {
   private triggerExecutor?: TriggerExecutor;
   private taskRuntimeContextProvider?: TaskRuntimeContextProvider;
   private aunMsgSender?: AunMsgSender;
+  private handoffReturnExecutor?: HandoffReturnExecutor;
+  private handoffStatusExecutor?: HandoffStatusExecutor;
   private bindExecutor?: BindExecutor;
   private configOperationExecutor?: ConfigOperationExecutor;
+  private dingtalkContactBindExecutor?: DingtalkContactBindExecutor;
 
   // CPU 占用追踪：IPC handler 是一次性同步调用，无法在响应里做 200ms 异步采样，
   // 故用后台 1s interval 累积 process.cpuUsage() 增量，handler 直接读最近值。
@@ -232,9 +254,23 @@ export class IpcServer {
     this.aunMsgSender = sender;
   }
 
+  /** Inject internal handoff result return executor for `ec handoff return`. */
+  setHandoffReturnExecutor(executor: HandoffReturnExecutor): void {
+    this.handoffReturnExecutor = executor;
+  }
+
+  setHandoffStatusExecutor(executor: HandoffStatusExecutor): void {
+    this.handoffStatusExecutor = executor;
+  }
+
   /** Inject bootstrap QR bind executor for init/init aun. */
   setBindExecutor(executor: BindExecutor): void {
     this.bindExecutor = executor;
+  }
+
+  /** Inject DingTalk contact binding-code executor. */
+  setDingtalkContactBindExecutor(executor: DingtalkContactBindExecutor): void {
+    this.dingtalkContactBindExecutor = executor;
   }
 
   /** Start the 1s background CPU sampling loop (for monitor-snapshot). Call after start(). */
@@ -359,6 +395,16 @@ export class IpcServer {
         if (!this.bindExecutor) return { ok: false, error: 'bind executor not configured' };
         return this.bindExecutor.cancel(cmd.taskId);
       }
+      case 'dingtalk.contact-bind.register': {
+        if (!this.dingtalkContactBindExecutor) {
+          return { ok: false, error: 'dingtalk contact bind executor not configured' };
+        }
+        return this.dingtalkContactBindExecutor.register({
+          selfAid: cmd.selfAid,
+          channelName: cmd.channelName,
+          primaryId: cmd.primaryId,
+        });
+      }
       case 'aun-aids': {
         const aids = this.aunAidProvider ? this.aunAidProvider() : [];
         return { ok: true, aids };
@@ -426,6 +472,9 @@ export class IpcServer {
         const log: IpcAunMsgSendLogRequest | undefined = typeof rawLog?.content === 'string'
           ? {
             content: rawLog.content,
+            msgType: rawLog.msgType as IpcAunMsgSendLogRequest['msgType'],
+            payloadType: typeof rawLog.payloadType === 'string' ? rawLog.payloadType : undefined,
+            payloadSummary: rawLog.payloadSummary as IpcAunMsgSendLogRequest['payloadSummary'],
             source: rawLog.source as IpcAunMsgSendLogRequest['source'],
             handoff: rawLog.handoff as IpcAunMsgSendLogRequest['handoff'],
           }
@@ -436,11 +485,36 @@ export class IpcServer {
             to: cmd.to,
             payload: cmd.payload as Record<string, unknown>,
             encrypt: cmd.encrypt === true,
+            thread: typeof cmd.thread === 'string' ? cmd.thread : undefined,
+            returnPolicy: cmd.returnPolicy === 'required' || cmd.returnPolicy === 'none' ? cmd.returnPolicy : undefined,
+            originSessionId: typeof cmd.originSessionId === 'string' ? cmd.originSessionId : undefined,
+            originMessageId: typeof cmd.originMessageId === 'string' ? cmd.originMessageId : undefined,
             log,
           });
         } catch (e: any) {
           return { ok: false, error: e?.message || String(e) };
         }
+      }
+      case 'handoff-return': {
+        if (!this.handoffReturnExecutor) return { ok: false, error: 'handoff return not configured' };
+        if (typeof cmd.content !== 'string') return { ok: false, code: 'HANDOFF_RETURN_CONTENT_REQUIRED', error: 'missing content' };
+        try {
+          return await this.handoffReturnExecutor({
+            sessionId: typeof cmd.sessionId === 'string' ? cmd.sessionId : undefined,
+            handoffId: typeof cmd.handoffId === 'string' ? cmd.handoffId : undefined,
+            content: cmd.content,
+          });
+        } catch (e: any) {
+          return { ok: false, error: e?.message || String(e) };
+        }
+      }
+      case 'handoff-status': {
+        if (!this.handoffStatusExecutor) return { ok: false, code: 'HANDOFF_STATUS_UNAVAILABLE', error: 'handoff status not configured' };
+        if (!cmd.handoffId || typeof cmd.handoffId !== 'string') return { ok: false, code: 'INVALID_HANDOFF_ID', error: 'missing handoff_id' };
+        return this.handoffStatusExecutor({
+          sessionId: typeof cmd.sessionId === 'string' ? cmd.sessionId : undefined,
+          handoffId: cmd.handoffId,
+        });
       }
       case 'ctl': {
         if (!this.commandExecutor) return { ok: false, error: 'ctl not configured' };
@@ -461,6 +535,7 @@ export class IpcServer {
       }
       case 'trigger.list':
       case 'trigger.show':
+      case 'trigger.history':
       case 'trigger.eventCatalog':
       case 'trigger.create':
       case 'trigger.update':

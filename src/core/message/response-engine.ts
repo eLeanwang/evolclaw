@@ -7,16 +7,19 @@ import { SessionManager } from '../session/session-manager.js';
 import { appendMessageLog, buildOutboundEntry } from './message-log.js';
 import {
   appendHandoffConsumedEvent,
+  buildHandoffReturnMessageId,
   buildTaskRuntimeEnv,
-  formatEcMsgSendCommand,
   selectConsumableHandoff,
   toConsumedHandoffContext,
   type ConsumedHandoffContext,
+  type HandoffReturnIpcResponse,
   type TaskRuntimeContext,
 } from './handoff.js';
 import { IMRenderer } from './im-renderer.js';
 import { MessageCache } from './message-cache.js';
 import type { MessageQueue } from './message-queue.js';
+import type { HandoffRuntime } from '../handoff/runtime.js';
+import type { HandoffReturnResponse } from '../handoff/types.js';
 import { StreamIdleMonitor } from './stream-idle-monitor.js';
 import { logger } from '../../utils/logger.js';
 import { getErrorMessage, classifyError, ErrorType, ERROR_PREFIX, isInfraError, prefixErrorType, isRetryableError, isContextTooLongText } from '../../utils/error-utils.js';
@@ -312,6 +315,7 @@ export class ResponseEngine implements IMessageProcessor {
   }>();
   private interactionRouter?: InteractionRouter;
   private messageQueue?: MessageQueue;
+  private handoffRuntime?: HandoffRuntime;
   /** sessionId → 活跃的空闲监控器，用于等待用户交互期间暂停/恢复计时 */
   private activeMonitors = new Map<string, StreamIdleMonitor>();
   /** sessionId → 当前正在处理任务的运行时上下文，供 in-task CLI 通过 IPC 查询。 */
@@ -467,12 +471,120 @@ export class ResponseEngine implements IMessageProcessor {
     this.messageQueue = queue;
   }
 
+  setHandoffRuntime(runtime: HandoffRuntime): void {
+    this.handoffRuntime = runtime;
+  }
+
   getTaskRuntimeContext(sessionId: string): TaskRuntimeContext | null {
     return this.activeTaskRuntimeContexts.get(sessionId) ?? null;
   }
 
   setAgentDelegationRegistry(registry: AgentDelegationRegistry): void {
     this.agentDelegationRegistry = registry;
+  }
+
+  async returnHandoffResult(params: { sessionId?: string; handoffId?: string; content: string }): Promise<HandoffReturnIpcResponse | HandoffReturnResponse> {
+    if (this.handoffRuntime) {
+      const runtime = params.sessionId ? this.activeTaskRuntimeContexts.get(params.sessionId) : undefined;
+      if (!params.sessionId) return { ok: false, code: 'HANDOFF_ID_REQUIRED', error: 'current session is required' };
+      const session = await this.sessionManager.getSessionById(params.sessionId);
+      const selfAid = runtime?.selfAid || session?.selfAID;
+      if (!selfAid) return { ok: false, code: 'HANDOFF_NOT_FOUND', error: 'self agent not found' };
+      return this.handoffRuntime.returnHandoff({
+        selfAid,
+        currentSessionId: params.sessionId,
+        handoffId: params.handoffId,
+        currentTaskHandoffIds: runtime?.handoffIds,
+        content: params.content,
+      });
+    }
+    const runtime = params.sessionId
+      ? this.activeTaskRuntimeContexts.get(params.sessionId)
+      : undefined;
+    if (!runtime) return { ok: false, error: 'active task runtime context not found' };
+    const consumed = runtime.consumedHandoff;
+    if (!consumed || consumed.kind !== 'request_to_target') {
+      return { ok: false, error: 'current task did not consume request_to_target handoff' };
+    }
+    const originSessionId = consumed.origin?.session_id;
+    if (!originSessionId) return { ok: false, error: 'handoff origin session_id missing' };
+    const originSession = await this.sessionManager.getSessionById(originSessionId);
+    if (!originSession) return { ok: false, error: `origin session not found: ${originSessionId}` };
+    if (!this.messageQueue) return { ok: false, error: 'message queue not configured' };
+
+    const content = params.content.trim();
+    if (!content) return { ok: false, error: 'empty handoff return content' };
+
+    const resultMessageId = buildHandoffReturnMessageId(consumed);
+    const chatDir = this.sessionManager.getChatDir(originSession);
+    appendMessageLog(chatDir, buildOutboundEntry({
+      from: runtime.selfAid || originSession.selfAID || 'self',
+      to: originSession.channelId,
+      chatType: originSession.chatType === 'group' ? 'group' : 'private',
+      groupId: originSession.chatType === 'group' ? originSession.channelId : null,
+      msgId: resultMessageId,
+      msgType: 'handoff_result',
+      content,
+      replyTo: consumed.origin.message_id ?? null,
+      source: 'handoff',
+      handoff: {
+        kind: 'response_to_origin',
+        request_content: consumed.sourceMessage.content,
+        origin: {
+          session_id: runtime.sessionId,
+          message_id: runtime.messageId,
+          channel: runtime.channel,
+          peerId: runtime.peerId,
+          threadId: runtime.threadId,
+          peerName: runtime.peerName,
+          peerType: runtime.peerType,
+          role: runtime.peerRole,
+        },
+      },
+    }));
+
+    const owningAgent = this.agentRegistry?.resolveByChannel(originSession.metadata?.channelKey || originSession.channel);
+    const message: Message = {
+      channel: originSession.channel,
+      channelType: originSession.channelType,
+      channelId: originSession.channelId,
+      selfAID: originSession.selfAID,
+      baseagent: originSession.baseagent,
+      threadId: originSession.threadId || undefined,
+      chatType: originSession.chatType === 'group' ? 'group' : 'private',
+      peerId: originSession.channelId,
+      peerName: originSession.metadata?.peerName || originSession.channelId,
+      peerType: (originSession.metadata as { peerType?: string } | undefined)?.peerType,
+      content,
+      messageId: resultMessageId,
+      timestamp: Date.now(),
+      source: 'handoff',
+      replyContext: {
+        sessionId: originSession.id,
+        threadId: originSession.threadId || undefined,
+        replyToMessageId: resultMessageId,
+        metadata: {
+          refMessageId: resultMessageId,
+          handoff: true,
+        },
+      },
+    };
+    void this.messageQueue.enqueue(originSession.id, message, originSession.projectPath, {
+      interruptible: originSession.chatType !== 'group',
+      interruptSamePeer: originSession.chatType === 'group',
+      agentName: owningAgent?.name ?? '<unknown>',
+      role: originSession.chatType === 'group' ? (originSession.identity?.role ?? 'anonymous') : undefined,
+      sessionKeyField: originSession.sessionKey,
+      selfAID: originSession.selfAID,
+    }).catch(error => {
+      logger.error(`[ResponseEngine] handoff return enqueue failed: ${error instanceof Error ? error.message : String(error)}`);
+    });
+
+    return {
+      ok: true,
+      result_message_id: resultMessageId,
+      origin_session_id: originSession.id,
+    };
   }
 
   private agentRegistry?: EvolAgentRegistryHandle;
@@ -787,7 +899,8 @@ export class ResponseEngine implements IMessageProcessor {
 
     // ── 角色访问控制检查：读取该用户角色的 allowAccess 配置，false 则拦截并回复权限不足 ──
     const userRole = session.identity?.role || 'none';
-    if (!checkRoleAccess(userRole, selfAidForAccess)) {
+    const isInternalHandoff = message.source === 'handoff';
+    if (!isInternalHandoff && !checkRoleAccess(userRole, selfAidForAccess)) {
       logger.warn(`[ResponseEngine] Access denied: role=${userRole} peerKey=${message.channelId} session=${session.id}`);
       const channelKey = session.metadata?.channelKey || message.channel;
       const channelInfo = this.resolveChannelInfo(channelKey);
@@ -1328,6 +1441,34 @@ export class ResponseEngine implements IMessageProcessor {
       const authPeerKey = session.channelType && authConversationId
         ? formatPeerKey(session.channelType, authConversationId)
         : undefined;
+      const owningAgentForAuth = this.agentRegistry?.resolveByChannel(channelKey);
+      const crossSessionApproval = (() => {
+        if (!owningAgentForAuth) return undefined;
+        const owners = Array.from(new Set((owningAgentForAuth.config.owners ?? []).filter(Boolean)));
+        if (owners.length === 0) return undefined;
+        const currentPeer = message.peerId || session.metadata?.peerId || session.channelId;
+        const ownerAid = owners.find(owner => owner !== currentPeer && owner.includes('.'));
+        if (!ownerAid) return undefined;
+        const aunAdapter = (owningAgentForAuth as any).channels?.get(`aun#${owningAgentForAuth.aid}#main`);
+        if (!aunAdapter?.capabilities?.interaction) return undefined;
+        return {
+          adapter: aunAdapter,
+          ownerAid,
+          owners,
+          selfAid: owningAgentForAuth.aid,
+          originSessionId: session.id,
+          originMessageId: message.messageId,
+          originChannel: currentChannelType,
+          originChannelId: session.channelId || capturedChannelId,
+          originPeerId: message.peerId || authConversationId,
+          originPeerName: peerName || undefined,
+          originPeerType: message.peerType || (session.metadata as any)?.peerType || undefined,
+          originRole: peerRole,
+          originThreadId: session.threadId || message.threadId || undefined,
+          originChatDir: this.sessionManager.getChatDir(session),
+          approvalTtlMs: 20 * 60 * 1000,
+        };
+      })();
 
       // 设置权限审批的交互上下文（支持交互卡片）
       agent.setPermissionContext?.(session.id, {
@@ -1344,6 +1485,7 @@ export class ResponseEngine implements IMessageProcessor {
         chatType: authChatType,
         selfAid: session.selfAID || message.selfAID,
         peerKey: authPeerKey,
+        crossSessionApproval,
         flushPending: async () => {
           await renderer.flush(false);
         },
@@ -1411,6 +1553,8 @@ export class ResponseEngine implements IMessageProcessor {
       let skipEvolclawModel = false;
       let agentModel: string | undefined;
       let consumedHandoff: ConsumedHandoffContext | null = null;
+      let v2HandoffId: string | undefined;
+      let v2HandoffDirection: 'target' | 'origin' | undefined;
       let handoffPromptRendered = false;
       let handoffConsumedRecorded = false;
       let handoffChatDir: string | undefined;
@@ -1655,7 +1799,18 @@ export class ResponseEngine implements IMessageProcessor {
                 mentionAids: message.mentionAids,
               }];
           const peerItems: SubMessage[] = (() => {
-            if (currentChannelType !== 'aun' || chatType !== 'private') return rawPeerItems;
+            if (message.handoffDelivery && this.handoffRuntime) {
+              const item = this.handoffRuntime.buildPromptItem(message);
+              if (item) {
+                v2HandoffId = message.handoffDelivery.handoffId;
+                v2HandoffDirection = message.handoffDelivery.direction;
+                return [item];
+              }
+            }
+            if (this.handoffRuntime) return rawPeerItems;
+            const isAunPrivateHandoffCandidate = currentChannelType === 'aun' && chatType === 'private';
+            const isInternalHandoffCandidate = message.source === 'handoff';
+            if (!isAunPrivateHandoffCandidate && !isInternalHandoffCandidate) return rawPeerItems;
             const getChatDir = (this.sessionManager as unknown as { getChatDir?: (s: Session) => string }).getChatDir;
             if (typeof getChatDir !== 'function') return rawPeerItems;
             try {
@@ -1671,6 +1826,7 @@ export class ResponseEngine implements IMessageProcessor {
               replyToMessageId: inboundRefMessageId,
               inboundMessageId: message.messageId,
               inboundTs: message.timestamp ?? Date.now(),
+              kinds: isInternalHandoffCandidate ? ['response_to_origin'] : ['request_to_target'],
             });
             if (!match) return rawPeerItems;
 
@@ -1682,9 +1838,6 @@ export class ResponseEngine implements IMessageProcessor {
             const combinedContent = rawPeerItems.map(item => item.content).filter(Boolean).join('\n\n') || message.content;
             const combinedImages = rawPeerItems.flatMap(item => item.images ?? []);
             const base = rawPeerItems[rawPeerItems.length - 1] ?? {};
-            const originPeerId = ctx.origin.peerId;
-            const replyCommand = formatEcMsgSendCommand(selfAid, originPeerId, '<反馈内容>', ctx.origin.threadId);
-            const continueCommand = formatEcMsgSendCommand(selfAid, originPeerId, '<追问内容>', ctx.origin.threadId);
             return [{
               ...base,
               kind: 'handoff',
@@ -1695,8 +1848,6 @@ export class ResponseEngine implements IMessageProcessor {
                 origin: ctx.origin,
                 previousContent: ctx.sourceMessage.content,
                 previousMessageId: ctx.sourceMessage.msgId,
-                replyCommand,
-                continueCommand,
               },
             }];
           })();
@@ -1747,6 +1898,7 @@ export class ResponseEngine implements IMessageProcessor {
           if (consumedHandoff && !handoffPromptRendered) {
             consumedHandoff = null;
           }
+          if (v2HandoffId && renderResult?.body.trim()) handoffPromptRendered = true;
         }
 
         // 空消息防护：在 agent 调用之前检查 prompt 是否为空
@@ -1754,6 +1906,10 @@ export class ResponseEngine implements IMessageProcessor {
         if (!effectivePrompt.trim()) {
           logger.info(`[ResponseEngine] Skip agent call: empty prompt after render. session=${session.id} task=${taskId}`);
           return;
+        }
+
+        if (v2HandoffId && v2HandoffDirection === 'origin' && handoffPromptRendered && this.handoffRuntime && selfAid) {
+          this.handoffRuntime.completeOriginContext(selfAid, v2HandoffId);
         }
 
         const taskRuntimeContext: TaskRuntimeContext = {
@@ -1769,6 +1925,7 @@ export class ResponseEngine implements IMessageProcessor {
           peerRole,
           threadId: session.threadId || undefined,
           consumedHandoff,
+          handoffIds: v2HandoffId && v2HandoffDirection === 'target' ? [v2HandoffId] : undefined,
         };
         this.activeTaskRuntimeContexts.set(session.id, taskRuntimeContext);
         runtimeEnv = buildTaskRuntimeEnv(taskRuntimeContext);

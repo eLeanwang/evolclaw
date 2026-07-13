@@ -17,6 +17,7 @@ export interface MessageLogEntry {
   groupId: string | null;
   msgId: string | null;
   msgType: string;
+  payloadType?: string;
   content: string;
   replyTo: string | null;
   agent: string | null;
@@ -27,7 +28,7 @@ export interface MessageLogEntry {
   usage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number } | null;
   encrypt?: boolean;
   chatmode?: string;
-  source?: 'daemon' | 'cli' | 'msg' | 'ctl' | 'owner-inject';
+  source?: 'daemon' | 'cli' | 'msg' | 'ctl' | 'owner-inject' | 'handoff';
 }
 
 export interface PeerInfo {
@@ -379,7 +380,7 @@ function renderMessagesPanel(state: WatchMsgState, width: number, height: number
       const rawSource = (m as any).source as string | undefined;
       // 4 种来源: daemon | ctl | msg | cli
       const source = (rawSource === 'ctl' || rawSource === 'msg' || rawSource === 'cli') ? rawSource : 'daemon';
-      const method = m.msgType === 'thought' ? 'thought' : 'send';
+      const method = m.msgType === 'thought' ? 'thought' : (m.payloadType || m.msgType || 'send');
       typeTag = `${DIM}[${source}|${method}]${RST}`;
     }
     const byteLen = Buffer.byteLength(m.content, 'utf-8');

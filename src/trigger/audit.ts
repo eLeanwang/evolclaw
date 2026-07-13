@@ -3,14 +3,20 @@ import path from 'path';
 import { resolvePaths } from '../paths.js';
 import { LogWriter } from '../utils/log-writer.js';
 import type { TriggerAuditRecord } from './types.js';
+import type { TriggerHistoryStore } from './history.js';
 
 export class TriggerAuditLogger {
   private writer: LogWriter;
   private logDir: string;
 
-  constructor(logDir = resolvePaths().logs) {
+  constructor(
+    logDir = resolvePaths().logs,
+    private history?: TriggerHistoryStore,
+    writer?: LogWriter,
+  ) {
     this.logDir = logDir;
-    this.writer = new LogWriter({
+    this.history?.importAuditLogs(logDir);
+    this.writer = writer ?? new LogWriter({
       baseName: 'trigger-runs',
       logDir,
       rotation: 'daily',
@@ -18,11 +24,17 @@ export class TriggerAuditLogger {
     });
   }
 
+  withHistory(history: TriggerHistoryStore): TriggerAuditLogger {
+    return new TriggerAuditLogger(this.logDir, history, this.writer);
+  }
+
   write(record: TriggerAuditRecord): void {
     this.writer.write(JSON.stringify(record));
+    this.history?.recordRun(record);
   }
 
   recent(triggerId: string, limit = 20): TriggerAuditRecord[] {
+    if (this.history) return this.history.recentRuns(triggerId, limit);
     const file = path.join(this.logDir, 'trigger-runs.log');
     let lines: string[];
     try { lines = fs.readFileSync(file, 'utf-8').split('\n').filter(Boolean); } catch { return []; }
@@ -39,13 +51,11 @@ export class TriggerAuditLogger {
   }
 
   /**
-   * 汇总某 trigger 的运行统计——扫描所有保留的 trigger-runs 切片（活跃文件 +
-   * 按天归档的 trigger-runs-YYYYMMDD.log），统计执行过的运行（completed/noop/failed）。
-   *
-   * 注意：受日志保留期（默认 7 天）限制，这是「保留窗口内」的统计而非全生命周期计数。
-   * skipped（并发禁止/错过策略）和 dry-run 不计入 fireCount——它们没有真正执行脚本。
+   * 汇总某 trigger 的运行统计。绑定 history 时读取长期历史；未绑定时保留旧的
+   * 日志扫描行为，供兼容调用使用。skipped 和 dry-run 不计入 fireCount。
    */
   stats(triggerId: string): TriggerRunStats {
+    if (this.history) return this.history.stats(triggerId);
     const out: TriggerRunStats = { fireCount: 0, failCount: 0 };
     let latestFinishedAt = -1;
     for (const file of this.listLogFiles()) {
@@ -70,6 +80,7 @@ export class TriggerAuditLogger {
   }
 
   hasSkippedSchedule(triggerId: string, scheduledAt: number): boolean {
+    if (this.history) return this.history.hasSkippedSchedule(triggerId, scheduledAt);
     for (const file of this.listLogFiles()) {
       let lines: string[];
       try { lines = fs.readFileSync(file, 'utf-8').split('\n'); } catch { continue; }

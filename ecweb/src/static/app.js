@@ -1585,11 +1585,12 @@ function connect() {
     }
     if (msg.type === 'snapshot' || msg.type === 'delta') {
       console.log('[ecweb] Received', msg.type, 'for view:', msg.view, 'currentView:', currentView);
-      // system 视图保留客户端写入的 check/upgrade，防止 3s 轮询覆盖
+      // check 来自服务端实时健康快照，必须优先采用新值，避免 daemon/ECWeb
+      // 重启后浏览器继续保留旧 agent 列表。upgrade 仍保留客户端操作结果。
       if (msg.view === 'system' && state.system) {
         state.system = {
           ...msg.data,
-          check: state.system.check ?? msg.data.check,
+          check: msg.data.check ?? state.system.check,
           upgrade: state.system.upgrade ?? msg.data.upgrade,
         };
       } else {

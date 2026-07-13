@@ -550,7 +550,7 @@ function checkConfigFieldPolicy(
     ? resolveRoleFieldPermission(roleDef.permissions || {}, field)
     : undefined;
   if (!fieldPermission) {
-    return { ok: false, reason: `Role ${ctx.role} has no field permission for ${field}` };
+    return { ok: true };
   }
   if (policy === 'behavior-read') return { ok: true };
   if (!fieldPermission.allowOverride) {

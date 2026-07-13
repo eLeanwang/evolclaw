@@ -210,6 +210,31 @@ export interface ReplyContext {
   peerId?: string;  // 发送者 ID，出站时兜底 @ 补全用
 }
 
+export interface CrossSessionApprovalContext {
+  /** AUN owner 会话使用的 adapter。MVP 只允许 AUN private owner 审批。 */
+  adapter: ChannelAdapter;
+  /** 本次选定的 owner AID。 */
+  ownerAid: string;
+  /** 当前 agent 的 owner 候选，用于审计和后续扩展。 */
+  owners?: string[];
+  /** 当前 self agent AID。 */
+  selfAid?: string;
+  /** 原始受限会话上下文。grant 只应绑定这个上下文，而不是 owner 会话。 */
+  originSessionId: string;
+  originMessageId?: string;
+  originChannel?: string;
+  originChannelId?: string;
+  originPeerId?: string;
+  originPeerName?: string;
+  originPeerType?: string;
+  originRole?: string;
+  originThreadId?: string;
+  /** 原始会话 messages.jsonl 所在目录，用于追加 response_to_origin 审计事件。 */
+  originChatDir?: string;
+  /** 授权卡片可审批时长。 */
+  approvalTtlMs?: number;
+}
+
 export interface SessionIdentity {
   role: string;
   mode: 'interactive';
@@ -274,6 +299,7 @@ export interface SubMessage {
   /** handoff 专用：跨会话上下文渲染数据。 */
   handoff?: {
     kind: 'request_to_target' | 'response_to_origin';
+    handoffId?: string;
     origin?: {
       channel?: string;
       peerId?: string;
@@ -284,8 +310,6 @@ export interface SubMessage {
     };
     previousContent?: string;
     previousMessageId?: string | null;
-    replyCommand?: string;
-    continueCommand?: string;
   };
 }
 
@@ -336,7 +360,11 @@ export interface Message {
   replyContext?: ReplyContext;       // Channel 预构建的回复上下文（渠道无关）
   dispatchMode?: string;            // 群聊分发模式，由渠道适配器从服务器信封解析后注入（mention|broadcast）
   timestamp?: number;
-  source?: 'user' | 'card-trigger' | 'trigger' | 'owner-inject';
+  source?: 'user' | 'card-trigger' | 'trigger' | 'owner-inject' | 'handoff';
+  handoffDelivery?: {
+    direction: 'target' | 'origin';
+    handoffId: string;
+  };
   triggerMeta?: {
     triggerId: string;
     runId?: string;
@@ -381,6 +409,10 @@ export interface InboundMessage {
   replyContext?: ReplyContext;       // Channel 预构建的回复上下文（渠道无关）
   dispatchMode?: string;            // 群聊分发模式（mention|broadcast）
   source?: 'user' | 'card-trigger';  // 消息来源：用户输入 / 卡片按钮触发
+  msgType?: import('./core/message/message-log.js').MessageLogType;
+  payloadType?: string;
+  payloadSummary?: import('./core/message/message-log.js').MessageLogPayloadSummary;
+  messageLogContent?: string;
   /** 来自控制 AID channel（evolclaw.json.aid）。控制面入口拥有全量权限（进程级 + 跨 agent），
    *  由 index.ts 的 controlChannel.onMessage 在构造 InboundMessage 时注入。普通 agent channel 不设。 */
   isControlChannel?: boolean;
@@ -789,6 +821,10 @@ export interface DebugBlock {
   upmsg?: boolean;
 }
 
+export interface ProcessDebugBlock extends DebugBlock {
+  eckSnapshots?: boolean;
+}
+
 export type ShowActivitiesMode = 'all' | 'text' | 'none';
 
 export interface ProactiveBehaviorBlock {
@@ -876,7 +912,7 @@ export interface ProcessConfig {
   aid?: string;
   owners?: string[];
   admins?: string[];
-  debug?: DebugBlock;
+  debug?: ProcessDebugBlock;
   tunnel?: { targets: Array<{ name: string; port: number; pathPrefix?: string }> };
   aun?: { encryptionSeed?: string | null };
   serviceProxy?: {

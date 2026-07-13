@@ -3,11 +3,13 @@ import path from 'path';
 import { spawn, execFile } from 'child_process';
 import { promisify } from 'util';
 import { resolvePaths, getPackageRoot } from '../paths.js';
-import { loadAllAgents } from '../config-store.js';
+import { loadEvolclawConfig } from '../config-store.js';
 import * as platform from '../utils/cross-platform.js';
 import { EventBus } from '../core/event-bus.js';
 import { tryUpgrade, tryUpgradeAunSdk, tryUpgradeGlobalPkg, resolveGlobalPkg } from '../utils/npm-ops.js';
 import { resolveAunCoreSdkPkg, AUN_CORE_SDK_PKG } from '../aun/aid/client.js';
+import { isValidAid } from '../aun/aid/index.js';
+import { msgSend } from '../aun/msg/index.js';
 import { scanInstances, cleanupInstances, writeRestartMonitor, removeRestartMonitor, isRestartMonitorWinner } from '../utils/instance-registry.js';
 
 const execFileAsync = promisify(execFile);
@@ -27,7 +29,7 @@ export async function cmdRestartMonitor() {
   const p = resolvePaths();
   const restartLog = path.join(p.logs, 'restart.log');
   const MAX_HEAL_ATTEMPTS = 3;
-  const READY_TIMEOUT = 30000; // 30s（AUN sidecar 10s + Feishu 连接 12s）
+  const READY_TIMEOUT = 30000; // 30s（AUN sidecar + 外部渠道连接预留）
   const HEAL_TIMEOUT = 30 * 60 * 1000; // 30 分钟，让 claude 自然结束
   const eventBus = new EventBus();
 
@@ -72,14 +74,8 @@ export async function cmdRestartMonitor() {
 
   log('Restart monitor started');
 
-  // 读取 restart-pending.json 用于后续通知
+  // restart-pending.json 只留给新主进程发送发起会话内的“重启成功”回执。
   const pendingFile = path.join(p.dataDir, 'restart-pending.json');
-  let pendingInfo: { channel: string; channelId: string; timestamp: number } | null = null;
-  try {
-    if (fs.existsSync(pendingFile)) {
-      pendingInfo = JSON.parse(fs.readFileSync(pendingFile, 'utf-8'));
-    }
-  } catch {}
 
   // 等待所有活 main 进程退出（可能不止一个）
   const oldStatus = scanInstances();
@@ -122,7 +118,7 @@ export async function cmdRestartMonitor() {
   switch (upgrade.status) {
     case 'upgraded':
       log(`✅ Upgraded: ${upgrade.from} → ${upgrade.to}`);
-      await notifyChannel(p, pendingInfo, `📦 已升级 ${upgrade.from} → ${upgrade.to}`, log);
+      await notifyDaemonOwners(p, `📦 已升级 ${upgrade.from} → ${upgrade.to}`, log);
       break;
     case 'no-update':
       log(`Already up to date (${upgrade.from})`);
@@ -134,7 +130,7 @@ export async function cmdRestartMonitor() {
       break;
     case 'failed':
       log(`⚠ Upgrade failed (${upgrade.from} → ${upgrade.to}): ${upgrade.error}`);
-      await notifyChannel(p, pendingInfo, `⚠️ 升级失败，使用当前版本继续`, log);
+      await notifyDaemonOwners(p, `⚠️ evolclaw 升级失败，使用当前版本继续\n${upgrade.error ?? ''}`.trim(), log);
       break;
   }
 
@@ -143,12 +139,13 @@ export async function cmdRestartMonitor() {
   switch (aunUpgrade.status) {
     case 'upgraded':
       log(`✅ AUN SDK upgraded: ${aunUpgrade.from} → ${aunUpgrade.to}`);
-      await notifyChannel(p, pendingInfo, `📦 AUN SDK 已升级 ${aunUpgrade.from} → ${aunUpgrade.to}`, log);
+      await notifyDaemonOwners(p, `📦 AUN SDK 已升级 ${aunUpgrade.from} → ${aunUpgrade.to}`, log);
       break;
     case 'no-update':
       break;
     case 'failed':
       log(`⚠ AUN SDK upgrade failed (${aunUpgrade.from} → ${aunUpgrade.to}): ${aunUpgrade.error}`);
+      await notifyDaemonOwners(p, `⚠️ AUN SDK 升级失败，使用当前版本继续\n${aunUpgrade.error ?? ''}`.trim(), log);
       break;
   }
 
@@ -157,12 +154,13 @@ export async function cmdRestartMonitor() {
   switch (ecwebUpgrade.status) {
     case 'upgraded':
       log(`✅ evolclaw-web upgraded: ${ecwebUpgrade.from} → ${ecwebUpgrade.to}`);
-      await notifyChannel(p, pendingInfo, `📦 evolclaw-web 已升级 ${ecwebUpgrade.from} → ${ecwebUpgrade.to}`, log);
+      await notifyDaemonOwners(p, `📦 evolclaw-web 已升级 ${ecwebUpgrade.from} → ${ecwebUpgrade.to}`, log);
       break;
     case 'no-update':
       break;
     case 'failed':
       log(`⚠ evolclaw-web upgrade failed (${ecwebUpgrade.from} → ${ecwebUpgrade.to}): ${ecwebUpgrade.error}`);
+      await notifyDaemonOwners(p, `⚠️ evolclaw-web 升级失败，使用当前版本继续\n${ecwebUpgrade.error ?? ''}`.trim(), log);
       break;
   }
 
@@ -172,14 +170,14 @@ export async function cmdRestartMonitor() {
   if (started) {
     log('✓ Service restarted successfully');
     archiveSelfHealLog(p, log);
-    // 通知由新进程自行发送（channel-agnostic），此处不再调用 notifyChannel
+    // 发起会话内的“重启成功”通知由新进程自行发送，此处只负责失败/自愈告警。
     process.exit(0);
   }
 
   // 启动失败 — 测试环境下跳过 self-heal（避免 claude -p 污染会话列表、误杀生产进程）
   if (p.root.startsWith('/tmp/') || process.env.EVOLCLAW_TEST === '1') {
     log('❌ Service failed to start (test environment detected, skipping self-heal)');
-    await notifyChannel(p, pendingInfo, '❌ 服务启动失败（测试环境，已跳过自动修复）', log);
+    await notifyDaemonOwners(p, '❌ 服务启动失败（测试环境，已跳过自动修复）', log);
     cleanupPendingFile(pendingFile, log);
     process.exit(1);
   }
@@ -187,13 +185,13 @@ export async function cmdRestartMonitor() {
   // 启动失败，进入 self-heal 循环
   log('❌ Service failed to start, entering self-heal loop');
   eventBus.publish({ type: 'self-heal:started', reason: 'Service failed to start after restart' });
-  await notifyChannel(p, pendingInfo, '⚠️ 服务启动失败，正在尝试自动修复...', log);
+  await notifyDaemonOwners(p, '⚠️ 服务启动失败，正在尝试自动修复...', log);
 
   for (let attempt = 1; attempt <= MAX_HEAL_ATTEMPTS; attempt++) {
     // 前置检查：服务可能已被上一轮 claude 修复并启动
     if (isServiceAlive()) {
       log(`✓ Service already running before attempt ${attempt}, skipping`);
-      await sendHealSummary(p, pendingInfo, attempt - 1, log);
+      await sendHealSummary(p, attempt - 1, log);
       eventBus.publish({ type: 'self-heal:completed', success: true, attempts: attempt - 1 });
       archiveSelfHealLog(p, log);
       cleanupPendingFile(pendingFile, log);
@@ -202,14 +200,14 @@ export async function cmdRestartMonitor() {
 
     log(`Self-heal attempt ${attempt}/${MAX_HEAL_ATTEMPTS}`);
     eventBus.publish({ type: 'self-heal:attempt', attemptNumber: attempt, maxAttempts: MAX_HEAL_ATTEMPTS });
-    await notifyChannel(p, pendingInfo, `🔧 自动修复中（第 ${attempt}/${MAX_HEAL_ATTEMPTS} 次）...`, log);
+    await notifyDaemonOwners(p, `🔧 自动修复中（第 ${attempt}/${MAX_HEAL_ATTEMPTS} 次）...`, log);
 
     const healed = await invokeClaude(p, attempt, MAX_HEAL_ATTEMPTS, HEAL_TIMEOUT, log);
 
     // 后置检查：不管 invokeClaude 返回什么，都检查服务实际状态
     if (isServiceAlive()) {
       log(`✓ Service is running after attempt ${attempt}`);
-      await sendHealSummary(p, pendingInfo, attempt, log);
+      await sendHealSummary(p, attempt, log);
       eventBus.publish({ type: 'self-heal:completed', success: true, attempts: attempt });
       archiveSelfHealLog(p, log);
       cleanupPendingFile(pendingFile, log);
@@ -225,7 +223,7 @@ export async function cmdRestartMonitor() {
     started = await spawnAndWaitReady(p, log, READY_TIMEOUT);
     if (started) {
       log(`✓ Self-heal succeeded on attempt ${attempt}`);
-      await sendHealSummary(p, pendingInfo, attempt, log);
+      await sendHealSummary(p, attempt, log);
       eventBus.publish({ type: 'self-heal:completed', success: true, attempts: attempt });
       archiveSelfHealLog(p, log);
       cleanupPendingFile(pendingFile, log);
@@ -238,7 +236,7 @@ export async function cmdRestartMonitor() {
   // 全部失败 — 最后再检查一次
   if (isServiceAlive()) {
     log('✓ Service recovered during final check');
-    await sendHealSummary(p, pendingInfo, MAX_HEAL_ATTEMPTS, log);
+    await sendHealSummary(p, MAX_HEAL_ATTEMPTS, log);
     eventBus.publish({ type: 'self-heal:completed', success: true, attempts: MAX_HEAL_ATTEMPTS });
     archiveSelfHealLog(p, log);
     cleanupPendingFile(pendingFile, log);
@@ -247,7 +245,7 @@ export async function cmdRestartMonitor() {
 
   log(`❌ All ${MAX_HEAL_ATTEMPTS} self-heal attempts failed`);
   eventBus.publish({ type: 'self-heal:completed', success: false, attempts: MAX_HEAL_ATTEMPTS });
-  await notifyChannel(p, pendingInfo, `❌ ${MAX_HEAL_ATTEMPTS} 次自动修复均失败，需要人工介入。\n修复记录：${p.selfHealLog}`, log);
+  await notifyDaemonOwners(p, `❌ ${MAX_HEAL_ATTEMPTS} 次自动修复均失败，需要人工介入。\n修复记录：${p.selfHealLog}`, log);
   cleanupPendingFile(pendingFile, log);
   process.exit(1);
 }
@@ -257,7 +255,6 @@ export async function cmdRestartMonitor() {
  */
 async function sendHealSummary(
   p: ReturnType<typeof resolvePaths>,
-  pendingInfo: { channel: string; channelId: string } | null,
   attempts: number,
   log: (msg: string) => void
 ) {
@@ -277,7 +274,7 @@ async function sendHealSummary(
     }
   } catch {}
   summary += '\n\n⚠️ 修复前进行中的任务已中断，如需继续请重新发送。';
-  await notifyChannel(p, pendingInfo, summary, log);
+  await notifyDaemonOwners(p, summary, log);
 }
 
 function sleep(ms: number): Promise<void> {
@@ -455,145 +452,65 @@ function archiveSelfHealLog(
   log(`Archived self-heal log to ${archivePath}`);
 }
 
-/**
- * Resolve a channel instance name to its type and config object.
- * Searches across all channel types (feishu, wechat, aun) for a matching instance.
- */
-function resolveInstanceConfig(instanceName: string): { type: string; config: any } | null {
-  // 新结构：channel key 是 <type>#<selfAID>#<name>，解析后从对应 agent 的 channels[] 找
-  const parts = instanceName.split('#');
-  if (parts.length === 3) {
-    const [type, selfAID, name] = parts;
-    const { agents } = loadAllAgents();
-    // AUN channel 的 selfAID 就是 agent.aid
-    const agent = agents.find(a => a.aid === selfAID);
-    if (!agent) return null;
-    const inst = agent.channels.find((c: any) => c.type === type && c.name === name);
-    if (inst) return { type, config: inst };
-  }
-  return null;
-}
-
-/**
- * 通过对应渠道 API 发送通知（轻量级，不依赖 Channel 实例）
- * 支持 feishu / wechat，根据 pendingInfo.channel 路由
- *
- * Phase 3 例外说明（出站消息统一计划，docs/outbound-message-unification.md）：
- * 主网关进程出站系统通知（上线 / 重启完成 / channel:error 等）已迁到
- * `adapter.send(envelope, { kind: 'system.notice' | 'system.error', ... })` 统一入口。
- * 但 cli.ts 在 restart-monitor 子进程里跑，不持有 EvolAgent / ChannelAdapter 实例
- * （主网关进程已退出，新进程还没起或起不来），只能直连协议 SDK 自发。
- * 因此 self-heal 全流程（启动失败 / 修复中 / 修复成功 / 全部失败）和升级失败通知
- * 留在这里直发，**不属于** Phase 3 改造范围。
- */
-async function notifyChannel(
+async function notifyDaemonOwners(
   p: ReturnType<typeof resolvePaths>,
-  pendingInfo: { channel: string; channelId: string; rootId?: string } | null,
   message: string,
   log: (msg: string) => void
 ) {
-  if (!pendingInfo) return;
-
-  const resolved = resolveInstanceConfig(pendingInfo.channel);
-  if (!resolved) {
-    log(`Channel instance "${pendingInfo.channel}" not found in any agent config`);
+  const cfg = loadEvolclawConfig();
+  const daemonAid = typeof cfg.aid === 'string' ? cfg.aid.trim() : '';
+  if (!daemonAid) {
+    log('Daemon owner notification skipped: evolclaw.json.aid not configured');
+    return;
+  }
+  if (!isValidAid(daemonAid)) {
+    log(`Daemon owner notification skipped: invalid evolclaw.json.aid ${daemonAid}`);
     return;
   }
 
-  if (resolved.type === 'feishu') {
+  const owners = Array.from(new Set((Array.isArray(cfg.owners) ? cfg.owners : [])
+    .map(owner => typeof owner === 'string' ? owner.trim() : '')
+    .filter(Boolean)));
+  if (owners.length === 0) {
+    log('Daemon owner notification skipped: evolclaw.json.owners not configured');
+    return;
+  }
+
+  const validOwners = owners.filter(owner => {
+    const valid = isValidAid(owner);
+    if (!valid) log(`Daemon owner notification skipped invalid owner AID: ${owner}`);
+    return valid;
+  });
+  if (validOwners.length === 0) return;
+
+  const text = formatDaemonOwnerNotice(p, message);
+  for (const owner of validOwners) {
     try {
-      const inst = resolved.config;
-      if (!inst.appId || !inst.appSecret) return;
-
-      const lark = await import('@larksuiteoapi/node-sdk');
-      const client = new lark.Client({
-        appId: inst.appId,
-        appSecret: inst.appSecret,
+      const result = await msgSend({
+        from: daemonAid,
+        to: owner,
+        body: { mode: 'text', text },
+        slotId: 'restart-monitor',
       });
-
-      if (pendingInfo.rootId) {
-        await client.im.message.reply({
-          path: { message_id: pendingInfo.rootId },
-          data: {
-            msg_type: 'text',
-            content: JSON.stringify({ text: message }),
-            reply_in_thread: true,
-          },
-        });
-      } else {
-        await client.im.message.create({
-          params: { receive_id_type: 'chat_id' },
-          data: {
-            receive_id: pendingInfo.channelId,
-            msg_type: 'text',
-            content: JSON.stringify({ text: message }),
-          },
-        });
+      if (!result.ok) {
+        log(`Daemon owner notification failed for ${owner}: ${result.error}`);
+        continue;
       }
-
-      log(`Feishu notification sent: ${message.slice(0, 50)}`);
+      log(`Daemon owner notification sent to ${owner}: ${result.message_id}`);
     } catch (error: any) {
-      log(`Feishu notification failed: ${error.message?.slice(0, 200) || error}`);
-    }
-  } else if (resolved.type === 'wechat') {
-    try {
-      const inst = resolved.config;
-      if (!inst.token) return;
-
-      const crypto = await import('node:crypto');
-      const baseUrl = (inst.baseUrl || 'https://ilinkai.weixin.qq.com').replace(/\/$/, '');
-      const token = inst.token;
-
-      // 读取缓存的 context_token
-      const syncBufPath = path.join(p.dataDir, 'wechat-context-tokens.json');
-      let contextToken: string | undefined;
-      try {
-        if (fs.existsSync(syncBufPath)) {
-          const tokens = JSON.parse(fs.readFileSync(syncBufPath, 'utf-8'));
-          contextToken = tokens[pendingInfo.channelId];
-        }
-      } catch {}
-
-      if (!contextToken) {
-        log(`WeChat notification skipped: no context_token for ${pendingInfo.channelId}`);
-        return;
-      }
-
-      const uint32 = crypto.randomBytes(4).readUInt32BE(0);
-      const wechatUin = Buffer.from(String(uint32), 'utf-8').toString('base64');
-      const body = JSON.stringify({
-        msg: {
-          from_user_id: '',
-          to_user_id: pendingInfo.channelId,
-          client_id: `evolclaw-restart:${Date.now()}`,
-          message_type: 2,
-          message_state: 2,
-          item_list: [{ type: 1, text_item: { text: message } }],
-          context_token: contextToken,
-        },
-        base_info: { channel_version: '1.0.0' },
-      });
-
-      const res = await fetch(`${baseUrl}/ilink/bot/sendmessage`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'AuthorizationType': 'ilink_bot_token',
-          'Authorization': `Bearer ${token.trim()}`,
-          'X-WECHAT-UIN': wechatUin,
-          'Content-Length': String(Buffer.byteLength(body, 'utf-8')),
-        },
-        body,
-      });
-
-      if (res.ok) {
-        log(`WeChat notification sent: ${message.slice(0, 50)}`);
-      } else {
-        log(`WeChat notification failed: HTTP ${res.status}`);
-      }
-    } catch (error: any) {
-      log(`WeChat notification failed: ${error.message?.slice(0, 200) || error}`);
+      log(`Daemon owner notification failed for ${owner}: ${error.message?.slice(0, 200) || error}`);
     }
   }
 }
 
+function formatDaemonOwnerNotice(
+  p: ReturnType<typeof resolvePaths>,
+  message: string
+): string {
+  return [
+    'EvolClaw restart-monitor',
+    message,
+    '',
+    `EVOLCLAW_HOME: ${p.root}`,
+  ].join('\n');
+}

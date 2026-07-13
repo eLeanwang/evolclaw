@@ -33,7 +33,7 @@ import type {
   ChannelInstance,
   ChatmodeBlock,
   ShowActivitiesMode,
-  DebugBlock,
+  ProcessDebugBlock,
 } from './types.js';
 import { CONFIG_SCHEMA_VERSION } from './types.js';
 import { ConfigTarget, read as cfgRead, write as cfgWrite, resolveAgentConfig, resolveEffective } from './config/config-manager.js';
@@ -84,7 +84,7 @@ export interface EvolclawConfig {
   $schema_version?: number;
   aid?: string;
   owners?: string[];          // 进程级控制面鉴权名单（AID）：谁能远程管理本 daemon（/agent /system）
-  debug?: DebugBlock;
+  debug?: ProcessDebugBlock;
   tunnel?: TunnelConfig;
   aun?: EvolclawAunConfig;   // 从旧 config.json 迁入
   serviceProxy?: ServiceProxyConfig;  // AUN Service Proxy：把本地服务暴露到 AUN 网络
@@ -105,6 +105,10 @@ export interface EvolclawConfig {
 export function loadEvolclawConfig(): EvolclawConfig {
   const raw = atomicReadJson<EvolclawConfig>(resolvePaths().evolclawJson);
   return raw ?? {};
+}
+
+export function isEckSnapshotsEnabled(): boolean {
+  return loadEvolclawConfig().debug?.eckSnapshots ?? true;
 }
 
 /** 原子写入 {root}/evolclaw.json。调用方负责传完整对象（含要保留的字段）。 */
@@ -280,6 +284,7 @@ export interface AgentLoadIssue {
 export interface AgentLoadResult {
   agents: AgentConfig[];
   skipped: AgentLoadIssue[];
+  invalidAgents?: Array<{ agent: AgentConfig; reason: string }>;
 }
 
 function isGeneratedControlAid(aid: string): boolean {
@@ -305,9 +310,9 @@ function isControlAidStateDir(dirName: string, controlAid?: string): boolean {
  *
  * 不抛错——返回 skipped 列表交调用方决定是否继续。
  */
-export function loadAllAgents(): AgentLoadResult {
+export function loadAllAgents(opts: { includeInvalid?: boolean } = {}): AgentLoadResult {
   const agentsDir = resolvePaths().agentsDir;
-  const result: AgentLoadResult = { agents: [], skipped: [] };
+  const result: AgentLoadResult = { agents: [], skipped: [], invalidAgents: opts.includeInvalid ? [] : undefined };
   const controlAid = loadEvolclawConfig().aid;
 
   if (!fs.existsSync(agentsDir)) return result;
@@ -344,13 +349,28 @@ export function loadAllAgents(): AgentLoadResult {
       const errs = validateAgentConfig(cfg);
       if (errs.length > 0) {
         const reason = errs.join('; ');
-        result.skipped.push({ dirName, reason });
+        if (opts.includeInvalid) {
+          result.invalidAgents!.push({ agent: cfg, reason });
+        } else {
+          result.skipped.push({ dirName, reason });
+        }
         logger.warn(`[config] skip agents/${dirName}: ${reason}`);
         continue;
       }
       result.agents.push(cfg);
     } catch (e) {
       const reason = e instanceof Error ? e.message : String(e);
+      if (opts.includeInvalid) {
+        result.invalidAgents!.push({
+          agent: {
+            $schema_version: CONFIG_SCHEMA_VERSION,
+            aid: dirName,
+            enabled: true,
+            channels: [],
+          },
+          reason,
+        });
+      }
       result.skipped.push({ dirName, reason });
       logger.warn(`[config] skip agents/${dirName}: ${reason}`);
     }

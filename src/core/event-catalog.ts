@@ -337,6 +337,8 @@ const CATALOG: EventCatalogEntry[] = [
       { path: 'sessionId', type: 'string' },
       { path: 'requestId', type: 'string' },
       { path: 'approved', type: 'boolean' },
+      { path: 'toolName', type: 'string', optional: true },
+      { path: 'reason', type: 'string', optional: true },
     ],
   },
   {

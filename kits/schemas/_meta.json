@@ -3,7 +3,8 @@
     "evolclaw":        { "currentVersion": 1 },
     "defaults":        { "currentVersion": 1 },
     "agent-config":    { "currentVersion": 3 },
-    "relation-config": { "currentVersion": 2 }
+    "relation-config": { "currentVersion": 2 },
+    "contact-book":    { "currentVersion": 1 }
   },
   "history": [
     { "schema": "evolclaw",        "version": 1, "date": "2026-06-14", "description": "initial: process config (evolclaw.json)" },
@@ -12,6 +13,7 @@
     { "schema": "agent-config",    "version": 2, "date": "2026-06-23", "description": "add lifecycle state for bootstrap flow; initialized retained for compatibility" },
     { "schema": "agent-config",    "version": 3, "date": "2026-07-08", "description": "move user role policy into agent config" },
     { "schema": "relation-config", "version": 1, "date": "2026-06-14", "description": "initial: relation config" },
-    { "schema": "relation-config", "version": 2, "date": "2026-07-08", "description": "move user/group role assignments into relation config" }
+    { "schema": "relation-config", "version": 2, "date": "2026-07-08", "description": "move user/group role assignments into relation config" },
+    { "schema": "contact-book",    "version": 1, "date": "2026-07-10", "description": "agent contact aliases for cross-channel identity mapping" }
   ]
 }

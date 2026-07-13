@@ -32,6 +32,9 @@ export async function cmdTrigger(args: string[]): Promise<void> {
       case 'show':
         await showTrigger(rest, json);
         return;
+      case 'history':
+        await showHistory(rest, json);
+        return;
       case 'create':
         await createTrigger(rest, json);
         return;
@@ -69,6 +72,7 @@ function printHelp(): void {
 命令:
   list --agent <aid> [--all] [--json]
   show --agent <aid> <triggerId> [--json]
+  history --agent <aid> [triggerId] [--limit <n>] [--json]
   create --file <trigger.json|trigger-dir> [--enable] [--json]
     OR
   create --agent <aid> --cron <expr>|--event <pattern> --prompt <text> [--enable] [其他flag]
@@ -153,6 +157,32 @@ async function showTrigger(args: string[], json: boolean): Promise<void> {
     for (const r of recent.slice(0, 5)) {
       console.log(`  ${r.status.padEnd(9)} ${r.reason ?? ''} ${new Date(r.finishedAt).toISOString()} ${r.runId}`);
     }
+  }
+}
+
+async function showHistory(args: string[], json: boolean): Promise<void> {
+  const agentAid = requireFlag(args, '--agent');
+  const triggerId = optionalPositional(args, 0, ['--agent', '--limit', '--format']);
+  const rawLimit = flagValue(args, '--limit');
+  const limit = rawLimit === undefined ? 100 : Number(rawLimit);
+  if (!Number.isInteger(limit) || limit <= 0 || limit > 10_000) {
+    throw new Error('--limit 必须是 1 到 10000 的整数');
+  }
+  const res = await request({ type: 'trigger.history', agentAid, triggerId, limit });
+  if (json) return printJson(res);
+  const events = Array.isArray(res.events) ? res.events : [];
+  if (events.length === 0) {
+    console.log('(无 trigger history)');
+    return;
+  }
+  for (const event of events) {
+    const timestamp = new Date(event.timestamp).toISOString();
+    const detail = event.audit
+      ? `${event.audit.status} ${event.audit.runId}`
+      : event.legacyRecord
+        ? `${event.legacyRecord.name ?? ''} ${event.legacyRecord.doneReason ?? ''}`.trim()
+      : `${event.definition?.name ?? ''} ${event.revision ?? ''}`.trim();
+    console.log(`${timestamp}  ${event.type.padEnd(18)}  ${event.triggerId}  ${detail}`);
   }
 }
 
@@ -400,15 +430,19 @@ function hasFlag(args: string[], name: string): boolean {
 }
 
 function positional(args: string[], index: number, flagsWithValue: string[]): string {
+  const value = optionalPositional(args, index, flagsWithValue);
+  if (!value) throw new Error('missing triggerId');
+  return value;
+}
+
+function optionalPositional(args: string[], index: number, flagsWithValue: string[]): string | undefined {
   const skip = new Set<number>();
   for (const flag of flagsWithValue) {
     const idx = args.indexOf(flag);
     if (idx >= 0) { skip.add(idx); skip.add(idx + 1); }
   }
   const values = args.filter((a, i) => !skip.has(i) && !a.startsWith('-'));
-  const value = values[index];
-  if (!value) throw new Error('missing triggerId');
-  return value;
+  return values[index];
 }
 
 function printJson(value: unknown): void {

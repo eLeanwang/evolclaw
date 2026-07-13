@@ -30,8 +30,8 @@ describe('role constraints integration', () => {
 
     const visitorEffective = resolveEffective({ self: aid, peerKey, role: 'visitor' });
     expect(visitorEffective.permissionMode).toBe('readonly');
-    expect(visitorEffective.baseagents?.claude?.model).toBe('claude-haiku-4-5-20251001');
-    expect(visitorEffective.dispatch).toBe('mention');
+    expect(visitorEffective.baseagents?.claude?.model).toBe('claude-opus-4-8');
+    expect(visitorEffective.dispatch).toBe('broadcast');
 
     const ownerEffective = resolveEffective({ self: aid, peerKey, role: 'owner' });
     expect(ownerEffective.permissionMode).toBe('bypass');

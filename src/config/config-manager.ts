@@ -16,6 +16,7 @@ import path from 'path';
 import {
   resolvePaths,
   agentConfig as agentConfigPath,
+  agentContactConfig,
   agentRelationConfig,
   agentDir,
   agentRelationsDir,
@@ -53,6 +54,7 @@ export enum ConfigTarget {
   Defaults = 'defaults',                // agents/defaults.json
   Agent = 'agent',                      // agents/{aid}/config.json
   Relation = 'relation',                // agents/{aid}/relations/{peerKey}/config.json
+  Contact = 'contact',                  // agents/{aid}/contact.json
 }
 
 export interface Selector {
@@ -66,6 +68,7 @@ const TARGET_SCHEMA: Record<ConfigTarget, LogicalSchemaName> = {
   [ConfigTarget.Defaults]: 'defaults',
   [ConfigTarget.Agent]: 'agent-config',
   [ConfigTarget.Relation]: 'relation-config',
+  [ConfigTarget.Contact]: 'contact-book',
 };
 
 export class ConfigError extends Error {
@@ -125,6 +128,9 @@ function targetPath(target: ConfigTarget, sel?: Selector): string {
     case ConfigTarget.Relation:
       requirePeer(sel, target);
       return agentRelationConfig(sel!.self!, sel!.peerKey!);
+    case ConfigTarget.Contact:
+      requireSelf(sel, target);
+      return agentContactConfig(sel!.self!);
   }
 }
 
@@ -215,6 +221,9 @@ function groupFor(target: ConfigTarget, sel?: Selector): string {
   }
   if (target === ConfigTarget.Relation) {
     return 'relation-prefs';
+  }
+  if (sel?.self && target === ConfigTarget.Contact) {
+    return `contact:${sel.self}`;
   }
   return 'config';
 }

@@ -52,11 +52,11 @@ describe('Role Configuration', () => {
       expect(getFieldPermission('none', 'permissionMode')).toBeNull();
     });
 
-    it('gets nested field permission', () => {
-      const perm = getFieldPermission('owner', 'baseagents.claude.model');
-      expect(perm?.default).toBe('claude-opus-4-8');
-      expect(perm?.allowOverride).toBe(true);
-      expect(perm?.allowedModels).toContain('*');
+    it('does not define role-level model permissions', () => {
+      expect(getFieldPermission('owner', 'baseagents.claude.model')).toBeNull();
+      expect(getFieldPermission('admin', 'baseagents.claude.model')).toBeNull();
+      expect(getFieldPermission('member', 'baseagents.claude.model')).toBeNull();
+      expect(getFieldPermission('visitor', 'baseagents.claude.model')).toBeNull();
     });
 
     it('returns null for unknown field or role', () => {
@@ -65,30 +65,19 @@ describe('Role Configuration', () => {
     });
   });
 
-  describe('Model Whitelist', () => {
-    it('keeps builtin model allowlists', () => {
-      expect(getFieldPermission('owner', 'baseagents.claude.model')?.allowedModels).toContain('*');
-      expect(getFieldPermission('admin', 'baseagents.claude.model')?.allowedModels).toEqual([
-        'claude-opus-*',
-        'claude-sonnet-*',
-        'claude-haiku-*',
-      ]);
-      expect(getFieldPermission('member', 'baseagents.claude.model')?.allowedModels).toEqual([
-        'claude-sonnet-*',
-        'claude-haiku-*',
-      ]);
-      expect(getFieldPermission('visitor', 'baseagents.claude.model')?.allowedModels).toEqual(['claude-haiku-*']);
+  describe('Behavior Fields', () => {
+    it('defines only permissionMode for builtin roles', () => {
+      for (const role of ['owner', 'admin', 'member', 'visitor']) {
+        expect(Object.keys(getRoleDefinition(role)?.permissions || {})).toEqual(['permissionMode']);
+      }
     });
   });
 
   describe('Override Permissions', () => {
-    it('keeps builtin field override policy', () => {
-      expect(getFieldPermission('owner', 'chatmode')?.allowOverride).toBe(true);
+    it('keeps permission mode locked and leaves other fields unconfigured', () => {
       expect(getFieldPermission('owner', 'permissionMode')?.allowOverride).toBe(false);
-      expect(getFieldPermission('visitor', 'chatmode')?.allowOverride).toBe(false);
-      expect(getFieldPermission('visitor', 'baseagents.claude.model')?.allowOverride).toBe(false);
-      expect(getFieldPermission('member', 'chatmode')?.allowOverride).toBe(true);
-      expect(getFieldPermission('member', 'dispatch')?.allowOverride).toBe(false);
+      expect(getFieldPermission('visitor', 'chatmode')).toBeNull();
+      expect(getFieldPermission('member', 'dispatch')).toBeNull();
     });
   });
 

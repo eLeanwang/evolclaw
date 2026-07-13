@@ -7,7 +7,8 @@ import { ConfigTarget, read, write } from '../../src/config/config-manager.js';
 import { formatPeerKey } from '../../src/core/relation/peer-identity.js';
 import { _resetRoot } from '../../src/paths.js';
 import { _resetSchemaCache } from '../../src/config/schema-registry.js';
-import type { ChannelAdapter, InboundMessage, ReplyContext, OutboundEnvelope, OutboundPayload } from '../../src/types.js';
+import { clearPendingDingtalkContactBinds, registerPendingDingtalkContactBind } from '../../src/channels/dingtalk.js';
+import type { AgentConfig, ChannelAdapter, InboundMessage, ReplyContext, OutboundEnvelope, OutboundPayload } from '../../src/types.js';
 
 /**
  * 命令回显改走 adapter.send 统一出站入口的回归测试
@@ -32,6 +33,7 @@ interface BridgeHarness {
     getSubMenuItems: ReturnType<typeof vi.fn>;
   };
   adapter: ChannelAdapter;
+  eventBus: { publish: ReturnType<typeof vi.fn>; subscribe: ReturnType<typeof vi.fn> };
   sendReply: ReturnType<typeof vi.fn>;
   triggerInbound: (msg: InboundMessage) => Promise<void>;
 }
@@ -42,7 +44,15 @@ const oldHome = process.env.EVOLCLAW_HOME;
 let tmpRoot: string;
 
 /** 构造一个最小的 MessageBridge harness，捕获 adapter.send / sendReply 调用 */
-function makeBridge(opts: { adapterSend?: ReturnType<typeof vi.fn> | undefined } = {}): BridgeHarness {
+function makeBridge(opts: {
+  adapterSend?: ReturnType<typeof vi.fn> | undefined;
+  channelName?: string;
+  channelKey?: string;
+  channelType?: string;
+} = {}): BridgeHarness {
+  const channelName = opts.channelName ?? 'test-instance';
+  const channelKey = opts.channelKey ?? channelName;
+  const channelType = opts.channelType ?? 'test-type';
   const cmdHandler = {
     isCommand: vi.fn((s: string) => s.startsWith('/')),
     handle: vi.fn(),
@@ -55,7 +65,8 @@ function makeBridge(opts: { adapterSend?: ReturnType<typeof vi.fn> | undefined }
   };
 
   const adapter: ChannelAdapter = {
-    channelName: 'test-instance',
+    channelName,
+    channelKey,
     sendText: vi.fn().mockResolvedValue(undefined),
     ...(opts.adapterSend !== undefined ? { send: opts.adapterSend } : {}),
   };
@@ -95,13 +106,14 @@ function makeBridge(opts: { adapterSend?: ReturnType<typeof vi.fn> | undefined }
     (handler) => { registeredHandler = handler; },
     sendReply,
     adapter,
-    'test-type'
+    channelType
   );
 
   return {
     bridge,
     cmdHandler,
     adapter,
+    eventBus,
     sendReply,
     triggerInbound: async (msg) => { if (registeredHandler) await registeredHandler(msg); },
   };
@@ -143,10 +155,12 @@ describe('MessageBridge — 命令回显走 adapter.send', () => {
     write(ConfigTarget.Relation, {
       roles: { assigned: 'member' },
     }, { self: BRIDGE_AID, peerKey: formatPeerKey('test-type', BRIDGE_PEER) });
+    clearPendingDingtalkContactBinds();
     vi.clearAllMocks();
   });
 
   afterEach(() => {
+    clearPendingDingtalkContactBinds();
     fs.rmSync(tmpRoot, { recursive: true, force: true });
     if (oldHome) process.env.EVOLCLAW_HOME = oldHome;
     else delete process.env.EVOLCLAW_HOME;
@@ -241,6 +255,56 @@ describe('MessageBridge — 命令回显走 adapter.send', () => {
     // null 视为已处理（return true）但不发任何消息
     expect(sendMock).not.toHaveBeenCalled();
     expect(h.sendReply).not.toHaveBeenCalled();
+  });
+
+  it('does not auto-bind the first inbound channel peer as owner', async () => {
+    write(ConfigTarget.Agent, {
+      aid: BRIDGE_AID,
+      owners: [],
+      channels: [],
+    }, { self: BRIDGE_AID });
+
+    const sendMock = vi.fn().mockResolvedValue(undefined);
+    const h = makeBridge({ adapterSend: sendMock });
+    h.cmdHandler.handle.mockResolvedValue('ok');
+
+    await h.triggerInbound(makeInbound({ content: '/help', peerId: BRIDGE_PEER }));
+
+    const saved = read<AgentConfig>(ConfigTarget.Agent, { self: BRIDGE_AID });
+    expect(saved?.owners ?? []).toEqual([]);
+    expect(h.eventBus.publish).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'channel:owner-bound' }));
+  });
+
+  it('matches DingTalk contact bind by full adapter channelKey after channel config is committed', async () => {
+    const channelKey = `dingtalk#${BRIDGE_AID}#main`;
+    registerPendingDingtalkContactBind({
+      selfAid: BRIDGE_AID,
+      channelName: channelKey,
+      primaryId: 'owner.aid.pub',
+      code: '123456',
+    });
+
+    const h = makeBridge({
+      channelName: 'main',
+      channelKey,
+      channelType: 'dingtalk',
+    });
+
+    await h.triggerInbound(makeInbound({
+      channel: 'main',
+      channelType: 'dingtalk',
+      peerId: 'staff-001',
+      content: ' 123456 ',
+    }));
+
+    const saved = read<{ contacts?: Record<string, { aliases?: string[] }> }>(ConfigTarget.Contact, { self: BRIDGE_AID });
+    expect(saved?.contacts?.['owner.aid.pub']?.aliases).toEqual(['dingtalk:staff-001']);
+    expect(h.sendReply).toHaveBeenCalledWith(
+      'chat-1',
+      expect.stringContaining('钉钉身份绑定成功'),
+      undefined,
+    );
+    expect(h.cmdHandler.handle).not.toHaveBeenCalled();
   });
 });
 
