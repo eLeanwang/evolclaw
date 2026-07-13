@@ -2,7 +2,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { parseReturn } from '../../src/cli/handoff-command.js';
+import { parseList, parseReturn, parseTrace } from '../../src/cli/handoff-command.js';
 import { HandoffRuntime } from '../../src/core/handoff/runtime.js';
 import { HandoffStore } from '../../src/core/handoff/store.js';
 
@@ -37,6 +37,19 @@ describe('handoff v2 CLI', () => {
     expect(parseReturn(['h-001', '--text-from-file', filePath])).toEqual({
       handoffId: 'h-001', content: 'line one\nline two\n',
     });
+  });
+
+  it('parses bounded list and trace query options', () => {
+    expect(parseList([
+      '--state', 'origin_queued', '--session', 'meta-origin', '--limit', '25', '--agent', 'self.agentid.pub',
+    ])).toEqual({
+      state: 'origin_queued', sessionId: 'meta-origin', limit: 25, agent: 'self.agentid.pub',
+    });
+    expect(parseTrace(['h-001', '--limit', '10', '--agent', 'self.agentid.pub'])).toEqual({
+      handoffId: 'h-001', limit: 10, agent: 'self.agentid.pub',
+    });
+    expect(() => parseList(['--state', 'invalid'])).toThrow('INVALID_HANDOFF_STATE');
+    expect(() => parseTrace(['h-001', '--limit', '501'])).toThrow('INVALID_HANDOFF_LIMIT');
   });
 
   it('rejects return=none in phase 1', async () => {

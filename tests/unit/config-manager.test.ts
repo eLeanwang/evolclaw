@@ -213,6 +213,40 @@ describe('resolveEffective (v3 覆盖链: defaults → agent → relation)', () 
     expect(resolveEffective({ self: AID, peerKey: PEER }).baseagents?.claude?.model).toBe('relation-model');
   });
 
+  it('merges session_renew across defaults, agent, and relation', () => {
+    write(ConfigTarget.Defaults, {
+      $schema_version: 1,
+      config: { auxiliaryModel: 'deepseek-v4-flash', debounceMs: 3000 },
+      session_renew: { enabled: false, after_hours: 24, effort: 'low' },
+    }, {});
+
+    write(ConfigTarget.Agent, {
+      $schema_version: 3,
+      aid: AID,
+      channels: [],
+      config: { auxiliaryModel: 'claude-haiku' },
+      session_renew: { enabled: true },
+    }, { self: AID });
+
+    write(ConfigTarget.Relation, {
+      $schema_version: 2,
+      config: { debounceMs: 1000 },
+      session_renew: { after_hours: 72, fallback_action: 'continue' },
+    }, { self: AID, peerKey: PEER });
+
+    expect(resolveEffective({ self: AID, peerKey: PEER }).session_renew).toEqual({
+      enabled: true,
+      after_hours: 72,
+      effort: 'low',
+      fallback_action: 'continue',
+    });
+    expect(resolveEffective({ self: AID, peerKey: PEER }).config).toEqual({
+      auxiliaryModel: 'claude-haiku',
+      debounceMs: 1000,
+    });
+    expect(routeFieldPath('session_renew.enabled', 'defaults').target).toBe(ConfigTarget.Defaults);
+  });
+
   it('roles 块保留在 effective（用于角色寻址）', () => {
     write(ConfigTarget.Agent, {
       $schema_version: 2,
@@ -282,11 +316,17 @@ describe('config field policy', () => {
     'baseagents.gemini.useVertex',
     'chatmode.private',
     'response_modes.default_private',
+    'responseMode',
+    'config.auxiliaryModel',
     'flush_delay',
     'debounce',
     'dispatch',
     'show_activities',
     'proactive.pre_tool_1stmsgchk',
+    'session_renew.enabled',
+    'session_renew.after_hours',
+    'session_renew.effort',
+    'session_renew.fallback_action',
     'render.private',
     'sessionManifests.default',
     'enable_rich_content',
@@ -334,6 +374,11 @@ describe('config field policy', () => {
     expect(parseConfigFieldValue('active_baseagent', 'unknown').ok).toBe(false);
     expect(parseConfigFieldValue('sessionManifests.main', 'custom.json')).toEqual({ ok: true, value: 'custom.json' });
     expect(parseConfigFieldValue('sessionManifests.main', '../../secret.json').ok).toBe(false);
+    expect(parseConfigFieldValue('session_renew.enabled', 'true')).toEqual({ ok: true, value: true });
+    expect(parseConfigFieldValue('session_renew.after_hours', '24')).toEqual({ ok: true, value: 24 });
+    expect(parseConfigFieldValue('session_renew.after_hours', '0').ok).toBe(false);
+    expect(parseConfigFieldValue('session_renew.fallback_action', 'continue')).toEqual({ ok: true, value: 'continue' });
+    expect(parseConfigFieldValue('session_renew.fallback_action', 'ask').ok).toBe(false);
   });
 });
 

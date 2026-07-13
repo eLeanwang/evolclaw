@@ -185,6 +185,25 @@ describe('MessageBridge — 命令回显走 adapter.send', () => {
     expect(h.sendReply).not.toHaveBeenCalled();
   });
 
+  it('drops transient protocol messages before session creation or handoff binding', async () => {
+    const h = makeBridge();
+    const getOrCreateSession = vi.fn();
+    const bindReply = vi.fn();
+    (h.bridge as any).sessionManager.getOrCreateSession = getOrCreateSession;
+    h.bridge.setHandoffRuntime({ bindReply } as any);
+
+    await h.triggerInbound(makeInbound({
+      content: '[status] processing',
+      msgType: 'custom',
+      payloadType: 'status.progress',
+      messageId: 'transient-status-1',
+    }));
+
+    expect(getOrCreateSession).not.toHaveBeenCalled();
+    expect(bindReply).not.toHaveBeenCalled();
+    expect(h.cmdHandler.handle).not.toHaveBeenCalled();
+  });
+
   it('cmdHandler 返回 { kind: command.result } → 透传', async () => {
     const sendMock = vi.fn().mockResolvedValue(undefined);
     const h = makeBridge({ adapterSend: sendMock });
@@ -442,7 +461,11 @@ describe('MessageBridge — menu 协议', () => {
     const h = makeBridge({ adapterSend: sendMock });
     h.cmdHandler.execMenuAction.mockResolvedValue({ data: { action: 'stop', success: true } });
 
-    await h.triggerInbound(makeInbound({ content: JSON.stringify({ type: 'menu.action', id: 'a1', name: 'session', action: 'stop' }) }));
+    await h.triggerInbound(makeInbound({
+      content: JSON.stringify({ type: 'menu.action', id: 'a1', name: 'session', action: 'stop' }),
+      msgType: 'custom',
+      payloadType: 'menu.action',
+    }));
 
     expect(h.cmdHandler.execMenuAction).toHaveBeenCalledWith('/session', 'stop', undefined, 'test-instance', 'chat-1', BRIDGE_PEER, MEMBER_IDENTITY, 'private', 'a1', false);
     expect(parseCustomResponse(sendMock)).toEqual({
