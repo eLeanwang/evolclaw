@@ -61,10 +61,25 @@
    - 入方向：`MessageBridge` 构造完 `Message` 后立即写入
    - 出方向：`MessageProcessor` 完成处理后写入（包含 durationMs）
 5. **不阻塞主流程**：写入失败只 log warning，不影响消息处理
+6. **只保存消息历史**：`menu.*`、`activity*`、`status*`、`event(s)*`、`task.status*`、`thought`、`handoff_state/result` 等协议与运行状态仅不写入 `messages.jsonl`，协议处理、传输和可观测性不受影响
+7. **handoff 正文仍是消息**：跨会话请求、对端回复和回流正文按普通消息保存；只允许附带 v2 `handoff_trace` 关联信息，不保存旧 `handoff` metadata 或状态事件
+
+## 协议与运行状态的观测位置
+
+| 类型 | 处理/观测位置 | 持久化范围 |
+|------|---------------|------------|
+| `menu.*` | `logs/channel-in-*.log`、`logs/channel-out-*.log`、`logs/evolclaw-*.log` | 原始请求、响应和执行决策；不进入会话正文 |
+| `status.*` / `task.status` | `logs/channel-out-*.log`、`logs/evolclaw-*.log`、AUN `notify.task_status` trace、AID 运行统计 | 任务状态实时传输与短期运行日志 |
+| `activity.*` | `logs/channel-out-*.log`；runner 事件另见 `logs/events-*.log` | 工具调用、工具结果和进度事件 |
+| `thought` | AUN `thought.put`、`logs/events-*.log` 的 `message:thought-put`、`logs/evolclaw-*.log`、内存统计 | 实时 thought 与事件审计，不进入会话正文 |
+| 入站 `event(s).*` | `logs/evolclaw-*.log` 的 AUN dispatch/drop 决策；开启 AUN trace 时另见 `logs/aun-*.log` | 协议接收与过滤决策 |
+| handoff 状态/结果 | `data/handoff/<aid>/handoffs/<handoff_id>/handoff.json`、`data/handoff/<aid>/history.jsonl`，通过 `ec handoff status/list/trace` 查询 | durable 权威状态与 append-only 审计历史 |
+
+`logs/channel-in/out` 默认按小时轮转并保留 24 小时；`events` 日志由 `EVENT_LOG=true` 启用，daemon 默认开启。上述日志是协议观测面，`messages.jsonl` 是会话正文面，两者不可混用。
 
 ## 实现位置
 
-- 类型定义：`src/core/session/message-log.ts`
+- 类型定义与统一过滤：`src/core/message/message-log.ts`
 - 写入调用点：
   - 入方向：`src/core/message/message-bridge.ts`（Message 构造后）
-  - 出方向：`src/core/message/message-processor.ts`（处理完成后）
+  - 出方向：`src/core/message/response-engine.ts` 与各渠道发送实现

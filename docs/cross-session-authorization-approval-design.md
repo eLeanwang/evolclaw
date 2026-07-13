@@ -1,8 +1,10 @@
 # 跨会话授权审批方案
 
-> 状态：设计草案
+> 状态：已实现（2026-07-13）
 > 日期：2026-07-10
-> 范围：agent 在会话对端权限不足时，通过跨会话 handoff 向 agent owner 发起临时授权审批
+> 范围：特定权限模式产生真实授权 challenge 后，按审批策略在本会话审批或通过跨会话 handoff 投递给 agent owner
+>
+> 实现落点：`src/core/permission.ts`（显式 `AuthorizationChallenge`、`ApprovalRoute` planner、"临时授权申请" action_card、TTL）、`src/core/message/response-engine.ts`（`approvalRouting` 权威上下文）、`src/core/handoff/runtime.ts`（`request_to_target`/`response_to_origin`）。测试：`tests/unit/cross-session-permission.test.ts`。
 > 关联文档：
 > - `docs/msg-send-cross-session-handoff-append-only-design.md`
 > - `docs/aun-message-log-msgtype-expansion-design.md`
@@ -11,14 +13,14 @@
 
 当前权限请求主要发生在同一会话内：agent 调用工具时被权限系统拦截，系统向当前会话对端发送权限请求卡片或文本，等待对端通过按钮或 `/perm` 命令回答。
 
-但有些任务由非 owner 对端发起。对端没有足够权限，任务本身又可能是合理的，例如：
+但有些会话的有效权限模式会要求人工审批，审批主体又不一定是当前会话对端。例如 admin 的内置权限模式为 `request`，工具调用产生 challenge 后，审批策略可能要求由 agent owner 决定。
 
 - 读取或修改 owner 允许范围内的工作区文件。
 - 发送由 agent 生成的文件。
 - 调用某个需要 owner 临时放行的工具。
 - 在只读或受限会话中执行一次受控写入。
 
-这时不能把 grant 自动继承到其它会话，也不能让 agent 直接获得 owner 身份。正确模型是：**通过跨会话 handoff 向 agent owner 投递授权审批卡片，owner 的审批结果回流到原始受限会话，原会话再携带 grant 重试原动作**。
+这时不能先向请求者展示审批卡片、再判断是否转发，也不能把 grant 自动继承到其它会话。正确模型是：**只创建一个 AuthorizationRequest，先依据 challenge 的 `approver_policy` 解析审批主体，再选择本会话或跨会话投递；审批结果始终解除原始 challenge**。
 
 ## 2. 设计目标
 
@@ -29,6 +31,7 @@
 5. **append-only 可审计**：跨会话投递、消费、审批、回流全部追加到相关 `messages.jsonl`，不修改历史行。
 6. **可中断、可超时、可幂等**：原始任务取消后审批请求失效；审批卡片超时后不能继续签发 grant；重复点击不重复生效。
 7. **与 msgType 扩展兼容**：授权卡片使用 AUN `action_card`，日志语义遵循 `docs/aun-message-log-msgtype-expansion-design.md`。
+8. **审批触发与投递解耦**：`permissionMode` 决定是否产生 challenge，`approver_policy` 决定谁审批，审批主体是否位于当前会话决定如何投递。
 
 ## 3. 非目标
 
@@ -90,22 +93,49 @@ owner 点击批准不等于直接放行。系统必须再次校验：
 
 校验通过后才签发 grant。
 
-## 5. Owner 选择与投递渠道
+### 4.4 Challenge 驱动审批路由
 
-MVP 固定：
+跨会话审批不根据 `owner/admin/member/visitor` 等角色名称直接分流。完整链路是：
 
 ```text
-approver_policy = agent_owner
-approval_channel = AUN private
+role / relation config
+  -> effectivePermissionMode
+  -> runner/PDP 产生 AuthorizationChallenge
+  -> ApproverResolver 解析审批主体
+  -> ApprovalDeliveryPlanner 选择 local / handoff / unavailable
 ```
 
-owner resolver 建议：
+约束如下：
 
-1. 如果配置了 `approval.ownerAid`，优先使用该 AUN AID。
-2. 否则从 agent owners 中筛选可通过 AUN 私聊触达的 owner。
-3. 默认选择排序后的第一个 AUN owner。
-4. 发送失败时可尝试下一个 AUN owner。
-5. 全部不可用时，原请求返回 `no_approver_available`。
+- role 只参与权限模式和访问策略解析，不直接决定审批卡片投递位置。
+- 只有真实工具审批回调可以创建 challenge，普通模型文本或 handoff payload 不能自报 challenge。
+- 当前私聊对端恰好是合法审批主体时，使用本会话卡片。
+- 审批主体不在当前私聊时，通过 handoff 投递；群聊中的 owner 也统一投递到 owner 的 AUN 私聊。
+- 系统只创建一个 AuthorizationRequest，不存在先本地审批再转发的第二层审批。
+
+## 5. 审批策略与投递路由
+
+### 5.1 ApproverPolicy
+
+MVP 支持：
+
+```text
+requester   -> 当前私聊对端审批
+agent_owner -> agent 权威配置 owners 中的 owner 审批
+```
+
+只要 runtime 能解析 owning agent，真实工具 challenge 默认使用 `agent_owner`。完全没有 owning agent/runtime 路由上下文的独立 `PermissionGateway` 调用，兼容回退为 `requester`。
+
+一旦策略为 `agent_owner`，未配置 owner 或 owner AUN 通道不可达时必须返回 `unavailable`，不得降级为请求者自审。
+
+### 5.2 ApproverResolver
+
+`agent_owner` 的 owner 列表只能由 runtime 从 agent 权威配置注入，不能信任消息 payload。MVP：
+
+1. 从 `owners` 中选择首个可作为 AUN AID 的 owner。
+2. 使用当前 agent 的 AUN interaction adapter 投递私聊卡片。
+3. 没有合法 owner 时返回 `no_agent_owner_configured`。
+4. owner 通道不可达时返回 `owner_approval_channel_unavailable`。
 
 第一版不广播给所有 owners。广播会引入重复审批、竞态、生效顺序和撤销语义。后续可以扩展为：
 
@@ -113,6 +143,32 @@ owner resolver 建议：
 - `quorum_m_of_n`
 - `security_owner_required`
 - `delegated_approver_agent`
+
+### 5.3 ApprovalDeliveryPlanner
+
+```text
+challenge.grantable = false                 -> unavailable
+approver_policy = requester                 -> local
+agent_owner + 当前私聊对端属于 owners       -> local
+agent_owner + owner 可通过 AUN private 触达 -> handoff
+其它情况                                    -> unavailable
+```
+
+这里比较的是审批人 identity 与当前会话对端 identity，而不是角色名称。admin 产生 owner challenge 时会投递给 owner；owner 在自己的私聊中产生同类 challenge 时留在当前会话。
+
+### 5.4 与 permissionMode 的关系
+
+`permissionMode` 只决定 runner 是否产生 challenge：
+
+| permissionMode | 常规行为 | 产生 challenge 后 |
+|---|---|---|
+| `request` | SDK/PDP 请求人工确认 | 按 `approver_policy` 路由 |
+| `bypass` | 普通操作直通；强制危险规则仍可挑战 | 按 `approver_policy` 路由 |
+| `auto` | 自动决策 | 仅独立规则产生 challenge 时路由 |
+| `readonly` | 越界操作硬拒绝 | 默认不产生 challenge |
+| `noask` | 拒绝 | 不产生 challenge |
+
+因此 admin 的 `permissionMode=request` 会产生 challenge，并在 `agent_owner` 策略下直接投递 owner；owner 的 `permissionMode=bypass` 仅在强制危险规则产生 challenge 时进入审批。
 
 ## 6. 端到端流程
 
@@ -185,12 +241,20 @@ owner 会话自身被打断不取消申请。owner 卡片是系统交互入口�
 - `PermissionGateway.cancelAll(sessionId)` 可取消某会话 pending 请求。
 - `InteractionRouter` 支持 timeout，但当前权限请求没有传业务 timeout。
 
-跨会话审批应复用这些抽象，但需要补齐两个点：
+本会话审批和跨会话审批共用同一个 AuthorizationRequest，只是 delivery route 不同。`PermissionGateway.requestPermission()` 表示 runner/PDP 已产生真实 challenge，随后统一执行：
+
+```text
+AuthorizationChallenge
+  -> planApprovalRoute()
+  -> local | handoff | unavailable
+```
+
+跨会话路径在复用现有抽象的基础上补齐两个点：
 
 1. `task:interrupted` 时应调用授权请求管理器取消原始 session 的 pending cross-session auth request。
 2. cross-session auth request 必须有 `approval_request_ttl`，不能无限等待 owner。
 
-单会话 `/perm always` 表示始终允许某工具；跨会话 MVP 不建议提供 `always`。跨会话只签发短期、窄范围、绑定上下文的临时 grant。
+单会话 `/perm always` 表示始终允许某工具；跨会话不提供 `always`，只提供“批准本次”和严格绑定原 session、工具、完整输入指纹的“本会话 30 分钟”。
 
 ## 8. 复用 handoff 的设计
 
@@ -215,7 +279,44 @@ owner 会话自身被打断不取消申请。owner 卡片是系统交互入口�
 
 ### 9.1 AuthorizationChallenge
 
-PDP 返回的可申请 challenge 示例：
+Runtime 显式模型：
+
+```ts
+type ApproverPolicy = 'requester' | 'agent_owner';
+
+interface AuthorizationChallenge {
+  id: string;
+  sessionId: string;
+  toolName: string;
+  toolInput: Record<string, unknown>;
+  summary: string;
+  reason?: string;
+  grantable: boolean;
+  approverPolicy: ApproverPolicy;
+  createdAt: number;
+}
+
+type ApprovalRoute =
+  | { kind: 'local'; approverId: string }
+  | { kind: 'handoff'; approverId: string; channel: 'aun'; adapter: ChannelAdapter }
+  | { kind: 'unavailable'; reason: string };
+
+interface ApprovalRoutingContext {
+  approverPolicy: ApproverPolicy;
+  owners: string[];
+  ownerAdapter?: ChannelAdapter;
+  selfAid?: string;
+  originSessionId: string;
+  originMessageId?: string;
+  originChannel?: string;
+  originChannelId?: string;
+  originPeerId?: string;
+  originRole?: string;
+  approvalTtlMs?: number;
+}
+```
+
+PDP 协议中的可申请 challenge 示例：
 
 ```jsonc
 {
@@ -305,9 +406,10 @@ PDP 返回的可申请 challenge 示例：
         "factors": ["write_access", "non_owner_origin"]
       },
       "constraints_options": {
-        "ttl_seconds": [600, 1800, 3600],
-        "max_uses": [1, 3, 10],
-        "bindable": ["session", "channelKey", "agentInstance"]
+        "grants": [
+          { "action": "approve_once", "max_uses": 1, "binding": ["challenge"] },
+          { "action": "approve_session_30m", "ttl_seconds": 1800, "binding": ["session", "tool", "input"] }
+        ]
       }
     }
   }
@@ -320,12 +422,19 @@ PDP 返回的可申请 challenge 示例：
 {
   "type": "action_card",
   "title": "临时授权申请",
-  "text": "Requester 请求 agent 执行受限能力：workspace.file.write\n范围：/project/src/**\n原因：需要修改源文件以完成当前任务\n风险：medium",
+  "format": "markdown",
+  "text": "**申请信息**\n\n- **申请主体**：`requester.agentid.pub` · role `admin` · via `aun`\n\n**请求执行**\n\n- **申请能力**：`tool:Write`\n- **申请原因**：需要修改源文件以完成当前任务\n\n**目标 / 参数**\n\n```text\n/project/src/file.ts\n```\n\n**风险与有效期**\n\n- **风险：中** · 请核对目标和参数",
   "actions": [
     {
-      "label": "批准一次",
+      "label": "批准本次",
       "value": "approve_once",
       "style": "primary",
+      "behavior": "reply"
+    },
+    {
+      "label": "本会话 30 分钟",
+      "value": "approve_session_30m",
+      "style": "default",
       "behavior": "reply"
     },
     {
@@ -339,11 +448,17 @@ PDP 返回的可申请 challenge 示例：
 }
 ```
 
-MVP 只提供 `approve_once` 和 `deny`。后续可增加：
+当前实现提供：
+
+- `approve_once`：只解除当前 pending challenge，最多执行一次。
+- `approve_session_30m`：进程内临时授权 30 分钟，严格绑定原 session、工具名和完整输入指纹；参数变化、跨 session 或进程重启后失效。
+- `deny`：拒绝当前 challenge。
+
+后续在通用 Grant Service 落地后可增加：
 
 - `adjust_scope`
 - `approve_10m`
-- `approve_30m`
+- 可配置 TTL / maxUses / binding
 - `approve_once_readonly`
 
 ### 9.4 审批决定事件
@@ -511,10 +626,11 @@ MVP 建议默认：
 
 ```text
 approval_request_ttl = 20m
-grant_ttl_options = [10m, 30m, 60m]
-default_grant_ttl = 30m
-default_max_uses = 1
+approve_once = 当前 challenge，最多 1 次
+approve_session_30m = 30m，绑定 session + tool + 完整 input 指纹
 ```
+
+当前 30 分钟 grant 保存在 `PermissionGateway` 内存中，不跨 daemon 重启持久化；参数变化、跨 session 或到期后必须重新审批。通用 TTL、maxUses 和 binding 配置留给后续 Grant Service。
 
 超时实现要求：
 
@@ -667,7 +783,10 @@ owner 不可以：
 
 必须覆盖：
 
-- 非 owner 会话触发 grantable challenge，系统向 AUN owner 发送授权卡片。
+- admin/member 等会话触发 `agent_owner` challenge，系统向 AUN owner 发送授权卡片。
+- 当前私聊对端就是 owner 时使用本会话审批；群聊中的 owner 仍投递到 owner 私聊。
+- `requester` policy 不受角色名称影响，始终在当前会话审批。
+- owner 未配置或不可达时明确拒绝，不回退为请求者自审。
 - 命中禁止清单时不发送卡片。
 - owner 批准后签发 grant，回流原会话，原工具重试成功。
 - owner 拒绝后回流拒绝，原工具不执行。
@@ -675,6 +794,7 @@ owner 不可以：
 - 审批超时后，owner 晚到点击显示已过期，不签发 grant。
 - owner 不是本次 approver 时点击被拒绝。
 - 重复点击同一卡片只生效一次。
+- 30 分钟 grant 只命中同 session、同工具、同输入；跨 session、参数变化和过期后重新审批。
 - daemon 重启后，可通过持久 auth request 或日志恢复 pending/expired 判断。
 - `messages.jsonl` 中授权卡片、decision、result 均为 append-only。
 - watch/stats/prompt 不把 `handoff_state`、授权卡片和 `action_card_reply` 当普通对话。
@@ -704,11 +824,13 @@ MVP 选择单 owner，避免竞态。后续如做 fanout，需要增加 request 
 
 ```text
 AuthorizationChallenge
-  -> AUN owner action_card via handoff request_to_target
+  -> ApproverResolver
+  -> ApprovalDeliveryPlanner(local | handoff | unavailable)
+  -> AUN owner action_card via handoff request_to_target（handoff 路由）
   -> action_card_reply system callback
   -> Grant Service issue/deny
   -> handoff response_to_origin
   -> origin session retries with grant
 ```
 
-这条链路不会自动继承权限，也不会把 owner 身份交给 agent。handoff 只负责跨会话传递授权卡片和审批结果；Grant Service 负责真正的临时能力；PDP/PEP 负责每次执行前的最终判断。
+这条链路不会自动继承权限，也不会把 owner 身份交给 agent。`permissionMode` 负责产生 challenge，`approver_policy` 负责确定审批主体，delivery planner 负责选择投递位置。handoff 只负责跨会话传递授权卡片和审批结果；当前最小 grant 严格绑定原 session、工具和输入，后续由通用 Grant Service 承担完整生命周期。

@@ -1,8 +1,10 @@
 # AUN messages.jsonl msgType 语义修正与内容类型扩展方案
 
-> 状态：设计草案
+> 状态：已实现（2026-07-13）
 > 日期：2026-07-10
 > 范围：AUN 入站/出站消息日志、`ec msg send`、daemon 代发、handoff、watch/stats/prompt 消费方
+>
+> 实现落点：`src/core/message/message-log.ts`（`MessageLogType` union + `classifyAunPayloadForLog()`）、`src/aun/msg/p2p.ts`（`appendMsgSendOutboundLog` 接入分类）。测试：`tests/unit/aun-payload-log.test.ts`、`tests/unit/handoff-v2-message-log.test.ts` 通过。commit `68de544`。
 
 ## 1. 背景
 

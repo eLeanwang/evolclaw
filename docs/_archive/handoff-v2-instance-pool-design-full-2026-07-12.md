@@ -1,6 +1,10 @@
 # Handoff v2：实例池、逻辑调度批次与跨会话回流设计
 
-> 状态：完整设计归档稿；当前实施基线见 `docs/handoff-v2-instance-pool-design.md`
+> 状态：历史完整设计归档稿，不作为一期或二期实施基线
+>
+> 当前一期基线：`docs/handoff-v2-instance-pool-design.md`
+>
+> 当前二期基线：`docs/handoff-v2-phase-2-design.md`
 >
 > 日期：2026-07-12
 >
