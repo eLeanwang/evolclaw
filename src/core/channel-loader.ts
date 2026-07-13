@@ -280,16 +280,36 @@ export interface ReloadHooksDeps {
   /** startChannel 首连成功后回调，用于同步连接状态/事件。 */
   onChannelConnected?: (inst: ChannelInstance) => void | Promise<void>;
   messageQueue?: { isChannelProcessing(channelName: string): boolean };
+  handoffRuntime?: {
+    pauseAgent(aid: string): void;
+    drainAgent(aid: string, timeoutMs?: number): Promise<void>;
+    recover(aids: string[]): Promise<void>;
+    resumeAgent(aid: string): void;
+  };
   drainDelayMs?: number;
   drainTimeoutMs?: number;
 }
 
 export function buildReloadHooks(deps: ReloadHooksDeps): ReloadHooks {
-  const { channelLoader, channelInstances, registerChannelInstance, unregisterChannelInstance, messageQueue, onChannelStarted, onChannelConnected } = deps;
+  const { channelLoader, channelInstances, registerChannelInstance, unregisterChannelInstance, messageQueue, handoffRuntime, onChannelStarted, onChannelConnected } = deps;
   const drainDelayMs = deps.drainDelayMs ?? 500;
   const drainTimeoutMs = deps.drainTimeoutMs ?? 30000;
 
   return {
+    async prepareHandoffReload(aid: string): Promise<void> {
+      if (!handoffRuntime) return;
+      logger.info(`[Reload] Pausing Handoff dispatcher for agent: ${aid}`);
+      handoffRuntime.pauseAgent(aid);
+      await handoffRuntime.drainAgent(aid, drainTimeoutMs);
+    },
+
+    async completeHandoffReload(aid: string): Promise<void> {
+      if (!handoffRuntime) return;
+      await handoffRuntime.recover([aid]);
+      handoffRuntime.resumeAgent(aid);
+      logger.info(`[Reload] Resumed Handoff dispatcher for agent: ${aid}`);
+    },
+
     async drainChannel(channelName: string): Promise<void> {
       logger.info(`[Reload] Draining channel: ${channelName}`);
       if (messageQueue) {

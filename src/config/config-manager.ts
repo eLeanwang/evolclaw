@@ -604,11 +604,14 @@ export function resolveEffective(sel: Selector, opts: ReadOpts = {}): EffectiveA
     baseagents: config.baseagents,
     chatmode: config.chatmode,
     response_modes: config.response_modes,
+    responseMode: config.responseMode,
+    config: config.config,
     flush_delay: config.flush_delay,
     debounce: config.debounce,
     dispatch: config.dispatch,
     show_activities: config.show_activities,
     proactive: config.proactive,
+    session_renew: config.session_renew,
     render: config.render,
     sessionManifests: config.sessionManifests,
     enable_rich_content: config.enable_rich_content,
@@ -638,6 +641,7 @@ export function resolveEffective(sel: Selector, opts: ReadOpts = {}): EffectiveA
         'debounce',
         'enable_rich_content',
         'proactive',
+        'session_renew',
         'render',
         'sessionManifests'
       ];
@@ -756,6 +760,7 @@ const EFFECTIVE_BEHAVIOR_FIELDS = [
   'dispatch',
   'show_activities',
   'proactive',
+  'session_renew',
   'render',
   'sessionManifests',
   'enable_rich_content',
@@ -785,7 +790,7 @@ export function routeFieldPath(
   const topField = fieldPath.split('.')[0];
   if (scope === 'process') return routeIn('evolclaw', ConfigTarget.Process, topField);
   if (scope === 'defaults') {
-    if (isBehaviorConfigFieldPath(fieldPath)) {
+    if (isBehaviorConfigFieldPath(fieldPath) && topField !== 'session_renew') {
       throw new ConfigError('DEFAULT_BEHAVIOR_REJECT', `--default 不支持行为字段: ${fieldPath}`);
     }
     return routeIn('defaults', ConfigTarget.Defaults, topField);

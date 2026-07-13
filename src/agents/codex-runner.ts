@@ -8,7 +8,7 @@
 
 import type { Config, InteractionRequest } from '../types.js';
 import type { AgentPlugin, AgentInstance, AgentCallbacks } from '../core/baseagent-loader.js';
-import type { AgentEvent, AgentRunnerFull, ModelSwitcher, PermissionContext, PermissionModeInfo } from './runner-types.js';
+import type { AgentEvent, AgentRunnerFull, AgentRunOverrides, ModelSwitcher, PermissionContext, PermissionModeInfo } from './runner-types.js';
 import { checkBlacklist, checkReadonly, checkDangerousCommand, isEvolclawHandoffReturnCommand, parseEvolclawSendCommand, requestDangerousCommandPermission, type PermissionGateway } from '../core/permission.js';
 import { CodexAppServerClient, type CodexServerNotification, type CodexServerRequest, type CodexThreadResponse, type CodexTurnItem } from './codex-app-server-client.js';
 import { resolveOpenaiConfig, type OpenaiResolved } from './baseagent.js';
@@ -382,16 +382,17 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
     images?: Array<{ data: string; mimeType?: string }>,
     systemPromptAppend?: string,
     sessionManager?: any,
-    modelOverride?: { model?: string; effort?: string; permissionMode?: string },
+    modelOverride?: AgentRunOverrides,
     runtimeEnv?: Record<string, string>
   ): Promise<AsyncIterable<AgentEvent>> {
-    let agentSessionId = initialAgentSessionId || this.activeSessions.get(sessionId);
+    const disableTools = modelOverride?.disableTools === true;
+    let agentSessionId = disableTools ? undefined : (initialAgentSessionId || this.activeSessions.get(sessionId));
     const callModel = modelOverride?.model || this.model;
     const callEffort = modelOverride?.effort ?? this.effort;
     // per-call 权限模式：优先 override（message-processor 解析后传入），缺省回落实例级 currentMode。
     // 写入 chatModes 供异步审批回调按 sessionKey 读取，并据此派生本次 thread 的 approvalPolicy/sandbox，
     // 不依赖共享的 this.approvalPolicy/this.sandboxMode（多会话并发互不污染）。
-    const callMode = modelOverride?.permissionMode || this.currentMode;
+    const callMode = disableTools ? 'noask' : (modelOverride?.permissionMode || this.currentMode);
     this.chatModes.set(sessionId, callMode);
     const callApprovalPolicy = this.toApprovalPolicy(callMode);
     const callSandboxMode = this.toSandboxMode(callMode);
@@ -408,7 +409,7 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
       logger.info(`[CodexRunner] Proactive mode: upgraded approvalPolicy from ${callApprovalPolicy} to ${effectiveApprovalPolicy} for session=${sessionId}`);
     }
 
-    const capabilityConfig = await this.resolveCapabilityThreadConfig(projectPath);
+    const capabilityConfig = disableTools ? {} : await this.resolveCapabilityThreadConfig(projectPath);
     const threadOptions = {
       model: callModel,
       effort: callEffort,
@@ -421,6 +422,12 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
         capabilityConfig,
       ),
       ...(systemPromptAppend ? { developerInstructions: systemPromptAppend } : {}),
+      ...(disableTools ? {
+        selectedCapabilityRoots: [],
+        dynamicTools: [],
+        environments: [],
+      } : {}),
+      ...(modelOverride?.persistSession === false ? { ephemeral: true } : {}),
     };
 
     const threadResponse = agentSessionId

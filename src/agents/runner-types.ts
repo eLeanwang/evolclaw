@@ -1,4 +1,4 @@
-import type { ChannelAdapter, ReplyContext, InteractionRequest, Message, CrossSessionApprovalContext } from '../types.js';
+import type { ChannelAdapter, ReplyContext, InteractionRequest, Message, ApprovalRoutingContext } from '../types.js';
 import type { InteractionRouter } from '../core/interaction-router.js';
 
 export const BASEAGENT_RUNNER_UNAVAILABLE = 'BASEAGENT_RUNNER_UNAVAILABLE';
@@ -40,12 +40,23 @@ export interface PermissionContext {
   chatType?: 'private' | 'group';
   selfAid?: string;
   peerKey?: string;
-  /** Optional owner-approval path for non-owner sessions. */
-  crossSessionApproval?: CrossSessionApprovalContext;
+  /** Facts required to resolve the approver and choose local vs handoff delivery. */
+  approvalRouting?: ApprovalRoutingContext;
   /** proactive 模式行为策略钩子：PreToolUse 阶段调用，返回 block 则拒绝工具调用 */
   policyHook?: (toolName: string, toolInput: Record<string, unknown>) => { block: boolean; reason?: string } | undefined;
   /** 发送交互卡片前刷新当前 renderer 队列，避免卡片早于事件消息到达 */
   flushPending?: () => Promise<void>;
+}
+
+/** Per-call overrides that must not mutate a shared runner instance. */
+export interface AgentRunOverrides {
+  model?: string;
+  effort?: string;
+  permissionMode?: string;
+  /** Internal model-only calls should remove or deny every available tool. */
+  disableTools?: boolean;
+  /** Avoid retaining one-shot internal sessions when the backend supports it. */
+  persistSession?: boolean;
 }
 
 export interface ImageData {
@@ -100,7 +111,7 @@ export interface AgentRunnerFull {
     sessionManager?: any,
     /** 本次调用的模型/强度/权限模式覆盖（按 关系>agent>全局 解析后传入；缺省用 runner 默认）。
      *  permissionMode 作为 per-call 入参传入，避免多会话共享 runner 实例时 setMode 的并发污染。 */
-    modelOverride?: { model?: string; effort?: string; permissionMode?: string },
+    modelOverride?: AgentRunOverrides,
     /** 本轮任务注入给 baseagent shell/tool 环境的变量。 */
     runtimeEnv?: Record<string, string>
   ): Promise<AsyncIterable<AgentEvent>>;

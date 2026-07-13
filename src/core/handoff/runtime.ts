@@ -1,11 +1,19 @@
 import type { Message, Session, SubMessage } from '../../types.js';
 import type { SessionManager } from '../session/session-manager.js';
 import type { MessageQueue } from '../message/message-queue.js';
+import { formatChannelKey } from '../channel-loader.js';
 import { classifyAunPayloadForLog } from '../message/message-log.js';
 import { HandoffDispatcher, type HandoffTargetSender } from './dispatcher.js';
 import { KeyedFairMutex } from './mutex.js';
 import { HandoffStore } from './store.js';
-import type { HandoffInstance, HandoffReturnResponse, HandoffStatusResponse } from './types.js';
+import type {
+  HandoffInstance,
+  HandoffListResponse,
+  HandoffReturnResponse,
+  HandoffState,
+  HandoffStatusResponse,
+  HandoffTraceResponse,
+} from './types.js';
 
 export interface CreateOutboundHandoffInput {
   selfAid: string;
@@ -47,18 +55,19 @@ export class HandoffRuntime {
     }
     const origin = await this.sessionManager.getSessionById(input.originSessionId);
     if (!origin || origin.selfAID !== input.selfAid) throw new Error('origin session not found');
+    const targetChannelKey = formatChannelKey({ type: 'aun', selfAID: input.selfAid, name: 'main' });
     const target = await this.sessionManager.getOrCreateSession(
-      origin.channel,
+      targetChannelKey,
       input.to,
       origin.projectPath,
       input.thread,
-      { channelKey: origin.metadata?.channelKey, peerId: input.to },
+      { channelKey: targetChannelKey, peerId: input.to },
       undefined,
       input.to,
       'private',
       origin.baseagent,
       input.selfAid,
-      origin.channelType || 'aun',
+      'aun',
       'agent',
     );
     if (target.id === origin.id) {
@@ -195,6 +204,45 @@ export class HandoffRuntime {
 
   status(selfAid: string, handoffId: string): HandoffStatusResponse | null {
     return this.store.status(selfAid, handoffId);
+  }
+
+  listHandoffs(input: {
+    selfAid: string;
+    state?: HandoffState;
+    sessionId?: string;
+    limit?: number;
+  }): HandoffListResponse {
+    return {
+      ok: true,
+      handoffs: this.store.query(input.selfAid, input).map(instance => ({
+        handoff_id: instance.handoff_id,
+        state: instance.state,
+        origin_session_id: instance.origin_session_id,
+        target_session_id: instance.target_session_id,
+        return_policy: instance.return_policy,
+        created_at: instance.created_at,
+        updated_at: instance.updated_at,
+        attention_required: instance.attention_required,
+        attention_reason: instance.attention_reason,
+      })),
+    };
+  }
+
+  traceHandoff(selfAid: string, handoffId: string, limit?: number): HandoffTraceResponse | null {
+    const events = this.store.trace(selfAid, handoffId, limit);
+    return events ? { ok: true, handoff_id: handoffId, events } : null;
+  }
+
+  pauseAgent(selfAid: string): void {
+    this.dispatcher.pauseAgent(selfAid);
+  }
+
+  drainAgent(selfAid: string, timeoutMs?: number): Promise<void> {
+    return this.dispatcher.drainAgent(selfAid, timeoutMs);
+  }
+
+  resumeAgent(selfAid: string): void {
+    this.dispatcher.resumeAgent(selfAid);
   }
 
   async recover(selfAids: string[]): Promise<void> {

@@ -742,7 +742,6 @@ async function main() {
 
   // Per-AID 消息统计收集器（累计，供 watch aid 实时展示）
   const aidStatsCollector = new AidStatsCollector(eventBus);
-  aidStatsCollector.setSessionsDir(paths.sessionsDir);
   // 持久化网络流量到 message_events 表
   aidStatsCollector.onMessage = (ev) => {
     import('./stats/writer.js').then(({ insertMessageEvent }) => {
@@ -1030,6 +1029,7 @@ async function main() {
       encrypt: handoff.request.encrypt,
       log: {
         content: classified.content,
+        sessionId: targetSession.id,
         msgType: classified.msgType,
         payloadType: classified.payloadType,
         payloadSummary: classified.payloadSummary,
@@ -1208,6 +1208,7 @@ async function main() {
               appendMessageLog(chatDir, buildOutboundEntry({
                 from: owningAgent?.aid ?? envelope.agentName ?? session.selfAID ?? 'self',
                 to: String(target || envelope.channelId),
+                sessionId: session.id,
                 chatType: isGroup ? 'group' : 'private',
                 groupId: isGroup ? String(session.metadata?.groupId || session.channelId) : null,
                 msgId: `${envelope.taskId || 'out'}_${Date.now()}`,
@@ -1944,6 +1945,43 @@ async function main() {
     return handoffRuntime.status(selfAid, params.handoffId)
       ?? { ok: false, code: 'HANDOFF_NOT_FOUND', error: 'handoff not found' };
   });
+  const resolveHandoffQueryAid = async (params: { sessionId?: string; agent?: string }) => {
+    if (params.sessionId) {
+      const runtime = responseEngine.getTaskRuntimeContext(params.sessionId);
+      const session = await sessionManager.getSessionById(params.sessionId);
+      const selfAid = runtime?.selfAid || session?.selfAID;
+      if (!selfAid) {
+        return { ok: false as const, code: 'HANDOFF_CALL_SESSION_INVALID', error: 'current session is invalid' };
+      }
+      if (params.agent && params.agent !== selfAid) {
+        return { ok: false as const, code: 'HANDOFF_AGENT_SCOPE_MISMATCH', error: 'agent does not match the current session' };
+      }
+      return { ok: true as const, aid: selfAid };
+    }
+    if (!params.agent) {
+      return { ok: false as const, code: 'HANDOFF_AGENT_REQUIRED', error: '--agent is required outside a task context' };
+    }
+    if (!agentRegistry.get(params.agent)) {
+      return { ok: false as const, code: 'HANDOFF_AGENT_NOT_FOUND', error: `agent not found: ${params.agent}` };
+    }
+    return { ok: true as const, aid: params.agent };
+  };
+  ipcServer.setHandoffListExecutor(async (params) => {
+    const scope = await resolveHandoffQueryAid(params);
+    if (!scope.ok) return scope;
+    return handoffRuntime.listHandoffs({
+      selfAid: scope.aid,
+      state: params.state,
+      sessionId: params.filterSessionId,
+      limit: params.limit,
+    });
+  });
+  ipcServer.setHandoffTraceExecutor(async (params) => {
+    const scope = await resolveHandoffQueryAid(params);
+    if (!scope.ok) return scope;
+    return handoffRuntime.traceHandoff(scope.aid, params.handoffId, params.limit)
+      ?? { ok: false, code: 'HANDOFF_NOT_FOUND', error: 'handoff not found' };
+  });
   ipcServer.setAunMsgSender(async (params) => {
     const inst = channelInstances.find((candidate) => {
       if (candidate.channelType !== 'aun') return false;
@@ -1959,6 +1997,7 @@ async function main() {
     if (!ch || typeof ch.sendDaemonMsg !== 'function') {
       return { ok: false, error: `AUN channel not found for ${params.aid}`, code: 'AUN_CHANNEL_NOT_FOUND' };
     }
+    let targetSessionId: string | undefined;
     if (params.originSessionId && params.originMessageId) {
       try {
         const created = await handoffRuntime.createOutbound({
@@ -1971,6 +2010,7 @@ async function main() {
           thread: params.thread,
           explicitReturnPolicy: params.returnPolicy,
         });
+        targetSessionId = created.targetSession.id;
         if (created.crossSession && created.handoff) {
           return {
             ok: true,
@@ -1991,7 +2031,7 @@ async function main() {
       to: params.to,
       payload: params.payload,
       encrypt: params.encrypt,
-      log: params.log,
+      log: params.log ? { ...params.log, sessionId: targetSessionId ?? params.log.sessionId } : undefined,
     });
   });
 
@@ -2015,6 +2055,7 @@ async function main() {
     },
     onChannelConnected: markChannelConnected,
     messageQueue,
+    handoffRuntime,
   });
 
   // Make reload hooks accessible to IPC handler & ctl handler (both run in this process)
@@ -2022,6 +2063,7 @@ async function main() {
 
   // Hot-load handler: dynamically add a new agent at runtime
   (globalThis as any).__evolclaw_hotLoadAgent = async (aid: string) => {
+    handoffRuntime.pauseAgent(aid);
     agentRuntimeState = 'starting';
     agentRuntimeError = undefined;
     const agent = agentRegistry.loadNewAgent(aid);
@@ -2068,6 +2110,7 @@ async function main() {
     await channelLoader.connectAll(instances, { onConnected: markChannelConnected });
     await handoffRuntime.recover([aid]);
     await ensureTriggerSchedulerStarted(agent);
+    handoffRuntime.resumeAgent(aid);
     agentRuntimeState = 'running';
     agentRuntimeError = undefined;
     logger.info(`[HotLoad] ✓ Agent ${aid} online with ${instances.length} channel(s)`);
@@ -2087,6 +2130,13 @@ async function main() {
     for (const [aid, agent] of [...(agentRegistry as any).agents.entries()] as [string, any][]) {
       const diskCfg = diskAgents.find(a => a.aid === aid);
       if (!diskCfg || diskCfg.enabled === false) {
+        handoffRuntime.pauseAgent(aid);
+        try {
+          await handoffRuntime.drainAgent(aid);
+        } catch (error) {
+          results.push(`⚠ ${aid}: ${error instanceof Error ? error.message : String(error)}`);
+          continue;
+        }
         triggerSchedulers.get(aid)?.stop();
         triggerSchedulers.delete(aid);
         // 断开所有 channels

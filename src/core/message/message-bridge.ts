@@ -1,7 +1,7 @@
 import { randomBytes } from 'crypto';
 import { logger } from '../../utils/logger.js';
 import { StreamDebouncer } from './stream-debouncer.js';
-import { appendMessageLog, appendMessageLogStrict, buildInboundEntry } from './message-log.js';
+import { appendMessageLog, appendMessageLogStrict, buildInboundEntry, isTransientProtocolMessage } from './message-log.js';
 import { buildEnvelope } from './message-utils.js';
 import { chatDirPath } from '../session/session-fs-store.js';
 import { tryParseChannelKey } from '../channel-loader.js';
@@ -10,6 +10,7 @@ import { resolvePeerRoleDetail, type ResolvedPeerRole } from '../../config/peer-
 import { handlePendingDingtalkContactBindMessage } from '../../channels/dingtalk.js';
 import { authorizeAccess, buildAuthSubject } from '../auth/auth-gateway.js';
 import type { SessionManager } from '../session/session-manager.js';
+import { SessionRenewService } from '../session/session-renew.js';
 import type { IMessageProcessor } from './message-processor-interface.js';
 import type { MessageQueue } from './message-queue.js';
 import type { CommandHandler as CmdHandler } from '../command/command-handler.js';
@@ -31,6 +32,7 @@ export class MessageBridge {
   private agentRegistry?: EvolAgentRegistryHandle;
   private bootstrapService?: BootstrapService;
   private handoffRuntime?: HandoffRuntime;
+  private sessionRenewService: SessionRenewService;
 
   constructor(
     private defaultProjectPath: string,
@@ -42,6 +44,7 @@ export class MessageBridge {
     defaultDebounce?: number,
   ) {
     this.defaultDebounce = defaultDebounce ?? 0;
+    this.sessionRenewService = new SessionRenewService(sessionManager, processor);
   }
 
   /** Inject EvolAgentRegistry so owner lookups/writes route to agent.json for agent-owned channels. */
@@ -177,6 +180,15 @@ export class MessageBridge {
 
         // 0. 自定义消息快速路径（menu.query 等）
         if (await this.handleCustomPayload(content, channelName, msg, sendReply, adapter, identity)) return;
+        // 仅阻止协议遥测进入 session / model / messages.jsonl；协议本身已在
+        // channel/main/events/AUN/handoff 专用链路中处理和记录。
+        if (isTransientProtocolMessage({
+          msgType: msg.msgType ?? 'custom',
+          payloadType: msg.payloadType,
+        })) {
+          logger.debug(`[MessageBridge] Transient protocol message ignored: channel=${channelName} type=${msg.payloadType || msg.msgType || '<unknown>'}`);
+          return;
+        }
 
         // 1. owner 绑定（按实例名绑定）
         if (adapter && actorId && roleDetail.effectiveRole === 'owner') {
@@ -267,6 +279,12 @@ export class MessageBridge {
         const effectiveProjectPath = owningAgent?.projectPath
           ?? this.defaultProjectPath;
 
+        const hadMainSession = msg.threadId ? true : this.sessionManager.hasMainSession(
+          channelName,
+          msg.channelId,
+          msg.channelType || effectiveChannelType,
+          msg.selfAID || selfAid,
+        );
         let session = await this.sessionManager.getOrCreateSession(
           channelName, msg.channelId,
           effectiveProjectPath,
@@ -275,6 +293,25 @@ export class MessageBridge {
           msg.peerType, identity
         );
         session = await this.alignSessionBaseagent(channelName, session);
+
+        const replyToMessageId = typeof msg.replyContext?.metadata?.refMessageId === 'string'
+          ? msg.replyContext.metadata.refMessageId
+          : msg.replyContext?.replyToMessageId ?? null;
+        const renewResult = await this.sessionRenewService.resolve({
+          session,
+          channelName,
+          channelType: msg.channelType || effectiveChannelType,
+          channelId: msg.channelId,
+          selfAid: session.selfAID || selfAid,
+          peerId: msg.peerId,
+          groupId: msg.groupId,
+          chatType,
+          role: identity.role,
+          content,
+          replyToMessageId,
+          isNewSession: !hadMainSession,
+        });
+        session = renewResult.session;
 
         // 4. 群聊发送者标注由消息渲染层（message-renderer）逐条承担，不再在此硬编码前缀，
         //    消息日志因此保存干净原文。policy.messagePrefix 暂保留（未来清理）。
@@ -314,6 +351,7 @@ export class MessageBridge {
           return { chatDir, entry: buildInboundEntry({
             from: msg.peerId || 'unknown',
             to: msg.selfAID || 'self',
+            sessionId: session.id,
             chatType,
             groupId: msg.groupId ?? null,
             msgId: msg.messageId ?? null,

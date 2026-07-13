@@ -10,6 +10,7 @@ export interface ConfigFieldRule {
     | 'baseagent'
     | 'boolean'
     | 'nonnegative-number'
+    | 'positive-number'
     | 'effort'
     | 'chatmode'
     | 'dispatch'
@@ -17,7 +18,8 @@ export interface ConfigFieldRule {
     | 'permission-mode'
     | 'approvals-reviewer'
     | 'gemini-mode'
-    | 'manifest-file';
+    | 'manifest-file'
+    | 'session-renew-action';
 }
 
 export type ConfigFieldValueResult =
@@ -28,11 +30,14 @@ const BEHAVIOR_TOP_FIELDS = new Set([
   'active_baseagent',
   'chatmode',
   'response_modes',
+  'responseMode',
+  'config',
   'flush_delay',
   'debounce',
   'dispatch',
   'show_activities',
   'proactive',
+  'session_renew',
   'group_venue_sync',
   'render',
   'sessionManifests',
@@ -129,6 +134,7 @@ export function resolveConfigFieldRule(fieldPath: string): ConfigFieldRule {
   if (field === 'show_activities') return scalar(field, 'show-activities');
   if (field === 'enable_rich_content') return scalar(field, 'boolean');
   if (field === 'permissionMode') return scalar(field, 'permission-mode');
+  if (field === 'responseMode') return scalar(field, 'string');
 
   if (top === 'chatmode') {
     if (parts.length === 1) return readonlyObject('chatmode');
@@ -147,11 +153,27 @@ export function resolveConfigFieldRule(fieldPath: string): ConfigFieldRule {
     return { class: 'unknown' };
   }
 
+  if (top === 'config') {
+    if (parts.length === 1) return readonlyObject('config');
+    if (parts.length === 2 && parts[1] === 'auxiliaryModel') return scalar('config', 'string');
+    return { class: 'unknown' };
+  }
+
   if (top === 'proactive') {
     if (parts.length === 1) return readonlyObject('proactive');
     if (parts.length === 2 && (parts[1] === 'pre_tool_1stmsgchk' || parts[1] === 'tool_use_reminder')) {
       return scalar('proactive', 'boolean');
     }
+    return { class: 'unknown' };
+  }
+
+  if (top === 'session_renew') {
+    if (parts.length === 1) return readonlyObject('session_renew');
+    if (parts.length !== 2) return { class: 'unknown' };
+    if (parts[1] === 'enabled') return scalar('session_renew', 'boolean');
+    if (parts[1] === 'after_hours') return scalar('session_renew', 'positive-number');
+    if (parts[1] === 'effort') return scalar('session_renew', 'effort');
+    if (parts[1] === 'fallback_action') return scalar('session_renew', 'session-renew-action');
     return { class: 'unknown' };
   }
 
@@ -217,6 +239,12 @@ export function parseConfigFieldValue(fieldPath: string, rawValue: unknown): Con
         ? { ok: true, value }
         : { ok: false, reason: `Config field ${fieldPath} must be a non-negative number` };
     }
+    case 'positive-number': {
+      const value = Number(raw);
+      return Number.isFinite(value) && value > 0
+        ? { ok: true, value }
+        : { ok: false, reason: `Config field ${fieldPath} must be a positive number` };
+    }
     case 'effort':
       return EFFORTS.has(raw)
         ? { ok: true, value: raw }
@@ -249,5 +277,9 @@ export function parseConfigFieldValue(fieldPath: string, rawValue: unknown): Con
       return /^[A-Za-z0-9_-]+\.json$/.test(raw)
         ? { ok: true, value: raw }
         : { ok: false, reason: `Config field ${fieldPath} must be a JSON filename without path separators` };
+    case 'session-renew-action':
+      return raw === 'continue' || raw === 'new'
+        ? { ok: true, value: raw }
+        : { ok: false, reason: `Config field ${fieldPath} must be continue or new` };
   }
 }

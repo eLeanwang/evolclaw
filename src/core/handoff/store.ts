@@ -7,6 +7,8 @@ import { appendJsonl, readAllJsonlLines } from '../session/session-fs-store.js';
 import { classifyAunPayloadForLog } from '../message/message-log.js';
 import {
   HANDOFF_SCHEMA_VERSION,
+  HANDOFF_QUERY_DEFAULT_LIMIT,
+  HANDOFF_QUERY_MAX_LIMIT,
   type HandoffAttentionReason,
   type HandoffEvent,
   type HandoffEventType,
@@ -47,6 +49,12 @@ export interface ReturnHandoffInput {
   now?: number;
 }
 
+export interface ListHandoffsInput {
+  state?: HandoffState;
+  sessionId?: string;
+  limit?: number;
+}
+
 function safeSegment(value: string, field: string): string {
   if (!value || !SAFE_ID_RE.test(value) || value === '.' || value === '..') {
     throw new Error(`invalid ${field}`);
@@ -54,8 +62,12 @@ function safeSegment(value: string, field: string): string {
   return value;
 }
 
-function newId(prefix: 'h' | 'ev'): string {
-  return `${prefix}-${Date.now().toString(36)}-${crypto.randomBytes(8).toString('hex')}`;
+function newHandoffId(): string {
+  return `h-${crypto.randomBytes(4).toString('hex')}`;
+}
+
+function newEventId(): string {
+  return `ev-${Date.now().toString(36)}-${crypto.randomBytes(8).toString('hex')}`;
 }
 
 function clonePayload(payload: Record<string, unknown>): Record<string, unknown> {
@@ -69,6 +81,11 @@ function normalizeReturnContent(content: string): string {
 
 function contentHash(content: string): string {
   return crypto.createHash('sha256').update(content, 'utf8').digest('hex');
+}
+
+function boundedQueryLimit(limit?: number): number {
+  if (typeof limit !== 'number' || !Number.isInteger(limit)) return HANDOFF_QUERY_DEFAULT_LIMIT;
+  return Math.max(1, Math.min(HANDOFF_QUERY_MAX_LIMIT, limit));
 }
 
 export class HandoffStore {
@@ -100,7 +117,7 @@ export class HandoffStore {
   } = {}): HandoffEvent {
     fs.mkdirSync(this.agentDir(selfAid), { recursive: true });
     const event: HandoffEvent = {
-      event_id: newId('ev'),
+      event_id: newEventId(),
       event_type: eventType,
       ...(handoffId ? { handoff_id: handoffId } : {}),
       ...(opts.operationKey ? { operation_key: opts.operationKey } : {}),
@@ -136,7 +153,7 @@ export class HandoffStore {
 
   create(input: CreateHandoffInput): HandoffInstance {
     const now = input.now ?? Date.now();
-    const handoffId = newId('h');
+    const handoffId = newHandoffId();
     const instance: HandoffInstance = {
       schema_version: HANDOFF_SCHEMA_VERSION,
       handoff_id: handoffId,
@@ -195,8 +212,24 @@ export class HandoffStore {
     return this.list(selfAid).filter(item => item.origin_session_id === originSessionId && (!state || item.state === state));
   }
 
+  query(selfAid: string, input: ListHandoffsInput = {}): HandoffInstance[] {
+    return this.list(selfAid)
+      .filter(item => !input.state || item.state === input.state)
+      .filter(item => !input.sessionId
+        || item.origin_session_id === input.sessionId
+        || item.target_session_id === input.sessionId)
+      .sort((left, right) => right.updated_at - left.updated_at || left.handoff_id.localeCompare(right.handoff_id))
+      .slice(0, boundedQueryLimit(input.limit));
+  }
+
   events(selfAid: string): HandoffEvent[] {
     return readAllJsonlLines<HandoffEvent>(this.historyPath(selfAid));
+  }
+
+  trace(selfAid: string, handoffId: string, limit?: number): HandoffEvent[] | null {
+    if (!this.get(selfAid, handoffId)) return null;
+    const events = this.events(selfAid).filter(event => event.handoff_id === handoffId);
+    return events.slice(-boundedQueryLimit(limit));
   }
 
   recordSendStarted(selfAid: string, handoffId: string, now = Date.now()): HandoffInstance {

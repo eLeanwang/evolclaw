@@ -210,13 +210,32 @@ export interface ReplyContext {
   peerId?: string;  // 发送者 ID，出站时兜底 @ 补全用
 }
 
-export interface CrossSessionApprovalContext {
-  /** AUN owner 会话使用的 adapter。MVP 只允许 AUN private owner 审批。 */
-  adapter: ChannelAdapter;
-  /** 本次选定的 owner AID。 */
-  ownerAid: string;
-  /** 当前 agent 的 owner 候选，用于审计和后续扩展。 */
-  owners?: string[];
+export type ApproverPolicy = 'requester' | 'agent_owner';
+
+export interface AuthorizationChallenge {
+  id: string;
+  sessionId: string;
+  toolName: string;
+  toolInput: Record<string, unknown>;
+  summary: string;
+  reason?: string;
+  grantable: boolean;
+  approverPolicy: ApproverPolicy;
+  createdAt: number;
+}
+
+export type ApprovalRoute =
+  | { kind: 'local'; approverId: string }
+  | { kind: 'handoff'; approverId: string; channel: 'aun'; adapter: ChannelAdapter }
+  | { kind: 'unavailable'; reason: string };
+
+export interface ApprovalRoutingContext {
+  /** 真实 challenge 的审批主体策略。MVP 支持 requester 和 agent_owner。 */
+  approverPolicy: ApproverPolicy;
+  /** agent 权威配置中的 owner 候选，不能来自消息 payload 自报。 */
+  owners: string[];
+  /** AUN owner 私聊投递使用的本 agent adapter。 */
+  ownerAdapter?: ChannelAdapter;
   /** 当前 self agent AID。 */
   selfAid?: string;
   /** 原始受限会话上下文。grant 只应绑定这个上下文，而不是 owner 会话。 */
@@ -424,6 +443,7 @@ export interface CommandCard {
   kind: 'command-card';
   title: string;
   body?: string;
+  bodyFormat?: 'plain' | 'markdown';
   buttons: Array<{
     label: string;
     command: string;
@@ -440,6 +460,7 @@ export interface ActionInteraction {
   kind: 'action';
   title: string;
   body?: string;
+  bodyFormat?: 'plain' | 'markdown';
   buttons: Array<{
     key: string;
     label: string;
@@ -807,6 +828,14 @@ export interface ResponseModesConfig {
   overrides?: Record<string, { mode: string; config?: any }>;
 }
 
+export interface ResponseModeConfig {
+  chatMode?: 'interactive' | 'proactive';
+  mentionMode?: 'disabled' | 'mention-only';
+  model?: string;
+  auxiliaryModel?: string;
+  [key: string]: unknown;
+}
+
 export interface AunRuntimeBlock {
   keystorePath?: string;
   encryptionSeed?: string;
@@ -832,6 +861,17 @@ export interface ProactiveBehaviorBlock {
   pre_tool_1stmsgchk?: boolean;
   /** proactive 下是否启用队列未读提醒和 10 次工具汇报提醒。 */
   tool_use_reminder?: boolean;
+}
+
+export interface SessionRenewConfig {
+  /** 超时后是否启用会话连续性判定。缺省或 false 均为关闭。 */
+  enabled?: boolean;
+  /** 当前会话最后一条有效对话距今超过该时长才触发。 */
+  after_hours?: number;
+  /** 判定调用推理强度，默认 low。 */
+  effort?: string;
+  /** 判定调用失败或输出非法时的降级动作。 */
+  fallback_action?: 'continue' | 'new';
 }
 
 // channels[].* —— per-agent，新结构里以列表形式存储。
@@ -939,6 +979,9 @@ export interface DefaultsConfig {
   projects?: ProjectsBlock;
   aun?: AunRuntimeBlock;
   debug?: DebugBlock;
+  responseMode?: string;
+  config?: ResponseModeConfig;
+  session_renew?: SessionRenewConfig;
 }
 
 /**
@@ -977,6 +1020,8 @@ export interface AgentConfig {
   chatmode?: ChatmodeBlock;
   // 响应模式（响应系统插件化；过渡期与 chatmode/dispatch 并存）
   response_modes?: ResponseModesConfig;
+  responseMode?: string;
+  config?: ResponseModeConfig;
   // 消息合并/节流
   flush_delay?: number;
   debounce?: number;
@@ -986,6 +1031,8 @@ export interface AgentConfig {
   show_activities?: ShowActivitiesMode;
   // proactive 模式细粒度策略
   proactive?: ProactiveBehaviorBlock;
+  // 超时后的会话续接判定
+  session_renew?: SessionRenewConfig;
   // 渲染
   render?: { private?: string; group?: string; inject?: string };
   // 会话原型 → manifest 文件映射（sessionType 决定加载哪份系统提示词清单）
@@ -1011,11 +1058,14 @@ export interface RelationConfig {
   baseagents?: BaseagentsBlock;
   chatmode?: ChatmodeBlock;
   response_modes?: ResponseModesConfig;
+  responseMode?: string;
+  config?: ResponseModeConfig;
   flush_delay?: number;
   debounce?: number;
   dispatch?: 'mention' | 'broadcast';
   show_activities?: ShowActivitiesMode;
   proactive?: ProactiveBehaviorBlock;
+  session_renew?: SessionRenewConfig;
   render?: { private?: string; group?: string; inject?: string };
   sessionManifests?: Record<string, string>;
   enable_rich_content?: boolean;
@@ -1054,6 +1104,8 @@ export interface EffectiveAgentConfig {
   chatmode?: ChatmodeBlock;
   // 响应模式（响应系统插件化；过渡期与 chatmode/dispatch 并存）
   response_modes?: ResponseModesConfig;
+  responseMode?: string;
+  config?: ResponseModeConfig;
   // 消息合并/节流
   flush_delay?: number;
   debounce?: number;
@@ -1063,6 +1115,7 @@ export interface EffectiveAgentConfig {
   show_activities?: ShowActivitiesMode;
   // proactive 模式细粒度策略
   proactive?: ProactiveBehaviorBlock;
+  session_renew?: SessionRenewConfig;
   // 渲染
   render?: { private?: string; group?: string; inject?: string };
   // 会话原型 → manifest 文件映射（sessionType 决定加载哪份系统提示词清单）

@@ -1,13 +1,18 @@
 import path from 'path';
 import fs from 'fs';
+import { createHash } from 'crypto';
 import type { EventBus } from './event-bus.js';
-import type { ChannelAdapter, ReplyContext, InteractionRequest, CrossSessionApprovalContext } from '../types.js';
+import type {
+  ApprovalRoute,
+  ApprovalRoutingContext,
+  AuthorizationChallenge,
+  ChannelAdapter,
+  InteractionRequest,
+  ReplyContext,
+} from '../types.js';
 import type { InteractionRouter } from './interaction-router.js';
 import { renderActionAsText } from './interaction-router.js';
 import { buildEnvelope, sendInteractionPayload } from './message/message-utils.js';
-import { appendMessageLog, buildOutboundEntry } from './message/message-log.js';
-import { chatDirPath } from './session/session-fs-store.js';
-import { resolvePaths } from '../paths.js';
 import { logger } from '../utils/logger.js';
 import { summarizeToolInput } from '../utils/tool-summary.js';
 
@@ -324,7 +329,7 @@ export interface PermissionRequestContext {
   chatType?: 'private' | 'group';
   selfAid?: string;
   peerKey?: string;
-  crossSessionApproval?: CrossSessionApprovalContext;
+  approvalRouting?: ApprovalRoutingContext;
   flushPending?: () => Promise<void>;
 }
 
@@ -373,21 +378,104 @@ interface PendingCrossSessionPermission extends PendingPermission {
   requestId: string;
   displaySummary: string;
   reason?: string;
-  selfAid?: string;
-  ownerAid: string;
-  ownerChatDir?: string;
-  originChatDir?: string;
-  originChannelId?: string;
-  originChatType?: 'private' | 'group';
-  cardFallbackMsgId: string;
-  expiresAt: number;
+  inputFingerprint: string;
   interactionRouter?: InteractionRouter;
   timeout?: NodeJS.Timeout;
+}
+
+interface TemporaryPermissionGrant {
+  expiresAt: number;
+}
+
+const SESSION_GRANT_TTL_MS = 30 * 60 * 1000;
+const APPROVAL_DETAIL_LIMIT = 800;
+
+function stablePermissionInput(value: unknown): string {
+  if (value === undefined) return 'undefined';
+  if (typeof value === 'bigint') return `${value.toString()}n`;
+  if (value === null || typeof value !== 'object') return JSON.stringify(value) ?? String(value);
+  if (Array.isArray(value)) return `[${value.map(stablePermissionInput).join(',')}]`;
+  const record = value as Record<string, unknown>;
+  return `{${Object.keys(record).sort().map(key => `${JSON.stringify(key)}:${stablePermissionInput(record[key])}`).join(',')}}`;
+}
+
+function permissionInputFingerprint(input: Record<string, unknown>): string {
+  return createHash('sha256').update(stablePermissionInput(input)).digest('hex');
+}
+
+function truncateApprovalDetail(value: string): string {
+  const trimmed = value.trim();
+  return trimmed.length > APPROVAL_DETAIL_LIMIT
+    ? `${trimmed.slice(0, APPROVAL_DETAIL_LIMIT - 3)}...`
+    : trimmed;
+}
+
+function formatApprovalTarget(toolName: string, input: Record<string, unknown>): string {
+  if (toolName === 'Bash' || toolName.startsWith('dangerous:Bash:')) {
+    const command = typeof input.command === 'string' ? input.command : '';
+    if (command) return truncateApprovalDetail(command);
+  }
+  const summary = summarizeToolInput(toolName, input);
+  if (summary) return truncateApprovalDetail(summary);
+  return truncateApprovalDetail(stablePermissionInput(input));
+}
+
+function escapeApprovalMarkdown(value: string): string {
+  return value
+    .replace(/\\/g, '\\\\')
+    .replace(/([`*_{}[\]()])/g, '\\$1')
+    .replace(/^(\s*)(#{1,6}|>|[-+])(\s)/gm, '$1\\$2$3')
+    .replace(/^(\s*\d+)\.(\s)/gm, '$1\\.$2');
+}
+
+function approvalInlineCode(value: string): string {
+  const text = value.replace(/\s+/g, ' ').trim();
+  const longestRun = Math.max(0, ...(text.match(/`+/g) ?? []).map(run => run.length));
+  const fence = '`'.repeat(longestRun + 1);
+  return `${fence}${text}${fence}`;
+}
+
+function approvalCodeBlock(value: string): string {
+  const longestRun = Math.max(0, ...(value.match(/`+/g) ?? []).map(run => run.length));
+  const fence = '`'.repeat(Math.max(3, longestRun + 1));
+  return `${fence}text\n${value}\n${fence}`;
+}
+
+export function planApprovalRoute(
+  challenge: AuthorizationChallenge,
+  context?: PermissionRequestContext,
+): ApprovalRoute {
+  if (!challenge.grantable) {
+    return { kind: 'unavailable', reason: 'challenge_not_grantable' };
+  }
+  const requesterId = context?.userId || context?.channelId || '';
+  if (challenge.approverPolicy === 'requester') {
+    return { kind: 'local', approverId: requesterId };
+  }
+
+  const routing = context?.approvalRouting;
+  const owners = Array.from(new Set((routing?.owners ?? []).filter(Boolean)));
+  if (owners.length === 0) {
+    return { kind: 'unavailable', reason: 'no_agent_owner_configured' };
+  }
+  if (context?.chatType !== 'group' && requesterId && owners.includes(requesterId)) {
+    return { kind: 'local', approverId: requesterId };
+  }
+
+  const approverId = owners.find(owner => owner.includes('.'));
+  if (!approverId) {
+    return { kind: 'unavailable', reason: 'no_aun_owner_available' };
+  }
+  if (!routing?.ownerAdapter?.capabilities?.interaction) {
+    return { kind: 'unavailable', reason: 'owner_approval_channel_unavailable' };
+  }
+  return { kind: 'handoff', approverId, channel: 'aun', adapter: routing.ownerAdapter };
 }
 
 export class PermissionGateway {
   private pending = new Map<string, PendingPermission>();
   private crossSessionPending = new Map<string, PendingCrossSessionPermission>();
+  private temporaryGrants = new Map<string, TemporaryPermissionGrant>();
   private eventBus?: EventBus;
 
   /** 始终允许的工具缓存：toolName → Set<pattern> */
@@ -418,6 +506,35 @@ export class PermissionGateway {
    */
   clearAlwaysAllow(): void {
     this.alwaysAllow.clear();
+    this.temporaryGrants.clear();
+  }
+
+  private temporaryGrantKey(sessionId: string, toolName: string, inputFingerprint: string): string {
+    return `${sessionId}\u0000${toolName}\u0000${inputFingerprint}`;
+  }
+
+  private pruneTemporaryGrants(now: number): void {
+    for (const [key, grant] of this.temporaryGrants.entries()) {
+      if (grant.expiresAt <= now) this.temporaryGrants.delete(key);
+    }
+  }
+
+  private hasTemporaryGrant(sessionId: string, toolName: string, toolInput: Record<string, unknown>): boolean {
+    const now = Date.now();
+    this.pruneTemporaryGrants(now);
+    const key = this.temporaryGrantKey(sessionId, toolName, permissionInputFingerprint(toolInput));
+    const grant = this.temporaryGrants.get(key);
+    if (!grant) return false;
+    return true;
+  }
+
+  private addTemporaryGrant(pending: PendingCrossSessionPermission): number {
+    const now = Date.now();
+    this.pruneTemporaryGrants(now);
+    const expiresAt = now + SESSION_GRANT_TTL_MS;
+    const key = this.temporaryGrantKey(pending.sessionId, pending.toolName, pending.inputFingerprint);
+    this.temporaryGrants.set(key, { expiresAt });
+    return expiresAt;
   }
 
   /**
@@ -427,86 +544,12 @@ export class PermissionGateway {
     return [...this.alwaysAllow.keys()];
   }
 
-  private shouldUseCrossSessionApproval(context?: PermissionRequestContext): boolean {
-    if (!context?.crossSessionApproval) return false;
-    const role = context.role || 'none';
-    if (role === 'owner' || role === 'admin') return false;
-    if (context.userId && context.userId === context.crossSessionApproval.ownerAid) return false;
-    return true;
-  }
-
-  private appendCrossSessionState(
-    pending: PendingCrossSessionPermission,
-    event: 'decided' | 'cancelled' | 'expired' | 'failed',
-    auth: Record<string, unknown>,
-    opts?: { replyTo?: string | null; consumedByMessageId?: string | null },
-  ): void {
-    if (!pending.ownerChatDir) return;
-    try {
-      fs.mkdirSync(pending.ownerChatDir, { recursive: true });
-      appendMessageLog(pending.ownerChatDir, buildOutboundEntry({
-        from: pending.selfAid || 'self',
-        to: pending.ownerAid,
-        chatType: 'private',
-        groupId: null,
-        msgId: `auth-${event}:${pending.requestId}`,
-        msgType: 'handoff_state',
-        content: '',
-        replyTo: opts?.replyTo ?? pending.cardFallbackMsgId,
-        source: 'handoff',
-        handoff: {
-          event,
-          consumed_by_msg_id: opts?.consumedByMessageId ?? undefined,
-          auth,
-        },
-      }));
-    } catch (error) {
-      logger.debug(`[PermissionGateway] append cross-session state failed: ${error instanceof Error ? error.message : String(error)}`);
-    }
-  }
-
-  private appendCrossSessionResult(
-    pending: PendingCrossSessionPermission,
-    decision: 'approved' | 'denied' | 'cancelled' | 'expired' | 'failed',
-    auth: Record<string, unknown>,
-  ): void {
-    if (!pending.originChatDir) return;
-    try {
-      fs.mkdirSync(pending.originChatDir, { recursive: true });
-      const approved = decision === 'approved';
-      appendMessageLog(pending.originChatDir, buildOutboundEntry({
-        from: pending.selfAid || 'self',
-        to: pending.originChannelId || pending.sessionId,
-        chatType: pending.originChatType ?? 'private',
-        groupId: pending.originChatType === 'group' ? (pending.originChannelId || null) : null,
-        msgId: `auth-return:${pending.requestId}:${decision}`,
-        msgType: 'handoff_result',
-        content: approved ? `owner 已批准临时授权：${pending.displaySummary}` : `owner 授权结果：${decision}`,
-        replyTo: null,
-        source: 'handoff',
-        handoff: {
-          kind: 'response_to_origin',
-          request_content: pending.displaySummary,
-          origin: {
-            channel: 'aun',
-            peerId: pending.ownerAid,
-            peerType: 'human',
-            role: 'owner',
-          },
-          auth,
-        },
-      }));
-    } catch (error) {
-      logger.debug(`[PermissionGateway] append cross-session result failed: ${error instanceof Error ? error.message : String(error)}`);
-    }
-  }
-
   private resolveCrossSessionPermission(
     sessionId: string,
     requestId: string,
     action: string,
-    values?: Record<string, unknown>,
-    operatorId?: string,
+    _values?: Record<string, unknown>,
+    _operatorId?: string,
   ): boolean {
     const pending = this.crossSessionPending.get(requestId);
     if (!pending || pending.sessionId !== sessionId) return false;
@@ -514,33 +557,10 @@ export class PermissionGateway {
     if (pending.timeout) clearTimeout(pending.timeout);
     this.crossSessionPending.delete(requestId);
 
-    const cardMessageId = typeof values?.card_message_id === 'string'
-      ? values.card_message_id
-      : pending.cardFallbackMsgId;
-    const approved = action === 'approve_once' || action === 'allow';
+    const sessionGrant = action === 'approve_session_30m';
+    const approved = action === 'approve_once' || sessionGrant || action === 'allow';
     const decision: PermissionDecision = approved ? 'allow' : 'deny';
-    const auth = {
-      kind: 'authorization_decision',
-      request_id: requestId,
-      challenge_id: requestId,
-      decision: approved ? 'approved' : 'denied',
-      action,
-      operator_aid: operatorId,
-      grant_id: approved ? `grant:${requestId}` : undefined,
-      ttl_seconds: approved ? 1800 : undefined,
-      max_uses: approved ? 1 : undefined,
-    };
-
-    this.appendCrossSessionState(pending, 'decided', auth, { replyTo: cardMessageId });
-    this.appendCrossSessionResult(pending, approved ? 'approved' : 'denied', {
-      kind: 'authorization_result',
-      request_id: requestId,
-      challenge_id: requestId,
-      decision: approved ? 'approved' : 'denied',
-      grant_id: approved ? `grant:${requestId}` : undefined,
-      ttl_seconds: approved ? 1800 : undefined,
-      max_uses: approved ? 1 : undefined,
-    });
+    if (sessionGrant) this.addTemporaryGrant(pending);
 
     pending.resolve(decision);
     this.eventBus?.publish({ type: 'permission:resolved', sessionId, requestId, approved });
@@ -555,14 +575,6 @@ export class PermissionGateway {
     pending.interactionRouter?.cancel(requestId);
     this.crossSessionPending.delete(requestId);
 
-    const auth = {
-      kind: 'authorization_result',
-      request_id: requestId,
-      challenge_id: requestId,
-      decision: reason,
-    };
-    this.appendCrossSessionState(pending, reason, auth);
-    this.appendCrossSessionResult(pending, reason, auth);
     pending.resolve('deny');
     if (reason === 'cancelled') {
       this.eventBus?.publish({
@@ -587,32 +599,55 @@ export class PermissionGateway {
 
   private async requestCrossSessionPermission(
     sessionId: string,
-    requestId: string,
-    toolName: string,
-    toolInput: Record<string, unknown>,
+    challenge: AuthorizationChallenge,
+    route: Extract<ApprovalRoute, { kind: 'handoff' }>,
     sendPrompt: (text: string) => Promise<void>,
     context: PermissionRequestContext,
-    displaySummary: string,
-    reason?: string,
   ): Promise<PermissionDecision> {
-    const approval = context.crossSessionApproval;
+    const approval = context.approvalRouting;
     const interactionRouter = context.interactionRouter;
     if (!approval || !interactionRouter) {
       await sendPrompt('当前会话权限不足，且没有可用的 owner 审批通道。');
       return 'deny';
     }
 
+    const { id: requestId, toolName, toolInput, summary: displaySummary, reason } = challenge;
     const ttlMs = approval.approvalTtlMs && approval.approvalTtlMs > 0
       ? approval.approvalTtlMs
       : 20 * 60 * 1000;
     const expiresAt = Date.now() + ttlMs;
-    const reasonLine = reason ? `\n原因：${reason}` : '';
     const originRole = approval.originRole || context.role || 'none';
+    const requesterId = approval.originPeerId || approval.originChannelId || 'unknown';
+    const requester = approval.originPeerName
+      ? `${approval.originPeerName} (${requesterId})`
+      : requesterId;
+    const originChannel = approval.originChannel || context.channel || 'unknown';
+    const distinctSource = approval.originChannelId
+      && approval.originChannelId !== requesterId
+      ? approval.originChannelId
+      : undefined;
+    const approvalDeadline = new Date(expiresAt).toLocaleString('zh-CN', { hour12: false });
+    const target = formatApprovalTarget(toolName, toolInput);
     const body = [
-      `来源：${approval.originPeerName || approval.originPeerId || approval.originChannelId || 'unknown'} (${originRole})`,
-      `工具：${toolName}`,
-      `操作：${displaySummary}${reasonLine}`,
-      `有效期：${Math.round(ttlMs / 60000)} 分钟`,
+      '**申请信息**',
+      '',
+      `- **申请主体**：${approvalInlineCode(requester)} · role ${approvalInlineCode(originRole)} · via ${approvalInlineCode(originChannel)}`,
+      ...(distinctSource ? [`- **来源会话**：${approvalInlineCode(distinctSource)}`] : []),
+      '',
+      '**请求执行**',
+      '',
+      `- **申请能力**：${approvalInlineCode(`tool:${toolName}`)}`,
+      `- **预期动作**：${escapeApprovalMarkdown(displaySummary)}`,
+      `- **申请原因**：${escapeApprovalMarkdown(reason || '工具运行时要求人工授权')}`,
+      '',
+      '**目标 / 参数**',
+      '',
+      approvalCodeBlock(target),
+      '',
+      '**风险与有效期**',
+      '',
+      '- **风险：中** · 跨会话临时授权，请核对目标和参数',
+      `- **审批截止**：${escapeApprovalMarkdown(approvalDeadline)}（约 ${Math.round(ttlMs / 60000)} 分钟）`,
     ].join('\n');
 
     const interaction: InteractionRequest = {
@@ -622,14 +657,16 @@ export class PermissionGateway {
         kind: 'action',
         title: '临时授权申请',
         body,
+        bodyFormat: 'markdown',
         buttons: [
-          { key: 'approve_once', label: '批准一次', style: 'primary' },
+          { key: 'approve_once', label: '批准本次', style: 'primary' },
+          { key: 'approve_session_30m', label: '本会话 30 分钟', style: 'default' },
           { key: 'deny', label: '拒绝', style: 'danger' },
         ],
       },
-      channelId: approval.ownerAid,
+      channelId: route.approverId,
       sessionId,
-      initiatorId: approval.ownerAid,
+      initiatorId: route.approverId || undefined,
       expiresAt,
       fallback: { command: 'auth' },
     };
@@ -642,62 +679,25 @@ export class PermissionGateway {
       }
     }
 
-    const handoffAuth = {
-      kind: 'authorization_request',
-      request_id: requestId,
-      challenge_id: requestId,
-      approver_policy: 'agent_owner',
-      approval_request_expires_at: new Date(expiresAt).toISOString(),
-      requested_capabilities: [
-        {
-          namespace: 'tool',
-          action: toolName,
-          resource_selector: summarizeToolInput(toolName, toolInput),
-        },
-      ],
-      reason,
-      expected_actions: [displaySummary],
-      risk: { level: 'medium', factors: ['cross_session_owner_approval'] },
-      constraints_options: {
-        ttl_seconds: [600, 1800, 3600],
-        max_uses: [1],
-        bindable: ['session', 'channelKey', 'agentInstance'],
-      },
-    };
-
     const ownerReplyContext: ReplyContext = {
       metadata: {
         source: 'handoff',
         chatmode: 'interactive',
-        handoff: {
-          kind: 'request_to_target',
-          origin: {
-            session_id: approval.originSessionId,
-            message_id: approval.originMessageId,
-            channel: approval.originChannel,
-            peerId: approval.originPeerId,
-            threadId: approval.originThreadId,
-            peerName: approval.originPeerName,
-            peerType: approval.originPeerType,
-            role: originRole,
-          },
-          auth: handoffAuth,
-        },
       },
     };
 
     const envelope = buildEnvelope({
       taskId: context.taskId,
       sessionId,
-      channel: approval.adapter.channelName,
-      channelId: approval.ownerAid,
+      channel: route.adapter.channelName,
+      channelId: route.approverId,
       agentName: context.agentName,
       chatmode: 'interactive',
       replyContext: ownerReplyContext,
     });
 
     const sent = await sendInteractionPayload(
-      approval.adapter,
+      route.adapter,
       envelope,
       interaction,
       `临时授权申请\n${body}\n请在 AUN 卡片中选择批准或拒绝。`,
@@ -709,9 +709,6 @@ export class PermissionGateway {
     }
 
     return new Promise((resolve) => {
-      const ownerChatDir = approval.selfAid
-        ? chatDirPath(resolvePaths().sessionsDir, 'aun', approval.ownerAid, approval.selfAid)
-        : undefined;
       const pending: PendingCrossSessionPermission = {
         sessionId,
         requestId,
@@ -719,21 +716,14 @@ export class PermissionGateway {
         displaySummary,
         reason,
         resolve,
-        selfAid: approval.selfAid,
-        ownerAid: approval.ownerAid,
-        ownerChatDir,
-        originChatDir: approval.originChatDir,
-        originChannelId: approval.originChannelId,
-        originChatType: context.chatType,
-        cardFallbackMsgId: `auth-card:${requestId}`,
-        expiresAt,
+        inputFingerprint: permissionInputFingerprint(toolInput),
         interactionRouter,
       };
       this.crossSessionPending.set(requestId, pending);
       interactionRouter.register(requestId, sessionId, (action, values, operatorId) => {
         this.resolveCrossSessionPermission(sessionId, requestId, action, values, operatorId);
       }, {
-        initiatorId: approval.ownerAid,
+        initiatorId: route.approverId,
         timeoutMs: ttlMs,
         onTimeout: () => this.expireCrossSessionPermission(sessionId, requestId, 'expired'),
         fallbackCommand: 'auth',
@@ -760,23 +750,47 @@ export class PermissionGateway {
     if (this.isAlwaysAllowed(toolName)) {
       return 'always';
     }
+    if (this.hasTemporaryGrant(sessionId, toolName, toolInput)) {
+      return 'allow';
+    }
 
     const requestId = `perm-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const displaySummary = summary || summarizeToolInput(toolName, toolInput);
     const reasonLine = reason ? `\n原因：${reason}` : '';
+    const challenge: AuthorizationChallenge = {
+      id: requestId,
+      sessionId,
+      toolName,
+      toolInput,
+      summary: displaySummary,
+      reason,
+      grantable: true,
+      approverPolicy: context?.approvalRouting?.approverPolicy ?? 'requester',
+      createdAt: Date.now(),
+    };
 
     this.eventBus?.publish({ type: 'permission:requested', sessionId, requestId, toolName, input: displaySummary });
 
-    if (this.shouldUseCrossSessionApproval(context)) {
-      return this.requestCrossSessionPermission(
+    const route = planApprovalRoute(challenge, context);
+    if (route.kind === 'unavailable') {
+      await sendPrompt(`当前操作需要授权，但审批人不可用（${route.reason}）。`);
+      this.eventBus?.publish({
+        type: 'permission:resolved',
         sessionId,
         requestId,
         toolName,
-        toolInput,
+        reason: route.reason,
+        approved: false,
+      });
+      return 'deny';
+    }
+    if (route.kind === 'handoff') {
+      return this.requestCrossSessionPermission(
+        sessionId,
+        challenge,
+        route,
         sendPrompt,
         context!,
-        displaySummary,
-        reason,
       );
     }
 
@@ -796,7 +810,7 @@ export class PermissionGateway {
       },
       channelId: context?.channelId || '',
       sessionId,
-      initiatorId: context?.userId,
+      initiatorId: route.approverId,
       fallback: { command: 'perm' },
     };
 
@@ -845,7 +859,7 @@ export class PermissionGateway {
       if (context?.interactionRouter) {
         context.interactionRouter.register(requestId, sessionId, (action) => {
           this.resolvePermission(sessionId, requestId, action as PermissionDecision);
-        }, { initiatorId: context?.userId, fallbackCommand: 'perm' });
+        }, { initiatorId: route.approverId || undefined, fallbackCommand: 'perm' });
       }
     });
   }

@@ -89,6 +89,9 @@ interface CodexThreadOptions {
   baseInstructions?: string;
   developerInstructions?: string;
   selectedCapabilityRoots?: JsonObject[];
+  dynamicTools?: JsonObject[];
+  environments?: JsonObject[];
+  ephemeral?: boolean;
 }
 
 export class CodexAppServerClient {
@@ -122,6 +125,9 @@ export class CodexAppServerClient {
       ...(options?.baseInstructions ? { baseInstructions: options.baseInstructions } : {}),
       ...(options?.developerInstructions ? { developerInstructions: options.developerInstructions } : {}),
       ...(options?.selectedCapabilityRoots ? { selectedCapabilityRoots: options.selectedCapabilityRoots } : {}),
+      ...(options?.dynamicTools ? { dynamicTools: options.dynamicTools } : {}),
+      ...(options?.environments ? { environments: options.environments } : {}),
+      ...(options?.ephemeral !== undefined ? { ephemeral: options.ephemeral } : {}),
     }) as Promise<CodexThreadResponse>;
   }
 

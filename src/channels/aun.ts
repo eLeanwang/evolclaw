@@ -133,27 +133,11 @@ export interface AunDaemonMsgSendArgs {
   encrypt?: boolean;
   log?: {
     content: string;
+    sessionId?: string;
     msgType?: MessageLogType;
     payloadType?: string;
     payloadSummary?: MessageLogPayloadSummary;
     source?: 'daemon' | 'cli' | 'msg' | 'ctl' | 'owner-inject' | 'handoff';
-    handoff?: {
-      kind?: 'request_to_target' | 'response_to_origin';
-      event?: 'consumed';
-      origin?: {
-        session_id?: string;
-        message_id?: string;
-        channel?: string;
-        peerId?: string;
-        threadId?: string;
-        peerName?: string;
-        peerType?: string;
-        role?: string;
-      };
-      consumed_by_msg_id?: string;
-      match?: 'ref' | 'inferred';
-      request_content?: string;
-    };
     handoffTrace?: {
       version: 2;
       handoff_id: string;
@@ -2918,6 +2902,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
         appendMessageLog(chatDir, buildOutboundEntry({
           from: this.config.aid,
           to: args.to,
+          sessionId: args.log.sessionId,
           chatType: 'private',
           msgId: messageId,
           content: classified.content || args.log.content,
@@ -2927,7 +2912,6 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
           payloadType: classified.payloadType ?? args.log.payloadType,
           payloadSummary: classified.payloadSummary ?? args.log.payloadSummary,
           source: args.log.source ?? 'msg',
-          handoff: args.log.handoff,
           handoff_trace: args.log.handoffTrace,
         }));
         this.aidStatsCollector?.recordOutbound(
@@ -3161,7 +3145,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     return sent;
   }
 
-  /** 出站消息写入 messages.jsonl（message.send/group.send/thought.put 成功后调用） */
+  /** 有效会话正文写入 messages.jsonl（message.send/group.send 成功后调用）。 */
   private appendOutboundJsonl(channelId: string, descriptor: {
     content: string;
     msgType: MessageLogType;
@@ -3179,12 +3163,10 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       const selfAID = this.config.aid;
       const chatDir = chatDirPath(sessionsDir, 'aun', channelId, selfAID);
       const chatmode = context?.metadata?.chatmode as string | undefined;
-      const handoff = context?.metadata?.handoff && typeof context.metadata.handoff === 'object'
-        ? context.metadata.handoff as any
-        : undefined;
       appendMessageLog(chatDir, buildOutboundEntry({
         from: selfAID,
         to: channelId,
+        sessionId: context?.sessionId,
         chatType: isGroup ? 'group' : 'private',
         groupId: isGroup ? channelId : null,
         msgId,
@@ -3199,7 +3181,6 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
         payloadType,
         payloadSummary,
         source,
-        handoff,
       }));
     } catch (e) {
       logger.debug(`${this.logPrefix()} appendOutboundJsonl failed: ${e}`);
@@ -3267,10 +3248,6 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
         this.forwardOutbound(putRes);
         if (thoughtText) {
           this.aidStatsCollector?.recordOutbound(this.config.aid, channelId, Buffer.byteLength(thoughtText, 'utf-8'), thoughtText, false, encrypt, context?.metadata?.chatmode as string | undefined ?? 'proactive', 'thought');
-          this.appendOutboundJsonl(channelId, {
-            content: thoughtText, msgType: 'thought', payloadType: 'thought',
-            msgId: tid ?? `thought-${Date.now()}`, encrypt, context, isGroup: true, source: 'daemon',
-          });
         }
       } else {
         params.to = targetId;
@@ -3281,10 +3258,6 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
         this.forwardOutbound(putRes);
         if (thoughtText) {
           this.aidStatsCollector?.recordOutbound(this.config.aid, targetId, Buffer.byteLength(thoughtText, 'utf-8'), thoughtText, false, encrypt, context?.metadata?.chatmode as string | undefined ?? 'proactive', 'thought');
-          this.appendOutboundJsonl(channelId, {
-            content: thoughtText, msgType: 'thought', payloadType: 'thought',
-            msgId: tid ?? `thought-${Date.now()}`, encrypt, context, isGroup: false, source: 'daemon',
-          });
         }
       }
     } catch (e) {
@@ -3293,12 +3266,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     }
   }
 
-  /**
-   * 发送结构化 payload（type='thought' 等）作为消息历史持久化。
-   * 与 sendThought（thought.put）配对：thought.put 用于前端实时渲染（不入消息历史），
-   * sendStructured 用于把同一内容写入消息历史。
-   * 返回服务端分配的 message_id（失败时返回 null）。
-   */
+  /** 发送结构化 AUN payload；transient 协议载荷不写本地 messages.jsonl。 */
   async sendStructured(channelId: string, payload: Record<string, any>, context?: ReplyContext): Promise<string | null> {
     if (!this.connected || !this.client) return null;
     const isGroup = this.isGroupId(channelId);
@@ -3904,7 +3872,7 @@ export class AUNChannelPlugin implements ChannelPlugin {
       channelKey: inst.name,  // channelName 实际上就是 channelKey
       capabilities: { file: true, image: true, interaction: true, markdown: true, thought: true, status: true, thread: true },
       send: async (envelope: any, payload: any) => {
-        const replyCtx = envelope.replyContext;
+        const replyCtx: ReplyContext | undefined = envelope.replyContext;
         const channelId = envelope.channelId;
         const taskBase = () => channel.buildTaskPayloadBase(envelope, replyCtx);
         switch (payload.kind) {
@@ -3951,7 +3919,7 @@ export class AUNChannelPlugin implements ChannelPlugin {
             return;
           }
           case 'result.file': {
-            const fileCtx: ReplyContext = payload.correlationId
+            const fileCtx: ReplyContext | undefined = payload.correlationId
               ? { ...(replyCtx ?? {}), metadata: { ...(replyCtx?.metadata ?? {}), correlationId: payload.correlationId } }
               : replyCtx;
             await channel.sendFile(channelId, payload.filePath, fileCtx);
@@ -4028,7 +3996,10 @@ export class AUNChannelPlugin implements ChannelPlugin {
               if ((action as ActionInteraction).allowCustomInput) {
                 aunCard.actions.push({ label: '✏️ 手动输入', value: '_show_input', style: 'default', behavior: 'reply' });
               }
-              if (action.body) aunCard.description = action.body;
+              if (action.body) {
+                aunCard.text = action.body;
+                setIfDefined(aunCard, 'format', action.bodyFormat);
+              }
               if (req.initiatorId && channel.isGroupId(channelId)) aunCard.initiator = req.initiatorId;
               if (replyCtx?.threadId) aunCard.thread_id = replyCtx.threadId;
               await channel.sendContentPayload(channelId, aunCard, {
@@ -4059,7 +4030,10 @@ export class AUNChannelPlugin implements ChannelPlugin {
                   return action;
                 }),
               };
-              if (card.body) aunCard.description = card.body;
+              if (card.body) {
+                aunCard.text = card.body;
+                setIfDefined(aunCard, 'format', card.bodyFormat);
+              }
               if (replyCtx?.threadId) aunCard.thread_id = replyCtx.threadId;
               await channel.sendContentPayload(channelId, aunCard, {
                 contentKind: 'card',

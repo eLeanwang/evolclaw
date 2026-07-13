@@ -14,9 +14,10 @@ import { createInterface } from 'readline';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
+import crypto from 'crypto';
 import type { Config } from '../types.js';
 import type { AgentPlugin, AgentInstance, AgentCallbacks } from '../core/baseagent-loader.js';
-import type { AgentEvent, AgentRunnerFull, ModelSwitcher, PermissionModeInfo } from './runner-types.js';
+import type { AgentEvent, AgentRunnerFull, AgentRunOverrides, ModelSwitcher, PermissionModeInfo } from './runner-types.js';
 import { resolveGoogleConfig, type GoogleResolved } from './baseagent.js';
 import { commandExists } from '../utils/cross-platform.js';
 import { GeminiSessionFileAdapter } from '../core/session/adapters/gemini-session-file-adapter.js';
@@ -130,10 +131,11 @@ export class GeminiRunner implements AgentRunnerFull, ModelSwitcher {
     images?: Array<{ data: string; mimeType?: string }>,
     systemPromptAppend?: string,
     sessionManager?: any,
-    modelOverride?: { model?: string; effort?: string; permissionMode?: string },
+    modelOverride?: AgentRunOverrides,
     runtimeEnv?: Record<string, string>
   ): Promise<AsyncIterable<AgentEvent>> {
-    let geminiSessionId = initialAgentSessionId || this.activeSessions.get(sessionId);
+    const disableTools = modelOverride?.disableTools === true;
+    let geminiSessionId = disableTools ? undefined : (initialAgentSessionId || this.activeSessions.get(sessionId));
     // per-call 权限模式/模型：优先 override，缺省回落实例级（多会话并发互不污染）
     const callMode = modelOverride?.permissionMode || this.currentMode;
     const callModel = modelOverride?.model || this.model;
@@ -151,6 +153,18 @@ export class GeminiRunner implements AgentRunnerFull, ModelSwitcher {
 
     // Handle images: write to temp files, prepend @file references
     const tempFiles: string[] = [];
+    if (disableTools) {
+      const policyPath = path.join(os.tmpdir(), `evolclaw-gemini-no-tools-${crypto.randomUUID()}.toml`);
+      fs.writeFileSync(policyPath, [
+        '[[rule]]',
+        'toolName = "*"',
+        'decision = "deny"',
+        'priority = 999',
+        '',
+      ].join('\n'), { mode: 0o600 });
+      tempFiles.push(policyPath);
+      args.push('--policy', policyPath);
+    }
     if (images?.length) {
       const tmpDir = os.tmpdir();
       const fileParts: string[] = [];
@@ -171,7 +185,9 @@ export class GeminiRunner implements AgentRunnerFull, ModelSwitcher {
     args.push('-m', callModel);
 
     // Permission mode
-    if (callMode === 'plan') {
+    if (disableTools) {
+      args.push('--approval-mode=default');
+    } else if (callMode === 'plan') {
       args.push('--approval-mode=plan');
     } else if (callMode === 'noask') {
       args.push('--approval-mode=default');

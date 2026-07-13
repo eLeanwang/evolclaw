@@ -6,6 +6,15 @@ export {
   msgOnline,
 } from './p2p.js';
 
+export { msgHistory, MAX_MSG_HISTORY_LIMIT } from './history.js';
+
+export type {
+  MsgHistoryArgs,
+  MsgHistoryDirection,
+  MsgHistoryError,
+  MsgHistoryResult,
+} from './history.js';
+
 export type {
   MsgError,
   MsgSendResult,

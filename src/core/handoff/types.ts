@@ -1,12 +1,18 @@
 export const HANDOFF_SCHEMA_VERSION = 1 as const;
 
-export type HandoffState =
-  | 'queued'
-  | 'target_sent'
-  | 'return_pending'
-  | 'origin_queued'
-  | 'origin_delivered'
-  | 'completed';
+export const HANDOFF_STATES = [
+  'queued',
+  'target_sent',
+  'return_pending',
+  'origin_queued',
+  'origin_delivered',
+  'completed',
+] as const;
+
+export type HandoffState = typeof HANDOFF_STATES[number];
+
+export const HANDOFF_QUERY_DEFAULT_LIMIT = 100;
+export const HANDOFF_QUERY_MAX_LIMIT = 500;
 
 export type HandoffAttentionReason =
   | 'TARGET_SEND_OUTCOME_UNKNOWN'
@@ -120,4 +126,27 @@ export interface HandoffStatusResponse {
   updated_at: number;
   attention_required: boolean;
   attention_reason: HandoffAttentionReason | null;
+}
+
+export interface HandoffListItem {
+  handoff_id: string;
+  state: HandoffState;
+  origin_session_id: string;
+  target_session_id: string;
+  return_policy: 'required';
+  created_at: number;
+  updated_at: number;
+  attention_required: boolean;
+  attention_reason: HandoffAttentionReason | null;
+}
+
+export interface HandoffListResponse {
+  ok: true;
+  handoffs: HandoffListItem[];
+}
+
+export interface HandoffTraceResponse {
+  ok: true;
+  handoff_id: string;
+  events: HandoffEvent[];
 }

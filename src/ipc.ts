@@ -8,8 +8,15 @@ import type { AidStatsSnapshot, StatsSnapshot } from './utils/stats.js';
 import { fileCache } from './core/daemon-file-cache.js';
 import type { FileCacheStats } from './core/daemon-file-cache.js';
 import type { BindBeginRequest, BindBeginResponse, BindErrorResponse, BindStatusResponse } from './utils/aid-bind.js';
-import type { HandoffMetadata, HandoffReturnIpcResponse, TaskRuntimeContext } from './core/message/handoff.js';
-import type { HandoffReturnResponse, HandoffStatusResponse } from './core/handoff/types.js';
+import type { TaskRuntimeContext } from './core/task-runtime-context.js';
+import { HANDOFF_QUERY_MAX_LIMIT, HANDOFF_STATES } from './core/handoff/types.js';
+import type {
+  HandoffListResponse,
+  HandoffReturnResponse,
+  HandoffState,
+  HandoffStatusResponse,
+  HandoffTraceResponse,
+} from './core/handoff/types.js';
 import type { MessageLogPayloadSummary, MessageLogType } from './core/message/message-log.js';
 import type { ConfigExecutionResult } from './config/config-operation-service.js';
 import type {
@@ -107,11 +114,11 @@ export interface IpcAunMsgSendResponse {
 
 export interface IpcAunMsgSendLogRequest {
   content: string;
+  sessionId?: string;
   msgType?: MessageLogType;
   payloadType?: string;
   payloadSummary?: MessageLogPayloadSummary;
   source?: 'daemon' | 'cli' | 'msg' | 'ctl' | 'owner-inject' | 'handoff';
-  handoff?: HandoffMetadata;
   handoffTrace?: { version: 2; handoff_id: string };
 }
 
@@ -141,8 +148,22 @@ type QueueActionExecutor = (params: { agent: string; action: 'clear' | 'cancel' 
 type TriggerExecutor = (cmd: { type: string; [key: string]: any }) => Promise<any>;
 type TaskRuntimeContextProvider = (params: { sessionId: string }) => TaskRuntimeContext | null | undefined;
 type AunMsgSender = (params: { aid: string; to: string; payload: Record<string, unknown>; encrypt?: boolean; thread?: string; returnPolicy?: 'required' | 'none'; originSessionId?: string; originMessageId?: string; log?: IpcAunMsgSendLogRequest }) => Promise<IpcAunMsgSendResponse>;
-type HandoffReturnExecutor = (params: { sessionId?: string; handoffId?: string; content: string }) => Promise<HandoffReturnIpcResponse | HandoffReturnResponse>;
+type HandoffReturnExecutor = (params: { sessionId?: string; handoffId?: string; content: string }) => Promise<HandoffReturnResponse>;
 type HandoffStatusExecutor = (params: { sessionId?: string; handoffId: string }) => Promise<HandoffStatusResponse | { ok: false; code: string; error: string }>;
+type HandoffQueryError = { ok: false; code: string; error: string };
+type HandoffListExecutor = (params: {
+  sessionId?: string;
+  agent?: string;
+  state?: HandoffState;
+  filterSessionId?: string;
+  limit?: number;
+}) => Promise<HandoffListResponse | HandoffQueryError>;
+type HandoffTraceExecutor = (params: {
+  sessionId?: string;
+  agent?: string;
+  handoffId: string;
+  limit?: number;
+}) => Promise<HandoffTraceResponse | HandoffQueryError>;
 type BindExecutor = {
   begin: (cmd: BindBeginRequest) => BindBeginResponse | BindErrorResponse;
   status: (taskId: string) => BindStatusResponse | BindErrorResponse;
@@ -169,6 +190,8 @@ export class IpcServer {
   private aunMsgSender?: AunMsgSender;
   private handoffReturnExecutor?: HandoffReturnExecutor;
   private handoffStatusExecutor?: HandoffStatusExecutor;
+  private handoffListExecutor?: HandoffListExecutor;
+  private handoffTraceExecutor?: HandoffTraceExecutor;
   private bindExecutor?: BindExecutor;
   private configOperationExecutor?: ConfigOperationExecutor;
   private dingtalkContactBindExecutor?: DingtalkContactBindExecutor;
@@ -244,7 +267,7 @@ export class IpcServer {
     this.triggerExecutor = executor;
   }
 
-  /** Inject active task runtime-context provider for in-task CLI handoff metadata. */
+  /** Inject active task runtime-context provider for in-task CLI routing. */
   setTaskRuntimeContextProvider(provider: TaskRuntimeContextProvider): void {
     this.taskRuntimeContextProvider = provider;
   }
@@ -261,6 +284,14 @@ export class IpcServer {
 
   setHandoffStatusExecutor(executor: HandoffStatusExecutor): void {
     this.handoffStatusExecutor = executor;
+  }
+
+  setHandoffListExecutor(executor: HandoffListExecutor): void {
+    this.handoffListExecutor = executor;
+  }
+
+  setHandoffTraceExecutor(executor: HandoffTraceExecutor): void {
+    this.handoffTraceExecutor = executor;
   }
 
   /** Inject bootstrap QR bind executor for init/init aun. */
@@ -472,11 +503,11 @@ export class IpcServer {
         const log: IpcAunMsgSendLogRequest | undefined = typeof rawLog?.content === 'string'
           ? {
             content: rawLog.content,
+            sessionId: typeof rawLog.sessionId === 'string' ? rawLog.sessionId : undefined,
             msgType: rawLog.msgType as IpcAunMsgSendLogRequest['msgType'],
             payloadType: typeof rawLog.payloadType === 'string' ? rawLog.payloadType : undefined,
             payloadSummary: rawLog.payloadSummary as IpcAunMsgSendLogRequest['payloadSummary'],
             source: rawLog.source as IpcAunMsgSendLogRequest['source'],
-            handoff: rawLog.handoff as IpcAunMsgSendLogRequest['handoff'],
           }
           : undefined;
         try {
@@ -514,6 +545,40 @@ export class IpcServer {
         return this.handoffStatusExecutor({
           sessionId: typeof cmd.sessionId === 'string' ? cmd.sessionId : undefined,
           handoffId: cmd.handoffId,
+        });
+      }
+      case 'handoff-list': {
+        if (!this.handoffListExecutor) return { ok: false, code: 'HANDOFF_LIST_UNAVAILABLE', error: 'handoff list not configured' };
+        const state = typeof cmd.state === 'string' ? cmd.state : undefined;
+        if (state && !HANDOFF_STATES.includes(state as HandoffState)) {
+          return { ok: false, code: 'INVALID_HANDOFF_STATE', error: `invalid handoff state: ${state}` };
+        }
+        const limit = cmd.limit === undefined ? undefined : Number(cmd.limit);
+        if (limit !== undefined && (!Number.isInteger(limit) || limit < 1 || limit > HANDOFF_QUERY_MAX_LIMIT)) {
+          return { ok: false, code: 'INVALID_HANDOFF_LIMIT', error: `handoff limit must be an integer from 1 to ${HANDOFF_QUERY_MAX_LIMIT}` };
+        }
+        return this.handoffListExecutor({
+          sessionId: typeof cmd.sessionId === 'string' ? cmd.sessionId : undefined,
+          agent: typeof cmd.agent === 'string' ? cmd.agent : undefined,
+          state: state as HandoffState | undefined,
+          filterSessionId: typeof cmd.filterSessionId === 'string' ? cmd.filterSessionId : undefined,
+          limit,
+        });
+      }
+      case 'handoff-trace': {
+        if (!this.handoffTraceExecutor) return { ok: false, code: 'HANDOFF_TRACE_UNAVAILABLE', error: 'handoff trace not configured' };
+        if (!cmd.handoffId || typeof cmd.handoffId !== 'string') {
+          return { ok: false, code: 'INVALID_HANDOFF_ID', error: 'missing handoff_id' };
+        }
+        const limit = cmd.limit === undefined ? undefined : Number(cmd.limit);
+        if (limit !== undefined && (!Number.isInteger(limit) || limit < 1 || limit > HANDOFF_QUERY_MAX_LIMIT)) {
+          return { ok: false, code: 'INVALID_HANDOFF_LIMIT', error: `handoff limit must be an integer from 1 to ${HANDOFF_QUERY_MAX_LIMIT}` };
+        }
+        return this.handoffTraceExecutor({
+          sessionId: typeof cmd.sessionId === 'string' ? cmd.sessionId : undefined,
+          agent: typeof cmd.agent === 'string' ? cmd.agent : undefined,
+          handoffId: cmd.handoffId,
+          limit,
         });
       }
       case 'ctl': {

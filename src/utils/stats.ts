@@ -1,5 +1,3 @@
-import fs from 'fs';
-import path from 'path';
 import { EventBus, GatewayEvent } from '../core/event-bus.js';
 
 interface EventRecord {
@@ -396,12 +394,6 @@ export class AidStatsCollector {
     return entry;
   }
 
-  private sessionsDir?: string;
-
-  setSessionsDir(dir: string): void {
-    this.sessionsDir = dir;
-  }
-
   private onTaskStart(aid: string, encrypt?: boolean, chatmode?: string): void {
     const entry = this.getOrCreate(aid);
     entry.currentTaskStartAt = Date.now();
@@ -416,7 +408,6 @@ export class AidStatsCollector {
 
   private onTaskEnd(aid: string, status: 'completed' | 'error' | 'interrupted', errorType?: string, finalText?: string, numTurns?: number): void {
     const entry = this.getOrCreate(aid);
-    const startedAt = entry.currentTaskStartAt;
     const taskEndTs = Date.now();
 
     // 先用内存计数写入初始值（立即可用）
@@ -441,67 +432,6 @@ export class AidStatsCollector {
       entry.currentTaskThoughtPutCount,
       entry.currentTaskLastThoughtText ?? undefined,
     );
-
-    // 500ms 后从 jsonl 重新统计（覆盖 thought.put 异步延迟问题）
-    if (this.sessionsDir && startedAt != null) {
-      const sessionsDir = this.sessionsDir;
-      const toolUseCount = entry.currentTaskToolUseCount;
-      const resolvedNumTurns = numTurns ?? entry.currentTaskNumTurns;
-      const chatmode = entry.currentTaskChatmode;
-      const encrypt = entry.currentTaskEncrypt;
-      setTimeout(() => {
-        try {
-          const { chatDirPath } = require('../core/session/session-fs-store.js');
-          // 找该 aid 下所有 peer 的 messages.jsonl，统计 ts >= startedAt 的出站条目
-          const aidDir = path.join(sessionsDir, 'aun', aid.replace(/[/%\\:*?"<>|]/g, ch => '%' + ch.charCodeAt(0).toString(16).toUpperCase().padStart(2, '0')));
-          if (!fs.existsSync(aidDir)) return;
-          let msgCount = 0, thoughtCount = 0;
-          let lastThoughtText: string | undefined;
-          let lastMsgText: string | undefined;
-          for (const peerDir of fs.readdirSync(aidDir, { withFileTypes: true })) {
-            if (!peerDir.isDirectory() || peerDir.name.startsWith('_')) continue;
-            const msgFile = path.join(aidDir, peerDir.name, 'messages.jsonl');
-            if (!fs.existsSync(msgFile)) continue;
-            const lines = fs.readFileSync(msgFile, 'utf-8').split('\n').filter(Boolean);
-            for (const line of lines) {
-              try {
-                const rec = JSON.parse(line);
-                if (rec.dir !== 'out' || rec.ts < startedAt || rec.ts > taskEndTs + 2000) continue;
-                if (rec.msgType === 'thought') {
-                  thoughtCount++;
-                  if (rec.content) lastThoughtText = rec.content.length > 100 ? rec.content.slice(0, 100) + '…' : rec.content;
-                } else if (rec.msgType !== 'handoff_state' && rec.msgType !== 'status' && rec.msgType !== 'event') {
-                  msgCount++;
-                  if (rec.content) lastMsgText = rec.content.length > 100 ? rec.content.slice(0, 100) + '…' : rec.content;
-                }
-              } catch {}
-            }
-          }
-          const currentEntry = this.entries.get(aid);
-          if (currentEntry?.lastTaskEnd?.ts === taskEndTs) {
-            currentEntry.lastTaskEnd = {
-              ts: taskEndTs,
-              status,
-              errorType,
-              sentDuringTask: msgCount > 0,
-              thoughtDuringTask: thoughtCount > 0,
-              lastThoughtText: lastThoughtText,
-              replyCount: msgCount,
-              thoughtPutCount: thoughtCount,
-              toolUseCount,
-              numTurns: resolvedNumTurns,
-              finalText: finalText ? (finalText.length > 100 ? finalText.slice(0, 100) + '…' : finalText) : undefined,
-              chatmode: chatmode ?? undefined,
-              encrypt: encrypt ?? undefined,
-            };
-            // 更新 lastSentText 为最后一条 msg（如果有）
-            if (lastMsgText && msgCount > 0) {
-              currentEntry.lastSentText = lastMsgText;
-            }
-          }
-        } catch {}
-      }, 500);
-    }
 
     entry.currentTaskStartAt = null;
     entry.currentTaskReplyCount = 0;

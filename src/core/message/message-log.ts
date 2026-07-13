@@ -1,3 +1,4 @@
+import fs from 'fs';
 import path from 'path';
 import { appendJsonl, chatDirPath } from '../session/session-fs-store.js';
 import { logger } from '../../utils/logger.js';
@@ -22,9 +23,7 @@ export type MessageLogType =
   | 'json'
   | 'tool_call'
   | 'tool_result'
-  | 'custom'
-  | 'handoff_state'
-  | 'handoff_result';
+  | 'custom';
 
 export interface MessageLogPayloadSummary {
   title?: string;
@@ -42,6 +41,26 @@ export interface AunPayloadLogDescriptor {
   content: string;
   payloadSummary?: MessageLogPayloadSummary;
 }
+
+const TRANSIENT_PROTOCOL_TYPE_PREFIXES = [
+  'menu.',
+  'status.',
+  'event.',
+  'events.',
+  'task.status.',
+  'activity.',
+];
+
+const TRANSIENT_PROTOCOL_TYPES = new Set([
+  'status',
+  'event',
+  'events',
+  'task.status',
+  'activity',
+  'thought',
+  'handoff_state',
+  'handoff_result',
+]);
 
 const KNOWN_AUN_PAYLOAD_TYPES = new Set<MessageLogType>([
   'text',
@@ -223,6 +242,7 @@ export function classifyAunPayloadForLog(payload: unknown): AunPayloadLogDescrip
 export interface MessageLogEntry {
   ts: number;
   time: string;
+  sessionId?: string;
   dir: 'in' | 'out';
   from: string;
   to: string;
@@ -246,24 +266,6 @@ export interface MessageLogEntry {
   peerName?: string;
   peerType?: string;
   source?: 'daemon' | 'cli' | 'msg' | 'ctl' | 'owner-inject' | 'handoff';
-  handoff?: {
-    kind?: 'request_to_target' | 'response_to_origin';
-    event?: 'consumed' | 'decided' | 'cancelled' | 'expired' | 'failed';
-    origin?: {
-      session_id?: string;
-      message_id?: string;
-      channel?: string;
-      peerId?: string;
-      threadId?: string;
-      peerName?: string;
-      peerType?: string;
-      role?: string;
-    };
-    consumed_by_msg_id?: string;
-    match?: 'ref' | 'inferred';
-    request_content?: string;
-    auth?: Record<string, unknown>;
-  };
   handoff_trace?: {
     version: 2;
     reply_candidate?: boolean;
@@ -317,12 +319,15 @@ export function resolveChatDir(sessionsDir: string, channelType: string, channel
   return chatDirPath(sessionsDir, channelType, channelId, selfAID);
 }
 
+/** Append conversation history only. Protocol telemetry stays in its dedicated logs/stores. */
 export function appendMessageLog(chatDir: string, entry: MessageLogEntry): void {
+  if (isTransientProtocolMessage(entry)) return;
   if (entry.dir === 'in' && hasDuplicate(chatDir, entry.msgId)) {
     logger.debug(`[MessageLog] Duplicate msgId skipped: ${entry.msgId}`);
     return;
   }
   try {
+    fs.mkdirSync(chatDir, { recursive: true });
     appendJsonl(messageLogPath(chatDir), entry);
     if (entry.dir === 'in') rememberMessageId(chatDir, entry.msgId);
   } catch (e) {
@@ -330,8 +335,11 @@ export function appendMessageLog(chatDir: string, entry: MessageLogEntry): void 
   }
 }
 
+/** Strict conversation-history append used by handoff reply binding. */
 export function appendMessageLogStrict(chatDir: string, entry: MessageLogEntry): void {
+  if (isTransientProtocolMessage(entry)) return;
   if (entry.dir === 'in' && hasDuplicate(chatDir, entry.msgId)) return;
+  fs.mkdirSync(chatDir, { recursive: true });
   appendJsonl(messageLogPath(chatDir), entry);
   if (entry.dir === 'in') rememberMessageId(chatDir, entry.msgId);
 }
@@ -339,6 +347,7 @@ export function appendMessageLogStrict(chatDir: string, entry: MessageLogEntry):
 export function buildInboundEntry(opts: {
   from: string;
   to: string;
+  sessionId?: string;
   chatType: 'private' | 'group';
   groupId?: string | null;
   msgId?: string | null;
@@ -361,6 +370,7 @@ export function buildInboundEntry(opts: {
   return {
     ts,
     time: formatTimestampMs(ts),
+    sessionId: opts.sessionId,
     dir: 'in',
     from: opts.from,
     to: opts.to,
@@ -388,6 +398,7 @@ export function buildInboundEntry(opts: {
 export function buildOutboundEntry(opts: {
   from: string;
   to: string;
+  sessionId?: string;
   chatType: 'private' | 'group';
   groupId?: string | null;
   msgId?: string | null;
@@ -406,13 +417,13 @@ export function buildOutboundEntry(opts: {
   payloadType?: string;
   payloadSummary?: MessageLogPayloadSummary;
   source?: 'daemon' | 'cli' | 'msg' | 'ctl' | 'owner-inject' | 'handoff';
-  handoff?: MessageLogEntry['handoff'];
   handoff_trace?: MessageLogEntry['handoff_trace'];
 }): MessageLogEntry {
   const ts = opts.timestamp || Date.now();
   return {
     ts,
     time: formatTimestampMs(ts),
+    sessionId: opts.sessionId,
     dir: 'out',
     from: opts.from,
     to: opts.to,
@@ -435,11 +446,20 @@ export function buildOutboundEntry(opts: {
     chatmode: opts.chatmode,
     peerType: opts.peerType,
     source: opts.source ?? 'daemon',
-    handoff: opts.handoff,
     handoff_trace: opts.handoff_trace,
   };
 }
 
-export function isHandoffStateMessage(entry: Pick<MessageLogEntry, 'msgType'> | null | undefined): boolean {
-  return entry?.msgType === 'handoff_state';
+export function isTransientProtocolType(value: string | null | undefined): boolean {
+  const type = value?.trim().toLowerCase();
+  if (!type) return false;
+  return TRANSIENT_PROTOCOL_TYPES.has(type)
+    || TRANSIENT_PROTOCOL_TYPE_PREFIXES.some(prefix => type.startsWith(prefix));
+}
+
+export function isTransientProtocolMessage(
+  entry: Pick<MessageLogEntry, 'msgType' | 'payloadType'> | null | undefined,
+): boolean {
+  if (!entry) return false;
+  return isTransientProtocolType(entry.payloadType) || isTransientProtocolType(entry.msgType);
 }
