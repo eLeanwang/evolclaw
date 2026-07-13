@@ -2,7 +2,8 @@
 // Single-object form: `name` is optional (defaults to channel type name).
 // Array form: `name` is required to distinguish instances.
 
-export type PermissionMode = 'auto' | 'bypass' | 'readonly' | 'plan' | 'edit' | 'request' | 'noask';
+/** Public modes plus persisted legacy values accepted during migration. */
+export type PermissionMode = 'auto' | 'bypass' | 'readonly' | 'request' | 'plan' | 'edit' | 'noask';
 
 export interface FeishuChannelConfig {
   name?: string;

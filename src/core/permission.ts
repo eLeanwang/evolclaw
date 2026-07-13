@@ -65,22 +65,11 @@ const DANGEROUS_PATTERNS: Array<{
   { kind: 'git-destructive', pattern: /\bgit\s+branch\s+-D\b/, reason: 'Git 破坏性操作：强制删除分支' },
 ];
 
-// 只读模式写入命令黑名单
-const READONLY_WRITE_PATTERNS = [
-  /\bmkdir\b/, /\btouch\b/, /\btee\b/, /\bcp\b/, /\bmv\b/,
-  /\brm\b/, /\brmdir\b/, /\bchmod\b/, /\bchown\b/, /\bln\b/,
-  />>?\s/,
-  /\bgit\s+(commit|push|merge|rebase|reset|stash|checkout|cherry-pick|revert|tag|branch\s+-[dDmM])/,
-  /\bgit\s+am\b/,
-  /\bnpm\s+(install|ci|uninstall|update|link|publish|run|exec|init)\b/,
-  /\bnpx\b/, /\byarn\b/, /\bpnpm\b/, /\bpip\s+install\b/,
-  /\bsed\s+-i\b/, /\bawk\s+-i\b/, /\bpatch\b/,
-];
-
 /**
  * 只读模式检查（用于 PreToolUse hook 和 canUseTool callback）
- * Write/Edit/NotebookEdit 仅允许写入 {projectPath}/.evolclaw/tmp/
- * Bash 拦截所有写入意图命令
+ * 显式读工具自动允许；写工具和未知工具拒绝。
+ * Bash 无法可靠地从命令文本证明无副作用，因此默认拒绝；经过独立 EC
+ * 命令鉴权的命令应由 runner 在调用本函数前放行。
  */
 export function checkReadonly(
   toolName: string,
@@ -88,29 +77,34 @@ export function checkReadonly(
   projectPath: string,
   context?: { sessionId?: string; channel?: string; peerId?: string; role?: string }
 ): { behavior: 'allow' } | { behavior: 'deny'; message: string } {
+  const readOnlyTools = new Set([
+    'Read', 'Glob', 'Grep', 'WebSearch', 'WebFetch',
+    'TaskList', 'TaskGet', 'ToolSearch',
+  ]);
+  if (readOnlyTools.has(toolName)) return { behavior: 'allow' };
+
   if (toolName === 'Write' || toolName === 'Edit' || toolName === 'NotebookEdit') {
     const filePath = (input.file_path || input.notebook_path) as string | undefined;
-    if (!filePath) return { behavior: 'allow' };
-    const tmpDir = path.join(projectPath, '.evolclaw', 'tmp') + path.sep;
-    const resolved = path.resolve(projectPath, filePath) + (filePath.endsWith(path.sep) ? path.sep : '');
-    if (!resolved.startsWith(tmpDir) && resolved !== tmpDir.slice(0, -1)) {
+    const tmpDir = path.resolve(projectPath, '.evolclaw', 'tmp');
+    const resolved = filePath ? path.resolve(projectPath, filePath) : '';
+    const relative = resolved ? path.relative(tmpDir, resolved) : '..';
+    const insideTmp = relative === '' || (!!relative && !relative.startsWith('..') && !path.isAbsolute(relative));
+    if (!insideTmp) {
       logger.warn(`[ReadonlyCheck] 🔒 File write blocked: tool=${toolName} path=${filePath} session=${context?.sessionId} channel=${context?.channel} peer=${context?.peerId} role=${context?.role}`);
       return { behavior: 'deny', message: '🔒 只读模式：禁止修改项目文件。如需生成文件请写入 .evolclaw/tmp/ 目录' };
     }
+    return { behavior: 'allow' };
   }
 
   if (toolName === 'Bash') {
     const cmd = (input.command as string) || '';
-    for (const pattern of READONLY_WRITE_PATTERNS) {
-      if (pattern.test(cmd)) {
-        const cmdPreview = cmd.length > 80 ? cmd.substring(0, 80) + '...' : cmd;
-        logger.warn(`[ReadonlyCheck] 🔒 Bash write blocked: cmd="${cmdPreview}" pattern=${pattern} session=${context?.sessionId} channel=${context?.channel} peer=${context?.peerId} role=${context?.role}`);
-        return { behavior: 'deny', message: '🔒 只读模式：禁止执行写入操作' };
-      }
-    }
+    const cmdPreview = cmd.length > 80 ? cmd.substring(0, 80) + '...' : cmd;
+    logger.warn(`[ReadonlyCheck] 🔒 Bash blocked by default: cmd="${cmdPreview}" session=${context?.sessionId} channel=${context?.channel} peer=${context?.peerId} role=${context?.role}`);
+    return { behavior: 'deny', message: '🔒 只读模式：Shell 命令无法证明无副作用，已拒绝执行' };
   }
 
-  return { behavior: 'allow' };
+  logger.warn(`[ReadonlyCheck] 🔒 Unknown tool blocked: tool=${toolName} session=${context?.sessionId} channel=${context?.channel} peer=${context?.peerId} role=${context?.role}`);
+  return { behavior: 'deny', message: `🔒 只读模式：未声明为只读的工具 ${toolName} 已拒绝执行` };
 }
 
 /**
@@ -140,23 +134,43 @@ export function checkHClassWrite(
   input: Record<string, unknown>,
   context?: { sessionId?: string; channel?: string; peerId?: string; role?: string }
 ): { behavior: 'allow' } | { behavior: 'deny'; message: string } {
-  // 只检查写入类工具
-  if (!['Write', 'Edit', 'NotebookEdit'].includes(toolName)) {
+  const paths: string[] = [];
+  if (['Write', 'Edit', 'NotebookEdit'].includes(toolName)) {
+    const filePath = input.file_path ?? input.notebook_path ?? input.path;
+    if (typeof filePath === 'string' && filePath) paths.push(filePath);
+  } else if (toolName === 'FileChange') {
+    const grantRoot = input.grantRoot;
+    if (typeof grantRoot === 'string' && grantRoot) paths.push(grantRoot);
+    const fileChanges = input.fileChanges;
+    if (fileChanges && typeof fileChanges === 'object' && !Array.isArray(fileChanges)) {
+      paths.push(...Object.keys(fileChanges as Record<string, unknown>));
+    }
+  } else if (toolName === 'Bash') {
+    const command = typeof input.command === 'string' ? input.command.replace(/\\/g, '/') : '';
+    if (!command) return { behavior: 'allow' };
+    for (const pattern of H_CLASS_PATTERNS) {
+      if (pattern.test(command)) {
+        logger.warn(
+          `[H-Class Protection] 🔒 Protected path referenced by shell command: tool=${toolName} ` +
+          `session=${context?.sessionId} channel=${context?.channel} peer=${context?.peerId} role=${context?.role}`
+        );
+        return {
+          behavior: 'deny',
+          message: '🔒 Shell 命令涉及受保护的 H 类配置/证书/快照路径，agent 不可直接操作',
+        };
+      }
+    }
+    return { behavior: 'allow' };
+  } else {
     return { behavior: 'allow' };
   }
 
-  // 提取文件路径
-  const filePath = (input.file_path ?? input.notebook_path ?? input.path ?? '') as string;
-  if (!filePath) {
-    return { behavior: 'allow' };
-  }
+  if (paths.length === 0) return { behavior: 'allow' };
 
-  // 规范化路径分隔符（统一使用正斜杠）
-  const normalized = filePath.replace(/\\/g, '/');
-
-  // 检查是否匹配 H 类文件模式
-  for (const pattern of H_CLASS_PATTERNS) {
-    if (pattern.test(normalized)) {
+  for (const filePath of paths) {
+    const normalized = filePath.replace(/\\/g, '/');
+    const matched = H_CLASS_PATTERNS.some(pattern => pattern.test(normalized));
+    if (matched) {
       const fileBasename = path.basename(filePath);
       logger.warn(
         `[H-Class Protection] 🔒 Protected file write blocked: tool=${toolName} path=${filePath} ` +
@@ -346,12 +360,9 @@ export async function requestDangerousCommandPermission(
     return { matched: false };
   }
 
-  if (gateway?.isAlwaysAllowed(dangerCheck.cacheKey)) {
-    return { matched: true, decision: 'always' };
-  }
-
   if (!gateway || !sendPrompt) {
-    return { matched: true, decision: 'allow' };
+    logger.warn(`[PermissionGateway] Dangerous operation denied because approval is unavailable: session=${sessionId} tool=${toolName}`);
+    return { matched: true, decision: 'deny' };
   }
 
   const decision = await gateway.requestPermission(
@@ -370,6 +381,7 @@ export async function requestDangerousCommandPermission(
 interface PendingPermission {
   sessionId: string;
   toolName: string;
+  inputFingerprint: string;
   resolve: (decision: PermissionDecision) => void;
   interactionRouter?: InteractionRouter;
 }
@@ -478,34 +490,12 @@ export class PermissionGateway {
   private temporaryGrants = new Map<string, TemporaryPermissionGrant>();
   private eventBus?: EventBus;
 
-  /** 始终允许的工具缓存：toolName → Set<pattern> */
-  private alwaysAllow = new Map<string, Set<string>>();
-
   setEventBus(eventBus: EventBus): void {
     this.eventBus = eventBus;
   }
 
-  /**
-   * 检查工具是否已被标记为"始终允许"
-   */
-  isAlwaysAllowed(toolName: string): boolean {
-    return this.alwaysAllow.has(toolName);
-  }
-
-  /**
-   * 将工具标记为"始终允许"
-   */
-  addAlwaysAllow(toolName: string): void {
-    if (!this.alwaysAllow.has(toolName)) {
-      this.alwaysAllow.set(toolName, new Set());
-    }
-  }
-
-  /**
-   * 清除所有"始终允许"缓存（用于切换权限模式时重置）
-   */
+  /** Clear all temporary grants when the permission context changes. */
   clearAlwaysAllow(): void {
-    this.alwaysAllow.clear();
     this.temporaryGrants.clear();
   }
 
@@ -519,7 +509,7 @@ export class PermissionGateway {
     }
   }
 
-  private hasTemporaryGrant(sessionId: string, toolName: string, toolInput: Record<string, unknown>): boolean {
+  hasTemporaryGrant(sessionId: string, toolName: string, toolInput: Record<string, unknown>): boolean {
     const now = Date.now();
     this.pruneTemporaryGrants(now);
     const key = this.temporaryGrantKey(sessionId, toolName, permissionInputFingerprint(toolInput));
@@ -528,7 +518,7 @@ export class PermissionGateway {
     return true;
   }
 
-  private addTemporaryGrant(pending: PendingCrossSessionPermission): number {
+  private addTemporaryGrant(pending: Pick<PendingPermission, 'sessionId' | 'toolName' | 'inputFingerprint'>): number {
     const now = Date.now();
     this.pruneTemporaryGrants(now);
     const expiresAt = now + SESSION_GRANT_TTL_MS;
@@ -537,11 +527,10 @@ export class PermissionGateway {
     return expiresAt;
   }
 
-  /**
-   * 获取所有"始终允许"的工具列表
-   */
+  /** Legacy diagnostics alias. Grants are no longer tool-wide or permanent. */
   getAlwaysAllowList(): string[] {
-    return [...this.alwaysAllow.keys()];
+    this.pruneTemporaryGrants(Date.now());
+    return [...this.temporaryGrants.keys()];
   }
 
   private resolveCrossSessionPermission(
@@ -746,10 +735,6 @@ export class PermissionGateway {
     summary?: string,
     reason?: string
   ): Promise<PermissionDecision> {
-    // 如果已标记为始终允许，直接放行
-    if (this.isAlwaysAllowed(toolName)) {
-      return 'always';
-    }
     if (this.hasTemporaryGrant(sessionId, toolName, toolInput)) {
       return 'allow';
     }
@@ -803,9 +788,9 @@ export class PermissionGateway {
         title: '🔐 权限请求',
         body: `工具：${toolName}\n操作：${displaySummary}${reasonLine}`,
         buttons: [
-          { key: 'allow',  label: '✅ 允许',     style: 'primary' },
-          { key: 'always', label: '🔓 始终允许',  style: 'default' },
-          { key: 'deny',   label: '❌ 拒绝',     style: 'danger' },
+          { key: 'allow',  label: '✅ 允许本次', style: 'primary' },
+          { key: 'always', label: '⏱ 同操作 30 分钟', style: 'default' },
+          { key: 'deny',   label: '❌ 拒绝', style: 'danger' },
         ],
       },
       channelId: context?.channelId || '',
@@ -833,7 +818,7 @@ export class PermissionGateway {
           chatmode: context.chatmode,
           replyContext: context.replyContext,
         });
-        const fallbackText = `🔐 权限请求 - ${toolName}\n${displaySummary}${reasonLine}\n回复 /perm allow 同意 / /perm always 始终允许 / /perm deny 拒绝`;
+        const fallbackText = `🔐 权限请求 - ${toolName}\n${displaySummary}${reasonLine}\n回复 /perm allow 允许本次 / /perm always 同操作授权 30 分钟 / /perm deny 拒绝`;
         const result = await sendInteractionPayload(
           context.adapter,
           envelope,
@@ -853,7 +838,13 @@ export class PermissionGateway {
     }
 
     return new Promise((resolve) => {
-      this.pending.set(requestId, { sessionId, toolName, resolve, interactionRouter: context?.interactionRouter });
+      this.pending.set(requestId, {
+        sessionId,
+        toolName,
+        inputFingerprint: permissionInputFingerprint(toolInput),
+        resolve,
+        interactionRouter: context?.interactionRouter,
+      });
 
       // 注册到 InteractionRouter（卡片和文本降级都注册，统一路由）
       if (context?.interactionRouter) {
@@ -868,9 +859,9 @@ export class PermissionGateway {
     const pending = this.pending.get(requestId);
     if (!pending || pending.sessionId !== sessionId) return false;
 
-    // 如果是 always，缓存该工具
+    // Legacy "always" now means this exact operation in this session for 30 minutes.
     if (decision === 'always') {
-      this.addAlwaysAllow(pending.toolName);
+      this.addTemporaryGrant(pending);
     }
 
     pending.resolve(decision);
