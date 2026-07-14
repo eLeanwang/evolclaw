@@ -112,11 +112,13 @@ describe('ProactiveMode', () => {
 });
 
 describe('registerBuiltinModes', () => {
-  it('registers interactive and proactive', () => {
+  it('registers single-session + interactive + proactive (过渡期并存)', () => {
     const reg = new ResponseModeRegistry();
     registerBuiltinModes(reg);
+    expect(reg.get('single-session')?.id).toBe('single-session');
     expect(reg.get('interactive')?.id).toBe('interactive');
     expect(reg.get('proactive')?.id).toBe('proactive');
-    expect(reg.list().length).toBe(2);
+    // 步骤 7 删除 interactive/proactive 后此数应回落到 1
+    expect(reg.list().length).toBe(3);
   });
 });
