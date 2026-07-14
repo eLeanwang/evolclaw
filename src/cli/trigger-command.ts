@@ -94,7 +94,7 @@ Flag 模式支持的参数（与 /trigger 命令一致）:
   --max-runs <次数>  --max-duration <时长: 30s|15m|2h|1d>
   --permission <auto|bypass|readonly|plan|edit|request|noask>
   --tz <时区> (仅 cron)
-  --target-channel <channelKey> --target-channel-id <ID>
+  --target-channel <channelKey> --target-channel-id <ID>  (AUN 可简写为 aun)
   --target-session <main|thread> [--target-thread-id <threadId>]
   --trigger-thread <per-run|by-trigger>
   --name <名称>`);

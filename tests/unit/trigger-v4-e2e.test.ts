@@ -12,6 +12,7 @@ import { TriggerDefinitionManager } from '../../src/trigger/manager.js';
 import { TriggerRuntimeScheduler } from '../../src/trigger/scheduler.js';
 import { TriggerScriptExecutor } from '../../src/trigger/script-executor.js';
 import { TriggerRunStateStore } from '../../src/trigger/state.js';
+import { normalizeTriggerDefinition } from '../../src/trigger/validation.js';
 import type { Message } from '../../src/types.js';
 
 let tmpDir: string | undefined;
@@ -25,6 +26,36 @@ afterEach(() => {
 });
 
 describe('Trigger V4 e2e', () => {
+  it('expands the implicit AUN target shorthand to the agent channel key', () => {
+    const definition = normalizeTriggerDefinition({
+      $schema_version: 4,
+      agentAid: 'test.agentid.pub',
+      name: 'implicit-aun-target',
+      source: { type: 'once' },
+      execution: {
+        type: 'target_session',
+        prompt: 'test',
+        onError: 'fail',
+        noopSentinel: '[[NOOP]]',
+      },
+      feedback: {
+        strategy: 'target',
+        target: {
+          channelKey: 'aun',
+          channelId: 'recipient.agentid.pub',
+          session: 'main',
+        },
+      },
+      reliability: {
+        concurrency: 'forbid',
+        missedPolicy: 'run_once',
+        retry: { maxAttempts: 0, backoffMs: 30_000 },
+      },
+    });
+
+    expect(definition.feedback.target?.channelKey).toBe('aun#test.agentid.pub#main');
+  });
+
   it('runs once + target_session through scheduler, queue, event bus, and audit', async () => {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'trigger-v4-e2e-'));
     const projectPath = path.join(tmpDir, 'project');

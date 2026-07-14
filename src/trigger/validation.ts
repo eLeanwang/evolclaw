@@ -16,6 +16,7 @@ import type {
   TriggerScriptConfig,
   TriggerSource,
 } from './types.js';
+import { formatChannelKey } from '../core/channel-loader.js';
 
 const MAX_SCRIPT_TIMEOUT_MS = 900_000;
 const DEFAULT_NOOP_SENTINEL = '[[NOOP]]';
@@ -205,7 +206,7 @@ function normalizeV4(raw: Record<string, unknown>, opts: { now?: number }): Trig
     origin: normalizeOrigin(raw.origin),
     source: normalizeSource(raw.source),
     execution: normalizeExecution(raw.execution, { id }),
-    feedback: normalizeFeedback(raw.feedback),
+    feedback: normalizeFeedback(raw.feedback, agentAid),
     reliability: normalizeReliability(raw.reliability),
     limits: normalizeLimits(raw.limits),
   };
@@ -414,7 +415,7 @@ function normalizeScript(value: unknown): TriggerScriptConfig {
   };
 }
 
-function normalizeFeedback(value: unknown): TriggerFeedbackConfig {
+function normalizeFeedback(value: unknown, agentAid: string): TriggerFeedbackConfig {
   if (!isObject(value)) throw new Error('feedback must be an object');
   const raw = value as Record<string, unknown>;
   const strategy = requiredString(raw.strategy, 'feedback.strategy');
@@ -423,22 +424,25 @@ function normalizeFeedback(value: unknown): TriggerFeedbackConfig {
   }
   return {
     strategy,
-    target: raw.target === undefined ? undefined : normalizeFeedbackTarget(raw.target, 'feedback.target'),
+    target: raw.target === undefined ? undefined : normalizeFeedbackTarget(raw.target, 'feedback.target', agentAid),
     onReply: normalizeFeedbackTemplate(raw.onReply, 'feedback.onReply'),
     onNoop: normalizeFeedbackTemplate(raw.onNoop, 'feedback.onNoop'),
     onFailure: normalizeFeedbackTemplate(raw.onFailure, 'feedback.onFailure'),
   };
 }
 
-function normalizeFeedbackTarget(value: unknown, label: string): TriggerFeedbackTarget {
+function normalizeFeedbackTarget(value: unknown, label: string, agentAid: string): TriggerFeedbackTarget {
   if (!isObject(value)) throw new Error(`${label} must be an object`);
   const raw = value as Record<string, unknown>;
   const session = normalizeSessionKind(raw.session, `${label}.session`);
   const threadId = optionalString(raw.threadId);
   if (session === 'main' && threadId) throw new Error(`${label}.threadId is not allowed when ${label}.session=main`);
   if (session === 'thread' && !threadId) throw new Error(`${label}.threadId is required when ${label}.session=thread`);
+  const channelKey = requiredString(raw.channelKey, `${label}.channelKey`);
   return {
-    channelKey: requiredString(raw.channelKey, `${label}.channelKey`),
+    channelKey: channelKey === 'aun'
+      ? formatChannelKey({ type: 'aun', selfAID: agentAid, name: 'main' })
+      : channelKey,
     channelId: requiredString(raw.channelId, `${label}.channelId`),
     session,
     threadId,

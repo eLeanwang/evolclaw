@@ -106,6 +106,8 @@ V4 用 `execution.type` 区分执行位置：
 --target-session thread --target-thread-id <threadId>
 ```
 
+AUN 渠道由 agent AID 隐式创建，不需要写入 agent 配置的 `channels[]`。CLI 和 V4 definition 均可将 `aun` 用作 `channelKey` 简写；保存前会按 `agentAid` 展开为 `aun#<agentAid>#main`。其他渠道仍需指定完整的实例 channel key。
+
 V4 feedback 是单策略：
 
 - `origin`：送回创建 trigger 的来源会话
