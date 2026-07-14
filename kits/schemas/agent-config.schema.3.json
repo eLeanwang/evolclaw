@@ -35,7 +35,7 @@
     "capabilities": { "type": "object", "x-merge": "dict" },
     "debug": { "type": "object", "x-merge": "dict" },
     "observable": { "type": "boolean", "x-merge": "scalar" },
-    "chatmode": { "type": "object", "x-merge": "dict" },
+    "chatmode": { "type": "object", "x-merge": "dict", "default": { "private": "interactive", "group": "proactive", "nothuman": "proactive" }, "description": "chatMode 场景默认表；出厂默认值即此 default（agent 级改默认，关系级按键覆盖）" },
     "response_modes": { "type": "object", "x-merge": "dict" },
     "responseMode": { "type": "string", "x-merge": "scalar" },
     "config": { "type": "object", "x-merge": "dict" },
