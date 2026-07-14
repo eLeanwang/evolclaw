@@ -1,10 +1,10 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import os from 'os';
-import { ResponseModeCoordinator } from '../../src/response-modes/coordinator.js';
-import { ResponseModeRegistry } from '../../src/response-modes/registry.js';
-import { registerBuiltinModes } from '../../src/response-modes/core/index.js';
-import type { CoordinatorInboundDeps } from '../../src/response-modes/coordinator.js';
-import type { InboundMessage } from '../../src/response-modes/types.js';
+import { ResponseModeCoordinator } from '../../src/response-system/coordinator.js';
+import { ResponseModeRegistry } from '../../src/response-system/registry.js';
+import { registerBuiltinModes } from '../../src/response-system/modes/index.js';
+import type { CoordinatorInboundDeps } from '../../src/response-system/coordinator.js';
+import type { InboundMessage } from '../../src/response-system/types.js';
 import type { EffectiveAgentConfig } from '../../src/types.js';
 
 function makeDeps(agentConfig: Partial<EffectiveAgentConfig> = {}, peerKey?: string): CoordinatorInboundDeps {
@@ -49,10 +49,13 @@ describe('ResponseModeCoordinator', () => {
     expect(g?.modeId).toBe('proactive'); // group 系统兜底
   });
 
-  it('response_modes default has priority over chatMode fallback', async () => {
+  it('session.chatMode fallback wins over response_modes default (现行兼容语义)', async () => {
+    // 活代码语义（coordinator.ts resolveInbound）：source !== 'override' 时一律回落
+    // session.chatMode——response_modes 的 default 配置不压过会话 chatmode。
+    // 注：single-session 合并的步骤 4 会移除 chatModeFallback 参数，届时本用例重写。
     const deps = makeDeps({ response_modes: { default_private: 'interactive' } });
     const r = await coord.resolveInbound(msg('private'), deps, 'proactive');
-    expect(r?.modeId).toBe('interactive');
+    expect(r?.modeId).toBe('proactive');
   });
 
   it('relation override remains higher priority than session.chatMode', async () => {

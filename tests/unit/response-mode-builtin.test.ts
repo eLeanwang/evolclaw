@@ -1,9 +1,9 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { InteractiveMode } from '../../src/response-modes/core/interactive.js';
-import { ProactiveMode } from '../../src/response-modes/core/proactive.js';
-import { ResponseModeRegistry } from '../../src/response-modes/registry.js';
-import { registerBuiltinModes } from '../../src/response-modes/core/index.js';
-import type { ResponseModeContext, InboundMessage, OutboundPayload } from '../../src/response-modes/types.js';
+import { InteractiveMode } from '../../src/response-system/modes/interactive/index.js';
+import { ProactiveMode } from '../../src/response-system/modes/proactive/index.js';
+import { ResponseModeRegistry } from '../../src/response-system/registry.js';
+import { registerBuiltinModes } from '../../src/response-system/modes/index.js';
+import type { ResponseModeContext, InboundMessage, OutboundPayload } from '../../src/response-system/types.js';
 
 const inbound = (chatType: 'private' | 'group'): InboundMessage => ({
   peerId: 'p1', content: 'hi', chatType,

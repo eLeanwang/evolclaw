@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { LogicalQueueBridge } from '../../src/core/message/logical-queue-bridge.js';
-import { LIFOQueue } from '../../src/response-modes/queues/lifo-queue.js';
+import { LIFOQueue } from '../../src/response-system/queues/lifo-queue.js';
 import type { Message } from '../../src/types.js';
 
 function msg(id: string): Message {

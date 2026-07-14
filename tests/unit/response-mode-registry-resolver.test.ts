@@ -1,8 +1,8 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { ResponseModeRegistry } from '../../src/response-modes/registry.js';
-import { ResponseModeResolver } from '../../src/response-modes/resolver.js';
-import type { ResponseMode, MessageQueueInterface } from '../../src/response-modes/types.js';
-import { FIFOQueue } from '../../src/response-modes/queues/fifo-queue.js';
+import { ResponseModeRegistry } from '../../src/response-system/registry.js';
+import { ResponseModeResolver } from '../../src/response-system/resolver.js';
+import type { ResponseMode, MessageQueueInterface } from '../../src/response-system/types.js';
+import { FIFOQueue } from '../../src/response-system/queues/fifo-queue.js';
 
 function makeMode(id: string, type: 'builtin' | 'extension', scenes: ('private' | 'group')[]): ResponseMode {
   const queue = new FIFOQueue();

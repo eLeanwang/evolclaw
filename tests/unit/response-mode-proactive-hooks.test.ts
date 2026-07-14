@@ -1,9 +1,9 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { ProactiveMode } from '../../src/response-modes/core/proactive.js';
+import { ProactiveMode } from '../../src/response-system/modes/proactive/index.js';
 import type {
   ResponseModeContext, InboundMessage, ProcessContext, ToolUseContext,
   CompleteContext, AfterProcessContext,
-} from '../../src/response-modes/types.js';
+} from '../../src/response-system/types.js';
 
 const logger = { debug() {}, info() {}, warn() {}, error() {} };
 

@@ -49,6 +49,10 @@ export class PriorityQueue implements MessageQueueInterface {
     return this.queue[0]?.message;
   }
 
+  peekSync(): InboundMessage | undefined {
+    return this.queue[0]?.message;
+  }
+
   size(): number {
     return this.queue.length;
   }
