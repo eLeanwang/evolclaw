@@ -14,15 +14,15 @@
 
 | 文件 | 行数 | 职责 |
 |------|-----|------|
-| `config-manager.ts` | 406 | 配置读写统一归口；H 链/HA 链解析；字段路由 |
+| `config-manager.ts` | 406 | 配置读写统一归口；覆盖链/行为链解析；字段路由 |
 | `merge.ts` | 174 | 类型驱动合并（scalar/list/dict）；`${VAR}` 三级 .env 展开 |
 | `schema-registry.ts` | 170 | Schema 加载（SSOT）；AJV 校验；字段名不相交硬约束 |
 | `snapshot.ts` | 553 | 配置快照/恢复/回滚；版本差异比对；保留策略 |
 | `boot-log.ts` | 268 | 启动日志（按月归档）；自检回落（逐版本真实启动探测） |
 
 **核心能力**：
-- 四层覆盖链：defaults → agent/config → relation/config（H 链）
-- 角色层 behavior：agent/behavior → role → relation/behavior（HA 链）
+- 覆盖链：defaults → agent/config → relation/config
+- 角色层 behavior：agent/behavior → role → relation/behavior（行为链）
 - Schema 驱动的合并语义（字段无特判）
 - 版本控制与配置损坏自动回落
 

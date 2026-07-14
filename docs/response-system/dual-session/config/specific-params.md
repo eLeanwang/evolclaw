@@ -17,8 +17,12 @@
 > **参数唯一事实源见 [config-reference.md](../../config-reference.md)**。本文档保留各参数的
 > 详细说明与调优建议，参数集合/默认值以 config-reference.md 为准。
 
+> **存放位置**：以下特有参数存 `responseModeParams["dual-session"]` 桶（顶层）；
+> 通用参数 chatmode / mentionMode / model 在配置顶层，不在此桶内。
+
 ```typescript
-interface DualSessionConfig extends CommonResponseModeConfig {
+// 存 responseModeParams['dual-session']；通用参数在顶层，不在此
+interface DualSessionParams {
   // === 辅助队列触发配置 ===
   debounceMs?: number;          // 防抖时间（默认 3000ms，范围 0-6000）
   maxWaitMs?: number;           // 最早消息最长等待（默认 15000ms，范围 5000-30000）
@@ -88,15 +92,19 @@ T5: Owner: "怎么解决？"
 ```json
 // 快速响应（减少防抖）
 {
-  "config": {
-    "debounceMs": 1000  // 1秒
+  "responseModeParams": {
+    "dual-session": {
+      "debounceMs": 1000  // 1秒
+    }
   }
 }
 
 // 更长的等待（适合消息频繁的群聊）
 {
-  "config": {
-    "debounceMs": 5000  // 5秒
+  "responseModeParams": {
+    "dual-session": {
+      "debounceMs": 5000  // 5秒
+    }
   }
 }
 ```
@@ -132,15 +140,19 @@ T15: 强制触发（最早消息已等待15秒）
 ```json
 // 更快的强制触发
 {
-  "config": {
-    "maxWaitMs": 10000  // 10秒
+  "responseModeParams": {
+    "dual-session": {
+      "maxWaitMs": 10000  // 10秒
+    }
   }
 }
 
 // 更长的容忍时间
 {
-  "config": {
-    "maxWaitMs": 30000  // 30秒
+  "responseModeParams": {
+    "dual-session": {
+      "maxWaitMs": 30000  // 30秒
+    }
   }
 }
 ```
@@ -179,15 +191,19 @@ T15: 强制触发（最早消息已等待15秒）
 ```json
 // 群聊：更大的容量
 {
-  "config": {
-    "maxQueueSize": 100
+  "responseModeParams": {
+    "dual-session": {
+      "maxQueueSize": 100
+    }
   }
 }
 
 // 单聊：更小的容量（更快触发）
 {
-  "config": {
-    "maxQueueSize": 10
+  "responseModeParams": {
+    "dual-session": {
+      "maxQueueSize": 10
+    }
   }
 }
 ```
@@ -223,15 +239,19 @@ T15: 强制触发（最早消息已等待15秒）
 ```json
 // 使用 DeepSeek（默认）
 {
-  "config": {
-    "auxiliaryModel": "deepseek-v4-flash"
+  "responseModeParams": {
+    "dual-session": {
+      "auxiliaryModel": "deepseek-v4-flash"
+    }
   }
 }
 
 // 使用 Haiku（质量优先）
 {
-  "config": {
-    "auxiliaryModel": "claude-haiku"
+  "responseModeParams": {
+    "dual-session": {
+      "auxiliaryModel": "claude-haiku"
+    }
   }
 }
 ```
@@ -267,15 +287,19 @@ T15: 强制触发（最早消息已等待15秒）
 ```json
 // 更频繁的压缩
 {
-  "config": {
-    "auxiliaryMaxTokens": 20000
+  "responseModeParams": {
+    "dual-session": {
+      "auxiliaryMaxTokens": 20000
+    }
   }
 }
 
 // 更长的上下文
 {
-  "config": {
-    "auxiliaryMaxTokens": 80000
+  "responseModeParams": {
+    "dual-session": {
+      "auxiliaryMaxTokens": 80000
+    }
   }
 }
 ```
@@ -313,15 +337,19 @@ T15: 强制触发（最早消息已等待15秒）
 ```json
 // 更频繁的压缩
 {
-  "config": {
-    "mainMaxTokens": 80000
+  "responseModeParams": {
+    "dual-session": {
+      "mainMaxTokens": 80000
+    }
   }
 }
 
 // 超长上下文（Claude Opus 支持 200k）
 {
-  "config": {
-    "mainMaxTokens": 180000
+  "responseModeParams": {
+    "dual-session": {
+      "mainMaxTokens": 180000
+    }
   }
 }
 ```
@@ -379,15 +407,19 @@ T15: 强制触发（最早消息已等待15秒）
 ```json
 // 禁用打断（始终排队）
 {
-  "config": {
-    "interruptEnabled": false
+  "responseModeParams": {
+    "dual-session": {
+      "interruptEnabled": false
+    }
   }
 }
 
 // 启用打断（默认）
 {
-  "config": {
-    "interruptEnabled": true
+  "responseModeParams": {
+    "dual-session": {
+      "interruptEnabled": true
+    }
   }
 }
 ```
@@ -396,25 +428,27 @@ T15: 强制触发（最早消息已等待15秒）
 
 ## 七、完整配置示例
 
+> 提醒：通用参数（chatmode / mentionMode / model）在**顶层**；
+> 只有 dual-session 特有参数放进 `responseModeParams["dual-session"]` 桶。
+
 ### 7.1 标准群聊配置
 
 ```json
 {
   "responseMode": "dual-session",
-  "config": {
-    // 通用参数
-    "chatMode": "proactive",
-    "mentionMode": "disabled",
-    "model": "claude-opus",
-    
-    // 特有参数
-    "debounceMs": 3000,
-    "maxWaitMs": 15000,
-    "maxQueueSize": 50,
-    "auxiliaryModel": "deepseek-v4-flash",
-    "auxiliaryMaxTokens": 40000,
-    "mainMaxTokens": 160000,
-    "interruptEnabled": true
+  "chatmode": { "group": "proactive" },
+  "mentionMode": "disabled",
+  "model": "claude-opus",
+  "responseModeParams": {
+    "dual-session": {
+      "debounceMs": 3000,
+      "maxWaitMs": 15000,
+      "maxQueueSize": 50,
+      "auxiliaryModel": "deepseek-v4-flash",
+      "auxiliaryMaxTokens": 40000,
+      "mainMaxTokens": 160000,
+      "interruptEnabled": true
+    }
   }
 }
 ```
@@ -424,12 +458,14 @@ T15: 强制触发（最早消息已等待15秒）
 ```json
 {
   "responseMode": "dual-session",
-  "config": {
-    "chatMode": "proactive",
-    "mentionMode": "mention-only",  // 只处理 @ 消息
-    "debounceMs": 1000,             // 减少防抖
-    "maxWaitMs": 10000,             // 更快强制触发
-    "auxiliaryModel": "claude-haiku"  // 质量优先
+  "chatmode": { "group": "proactive" },
+  "mentionMode": "mention-only",
+  "responseModeParams": {
+    "dual-session": {
+      "debounceMs": 1000,             // 减少防抖
+      "maxWaitMs": 10000,             // 更快强制触发
+      "auxiliaryModel": "claude-haiku"  // 质量优先
+    }
   }
 }
 ```
@@ -439,13 +475,14 @@ T15: 强制触发（最早消息已等待15秒）
 ```json
 {
   "responseMode": "dual-session",
-  "config": {
-    "chatMode": "proactive",
-    "model": "claude-sonnet",           // 主会话使用 Sonnet
-    "auxiliaryModel": "deepseek-v4-flash",  // 辅助会话使用 DeepSeek
-    "debounceMs": 5000,                 // 更长防抖，批量处理
-    "auxiliaryMaxTokens": 20000,        // 更频繁压缩
-    "mainMaxTokens": 80000
+  "model": "claude-sonnet",
+  "responseModeParams": {
+    "dual-session": {
+      "auxiliaryModel": "deepseek-v4-flash",  // 辅助会话使用 DeepSeek
+      "debounceMs": 5000,                 // 更长防抖，批量处理
+      "auxiliaryMaxTokens": 20000,        // 更频繁压缩
+      "mainMaxTokens": 80000
+    }
   }
 }
 ```
@@ -455,12 +492,13 @@ T15: 强制触发（最早消息已等待15秒）
 ```json
 {
   "responseMode": "dual-session",
-  "config": {
-    "chatMode": "proactive",
-    "mentionMode": "disabled",  // 单聊无需 mention
-    "maxQueueSize": 15,         // 单聊专用队列大小
-    "debounceMs": 2000,         // 更快响应
-    "interruptEnabled": true    // 允许打断
+  "mentionMode": "disabled",
+  "responseModeParams": {
+    "dual-session": {
+      "maxQueueSize": 15,         // 单聊专用队列大小
+      "debounceMs": 2000,         // 更快响应
+      "interruptEnabled": true    // 允许打断
+    }
   }
 }
 ```
@@ -511,12 +549,17 @@ T15: 强制触发（最早消息已等待15秒）
 
 ## 十、配置层级
 
-特有参数也支持多层级配置和覆盖：
+特有参数（`responseModeParams`）支持多层级配置和覆盖：
 
 1. **关系级配置**（`$RELATIONS_DIR/<peerKey>/config.json`）
-2. **环境级配置**（`$VENUES_DIR/<venueKey>/config.json`）
+2. **环境级配置**（预留，存储路径待环境层定型）
 3. **Agent 级配置**（`$AGENT_DIR/config.json`）
-4. **出厂默认值**
+4. **出厂默认值**（代码内置，`responseModeParams` 不进 schema/defaults）
+
+> ⚠️ **合并语义**：`responseModeParams` 是 `x-merge: dict`，第一层键是**模式 id**，
+> 同一模式桶**整体覆盖、不递归**。因此关系级若写 `responseModeParams["dual-session"]`，
+> 会**整桶替换** agent 级的同名桶（agent 级桶内未在关系级重写的字段**不保留**）。
+> 要保留 agent 级字段，关系级需把它们一并写全。
 
 **示例**：
 
@@ -524,27 +567,27 @@ T15: 强制触发（最早消息已等待15秒）
 // Agent 级配置（$AGENT_DIR/config.json）
 {
   "responseMode": "dual-session",
-  "config": {
-    "debounceMs": 3000,
-    "auxiliaryModel": "deepseek-v4-flash"
+  "mentionMode": "disabled",           // 通用参数在顶层
+  "responseModeParams": {
+    "dual-session": { "debounceMs": 3000, "auxiliaryModel": "deepseek-v4-flash" }
   }
 }
 
-// 环境级覆盖（$VENUES_DIR/aun#vip-group/config.json）
+// 关系级覆盖（$RELATIONS_DIR/aun#vip-group/config.json）
 {
-  "config": {
-    "debounceMs": 1000,              // 覆盖：VIP 群快速响应
-    "mentionMode": "mention-only"    // 新增：启用提及模式
+  "mentionMode": "mention-only",       // 顶层标量覆盖
+  "responseModeParams": {
+    // 整桶替换：需把要保留的 auxiliaryModel 一并写全
+    "dual-session": { "debounceMs": 1000, "auxiliaryModel": "deepseek-v4-flash" }
   }
 }
 
 // 最终生效配置
 {
   "responseMode": "dual-session",
-  "config": {
-    "debounceMs": 1000,                     // 环境级覆盖
-    "mentionMode": "mention-only",          // 环境级新增
-    "auxiliaryModel": "deepseek-v4-flash"   // Agent 级继承
+  "mentionMode": "mention-only",       // 关系级覆盖（顶层标量）
+  "responseModeParams": {
+    "dual-session": { "debounceMs": 1000, "auxiliaryModel": "deepseek-v4-flash" }
   }
 }
 ```

@@ -13,11 +13,14 @@ import type { ResponseMode } from './types.js';
 
 export class ResponseModeRegistry {
   private modes = new Map<string, ResponseMode>();
+  /** 首选响应模式 id：当关系级/agent 级均未配 responseMode 时的兜底。 */
+  private preferredId?: string;
 
   /**
    * 注册内置模式（type 必须为 'builtin'）
+   * @param preferred 标记为首选响应模式（注册表默认）；仅允许一个，重复设置以最后一次为准
    */
-  registerBuiltin(mode: ResponseMode): void {
+  registerBuiltin(mode: ResponseMode, preferred = false): void {
     if (mode.type !== 'builtin') {
       throw new Error(`[Registry] registerBuiltin requires type='builtin', got '${mode.type}' for mode '${mode.id}'`);
     }
@@ -25,6 +28,27 @@ export class ResponseModeRegistry {
       throw new Error(`[Registry] mode id '${mode.id}' already registered`);
     }
     this.modes.set(mode.id, mode);
+    if (preferred) this.preferredId = mode.id;
+  }
+
+  /**
+   * 首选响应模式（responseMode 解析链的最终兜底：关系级 > agent 级 > 此项）。
+   * @throws 若从未标记首选模式（启动注册应保证存在）
+   */
+  getPreferred(): ResponseMode {
+    if (!this.preferredId) {
+      throw new Error('[Registry] no preferred response mode registered — a builtin must be registered with preferred=true at startup');
+    }
+    const mode = this.modes.get(this.preferredId);
+    if (!mode) {
+      throw new Error(`[Registry] preferred mode '${this.preferredId}' not found in registry`);
+    }
+    return mode;
+  }
+
+  /** 首选响应模式 id（未设置返回 undefined）。 */
+  getPreferredId(): string | undefined {
+    return this.preferredId;
   }
 
   /**

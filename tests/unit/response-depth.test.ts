@@ -7,7 +7,7 @@ describe('resolveResponseDepth', () => {
     content: '这是一条测试消息',
     selfAid: 'me.agentid.pub',
     mentionAids: undefined as string[] | undefined,
-    dispatch: 'broadcast' as string | undefined,
+    mentionMode: 'disabled' as string | undefined,
     topicRounds: 0,
     lastTopicHash: undefined as string | undefined,
   };
@@ -69,7 +69,7 @@ describe('resolveResponseDepth', () => {
       const result = resolveResponseDepth({
         ...baseInput,
         content: '好的', // short + non-question
-        dispatch: 'broadcast',
+        mentionMode: 'disabled',
         mentionAids: ['me.agentid.pub'],
       });
       expect(result.depth).toBe('standard'); // not lightweight
@@ -81,7 +81,7 @@ describe('resolveResponseDepth', () => {
       const result = resolveResponseDepth({
         ...baseInput,
         content: '好的',
-        dispatch: 'broadcast',
+        mentionMode: 'disabled',
       });
       expect(result.depth).toBe('lightweight');
     });
@@ -90,7 +90,7 @@ describe('resolveResponseDepth', () => {
       const result = resolveResponseDepth({
         ...baseInput,
         content: '这个行吗？',
-        dispatch: 'broadcast',
+        mentionMode: 'disabled',
       });
       expect(result.depth).toBe('standard');
     });
@@ -99,7 +99,7 @@ describe('resolveResponseDepth', () => {
       const result = resolveResponseDepth({
         ...baseInput,
         content: '怎么做的',
-        dispatch: 'broadcast',
+        mentionMode: 'disabled',
       });
       expect(result.depth).toBe('standard');
     });
@@ -108,7 +108,7 @@ describe('resolveResponseDepth', () => {
       const result = resolveResponseDepth({
         ...baseInput,
         content: '这是一条比较长的消息，超过了三十个字符的限制，所以它不算短消息，应该走 standard 路径',
-        dispatch: 'broadcast',
+        mentionMode: 'disabled',
       });
       expect(result.depth).toBe('standard');
     });
@@ -119,7 +119,7 @@ describe('resolveResponseDepth', () => {
       const result = resolveResponseDepth({
         ...baseInput,
         content,
-        dispatch: 'broadcast',
+        mentionMode: 'disabled',
         topicRounds: 2,
         lastTopicHash: hash,
       });
@@ -128,11 +128,11 @@ describe('resolveResponseDepth', () => {
     });
   });
 
-  describe('mention dispatch mode (not mentioned — fallback)', () => {
+  describe('mention-only mode (not mentioned — fallback)', () => {
     it('topicRounds < 3 → standard', () => {
       const result = resolveResponseDepth({
         ...baseInput,
-        dispatch: 'mention',
+        mentionMode: 'mention-only',
         topicRounds: 0,
       });
       expect(result.depth).toBe('standard');
@@ -142,7 +142,7 @@ describe('resolveResponseDepth', () => {
       const hash = computeTopicHash('这是一条测试消息');
       const result = resolveResponseDepth({
         ...baseInput,
-        dispatch: 'mention',
+        mentionMode: 'mention-only',
         topicRounds: 2,
         lastTopicHash: hash,
       });
@@ -157,7 +157,7 @@ describe('resolveResponseDepth', () => {
         content: '好的',
         selfAid: undefined,
         mentionAids: ['someone.agentid.pub'],
-        dispatch: 'broadcast',
+        mentionMode: 'disabled',
       });
       expect(result.depth).toBe('lightweight');
     });
@@ -166,7 +166,7 @@ describe('resolveResponseDepth', () => {
       const result = resolveResponseDepth({
         ...baseInput,
         content: '',
-        dispatch: 'broadcast',
+        mentionMode: 'disabled',
       });
       expect(result.depth).toBe('lightweight');
     });
@@ -175,15 +175,15 @@ describe('resolveResponseDepth', () => {
       const result = resolveResponseDepth({
         ...baseInput,
         content: 'How does this work',
-        dispatch: 'broadcast',
+        mentionMode: 'disabled',
       });
       expect(result.depth).toBe('standard');
     });
 
-    it('no dispatch (undefined) + topicRounds < 3 → standard', () => {
+    it('no mentionMode (undefined) + topicRounds < 3 → standard', () => {
       const result = resolveResponseDepth({
         ...baseInput,
-        dispatch: undefined,
+        mentionMode: undefined,
       });
       expect(result.depth).toBe('standard');
     });

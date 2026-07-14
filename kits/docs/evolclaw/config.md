@@ -61,6 +61,38 @@ ec config boots [-n N]
 ec config prune [--keep-full N] [--keep-delta N] [--yes]
 ```
 
+## Schema 查看
+
+查看随包分发的配置 schema **定义本身**（`kits/schemas/*.schema.*.json`）——不是读写配置值，而是查「某作用域有哪些字段、类型/枚举/默认、schema 有几个版本」。纯只读，人和 agent 均可。
+
+```bash
+# 概览：列出全部逻辑 schema 及各自当前版本
+ec config schema
+
+# 列出某 schema 磁盘上的所有版本（* 标当前版本，附日期/说明）
+ec config schema <name> --list
+
+# 查看某 schema 的原始定义（缺省版本号 = 当前版本）
+ec config schema <name> [version]
+```
+
+逻辑 schema 名（`<name>`）：`evolclaw` / `defaults` / `agent-config` / `relation-config` / `contact-book`。
+
+三种输出模式：
+
+| 调用形式 | mode | 输出 |
+|----------|------|------|
+| `config schema` | overview | 全部 schema + 各自当前版本号 |
+| `config schema <name> --list` | versions | 该 schema 所有磁盘版本，`*` 标当前，附 date/description |
+| `config schema <name> [version]` | content | 指定版本（缺省=当前）的完整 schema JSON |
+
+约定与报错：
+- `--list` 与 version 参数互斥（`INVALID_CONFIG_COMMAND`）
+- `--list` 或指定 version 时必须带 `<name>`（`MISSING_ARG`）
+- version 须为非负整数；未知 name → `UNKNOWN_SCHEMA`；版本不存在 → `SCHEMA_VERSION_NOT_FOUND`（错误信息列出可用版本）
+
+> 用途：写配置前先 `ec config fields` 看字段可设值，或 `ec config schema <name>` 看该层 schema 的完整字段约束与 `x-merge` 合并语义；排查「字段为何被拒/怎么合并」时定位 schema 版本。
+
 ## 作用域 selector
 
 | 参数 | 作用域 | 落盘 |
@@ -80,7 +112,7 @@ defaults → agent/config → relation/config
 agent/behavior → roles.<role> → relation/behavior
 ```
 
-运行时先合并 H 链，再叠加 HA 行为链；同名行为字段以 behavior 链为高优先级。同名字段深合并（对象/数组），标量覆盖。
+运行时先合并覆盖链，再叠加行为链；同名行为字段以 behavior 链为高优先级。同名字段深合并（对象/数组），标量覆盖。
 
 ## 权限控制
 
@@ -90,7 +122,7 @@ agent/behavior → roles.<role> → relation/behavior
 - Agent 托管环境写仅人字段被拒
 
 **操作权限**：
-- 读操作（get/show/list/effective/fields/history/diff/current/boots/validate）：人和 agent 均可
+- 读操作（get/show/list/effective/fields/schema/history/diff/current/boots/validate）：人和 agent 均可
 - 快照管理（snapshot/restore/init/prune）：仅人可执行
 
 **凭证安全**：

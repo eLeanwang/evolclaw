@@ -17,12 +17,6 @@ function fail(formatJson: boolean, code: string, message: string): never {
   process.exit(1);
 }
 
-function formatPermission(permission: string): string {
-  if (permission === 'H') return 'human-only';
-  if (permission === 'HA') return 'configurable';
-  return permission;
-}
-
 function isAgentEnv(): boolean {
   return !!process.env.EVOLCLAW_SESSION_ID;
 }
@@ -50,7 +44,6 @@ function renderConfigExecution(result: ConfigExecutionResult, formatJson: boolea
         field: result.field,
         value: result.value,
         scope: result.scope,
-        permission: formatPermission(result.permission),
         file: result.file,
       }, () => `Set ${result.field} = ${JSON.stringify(result.value)} [${result.scope}]`);
     case 'unset':
@@ -64,13 +57,9 @@ function renderConfigExecution(result: ConfigExecutionResult, formatJson: boolea
       return emit(formatJson, { ok: true, scope: result.scope, configs: result.configs }, () => JSON.stringify(result.configs, null, 2));
     case 'effective':
       return emit(formatJson, { ok: true, scope: result.scope, effective: result.effective }, () => JSON.stringify(result.effective, null, 2));
-    case 'fields': {
-      const fields = formatJson
-        ? result.fields.map(field => ({ ...field, permission: formatPermission(field.permission) }))
-        : result.fields;
-      return emit(formatJson, { ok: true, scope: result.scope, fields }, () =>
-        result.fields.map(field => `${field.field} ${formatPermission(field.permission)} merge=${field.merge}`).join('\n'));
-    }
+    case 'fields':
+      return emit(formatJson, { ok: true, scope: result.scope, fields: result.fields }, () =>
+        result.fields.map(field => `${field.field} merge=${field.merge}`).join('\n'));
     case 'validate':
       return emit(formatJson, { ok: result.valid, results: result.results }, () =>
         result.results.map(item => `${item.ok ? 'OK' : 'ERROR'} ${item.target}${item.error ? ` ${item.error}` : ''}`).join('\n'));
@@ -108,6 +97,24 @@ function renderConfigExecution(result: ConfigExecutionResult, formatJson: boolea
     case 'boots':
       return emit(formatJson, { ok: true, boots: result.boots }, () =>
         result.boots.map(boot => `${boot.bootedAt} ${boot.startMethod}`).join('\n'));
+    case 'schema': {
+      if (result.mode === 'overview') {
+        const pad = Math.max(0, ...result.schemas.map(s => s.name.length));
+        return emit(formatJson, { ok: true, schemas: result.schemas }, () =>
+          result.schemas.map(s => `${s.name.padEnd(pad)}  v${s.current}`).join('\n'));
+      }
+      if (result.mode === 'versions') {
+        return emit(formatJson, { ok: true, name: result.name, current: result.current, versions: result.versions }, () =>
+          result.versions.map(v => {
+            const marker = v.current ? '*' : ' ';
+            const meta = [v.date, v.description].filter(Boolean).join('  ');
+            return `${marker} v${v.version}${meta ? `  ${meta}` : ''}${v.current ? '  (current)' : ''}`;
+          }).join('\n'));
+      }
+      return emit(formatJson,
+        { ok: true, name: result.name, version: result.version, current: result.current, content: result.content },
+        () => JSON.stringify(result.content, null, 2));
+    }
   }
 }
 
@@ -149,6 +156,7 @@ Scoped commands:
 
 Global commands:
   list | snapshot | prune | history | diff | restore | current | boots
+  schema [<name> [<version>]] [--list]      view schema definitions and versions
 
 Selectors:
   --self <aid> [--peer <peerKey>] | --default | --process

@@ -1735,7 +1735,7 @@ export class CommandHandler {
     '/model', '/setmodel', '/effort', '/perm', '/agent', '/baseagent',
     '/compact', '/file', '/send', '/restart', '/aid', '/rpc', '/storage',
     '/rename', '/name', '/trigger',
-    '/chatmode', '/dispatch', '/activity',
+    '/chatmode', '/mentionmode', '/activity',
     '/queue',
   ];
 

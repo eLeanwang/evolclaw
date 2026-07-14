@@ -39,6 +39,7 @@ import { authorizeCommand, authorizeResolvedConfigCommand } from './command-perm
 import { auditCommandAuthorization, hashArgv } from './command-audit.js';
 import type { CommandAuthorizationContext, CommandIntent, CommandScope } from '../../types.js';
 import { chatmodeFieldForPeer } from '../message/peer-mode.js';
+import { dispatchToMentionMode } from '../../config/mention-mode.js';
 import { menuFailure, menuSuccess, normalizeMenuError, validateMenuRequest } from '../message/menu-control-protocol.js';
 
 /**
@@ -430,8 +431,8 @@ function menuStringArg(args: Record<string, any> | undefined, key: string): stri
 type MenuChatmodeScope = 'agent' | 'relation';
 type MenuChatmodeField = 'private' | 'group' | 'nothuman';
 type MenuChatmodeValue = 'interactive' | 'proactive';
-type MenuDispatchScope = 'agent' | 'relation';
-type MenuDispatchValue = 'mention' | 'broadcast';
+type MenuMentionModeScope = 'agent' | 'relation';
+type MenuMentionModeValue = 'disabled' | 'mention-only';
 type MenuPermissionScope = 'agent' | 'relation';
 type MenuPermissionValue = typeof PERMISSION_MODE_KEYS[number];
 type MenuModelScope = 'agent' | 'relation';
@@ -444,10 +445,10 @@ interface MenuChatmodeTarget {
   fieldPath: `chatmode.${MenuChatmodeField}`;
 }
 
-interface MenuDispatchTarget {
-  scope: MenuDispatchScope;
+interface MenuMentionModeTarget {
+  scope: MenuMentionModeScope;
   sel: Selector;
-  fieldPath: 'dispatch';
+  fieldPath: 'mentionMode';
 }
 
 interface MenuPermissionTarget {
@@ -568,13 +569,13 @@ function writeMenuChatmode(target: MenuChatmodeTarget, value: MenuChatmodeValue)
   cfgWrite(route.target, cur, target.sel);
 }
 
-function menuDispatchScope(args?: Record<string, any>): MenuDispatchScope | { error: string; code: string } {
+function menuMentionModeScope(args?: Record<string, any>): MenuMentionModeScope | { error: string; code: string } {
   const raw = menuStringArg(args, 'scope') ?? 'relation';
   if (raw === 'agent' || raw === 'relation') return raw;
   return { error: `无效 scope: ${raw}，可选: agent / relation`, code: 'INVALID_SCOPE' };
 }
 
-function resolveMenuDispatchTarget(this: any, params: {
+function resolveMenuMentionModeTarget(this: any, params: {
   args?: Record<string, any>;
   session?: Session | null;
   channel: string;
@@ -583,8 +584,8 @@ function resolveMenuDispatchTarget(this: any, params: {
   role?: string;
   explicitChatType?: MenuChatType;
   fromControlChannel?: boolean;
-}): MenuDispatchTarget | { error: string; code: string } {
-  const scope = menuDispatchScope(params.args);
+}): MenuMentionModeTarget | { error: string; code: string } {
+  const scope = menuMentionModeScope(params.args);
   if (typeof scope !== 'string') return scope;
 
   const explicitSelf = menuStringArg(params.args, 'self')
@@ -595,11 +596,11 @@ function resolveMenuDispatchTarget(this: any, params: {
   const self = explicitSelf ?? currentSelf;
   if (!self) return { error: '缺少 self/aid 参数', code: 'MISSING_AID' };
   if (!params.fromControlChannel && explicitSelf && currentSelf && explicitSelf !== currentSelf) {
-    return { error: '只能设置当前 agent 的 dispatch', code: 'FORBIDDEN' };
+    return { error: '只能设置当前 agent 的 mentionMode', code: 'FORBIDDEN' };
   }
 
   const sel: Selector = { self, role: params.role };
-  if (scope === 'agent') return { scope, sel, fieldPath: 'dispatch' };
+  if (scope === 'agent') return { scope, sel, fieldPath: 'mentionMode' };
 
   const explicitPeer = menuStringArg(params.args, 'peer') ?? menuStringArg(params.args, 'peerKey');
   let peerKey: string | undefined;
@@ -617,23 +618,23 @@ function resolveMenuDispatchTarget(this: any, params: {
   }
   if (!peerKey) return { error: 'relation scope 需要 peer/peerKey，或可推导的当前对端', code: 'MISSING_PEER' };
 
-  return { scope, sel: { ...sel, peerKey }, fieldPath: 'dispatch' };
+  return { scope, sel: { ...sel, peerKey }, fieldPath: 'mentionMode' };
 }
 
-function readMenuDispatch(target: MenuDispatchTarget, fallback: MenuDispatchValue | null = null): MenuDispatchValue | null {
+function readMenuMentionMode(target: MenuMentionModeTarget, fallback: MenuMentionModeValue | null = null): MenuMentionModeValue | null {
   try {
-    const mode = resolveEffective(target.sel, { cache: true }).dispatch;
-    return mode === 'mention' || mode === 'broadcast' ? mode : fallback;
+    const mode = resolveEffective(target.sel, { cache: true }).mentionMode;
+    return mode === 'disabled' || mode === 'mention-only' ? mode : fallback;
   } catch {
     return fallback;
   }
 }
 
-function writeMenuDispatch(target: MenuDispatchTarget, value: MenuDispatchValue | null): void {
+function writeMenuMentionMode(target: MenuMentionModeTarget, value: MenuMentionModeValue | null): void {
   const route = routeFieldPath(target.fieldPath, target.scope);
   const cur = (cfgRead<Record<string, any>>(route.target, target.sel) as Record<string, any>) || {};
-  if (value === null) delete cur.dispatch;
-  else cur.dispatch = value;
+  if (value === null) delete cur.mentionMode;
+  else cur.mentionMode = value;
   cfgWrite(route.target, cur, target.sel);
 }
 
@@ -870,7 +871,7 @@ function buildMenuIntent(
     if (cmdBase === '/model') return intent('model.current', modelScope);
     if (cmdBase === '/effort') return intent('model.current', modelScope);
     if (cmdBase === '/chatmode') return intent('chatmode.current', args?.scope === 'agent' ? 'agent' : 'relation');
-    if (cmdBase === '/dispatch') return intent('dispatch.current', args?.scope === 'agent' ? 'agent' : 'relation');
+    if (cmdBase === '/mentionmode') return intent('mentionmode.current', args?.scope === 'agent' ? 'agent' : 'relation');
     if (cmdBase === '/gateway') return intent('gateway.read', 'process');
     if (cmdBase === '/config') return intent('config.read', 'process');
     if (cmdBase === '/system') return intent('system.status', 'process');
@@ -883,7 +884,7 @@ function buildMenuIntent(
     if (cmdBase === '/model') return intent('model.use', modelScope, { model: value });
     if (cmdBase === '/effort') return intent('model.effort', modelScope, { effort: value });
     if (cmdBase === '/chatmode') return intent('chatmode.update', args?.scope === 'agent' ? 'agent' : 'relation', { value });
-    if (cmdBase === '/dispatch') return intent('dispatch.update', args?.scope === 'agent' ? 'agent' : 'relation', { value });
+    if (cmdBase === '/mentionmode') return intent('mentionmode.update', args?.scope === 'agent' ? 'agent' : 'relation', { value });
     if (cmdBase === '/gateway') return intent('gateway.write', 'process');
     if (cmdBase === '/config') return intent('config.write', 'process');
   }
@@ -1148,9 +1149,9 @@ export function getMenuItems(this: any, role: string, chatType: string = 'privat
           { value: 'interactive', label: '交互模式', desc: '仅在收到消息时响应' },
           { value: 'proactive', label: '主动模式', desc: 'Agent 可主动推进任务' },
         ] } },
-        { cmd: '/dispatch', label: '切换分发模式', desc: '控制群聊消息过滤（仅@提及或广播响应）', next: { type: 'select', items: [
-          { value: 'mention', label: '@ 提及', desc: '仅在被 @ 提及时响应' },
-          { value: 'broadcast', label: '广播', desc: '响应群内所有消息' },
+        { cmd: '/mentionmode', label: '切换 @ 处理模式', desc: '控制群聊消息过滤（仅@提及或全部响应）', next: { type: 'select', items: [
+          { value: 'mention-only', label: '@ 提及', desc: '仅在被 @ 提及时响应' },
+          { value: 'disabled', label: '全部响应', desc: '响应群内所有消息' },
         ] } },
         { cmd: '/capability', label: '能力开关管理', desc: '查看并管理 Skills / MCP / Plugins' },
       ]
@@ -1444,8 +1445,8 @@ export async function getSubMenuItems(this: any, cmd: string, channel: string, c
     ];
   }
 
-  if (cmd === '/dispatch') {
-    const target = resolveMenuDispatchTarget.call(this, {
+  if (cmd === '/mentionmode') {
+    const target = resolveMenuMentionModeTarget.call(this, {
       args,
       session,
       channel,
@@ -1456,13 +1457,11 @@ export async function getSubMenuItems(this: any, cmd: string, channel: string, c
       fromControlChannel,
     });
     if ('error' in target) throw { code: target.code, message: target.error };
-    const fallback = session?.metadata?.dispatchMode === 'mention' || session?.metadata?.dispatchMode === 'broadcast'
-      ? session.metadata.dispatchMode
-      : null;
-    const currentMode = readMenuDispatch(target, fallback);
+    const fallback = dispatchToMentionMode(session?.metadata?.dispatchMode) ?? null;
+    const currentMode = readMenuMentionMode(target, fallback);
     return [
-      { value: 'mention', label: '@提及时响应', selected: currentMode === 'mention' },
-      { value: 'broadcast', label: '所有消息响应', selected: currentMode === 'broadcast' },
+      { value: 'mention-only', label: '@提及时响应', selected: currentMode === 'mention-only' },
+      { value: 'disabled', label: '所有消息响应', selected: currentMode === 'disabled' },
     ];
   }
 
@@ -1783,12 +1782,12 @@ export async function execMenuQuery(this: any,
     };
   }
 
-  if (cmdBase === '/dispatch') {
+  if (cmdBase === '/mentionmode') {
     const chatType = session?.chatType ?? explicitChatType ?? 'private';
     if (chatType !== 'group') {
-      return { error: 'dispatch 仅在群聊会话中有效', code: 'NOT_APPLICABLE' };
+      return { error: 'mentionMode 仅在群聊会话中有效', code: 'NOT_APPLICABLE' };
     }
-    const target = resolveMenuDispatchTarget.call(this, {
+    const target = resolveMenuMentionModeTarget.call(this, {
       args,
       session,
       channel,
@@ -1799,12 +1798,12 @@ export async function execMenuQuery(this: any,
       fromControlChannel,
     });
     if ('error' in target) return target;
-    const fallback = session?.metadata?.dispatchMode === 'mention' || session?.metadata?.dispatchMode === 'broadcast'
-      ? session.metadata.dispatchMode
-      : (evolagent?.config?.dispatch === 'mention' || evolagent?.config?.dispatch === 'broadcast' ? evolagent.config.dispatch : null);
+    // session metadata 是 AUN 协议词汇，翻译成 mentionMode 词汇；evolagent.config 已是 mentionMode 字段
+    const fallback = dispatchToMentionMode(session?.metadata?.dispatchMode)
+      ?? (evolagent?.config?.mentionMode === 'disabled' || evolagent?.config?.mentionMode === 'mention-only' ? evolagent.config.mentionMode : null);
     return {
       data: {
-        mode: readMenuDispatch(target, fallback),
+        mode: readMenuMentionMode(target, fallback),
         scope: target.scope,
         field: target.fieldPath,
         self: target.sel.self,
@@ -2159,15 +2158,15 @@ export async function execMenuUpdate(this: any,
     };
   }
 
-  if (cmdBase === '/dispatch') {
-    if (arg !== 'mention' && arg !== 'broadcast' && arg !== 'clear') {
+  if (cmdBase === '/mentionmode') {
+    if (arg !== 'mention-only' && arg !== 'disabled' && arg !== 'clear') {
       return { error: `无效模式: ${arg}`, code: 'INVALID_VALUE' };
     }
     const chatType = session?.chatType;
     if (!session || chatType !== 'group') {
-      return { error: 'dispatch 仅在群聊会话中有效', code: 'NOT_APPLICABLE' };
+      return { error: 'mentionMode 仅在群聊会话中有效', code: 'NOT_APPLICABLE' };
     }
-    const target = resolveMenuDispatchTarget.call(this, {
+    const target = resolveMenuMentionModeTarget.call(this, {
       args,
       session,
       channel,
@@ -2178,7 +2177,7 @@ export async function execMenuUpdate(this: any,
     });
     if ('error' in target) return target;
     try {
-      writeMenuDispatch(target, arg === 'clear' ? null : arg);
+      writeMenuMentionMode(target, arg === 'clear' ? null : arg);
     } catch (e: any) {
       return { error: e?.message || String(e), code: e?.code || 'CONFIG_WRITE_FAILED' };
     }
@@ -2875,7 +2874,7 @@ export async function execMenuForEcweb(this: any, payload: any): Promise<import(
   const nameMap: Record<string, string> = {
     pwd: '/pwd', session: '/session', baseagent: '/baseagent', model: '/model',
     topic: '/topic',
-    effort: '/effort', chatmode: '/chatmode', dispatch: '/dispatch',
+    effort: '/effort', chatmode: '/chatmode', mentionmode: '/mentionmode',
     permission: '/perm', activity: '/activity', system: '/system',
     agent: '/agent', trigger: '/trigger', file: '/file', gateway: '/gateway',
     config: '/config', capability: '/capability',
@@ -2945,7 +2944,7 @@ export async function execMenuForControl(this: any, payload: any, peerId: string
   const nameMap: Record<string, string> = {
     pwd: '/pwd', session: '/session', baseagent: '/baseagent', model: '/model',
     topic: '/topic',
-    effort: '/effort', chatmode: '/chatmode', dispatch: '/dispatch',
+    effort: '/effort', chatmode: '/chatmode', mentionmode: '/mentionmode',
     permission: '/perm', activity: '/activity', system: '/system',
     agent: '/agent', trigger: '/trigger', file: '/file', gateway: '/gateway',
     config: '/config', capability: '/capability',

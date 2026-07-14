@@ -3,34 +3,26 @@
  *
  * 模式解析：决定某个会话该用哪个响应模式。
  *
- * 解析优先级（高→低）：
- *   1. relation override（overrides[peerKey].mode）—— 特定对端/群的指定模式
- *   2. chatType 默认（default_private / default_group）
- *   3. 系统兜底（single-session）
+ * responseMode 是**标量**参数，走特殊路线（不同于 chatmode/mentionMode/model 的普通配置链）：
+ * 候选清单与默认值来自**注册表**，不来自 schema。解析优先级（高→低）：
+ *   1. 关系级 responseMode（$RELATIONS_DIR/<peerKey>/config.json）
+ *   2. agent 级 responseMode（$AGENT_DIR/config.json）
+ *   3. 注册表首选响应模式（registry.getPreferred()，当前为 single-session）
  *
- * 注：chatMode（interactive/proactive）不再决定「用哪个模式」，而是 single-session
- *    的配置参数。旧配置里 default_private / default_group / overrides 指向
- *    interactive 或 proactive 的，在配置迁移（步骤 5）后统一改写为 single-session + chatMode。
+ * 关系级 > agent 级由 ConfigManager 按 `x-merge: scalar` 合并完成，因此本解析器
+ * 收到的是**合并后的标量值**；只需「有值用值、无值用注册表首选」。
+ *
+ * 注：旧的 response_modes 块（default_private/default_group/configs/overrides）已废除。
+ *    chatMode 从顶层 chatmode 字典读、与选模式正交；模式特有参数从顶层 config 块读。
  */
 
 import type { ResponseMode } from './types.js';
 import type { ResponseModeRegistry } from './registry.js';
-import type { ResponseModesConfig } from '../types.js';
-
-// ResponseModesConfig 的权威定义在 src/types.ts（与 AgentConfig 同源）。
-// 此处 re-export，方便响应模式系统内部引用。
-export type { ResponseModesConfig };
-
-/** 系统兜底模式 id（response_modes 完全缺失时使用）——单会话合并后统一为 single-session。 */
-const FALLBACK_PRIVATE = 'single-session';
-const FALLBACK_GROUP = 'single-session';
 
 export interface ResolvedMode {
   mode: ResponseMode;
-  /** 该模式的配置（合并 configs[id] 与 override.config） */
-  config: any;
   /** 解析来源（用于 ec response current 显示与调试） */
-  source: 'override' | 'session' | 'default' | 'fallback';
+  source: 'config' | 'preferred';
 }
 
 export class ResponseModeResolver {
@@ -39,41 +31,14 @@ export class ResponseModeResolver {
   /**
    * 解析会话的响应模式。
    *
-   * @param chatType 会话类型
-   * @param peerKey  对端标识（<channel>#<peerId>），用于 override 查找
-   * @param config   响应模式配置块（可空，缺失时走兜底）
+   * @param responseModeId 合并后的标量 responseMode（关系级>agent级，可空）
    */
-  resolve(
-    chatType: 'private' | 'group',
-    peerKey: string | undefined,
-    config: ResponseModesConfig | undefined,
-  ): ResolvedMode {
-    // 1. relation override
-    if (peerKey && config?.overrides?.[peerKey]) {
-      const ov = config.overrides[peerKey];
-      const mode = this.registry.get(ov.mode);
-      if (mode) {
-        const baseConfig = config.configs?.[ov.mode] ?? {};
-        return { mode, config: { ...baseConfig, ...(ov.config ?? {}) }, source: 'override' };
-      }
-      // override 指定了不存在的模式：记录后回落到默认（不抛错，避免单个坏配置卡死会话）
+  resolve(responseModeId: string | undefined): ResolvedMode {
+    if (responseModeId) {
+      const mode = this.registry.get(responseModeId);
+      if (mode) return { mode, source: 'config' };
+      // 配了不存在的模式：不抛错（避免单个坏配置卡死会话），回落注册表首选
     }
-
-    // 2. chatType 默认
-    const defaultId = chatType === 'group' ? config?.default_group : config?.default_private;
-    if (defaultId) {
-      const mode = this.registry.get(defaultId);
-      if (mode) {
-        return { mode, config: config?.configs?.[defaultId] ?? {}, source: 'default' };
-      }
-    }
-
-    // 3. 系统兜底
-    const fallbackId = chatType === 'group' ? FALLBACK_GROUP : FALLBACK_PRIVATE;
-    const mode = this.registry.get(fallbackId);
-    if (!mode) {
-      throw new Error(`[Resolver] fallback mode '${fallbackId}' not registered — builtin modes must be registered at startup`);
-    }
-    return { mode, config: config?.configs?.[fallbackId] ?? {}, source: 'fallback' };
+    return { mode: this.registry.getPreferred(), source: 'preferred' };
   }
 }

@@ -23,7 +23,7 @@ const CONFIG_SCHEMA: JSONSchema = {
     chatMode: {
       type: 'string',
       enum: ['interactive', 'proactive'],
-      description: '回复投递方式：interactive=输出即回复；proactive=CLI 回复 + 思考投影。每会话生效值由宿主按配置层级解析后注入，无 auto 值。',
+      description: '回复投递方式：interactive=输出即回复；proactive=CLI 回复 + 思考投影。每会话生效值由宿主按配置层级（chatmode 场景表）解析后注入。',
     },
     pre_tool_1stmsgchk: { type: 'boolean', default: true, description: 'proactive 首工具表态检查（仅 chatMode=proactive 生效）' },
     tool_use_reminder: { type: 'boolean', default: true, description: 'proactive 工具汇报提醒（仅 chatMode=proactive 生效）' },
@@ -40,7 +40,7 @@ const CONFIG_SCHEMA: JSONSchema = {
 export class SingleSessionMode implements ResponseMode {
   readonly id = 'single-session';
   readonly displayName = '单会话模式';
-  readonly description = '单会话直接响应，按 chatMode 决定投递方式（合并原 interactive/proactive）。';
+  readonly description = '单会话直接响应，按 chatMode 决定投递方式。';
   readonly type = 'builtin' as const;
   readonly applicableScenes = ['private', 'group'] as ('private' | 'group')[];
   readonly configSchema = CONFIG_SCHEMA;

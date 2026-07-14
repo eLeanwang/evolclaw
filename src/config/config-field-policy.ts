@@ -13,7 +13,7 @@ export interface ConfigFieldRule {
     | 'positive-number'
     | 'effort'
     | 'chatmode'
-    | 'dispatch'
+    | 'mention-mode'
     | 'show-activities'
     | 'permission-mode'
     | 'approvals-reviewer'
@@ -29,12 +29,11 @@ export type ConfigFieldValueResult =
 const BEHAVIOR_TOP_FIELDS = new Set([
   'active_baseagent',
   'chatmode',
-  'response_modes',
+  'mentionMode',
   'responseMode',
-  'config',
+  'responseModeParams',
   'flush_delay',
   'debounce',
-  'dispatch',
   'show_activities',
   'proactive',
   'session_renew',
@@ -130,7 +129,7 @@ export function resolveConfigFieldRule(fieldPath: string): ConfigFieldRule {
 
   if (field === 'active_baseagent') return scalar(field, 'baseagent');
   if (field === 'flush_delay' || field === 'debounce') return scalar(field, 'nonnegative-number');
-  if (field === 'dispatch') return scalar(field, 'dispatch');
+  if (field === 'mentionMode') return scalar(field, 'mention-mode');
   if (field === 'show_activities') return scalar(field, 'show-activities');
   if (field === 'enable_rich_content') return scalar(field, 'boolean');
   if (field === 'permissionMode') return scalar(field, 'permission-mode');
@@ -144,19 +143,14 @@ export function resolveConfigFieldRule(fieldPath: string): ConfigFieldRule {
     return { class: 'unknown' };
   }
 
-  if (top === 'response_modes') {
-    if (parts.length === 1) return readonlyObject('response_modes');
-    if (parts.length === 2 && (parts[1] === 'configs' || parts[1] === 'overrides')) return readonlyObject('response_modes');
-    if (parts.length === 2 && (parts[1] === 'default_private' || parts[1] === 'default_group')) {
-      return scalar('response_modes', 'string');
-    }
+  if (top === 'responseMode') {
+    if (parts.length === 1) return scalar('responseMode', 'string');
     return { class: 'unknown' };
   }
 
-  if (top === 'config') {
-    if (parts.length === 1) return readonlyObject('config');
-    if (parts.length === 2 && parts[1] === 'auxiliaryModel') return scalar('config', 'string');
-    return { class: 'unknown' };
+  if (top === 'responseModeParams') {
+    // responseModeParams 是按模式分桶的字典，整体只读，子路径黑箱
+    return readonlyObject('responseModeParams');
   }
 
   if (top === 'proactive') {
@@ -253,10 +247,10 @@ export function parseConfigFieldValue(fieldPath: string, rawValue: unknown): Con
       return raw === 'interactive' || raw === 'proactive'
         ? { ok: true, value: raw }
         : { ok: false, reason: `Config field ${fieldPath} must be interactive or proactive` };
-    case 'dispatch':
-      return raw === 'mention' || raw === 'broadcast'
+    case 'mention-mode':
+      return raw === 'disabled' || raw === 'mention-only'
         ? { ok: true, value: raw }
-        : { ok: false, reason: `Config field ${fieldPath} must be mention or broadcast` };
+        : { ok: false, reason: `Config field ${fieldPath} must be disabled or mention-only` };
     case 'show-activities':
       return raw === 'all' || raw === 'none'
         ? { ok: true, value: raw }

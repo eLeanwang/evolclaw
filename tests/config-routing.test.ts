@@ -55,7 +55,7 @@ describe('v3 config system', () => {
         // 基础设施参数
         projects: { defaultPath: '/home/user/projects' },
         // 行为参数
-        dispatch: 'broadcast',
+        mentionMode: 'disabled',
         chatmode: { private: 'proactive', group: 'interactive' },
         active_baseagent: 'claude',
         baseagents: {
@@ -70,7 +70,7 @@ describe('v3 config system', () => {
       expect(fs.existsSync(agentConfigPath)).toBe(true);
 
       const config = read(ConfigTarget.Agent, sel);
-      expect(config?.dispatch).toBe('broadcast');
+      expect(config?.mentionMode).toBe('disabled');
       expect(config?.projects?.defaultPath).toBe('/home/user/projects');
       expect(config?.baseagents?.claude?.model).toBe('claude-sonnet-4');
     });
@@ -120,7 +120,7 @@ describe('v3 config system', () => {
         channels: [],
         active_baseagent: 'codex',
         baseagents: { claude: { model: 'opus' } },
-        dispatch: 'mention',
+        mentionMode: 'mention-only',
       }, sel);
 
       // relation (使用 relation-config schema 支持的字段)
@@ -129,12 +129,12 @@ describe('v3 config system', () => {
       write(ConfigTarget.Relation, {
         $schema_version: 2,
         baseagents: { claude: { model: 'haiku' } },  // 覆盖 agent
-        dispatch: 'broadcast',  // 覆盖 agent
+        mentionMode: 'disabled',  // 覆盖 agent
         // active_baseagent 未设置，继承 agent
       }, relSel);
 
       const effective = resolveEffective(relSel);
-      expect(effective.dispatch).toBe('broadcast');  // relation 覆盖
+      expect(effective.mentionMode).toBe('disabled');  // relation 覆盖
       expect(effective.baseagents?.claude?.model).toBe('haiku');  // relation 覆盖
       expect(effective.active_baseagent).toBe('codex');  // 继承 agent
     });

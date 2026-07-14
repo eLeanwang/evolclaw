@@ -98,7 +98,7 @@ describe('SessionManager chatmode defaults', () => {
       'agent',
     );
 
-    expect(group.chatMode).toBe('proactive');
+    expect(group.chatMode).toBe('interactive');
     expect(system.chatMode).toBe('interactive');
     expect(systemGroup.chatMode).toBe('interactive');
     expect(bot.chatMode).toBe('interactive');

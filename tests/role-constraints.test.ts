@@ -158,45 +158,45 @@ describe('Role Constraints', () => {
     });
   });
 
-  describe('dispatch configuration', () => {
-    it('should preserve member broadcast', () => {
+  describe('mentionMode configuration', () => {
+    it('should preserve member disabled', () => {
       const result = mergeWithRoleConstraints('member', {
-        dispatch: 'broadcast'
+        mentionMode: 'disabled'
       });
 
       expect(result.valid).toBe(true);
-      expect(result.effectiveConfig.dispatch).toBe('broadcast');
+      expect(result.effectiveConfig.mentionMode).toBe('disabled');
     });
 
-    it('should preserve visitor dispatch', () => {
+    it('should preserve visitor mentionMode', () => {
       const result = mergeWithRoleConstraints('visitor', {
-        dispatch: 'broadcast'
+        mentionMode: 'disabled'
       });
 
       expect(result.valid).toBe(true);
-      expect(result.effectiveConfig.dispatch).toBe('broadcast');
+      expect(result.effectiveConfig.mentionMode).toBe('disabled');
     });
 
-    it('should allow admin to use mention', () => {
+    it('should allow admin to use mention-only', () => {
       const result = mergeWithRoleConstraints('admin', {
-        dispatch: 'mention'
+        mentionMode: 'mention-only'
       });
 
       expect(result.valid).toBe(true);
     });
 
-    it('should preserve admin broadcast', () => {
+    it('should preserve admin disabled', () => {
       const result = mergeWithRoleConstraints('admin', {
-        dispatch: 'broadcast'
+        mentionMode: 'disabled'
       });
 
       expect(result.valid).toBe(true);
-      expect(result.effectiveConfig.dispatch).toBe('broadcast');
+      expect(result.effectiveConfig.mentionMode).toBe('disabled');
     });
 
-    it('should allow owner to use broadcast', () => {
+    it('should allow owner to use disabled', () => {
       const result = mergeWithRoleConstraints('owner', {
-        dispatch: 'broadcast'
+        mentionMode: 'disabled'
       });
 
       expect(result.valid).toBe(true);
@@ -244,7 +244,7 @@ describe('Role Constraints', () => {
       const result = mergeWithRoleConstraints('visitor', {
         permissionMode: 'bypass',
         'baseagents.claude.model': 'claude-opus-4-8',
-        dispatch: 'broadcast',
+        mentionMode: 'disabled',
         chatmode: { private: 'interactive' }
       });
 

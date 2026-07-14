@@ -50,6 +50,11 @@ ec config effective --self <aid>
 
 # 列出所有配置文件
 ec config list
+
+# 查看 schema 定义（字段/类型/版本）
+ec config schema                       # 全部 schema + 当前版本
+ec config schema agent-config --list   # 某 schema 的所有版本
+ec config schema agent-config [version]# 某版本完整定义（缺省=当前）
 ```
 
 ### 修改配置

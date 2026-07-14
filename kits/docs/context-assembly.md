@@ -261,7 +261,7 @@ vars 由 evolclaw 在 `message-processor.ts` 按当前会话构造。分两类�
 | `groupId` | 群 ID（群聊时） |
 | `chatType` | `private` / `group` / `null`(coding) |
 | `channel` | 渠道类型（aun/feishu/...）|
-| `dispatch` | 群分发模式（mention/broadcast） |
+| `mentionMode` | 群 @ 处理模式（mention-only/disabled） |
 | `clientType` | 客户端类型（desktop/web/mobile） |
 | `permissionMode` / `readonly` | 权限模式 / 是否只读 |
 | `capabilities` | 当前渠道能力（图片输入/输出、文件发送） |

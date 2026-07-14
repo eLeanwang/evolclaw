@@ -133,7 +133,7 @@ resolveAnthropicConfig(syntheticConfig, override)
 **关键发现**：
 
 1. **baseagent-seed.ts 写入的配置可能不会生效**：
-   - 如果配置体系 v2 的 H 链（`resolveAgentConfig`）过滤掉了 `baseagents` 字段
+   - 如果配置体系 v2 的覆盖链（`resolveAgentConfig`）过滤掉了 `baseagents` 字段
    - 那么 `defaults.json` 里的 baseUrl/apiKey 不会被读取
    - 实际生效的是环境变量 fallback
 

@@ -1,15 +1,10 @@
 import type { ResponseModeRegistry } from '../registry.js';
-import { InteractiveMode } from './interactive/index.js';
-import { ProactiveMode } from './proactive/index.js';
 import { SingleSessionMode } from './single-session/index.js';
 
 export function registerBuiltinModes(registry: ResponseModeRegistry): void {
-  registry.registerBuiltin(new SingleSessionMode());
-  // 过渡期并存：interactive/proactive 在步骤 7 删除
-  registry.registerBuiltin(new InteractiveMode());
-  registry.registerBuiltin(new ProactiveMode());
+  // single-session 为首选响应模式（responseMode 解析链的最终兜底）。
+  // 合并了原 interactive/proactive——投递方式由 chatMode 参数决定，不再是独立模式。
+  registry.registerBuiltin(new SingleSessionMode(), true);
 }
 
 export { SingleSessionMode } from './single-session/index.js';
-export { InteractiveMode } from './interactive/index.js';
-export { ProactiveMode } from './proactive/index.js';

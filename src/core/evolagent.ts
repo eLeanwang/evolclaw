@@ -15,6 +15,7 @@ import type {
   ChannelAdapter,
   ShowActivitiesMode,
   ChatmodeBlock,
+  MentionMode,
 } from '../types.js';
 
 // ── 校验：迁到 config-store.validateAgentConfig ──
@@ -246,11 +247,11 @@ export class EvolAgent {
     });
   }
 
-  /** 设置群聊 dispatch 默认值（mention | broadcast）。 */
-  setDispatch(value: 'mention' | 'broadcast' | undefined): void {
-    this.merged.dispatch = value;
+  /** 设置群聊 mentionMode（mention-only | disabled）。 */
+  setMentionMode(value: MentionMode | undefined): void {
+    this.merged.mentionMode = value;
     this.updateAgentConfig(b => {
-      if (value === undefined) delete b.dispatch; else b.dispatch = value;
+      if (value === undefined) delete b.mentionMode; else b.mentionMode = value;
     });
   }
 

@@ -34,8 +34,8 @@ import { AGENT_DELEGATION_TOKEN_ENV, type AgentDelegationRegistry } from '../aut
 // Re-export 工具函数（向后兼容，让其他模块可以从 response-engine 导入）
 export { buildEnvelope, sendInteractionPayload } from './message-utils.js';
 import { resolveEffectiveModel, resolvePermissionMode } from '../model/config-scope.js';
-import { resolveEffective, read as readConfig, ConfigTarget } from '../../config/config-manager.js';
-import type { RelationConfig } from '../../types.js';
+import { resolveEffective } from '../../config/config-manager.js';
+import { dispatchToMentionMode } from '../../config/mention-mode.js';
 import { checkRoleAccess, getFirstStaticAgentOwner, resolvePeerRoleDetail, roleToSessionIdentity } from '../../config/peer-role-resolver.js';
 import { insertUsageEvent, insertContextBreakdown, insertModelCalls } from '../../stats/writer.js';
 import { normalizeUsage } from '../../stats/normalizer.js';
@@ -1059,35 +1059,25 @@ export class ResponseEngine implements IMessageProcessor {
     })();
 
     // ─── 响应模式解析（插件化机制中枢）───
-    // trigger override 绝对优先；否则由 Coordinator 解析（response_modes > chatmode 配置兜底）。
+    // trigger override 绝对优先；否则由 Coordinator 解析（responseMode 标量 > 注册表首选）。
     const peerType = message.peerType ?? (session.metadata as any)?.peerType;
     const systemOrServicePeer = isSystemOrServicePeer(peerType);
     const triggerChatModeOverride = systemOrServicePeer ? undefined : message.triggerMeta?.chatModeOverride;
-    // 关系级标量覆盖只在关系级有效：单独读关系层 config.chatMode（不能用合并后的
-    // effectiveAgentConfig.config.chatMode——那分不清值来自 agent 层还是关系层，
-    // 会让 agent 级误写的标量全局压过场景表）。agent 级只认场景表 chatmode。
-    const relationChatModeOverride = (() => {
-      if (!selfAid || !peerKey) return undefined;
-      try {
-        const rc = readConfig<RelationConfig>(ConfigTarget.Relation, { self: selfAid, peerKey }, { cache: true });
-        return (rc?.config as any)?.chatMode;
-      } catch {
-        return undefined;
-      }
-    })();
+    // chatmode 是顶层字典（agent 级与关系级同名，已由 ConfigManager 逐键合并）。
+    // 实际生效值由对端类型选键（private/nothuman/group），出厂默认走 schema。
     const chatModeFallback = resolveChatModeForPeer({
       chatType,
       peerType,
-      configured: effectiveAgentConfig?.chatmode,   // agent 级场景表（只认这个）
-      relationOverride: relationChatModeOverride,    // 关系级标量 config.chatMode
+      configured: effectiveAgentConfig?.chatmode,
     });
+    // mentionMode：顶层通用参数（先读出备用，投递/入队策略后续接入）
+    const mentionMode = effectiveAgentConfig?.mentionMode ?? 'disabled';
     const resolvedMode = triggerChatModeOverride || systemOrServicePeer
       ? null  // trigger 强制覆盖或 system/service 强制 interactive 时，不走插件解析
       : this.responseCoordinator.resolveMode(
-          chatType as 'private' | 'group',
-          peerKey,
-          effectiveAgentConfig?.response_modes,
+          effectiveAgentConfig?.responseMode,       // 标量：关系级>agent级>注册表首选
           chatModeFallback,
+          effectiveAgentConfig?.responseModeParams, // 按模式分桶的参数字典
           {
             session,
             agentConfig: effectiveAgentConfig as any,
@@ -1615,9 +1605,11 @@ export class ResponseEngine implements IMessageProcessor {
             chatType: session.chatType || null,
             channel: currentChannelType || null,
             venueUid: undefined,
-            // 群分发模式 / 客户端类型 / 权限模式
-            // 优先 agent/relation behavior 配置，fallback 到服务器 dispatch_mode 缓存。
-            dispatch: (effectiveAgentConfig?.dispatch ?? session.metadata?.dispatchMode ?? message.dispatchMode) || undefined,
+            // 群 @ 处理模式 / 客户端类型 / 权限模式
+            // 优先 agent/relation mentionMode 配置，fallback 到服务器 dispatch_mode 缓存（协议词汇需翻译）。
+            mentionMode: effectiveAgentConfig?.mentionMode
+              ?? dispatchToMentionMode(session.metadata?.dispatchMode ?? message.dispatchMode)
+              ?? undefined,
             clientType: message.clientType || undefined,
             permissionMode: effectivePermissionMode,
             capabilities: capParts.length > 0 ? capParts.join('、') : undefined,

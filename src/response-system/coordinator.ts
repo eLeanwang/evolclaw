@@ -6,8 +6,10 @@
  *   - resolveInbound：解析会话该用哪个模式 + 运行 handleInbound 得到决策（含 runtimeState）
  *   - resolveOutbound：对某个出站 payload 运行 handleOutbound 得到发送决策
  *
- * 设计原则（无缝迁移）：
- *   - 解析优先级：response_modes 配置 > session.chatMode（兼容现状）> 系统兜底
+ * 设计原则：
+ *   - 选模式：标量 responseMode（关系级>agent级，合并后）> 注册表首选（single-session）
+ *   - chatMode 与选模式正交：由顶层 chatmode 字典按对端类型解析后注入 modeConfig
+ *   - 模式特有参数：从 responseModeParams[modeId] 桶读取
  *   - 响应模式成为「响应决策的源头」，下游 message-processor 的执行流程原样保留
  *   - 异常不降级（D6）：解析/决策失败时回落到安全默认，记 WARN
  */
@@ -59,26 +61,25 @@ export class ResponseModeCoordinator {
    * 用于消息处理阶段（_processMessageInternal）：此时消息已出队，
    * 需要的是处理钩子（beforeProcess/configureRun/onToolUse 等），而非入队决策。
    *
-   * @param chatType 会话类型
-   * @param peerKey 对端标识（override 查找）
-   * @param rmConfig response_modes 配置
+   * @param responseModeId 合并后的标量 responseMode（关系级>agent级，可空 → 注册表首选）
    * @param resolvedChatMode 本会话生效的 chatMode（宿主按配置层级解析后传入），
    *        注入进模式 config.chatMode；模式据此分流投递方式。与「选哪个模式」无关。
+   * @param responseModeParams 按模式分桶的参数字典 { [modeId]: {...} }，取当前模式的桶注入
    * @param contextDeps 构建 context 所需依赖
    */
   resolveMode(
-    chatType: 'private' | 'group',
-    peerKey: string | undefined,
-    rmConfig: any,
+    responseModeId: string | undefined,
     resolvedChatMode: string | undefined,
+    responseModeParams: Record<string, any> | undefined,
     contextDeps: Omit<ContextDeps, 'modeConfig'>,
   ): { mode: ResponseMode; context: ResponseModeContext; source: string } | null {
     try {
-      const resolved = this.resolver.resolve(chatType, peerKey, rmConfig);
+      const resolved = this.resolver.resolve(responseModeId);
       const mode = resolved.mode;
-      // chatMode 是模式配置参数：注入宿主解析出的值（config 未显式设 chatMode 时用它）。
-      const modeConfig = { chatMode: resolvedChatMode, ...resolved.config };
-      contextDeps.logger.debug('[ResponseSystem] resolveMode mode=' + mode.id + ' source=' + resolved.source + ' chatMode=' + (modeConfig.chatMode ?? 'none') + ' chatType=' + chatType + ' peerKey=' + (peerKey ?? 'none'));
+      // chatMode 注入宿主解析出的值；模式特有参数从 responseModeParams[modeId] 桶读取
+      const modeSpecificParams = responseModeParams?.[mode.id] ?? {};
+      const modeConfig = { chatMode: resolvedChatMode, ...modeSpecificParams };
+      contextDeps.logger.debug('[ResponseSystem] resolveMode mode=' + mode.id + ' source=' + resolved.source + ' chatMode=' + (modeConfig.chatMode ?? 'none'));
       const context = this.contextBuilder.build(mode.id, { ...contextDeps, modeConfig });
       return { mode, context, source: resolved.source };
     } catch (e) {
@@ -90,8 +91,8 @@ export class ResponseModeCoordinator {
   /**
    * 解析会话的入站响应模式 + 运行 handleInbound。
    *
-   * @param message 入站消息（含 chatType，用于解析）
-   * @param chatModeFallback 现有 session.chatMode（兼容回落：config 未设时用它）
+   * @param message 入站消息
+   * @param resolvedChatMode 本会话生效的 chatMode（宿主解析后传入）
    */
   async resolveInbound(
     message: InboundMessage,
@@ -99,15 +100,12 @@ export class ResponseModeCoordinator {
     resolvedChatMode: string | undefined,
   ): Promise<ResolvedInbound | null> {
     try {
-      const chatType = message.chatType ?? 'private';
-      const rmConfig = deps.agentConfig.response_modes;
-
-      // 解析模式（override > default > 兜底 single-session）。chatMode 不参与选模式。
-      const resolved = this.resolver.resolve(chatType, deps.peerKey, rmConfig);
+      // 解析模式：标量 responseMode（合并后）> 注册表首选。chatMode 不参与选模式。
+      const resolved = this.resolver.resolve(deps.agentConfig.responseMode);
       const mode = resolved.mode;
-      // chatMode 是模式配置参数：注入宿主解析出的值（config 显式设 chatMode 时以 config 为准）。
-      const modeConfig = { chatMode: resolvedChatMode, ...resolved.config };
-      deps.contextDeps.logger.debug('[ResponseSystem] resolveInbound mode=' + mode.id + ' source=' + resolved.source + ' chatMode=' + (modeConfig.chatMode ?? 'none') + ' chatType=' + chatType + ' peerKey=' + (deps.peerKey ?? 'none'));
+      const modeSpecificParams = deps.agentConfig.responseModeParams?.[mode.id] ?? {};
+      const modeConfig = { chatMode: resolvedChatMode, ...modeSpecificParams };
+      deps.contextDeps.logger.debug('[ResponseSystem] resolveInbound mode=' + mode.id + ' source=' + resolved.source + ' chatMode=' + (modeConfig.chatMode ?? 'none'));
       const context = this.contextBuilder.build(mode.id, {
         ...deps.contextDeps,
         modeConfig,

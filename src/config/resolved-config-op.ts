@@ -10,7 +10,7 @@ import { ConfigError, routeFieldPath, type FieldRoute } from './config-manager.j
 
 export type ConfigFieldSubcommand = 'get' | 'set' | 'unset';
 export type ConfigScopedSubcommand = 'show' | 'effective' | 'fields' | 'validate' | 'init';
-export type ConfigGlobalSubcommand = 'list' | 'snapshot' | 'prune' | 'history' | 'diff' | 'restore' | 'current' | 'boots';
+export type ConfigGlobalSubcommand = 'list' | 'snapshot' | 'prune' | 'history' | 'diff' | 'restore' | 'current' | 'boots' | 'schema';
 export type ConfigSubcommand = ConfigFieldSubcommand | ConfigScopedSubcommand | ConfigGlobalSubcommand;
 
 export type ConfigOperationId =
@@ -33,7 +33,8 @@ export type ConfigManagementOperationId =
   | 'config.diff'
   | 'config.restore'
   | 'config.current'
-  | 'config.boots';
+  | 'config.boots'
+  | 'config.schema';
 
 export interface ResolvedConfigOp {
   kind: 'field';
@@ -76,7 +77,7 @@ export interface ResolvedGlobalConfigCommand {
   commandScope: 'process';
   operationId: Extract<ConfigManagementOperationId,
     'config.list' | 'config.snapshot' | 'config.prune' | 'config.history' | 'config.diff'
-    | 'config.restore' | 'config.current' | 'config.boots'>;
+    | 'config.restore' | 'config.current' | 'config.boots' | 'config.schema'>;
   dangerous: true;
   self?: never;
   peerKey?: never;
@@ -89,6 +90,9 @@ export interface ResolvedGlobalConfigCommand {
   versions?: [string, string];
   version?: string;
   count?: number;
+  schemaName?: string;
+  schemaVersion?: number;
+  schemaList?: boolean;
 }
 
 export type ResolvedConfigCommand = ResolvedConfigOp | ResolvedScopedConfigCommand | ResolvedGlobalConfigCommand;
@@ -119,7 +123,7 @@ const FIELD_OPTIONS: Record<string, 'boolean' | 'value'> = {
 };
 
 const SCOPED_SUBCOMMANDS = new Set<ConfigScopedSubcommand>(['show', 'effective', 'fields', 'validate', 'init']);
-const GLOBAL_SUBCOMMANDS = new Set<ConfigGlobalSubcommand>(['list', 'snapshot', 'prune', 'history', 'diff', 'restore', 'current', 'boots']);
+const GLOBAL_SUBCOMMANDS = new Set<ConfigGlobalSubcommand>(['list', 'snapshot', 'prune', 'history', 'diff', 'restore', 'current', 'boots', 'schema']);
 
 export function resolveConfigCommand(
   inputArgv: string[],
@@ -304,6 +308,7 @@ function resolveGlobalCommand(
     restore: { min: 1, max: 1, options: { '--format': 'value' } },
     current: { min: 0, max: 0, options: { '--format': 'value' } },
     boots: { min: 0, max: 0, options: { '-n': 'value', '--num': 'value', '--format': 'value' }, aliases: [['-n', '--num']] },
+    schema: { min: 0, max: 2, options: { '--list': 'boolean', '--format': 'value' } },
   };
   const parsed = parseStructuredArgs(argv.slice(2), specs[subcommand]);
   if (!parsed.ok) return parsed;
@@ -341,6 +346,20 @@ function resolveGlobalCommand(
     const count = parsePositiveInteger(parsed.values.n ?? parsed.values.num, '-n/--num');
     if (!count.ok) return count;
     command.count = count.value ?? 10;
+  } else if (subcommand === 'schema') {
+    command.schemaList = parsed.flags.has('list');
+    if (parsed.positionals[0]) command.schemaName = parsed.positionals[0];
+    if (parsed.positionals[1] !== undefined) {
+      if (command.schemaList) {
+        return { ok: false, code: 'INVALID_CONFIG_COMMAND', reason: 'config schema --list does not take a version argument' };
+      }
+      const version = parseNonNegativeInteger(parsed.positionals[1], 'version');
+      if (!version.ok) return version;
+      command.schemaVersion = version.value;
+    }
+    if (!command.schemaName && (command.schemaList || command.schemaVersion !== undefined)) {
+      return { ok: false, code: 'MISSING_ARG', reason: 'config schema requires a schema name' };
+    }
   }
   command.canonicalArgv = buildGlobalCanonicalArgv(command);
   return { ok: true, command };
@@ -534,6 +553,11 @@ function buildGlobalCanonicalArgv(command: ResolvedGlobalConfigCommand): string[
     if (command.yes) argv.push('--yes');
   }
   if (command.subcommand === 'boots' && command.count !== undefined) argv.push('-n', String(command.count));
+  if (command.subcommand === 'schema') {
+    if (command.schemaName) argv.push(command.schemaName);
+    if (command.schemaVersion !== undefined) argv.push(String(command.schemaVersion));
+    if (command.schemaList) argv.push('--list');
+  }
   if (command.format) argv.push('--format', command.format);
   return argv;
 }

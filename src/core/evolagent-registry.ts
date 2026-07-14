@@ -543,9 +543,6 @@ export class EvolAgentRegistry {
     const displayName = this.resolveDisplayName(agent.aid);
     const personalName = this.resolvePersonalName(agent.aid);
 
-    const rmConfig = agent.config.response_modes;
-    const responseModePrivate = rmConfig?.default_private || 'interactive';
-    const responseModeGroup = rmConfig?.default_group || 'proactive';
     const owners = Array.from(new Set(agent.config.owners ?? []));
     const channels = safeInfoValue(() => agent.channelInstanceNames(), []);
     const projectPath = safeInfoValue(() => agent.projectPath, '');
@@ -568,8 +565,6 @@ export class EvolAgentRegistry {
       lastActivity: agent.lastActivity,
       activeSessions: agent.activeSessions,
       error: agent.error,
-      responseModePrivate,
-      responseModeGroup,
     };
   }
 }

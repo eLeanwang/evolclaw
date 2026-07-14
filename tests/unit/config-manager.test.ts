@@ -42,15 +42,6 @@ describe('schema-registry (v3)', () => {
   beforeEach(() => { root = setupHome(); });
   afterEach(() => cleanup(root));
 
-  it('所有配置文件都标记为同一权限类型（H）', () => {
-    // v3: 不再区分 H 和 HA，所有配置都是 H（基础设施+行为统一）
-    expect(loadSchema('agent-config').permission).toBe('H');
-    expect(loadSchema('defaults').permission).toBe('H');
-    expect(loadSchema('evolclaw').permission).toBe('H');
-    expect(loadSchema('relation-config').permission).toBe('H');
-    expect(loadSchema('contact-book').permission).toBe('H');
-  });
-
   it('字段带 x-merge 语义', () => {
     const agent = loadSchema('agent-config');
     expect(agent.fields.get('baseagents')?.merge).toBe('dict');
@@ -148,7 +139,7 @@ describe('ConfigManager CRUD (v3 unified config.json)', () => {
       // 行为参数
       show_activities: 'none',
       chatmode: { private: 'proactive' },
-      dispatch: 'broadcast',
+      mentionMode: 'disabled',
       baseagents: { claude: { model: 'sonnet' } },
     }, { self: AID });
 
@@ -213,10 +204,10 @@ describe('resolveEffective (v3 覆盖链: defaults → agent → relation)', () 
     expect(resolveEffective({ self: AID, peerKey: PEER }).baseagents?.claude?.model).toBe('relation-model');
   });
 
-  it('merges session_renew across defaults, agent, and relation', () => {
+  it('merges session_renew + responseModeParams across defaults, agent, and relation', () => {
+    // session_renew 三层合并；responseModeParams 从 agent 级起（不落 defaults）。
     write(ConfigTarget.Defaults, {
       $schema_version: 1,
-      config: { auxiliaryModel: 'deepseek-v4-flash', debounceMs: 3000 },
       session_renew: { enabled: false, after_hours: 24, effort: 'low' },
     }, {});
 
@@ -224,13 +215,13 @@ describe('resolveEffective (v3 覆盖链: defaults → agent → relation)', () 
       $schema_version: 3,
       aid: AID,
       channels: [],
-      config: { auxiliaryModel: 'claude-haiku' },
+      responseModeParams: { 'dual-session': { auxiliaryModel: 'claude-haiku', debounceMs: 3000 } },
       session_renew: { enabled: true },
     }, { self: AID });
 
     write(ConfigTarget.Relation, {
       $schema_version: 2,
-      config: { debounceMs: 1000 },
+      responseModeParams: { 'single-session': { foo: 'bar' } },
       session_renew: { after_hours: 72, fallback_action: 'continue' },
     }, { self: AID, peerKey: PEER });
 
@@ -240,9 +231,11 @@ describe('resolveEffective (v3 覆盖链: defaults → agent → relation)', () 
       effort: 'low',
       fallback_action: 'continue',
     });
-    expect(resolveEffective({ self: AID, peerKey: PEER }).config).toEqual({
-      auxiliaryModel: 'claude-haiku',
-      debounceMs: 1000,
+    // responseModeParams 按第一层键（模式 id）dict 合并：
+    //   dual-session 桶来自 agent，single-session 桶由 relation 新增
+    expect(resolveEffective({ self: AID, peerKey: PEER }).responseModeParams).toEqual({
+      'dual-session': { auxiliaryModel: 'claude-haiku', debounceMs: 3000 },
+      'single-session': { foo: 'bar' },
     });
     expect(routeFieldPath('session_renew.enabled', 'defaults').target).toBe(ConfigTarget.Defaults);
   });
@@ -315,12 +308,10 @@ describe('config field policy', () => {
     'baseagents.gemini.mode',
     'baseagents.gemini.useVertex',
     'chatmode.private',
-    'response_modes.default_private',
+    'mentionMode',
     'responseMode',
-    'config.auxiliaryModel',
     'flush_delay',
     'debounce',
-    'dispatch',
     'show_activities',
     'proactive.pre_tool_1stmsgchk',
     'session_renew.enabled',
@@ -348,7 +339,6 @@ describe('config field policy', () => {
     }
     expect(resolveConfigFieldRule('made_up_field').class).toBe('unknown');
     expect(isSafeBehaviorConfigField('chatmode.secret')).toBe(false);
-    expect(isSafeBehaviorConfigField('response_modes.configs.secret')).toBe(false);
     expect(isCriticalAgentControlField('roles.definitions.member')).toBe(true);
   });
 
@@ -367,7 +357,7 @@ describe('config field policy', () => {
     expect(parseConfigFieldValue('enable_rich_content', '1').ok).toBe(false);
     expect(parseConfigFieldValue('flush_delay', '2.5')).toEqual({ ok: true, value: 2.5 });
     expect(parseConfigFieldValue('flush_delay', '-1').ok).toBe(false);
-    expect(parseConfigFieldValue('dispatch', 'broadcast')).toEqual({ ok: true, value: 'broadcast' });
+    expect(parseConfigFieldValue('mentionMode', 'disabled')).toEqual({ ok: true, value: 'disabled' });
     expect(parseConfigFieldValue('show_activities', 'text').ok).toBe(false);
     expect(parseConfigFieldValue('permissionMode', 'bypass')).toEqual({ ok: true, value: 'bypass' });
     expect(parseConfigFieldValue('active_baseagent', 'codex')).toEqual({ ok: true, value: 'codex' });

@@ -37,39 +37,42 @@ describe('ResponseModeCoordinator', () => {
     coord = new ResponseModeCoordinator(reg);
   });
 
-  // 解耦后（步骤 4）：resolveInbound 恒解析到 single-session（无 response_modes 配置时兜底），
-  // chatMode 不再决定「用哪个模式」而是注入 modeConfig；modeId 恒为 single-session。
-  it('无配置时兜底 single-session，chatMode 注入 modeConfig', async () => {
+  // 步骤 5：选模式 = 标量 responseMode（合并后）> 注册表首选（single-session）。
+  // chatMode 由宿主解析后作为第三参注入 modeConfig；模式特有参数来自 responseModeParams[modeId]。
+  it('无配置时兜底注册表首选 single-session，chatMode 注入 modeConfig', async () => {
     const r = await coord.resolveInbound(msg('private'), makeDeps(), 'proactive');
     expect(r?.modeId).toBe('single-session');
     expect((r?.context as any).modeConfig?.chatMode).toBe('proactive');
   });
 
-  it('私聊/群聊均兜底 single-session（chatMode 缺省不影响选模式）', async () => {
+  it('私聊/群聊均兜底 single-session（chatType 不影响选模式）', async () => {
     const r = await coord.resolveInbound(msg('private'), makeDeps(), undefined);
     expect(r?.modeId).toBe('single-session');
     const g = await coord.resolveInbound(msg('group'), makeDeps(), undefined);
     expect(g?.modeId).toBe('single-session');
   });
 
-  it('response_modes.default 指定的模式优先于兜底', async () => {
-    const deps = makeDeps({ response_modes: { default_private: 'single-session' } });
+  it('标量 responseMode 指定的模式优先于注册表首选', async () => {
+    const deps = makeDeps({ responseMode: 'single-session' });
     const r = await coord.resolveInbound(msg('private'), deps, 'proactive');
     expect(r?.modeId).toBe('single-session');
     expect((r?.context as any).modeConfig?.chatMode).toBe('proactive');
   });
 
-  it('relation override 选模式优先级最高；chatMode 仍按注入', async () => {
-    const deps = makeDeps({ response_modes: { overrides: { 'aun#p1': { mode: 'single-session' } } } }, 'aun#p1');
+  it('responseMode 指向不存在的模式时回落注册表首选', async () => {
+    const deps = makeDeps({ responseMode: 'no-such-mode' });
     const r = await coord.resolveInbound(msg('private'), deps, 'proactive');
     expect(r?.modeId).toBe('single-session');
-    expect((r?.context as any).modeConfig?.chatMode).toBe('proactive');
   });
 
-  it('config 显式 chatMode 覆盖注入值', async () => {
-    const deps = makeDeps({ response_modes: { default_private: 'single-session', configs: { 'single-session': { chatMode: 'interactive' } } } });
+  it('responseModeParams[modeId] 注入模式特有参数', async () => {
+    const deps = makeDeps({
+      responseMode: 'single-session',
+      responseModeParams: { 'single-session': { foo: 'bar' } },
+    });
     const r = await coord.resolveInbound(msg('private'), deps, 'proactive');
-    expect((r?.context as any).modeConfig?.chatMode).toBe('interactive');
+    expect((r?.context as any).modeConfig?.foo).toBe('bar');
+    expect((r?.context as any).modeConfig?.chatMode).toBe('proactive');
   });
 
   it('proactive inbound carries runtimeState', async () => {
