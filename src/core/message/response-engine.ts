@@ -34,7 +34,8 @@ import { AGENT_DELEGATION_TOKEN_ENV, type AgentDelegationRegistry } from '../aut
 // Re-export 工具函数（向后兼容，让其他模块可以从 response-engine 导入）
 export { buildEnvelope, sendInteractionPayload } from './message-utils.js';
 import { resolveEffectiveModel, resolvePermissionMode } from '../model/config-scope.js';
-import { resolveEffective } from '../../config/config-manager.js';
+import { resolveEffective, read as readConfig, ConfigTarget } from '../../config/config-manager.js';
+import type { RelationConfig } from '../../types.js';
 import { checkRoleAccess, getFirstStaticAgentOwner, resolvePeerRoleDetail, roleToSessionIdentity } from '../../config/peer-role-resolver.js';
 import { insertUsageEvent, insertContextBreakdown, insertModelCalls } from '../../stats/writer.js';
 import { normalizeUsage } from '../../stats/normalizer.js';
@@ -1062,10 +1063,23 @@ export class ResponseEngine implements IMessageProcessor {
     const peerType = message.peerType ?? (session.metadata as any)?.peerType;
     const systemOrServicePeer = isSystemOrServicePeer(peerType);
     const triggerChatModeOverride = systemOrServicePeer ? undefined : message.triggerMeta?.chatModeOverride;
+    // 关系级标量覆盖只在关系级有效：单独读关系层 config.chatMode（不能用合并后的
+    // effectiveAgentConfig.config.chatMode——那分不清值来自 agent 层还是关系层，
+    // 会让 agent 级误写的标量全局压过场景表）。agent 级只认场景表 chatmode。
+    const relationChatModeOverride = (() => {
+      if (!selfAid || !peerKey) return undefined;
+      try {
+        const rc = readConfig<RelationConfig>(ConfigTarget.Relation, { self: selfAid, peerKey }, { cache: true });
+        return (rc?.config as any)?.chatMode;
+      } catch {
+        return undefined;
+      }
+    })();
     const chatModeFallback = resolveChatModeForPeer({
       chatType,
       peerType,
-      configured: effectiveAgentConfig?.chatmode,
+      configured: effectiveAgentConfig?.chatmode,   // agent 级场景表（只认这个）
+      relationOverride: relationChatModeOverride,    // 关系级标量 config.chatMode
     });
     const resolvedMode = triggerChatModeOverride || systemOrServicePeer
       ? null  // trigger 强制覆盖或 system/service 强制 interactive 时，不走插件解析
