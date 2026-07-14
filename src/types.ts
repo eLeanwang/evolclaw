@@ -342,7 +342,7 @@ export interface Message {
   threadId?: string;  // 默认 ''
   topicName?: string;  // 话题会话创建时的显示名
   chatType?: 'private' | 'group';  // 由 Channel 层填充
-  peerId: string;  // 发送者 ID
+  peerId: string;  // 私聊：对端 ID；群聊：当前消息发送者 AID
   peerName?: string;  // 发送者名称
   peerType?: string;  // 对端类型 (human/ai/unknown)，由支持 agent.md 的渠道填充
   /** 对端网络邻近性（SDK 0.4.9 起明文/密文消息均可携带，具体字段以网关下发为准）*/
@@ -412,7 +412,7 @@ export interface InboundMessage {
   threadId?: string;  // 默认 ''
   topicName?: string;  // 话题会话创建时的显示名
   chatType: 'private' | 'group';  // 由 Channel 层填充
-  peerId: string;  // 发送者 ID
+  peerId: string;  // 私聊：对端 ID；群聊：当前消息发送者 AID
   peerName?: string;  // 发送者名称
   peerType?: string;  // 对端类型 (human/ai/unknown)，由支持 agent.md 的渠道填充
   sameDevice?: boolean;
