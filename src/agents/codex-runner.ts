@@ -1088,7 +1088,6 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
     }
     if (mode === 'noask') return 'deny';
     if (!this.permissionGateway || !this.sendPromptFn) return 'allow';
-    if (this.permissionGateway.isAlwaysAllowed(toolName)) return 'always';
     return this.permissionGateway.requestPermission(
       sessionKey,
       toolName,

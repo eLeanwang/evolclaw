@@ -553,7 +553,6 @@ describe('CodexRunner app-server approval bridge', () => {
   it('maps PermissionGateway always decisions to app-server acceptForSession', async () => {
     const { runner } = makeRunner();
     const gateway = {
-      isAlwaysAllowed: vi.fn().mockReturnValue(false),
       requestPermission: vi.fn().mockResolvedValue('always'),
     };
     runner.setMode('request');
@@ -580,11 +579,10 @@ describe('CodexRunner app-server approval bridge', () => {
     );
   });
 
-  it('uses PermissionGateway always allow without prompting again', async () => {
+  it('keeps cached temporary grants scoped to a single app-server request', async () => {
     const { runner } = makeRunner();
     const gateway = {
-      isAlwaysAllowed: vi.fn().mockReturnValue(true),
-      requestPermission: vi.fn(),
+      requestPermission: vi.fn().mockResolvedValue('allow'),
     };
     runner.setMode('request');
     runner.setSendPrompt(vi.fn());
@@ -596,9 +594,16 @@ describe('CodexRunner app-server approval bridge', () => {
       params: { threadId: 'thread-1', command: 'npm test' },
     });
 
-    expect(result).toEqual({ decision: 'acceptForSession' });
-    expect(gateway.isAlwaysAllowed).toHaveBeenCalledWith('Bash');
-    expect(gateway.requestPermission).not.toHaveBeenCalled();
+    expect(result).toEqual({ decision: 'accept' });
+    expect(gateway.requestPermission).toHaveBeenCalledWith(
+      'thread-1',
+      'Bash',
+      expect.objectContaining({ command: 'npm test' }),
+      expect.any(Function),
+      undefined,
+      'npm test',
+      undefined,
+    );
   });
 
   it('maps noask mode to app-server decline', async () => {

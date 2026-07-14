@@ -1578,11 +1578,6 @@ export class AgentRunner {
         return { behavior: 'allow' as const, updatedInput: input, decisionClassification: 'user_permanent' as const };
       }
 
-      // always-allow 缓存命中：直接放行
-      if (this.permissionGateway.isAlwaysAllowed(toolName)) {
-        return { behavior: 'allow' as const, updatedInput: input, decisionClassification: 'user_permanent' as const };
-      }
-
       const summary = options.title
         || options.description
         || summarizeToolInput(toolName, input);
