@@ -558,13 +558,16 @@ function readMenuChatmode(target: MenuChatmodeTarget): MenuChatmodeValue {
 
 function writeMenuChatmode(target: MenuChatmodeTarget, value: MenuChatmodeValue): void {
   const route = routeFieldPath(target.fieldPath, target.scope);
-  const cur = (cfgRead<Record<string, any>>(route.target, target.sel) as Record<string, any>) || {};
+  const writeSel = target.scope === 'relation'
+    ? { ...target.sel, role: undefined }
+    : target.sel;
+  const cur = (cfgRead<Record<string, any>>(route.target, writeSel) as Record<string, any>) || {};
   const block = cur.chatmode && typeof cur.chatmode === 'object' && !Array.isArray(cur.chatmode)
     ? { ...cur.chatmode }
     : {};
   block[target.field] = value;
   cur.chatmode = block;
-  cfgWrite(route.target, cur, target.sel);
+  cfgWrite(route.target, cur, writeSel);
 }
 
 function menuDispatchScope(args?: Record<string, any>): MenuDispatchScope | { error: string; code: string } {

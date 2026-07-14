@@ -12,7 +12,6 @@ import os from 'os';
 import { checkLatestVersion, getLocalVersion, isLinkedInstall, compareVersions } from '../../utils/npm-ops.js';
 import { loadEvolclawConfig } from '../../config-store.js';
 import {
-  ConfigTarget,
   read as cfgRead,
   resolveEffective,
   routeFieldPath,
@@ -69,6 +68,8 @@ function slashChatmodeField(session: Session | null | undefined, chatType?: stri
 function resolveSlashChatmodeTarget(this: any, params: {
   session?: Session | null;
   channel: string;
+  channelId: string;
+  userId?: string;
   selfAID?: string;
   role?: string;
   chatType?: string;
@@ -78,8 +79,22 @@ function resolveSlashChatmodeTarget(this: any, params: {
     ?? this.getOwningAgent?.(params.channel)?.aid
     ?? this.resolveSelfAID?.(params.channel);
   if (!self) return { error: '找不到当前 agent，无法读写 chatmode', code: 'MISSING_AID' };
+
+  const actualChatType = params.session?.chatType || params.chatType;
+  const peerId = actualChatType === 'group'
+    ? ((params.session?.metadata as any)?.groupId || params.channelId)
+    : (params.userId || (params.session?.metadata as any)?.peerId || params.channelId);
+  if (!peerId) return { error: '找不到当前对端，无法读写 relation chatmode', code: 'MISSING_PEER' };
+
+  const channelType = params.session?.channelType
+    || this.resolveChannelType?.(params.channel)
+    || params.channel.split('#')[0];
   const field = slashChatmodeField(params.session, params.chatType);
-  return { sel: { self, role: params.role }, field, fieldPath: `chatmode.${field}` };
+  return {
+    sel: { self, peerKey: formatPeerKey(channelType, peerId), role: params.role },
+    field,
+    fieldPath: `chatmode.${field}`,
+  };
 }
 
 function readSlashChatmode(target: SlashChatmodeTarget): SlashChatmodeValue {
@@ -95,14 +110,15 @@ function readSlashChatmode(target: SlashChatmodeTarget): SlashChatmodeValue {
 }
 
 function writeSlashChatmode(target: SlashChatmodeTarget, value: SlashChatmodeValue): void {
-  const route = routeFieldPath(target.fieldPath, 'agent');
-  const cur = (cfgRead<Record<string, any>>(route.target, target.sel) as Record<string, any>) || {};
+  const route = routeFieldPath(target.fieldPath, 'relation');
+  const writeSel: Selector = { ...target.sel, role: undefined };
+  const cur = (cfgRead<Record<string, any>>(route.target, writeSel) as Record<string, any>) || {};
   const block = cur.chatmode && typeof cur.chatmode === 'object' && !Array.isArray(cur.chatmode)
     ? { ...cur.chatmode }
     : {};
   block[target.field] = value;
   cur.chatmode = block;
-  cfgWrite(route.target, cur, target.sel);
+  cfgWrite(route.target, cur, writeSel);
 }
 
 function resolveSlashDispatchTarget(this: any, params: {
@@ -169,17 +185,6 @@ function resolveSlashRelationTarget(this: any, params: {
     peerKey: formatPeerKey(channelType, peerId),
     role: params.role,
   };
-}
-
-function writeRelationChatmode(target: SlashRelationTarget, field: SlashChatmodeField, value: SlashChatmodeValue): void {
-  const sel: Selector = { self: target.self, peerKey: target.peerKey, role: target.role };
-  const cur = (cfgRead<Record<string, any>>(ConfigTarget.Relation, sel) as Record<string, any>) || {};
-  const block = cur.chatmode && typeof cur.chatmode === 'object' && !Array.isArray(cur.chatmode)
-    ? { ...cur.chatmode }
-    : {};
-  block[field] = value;
-  cur.chatmode = block;
-  cfgWrite(ConfigTarget.Relation, cur, sel);
 }
 
 function getAvailableEfforts(agent: any, model: string): readonly Effort[] {
@@ -509,10 +514,12 @@ export async function handleSlashCommand(this: any,
     if (threadId) return await this.sessionManager.getThreadSession(channel, channelId, threadId);
     return activeSession;
   };
-  const getAgentChatmode = (session?: Session | null, fallbackChatType: string = activeChatType): SlashChatmodeValue => {
+  const getEffectiveChatmode = (session?: Session | null, fallbackChatType: string = activeChatType): SlashChatmodeValue => {
     const target = resolveSlashChatmodeTarget.call(this, {
       session,
       channel,
+      channelId,
+      userId,
       selfAID,
       role: session?.identity?.role || identity.role,
       chatType: session?.chatType || fallbackChatType,
@@ -1685,7 +1692,7 @@ export async function handleSlashCommand(this: any,
     if (activityArg && !isAdmin) return { kind: 'command.error' as const, text: '❌ 无权限：此命令仅限管理员使用' };
 
     // proactive 模式下流式输出全部静默，activity 配置无意义
-    if (getAgentChatmode(activeSession) === 'proactive') {
+    if (getEffectiveChatmode(activeSession) === 'proactive') {
       return { kind: 'command.error' as const, text: '❌ 当前会话为 proactive 模式，不支持 activity 配置（流式输出已全部静默）' };
     }
 
@@ -1769,14 +1776,14 @@ export async function handleSlashCommand(this: any,
     return { kind: 'command.result' as const, text: `✅ 中间输出模式: ${activityArg}（${label}）` };
   }
 
-  // /chatmode 命令：查看/切换 agent 级会话模式（interactive | proactive）
+  // /chatmode 命令：查看/切换当前 relation 的有效会话模式（interactive | proactive）
   // - 查看：所有人可用
   // - 设置：单聊任何角色可设置；群聊仅管理员可设置
   if (normalizedContent === '/chatmode' || normalizedContent.startsWith('/chatmode ')) {
     const arg = normalizedContent.slice(9).trim();
     if (!arg) {
       const existingChatmodeSession = await getExistingSessionForCommand();
-      const currentMode = getAgentChatmode(existingChatmodeSession);
+      const currentMode = getEffectiveChatmode(existingChatmodeSession);
       // 尝试发送 CommandCard 卡片
       const modes = [
         { key: 'interactive', name: '交互模式', desc: '被动响应：收到消息时才回复，回复直接显示' },
@@ -1802,7 +1809,13 @@ export async function handleSlashCommand(this: any,
       };
 
       const replyCtx = existingChatmodeSession ? this.getReplyContext(existingChatmodeSession) : undefined;
-      const cardResult = await this.sendCommandCard({ channel, channelId, interaction, replyCtx, canWrite: isAdmin });
+      const cardResult = await this.sendCommandCard({
+        channel,
+        channelId,
+        interaction,
+        replyCtx,
+        canWrite: activeChatType !== 'group' || isAdmin,
+      });
       if (cardResult === null) return null;
       // 卡片降级：fall through 到下方文本输出
 
@@ -1822,6 +1835,8 @@ export async function handleSlashCommand(this: any,
     const target = resolveSlashChatmodeTarget.call(this, {
       session: chatmodeSession,
       channel,
+      channelId,
+      userId,
       selfAID,
       role: chatmodeSession?.identity?.role || identity.role,
       chatType: chatmodeSession?.chatType || activeChatType,
@@ -1851,9 +1866,14 @@ export async function handleSlashCommand(this: any,
     const chatmodeAuthDenied = await authorizeSlashIntent({
       intent: {
         operation: 'chatmode.update',
-        scope: isAdmin ? 'agent' : 'relation',
+        scope: 'relation',
         source: 'slash',
-        args: { value: arg, self: target.sel.self },
+        args: {
+          value: arg,
+          self: target.sel.self,
+          peer: target.sel.peerKey,
+          peerKey: target.sel.peerKey,
+        },
       },
       identity,
       session: chatmodeSession,
@@ -1866,26 +1886,10 @@ export async function handleSlashCommand(this: any,
     });
     if (chatmodeAuthDenied) return chatmodeAuthDenied;
 
-    if (isAdmin) {
+    try {
       writeSlashChatmode(target, arg);
-    } else {
-      const relationTarget = resolveSlashRelationTarget.call(this, {
-        session: chatmodeSession,
-        channel,
-        channelId,
-        userId,
-        selfAID,
-        role: chatmodeSession?.identity?.role || identity.role,
-        chatType: chatmodeSession?.chatType || activeChatType,
-      });
-      if ('error' in relationTarget) {
-        return { kind: 'command.error' as const, text: `Cannot locate relation scope: ${relationTarget.error}` };
-      }
-      try {
-        writeRelationChatmode(relationTarget, target.field, arg);
-      } catch (e: any) {
-        return { kind: 'command.error' as const, text: `Failed to update relation chatmode: ${e?.message || e}` };
-      }
+    } catch (e: any) {
+      return { kind: 'command.error' as const, text: `Failed to update relation chatmode: ${e?.message || e}` };
     }
     if (this.shouldSuppressCardTriggerResult(source, channel)) return null;
     return { kind: 'command.result' as const, text: `✅ 会话模式已切换: ${arg}` };
@@ -2121,7 +2125,7 @@ export async function handleSlashCommand(this: any,
     }
 
     const lines: string[] = [];
-    const chatMode = getAgentChatmode(session);
+    const chatMode = getEffectiveChatmode(session);
     const sessionRole = session.identity?.role || identity.role || 'none';
     const sessionRoleLine = `角色身份: ${sessionRole}`;
     const dispatchTarget = resolveSlashDispatchTarget.call(this, {

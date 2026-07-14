@@ -275,6 +275,23 @@ describe('execMenuQuery', () => {
       expect(result).toEqual({ data: { mode: 'interactive', scope: 'relation', field: 'chatmode.private', self: TEST_AID, peerKey: formatPeerKey('aun', 'user1') } });
     });
 
+    it('renders the Slash card from the current relation effective mode', async () => {
+      writeRelationConfig('user1', { chatmode: { private: 'proactive' } });
+      const { handler } = createHandler();
+      const send = vi.fn().mockResolvedValue(undefined);
+      handler.registerAdapter({ channelName: 'aun', send } as any);
+
+      const result = await handler.handle('/chatmode', 'aun', 'chat1', undefined, 'user1');
+
+      expect(result).toBeNull();
+      const payload = send.mock.calls[0]?.[1];
+      expect(payload?.kind).toBe('interaction');
+      expect(payload?.interaction?.kind?.buttons).toEqual(expect.arrayContaining([
+        expect.objectContaining({ command: '/chatmode proactive', style: 'primary', disabled: true }),
+        expect.objectContaining({ command: '/chatmode interactive', style: 'default', disabled: false }),
+      ]));
+    });
+
     it('uses relation chatmode.nothuman for non-human private peers', async () => {
       const session = createPrivateNonHumanSession();
       const sm = createMockSessionManager({
@@ -546,6 +563,28 @@ describe('execMenuUpdate', () => {
       const result = await handler.execMenuUpdate('/chatmode', 'proactive', 'aun', 'chat1', 'user1');
       expect(result).toEqual({ data: { mode: 'proactive', scope: 'relation', field: 'chatmode.private', self: TEST_AID, peerKey: formatPeerKey('aun', 'user1') } });
       expect(readRelationConfig().chatmode.private).toBe('proactive');
+    });
+
+    it('writes the current relation through Menu for admin', async () => {
+      const sm = createMockSessionManager({ resolveIdentity: vi.fn().mockReturnValue({ role: 'admin' }) });
+      const { handler } = createHandler({ sessionManager: sm });
+
+      const result = await handler.execMenuUpdate('/chatmode', 'proactive', 'aun', 'chat1', 'user1');
+
+      expect(result).toEqual({ data: { mode: 'proactive', scope: 'relation', field: 'chatmode.private', self: TEST_AID, peerKey: formatPeerKey('aun', 'user1') } });
+      expect(readRelationConfig().chatmode.private).toBe('proactive');
+      expect(readTestAgentConfig().chatmode.private).toBe('interactive');
+    });
+
+    it.each(['owner', 'admin'] as const)('writes the current relation through Slash for %s', async (role) => {
+      const sm = createMockSessionManager({ resolveIdentity: vi.fn().mockReturnValue({ role }) });
+      const { handler } = createHandler({ sessionManager: sm });
+
+      const result = await handler.handle('/chatmode proactive', 'aun', 'chat1', undefined, 'user1') as any;
+
+      expect(result).toMatchObject({ kind: 'command.result' });
+      expect(readRelationConfig().chatmode.private).toBe('proactive');
+      expect(readTestAgentConfig().chatmode.private).toBe('interactive');
     });
 
     it('writes relation chatmode.nothuman for non-human private peers by default', async () => {
