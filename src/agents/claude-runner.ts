@@ -1,5 +1,5 @@
 import { query, forkSession as sdkForkSession, getSessionMessages as sdkGetSessionMessages } from '@anthropic-ai/claude-agent-sdk';
-import { ensureDir } from '../utils/atomic-write.js';
+import { atomicReadJson, atomicWriteJson, ensureDir } from '../utils/atomic-write.js';
 import { resolveAnthropicConfig } from './baseagent.js';
 import type { Config, InteractionRequest } from '../types.js';
 import { DEFAULT_PERMISSION_MODE } from '../types.js';
@@ -9,14 +9,16 @@ import type { PermissionGateway, PermissionDecision } from '../core/permission.j
 import path from 'path';
 import fs from 'fs';
 import os from 'os';
+import crypto from 'crypto';
 import { logger } from '../utils/logger.js';
 import { checkBlacklist, checkReadonly, checkHClassWrite, isEvolclawHandoffReturnCommand, parseEvolclawSendCommand, summarizeToolInput, requestDangerousCommandPermission } from '../core/permission.js';
 import { authorizeEcCommand } from '../core/command/ec-command-permission.js';
 import { encodePath } from '../utils/cross-platform.js';
+import { resolvePaths } from '../paths.js';
 import { resolveEffective } from '../config/config-manager.js';
 import { resolveClaudeCapabilityRunOptionsForProject } from '../core/capability/capability-manager.js';
 import type { AgentPlugin, AgentInstance, AgentCallbacks } from '../core/baseagent-loader.js';
-import type { AgentEvent, ImageData, PermissionContext, PermissionModeInfo, AgentTokenUsage, AgentContextUsage, AgentLastModelCall, AgentModelCall } from './runner-types.js';
+import type { AgentEvent, ImageData, PermissionContext, PermissionModeInfo, AgentTokenUsage, AgentContextUsage, AgentLastModelCall, AgentModelCall, AgentRunOverrides } from './runner-types.js';
 import type { GatewayPricingCache, PriceQuad } from '../stats/price-resolver.js';
 import { contextTokensForUsage, usageForContext, numericToken, isClaudeContextUsageModel, isOneMillionContextModel, realContextWindowForModel, autoCompactWindowForModel } from './runner-types.js';
 export type {
@@ -25,6 +27,7 @@ export type {
   AgentLastModelCall,
   AgentModelCall,
   AgentRunnerFull,
+  AgentRunOverrides,
   AgentRunnerInterface,
   AgentTokenUsage,
   Compactable,
@@ -39,26 +42,111 @@ export { hasCompact, hasModelSwitcher, hasPermissionController } from './runner-
 
 // ── 模型别名解析 ──
 // SDK 内置的别名表可能落后于代理实际可用的最新模型，
-// 因此优先从 {baseUrl}/models 动态获取各系列最新版本，失败则回退静态表。
+// 因此优先从 {baseUrl}/models 动态获取各系列最新版本，失败则使用持久化的最近成功值。
 // 已验证可用但尚未出现在 /models 列表中的模型 ID 会被注入候选列表，
 // 等列表更新后注入自动变为 no-op。
 
 const MODEL_FAMILIES = ['opus', 'sonnet', 'haiku'] as const;
+type ModelFamily = (typeof MODEL_FAMILIES)[number];
+type ModelAliases = Partial<Record<ModelFamily, string>>;
 
 /** 已验证可用但可能尚未出现在 /models 列表中的模型 ID（注入候选） */
 const INJECTED_MODELS: string[] = [];
 
-/** 静态回退表：动态获取失败时使用 */
-const STATIC_MODEL_ALIASES: Record<string, string> = {
+/** 启动默认值：某网关尚无任何成功刷新记录时使用。 */
+const BOOTSTRAP_MODEL_ALIASES: Record<ModelFamily, string> = {
   'opus': 'claude-opus-4-8',
   'sonnet': 'claude-sonnet-4-6',
   'haiku': 'claude-haiku-4-5-20251001',
 };
 
 const MODEL_ALIAS_TTL_MS = 5 * 60 * 1000; // 5min
-interface AliasCacheEntry { aliases: Record<string, string>; ids: string[]; fetchedAt: number; }
+const MODEL_ALIAS_STORE_VERSION = 1;
+interface AliasCacheEntry { aliases: ModelAliases; ids: string[]; fetchedAt: number; }
+interface PersistedAliasEntry { aliases: ModelAliases; updatedAt: number; }
+interface PersistedAliasStore {
+  $schema_version: number;
+  gateways: Record<string, PersistedAliasEntry>;
+}
 const modelAliasCache = new Map<string, AliasCacheEntry>(); // key: baseUrl
+const modelAliasFallbacks = new Map<string, ModelAliases>(); // key: baseUrl，最近一次成功解析值
 const modelAliasInFlight = new Set<string>();               // 去重并发刷新
+const loadedModelAliasFallbacks = new Set<string>();        // key: store path + gateway hash
+
+function normalizeModelGatewayUrl(baseUrl: string): string {
+  return baseUrl.trim().replace(/\/+$/, '');
+}
+
+function modelGatewayKey(baseUrl: string): string {
+  return crypto.createHash('sha256').update(normalizeModelGatewayUrl(baseUrl)).digest('hex');
+}
+
+function modelAliasStorePath(): string {
+  return resolvePaths().claudeModelCache;
+}
+
+function sanitizeModelAliases(value: unknown): ModelAliases {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  const aliases: ModelAliases = {};
+  for (const family of MODEL_FAMILIES) {
+    const model = (value as Record<string, unknown>)[family];
+    if (typeof model !== 'string') continue;
+    const pattern = new RegExp(`^claude-${family}-[A-Za-z0-9._-]+$`);
+    if (pattern.test(model)) aliases[family] = model;
+  }
+  return aliases;
+}
+
+function readPersistedAliasStore(): PersistedAliasStore {
+  try {
+    const value = atomicReadJson<unknown>(modelAliasStorePath());
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+      return { $schema_version: MODEL_ALIAS_STORE_VERSION, gateways: {} };
+    }
+    const raw = value as Record<string, unknown>;
+    if (raw.$schema_version !== MODEL_ALIAS_STORE_VERSION || !raw.gateways || typeof raw.gateways !== 'object' || Array.isArray(raw.gateways)) {
+      return { $schema_version: MODEL_ALIAS_STORE_VERSION, gateways: {} };
+    }
+    const gateways: Record<string, PersistedAliasEntry> = {};
+    for (const [key, entry] of Object.entries(raw.gateways as Record<string, unknown>)) {
+      if (!/^[a-f0-9]{64}$/.test(key) || !entry || typeof entry !== 'object' || Array.isArray(entry)) continue;
+      const record = entry as Record<string, unknown>;
+      const aliases = sanitizeModelAliases(record.aliases);
+      if (Object.keys(aliases).length === 0) continue;
+      gateways[key] = {
+        aliases,
+        updatedAt: typeof record.updatedAt === 'number' && Number.isFinite(record.updatedAt) ? record.updatedAt : 0,
+      };
+    }
+    return { $schema_version: MODEL_ALIAS_STORE_VERSION, gateways };
+  } catch (error) {
+    logger.warn(`[AgentRunner] Failed to load persisted model aliases: ${error instanceof Error ? error.message : String(error)}`);
+    return { $schema_version: MODEL_ALIAS_STORE_VERSION, gateways: {} };
+  }
+}
+
+function loadPersistedModelAliases(baseUrl: string): void {
+  const cacheKey = normalizeModelGatewayUrl(baseUrl);
+  const storePath = modelAliasStorePath();
+  const gatewayKey = modelGatewayKey(cacheKey);
+  const loadKey = `${storePath}\0${gatewayKey}`;
+  if (loadedModelAliasFallbacks.has(loadKey)) return;
+  loadedModelAliasFallbacks.add(loadKey);
+  const persisted = readPersistedAliasStore().gateways[gatewayKey];
+  if (!persisted) return;
+  modelAliasFallbacks.set(cacheKey, persisted.aliases);
+  logger.info(`[AgentRunner] Loaded persisted model aliases: ${JSON.stringify(persisted.aliases)}`);
+}
+
+function persistModelAliases(baseUrl: string, aliases: ModelAliases, updatedAt: number): void {
+  try {
+    const store = readPersistedAliasStore();
+    store.gateways[modelGatewayKey(baseUrl)] = { aliases, updatedAt };
+    atomicWriteJson(modelAliasStorePath(), store);
+  } catch (error) {
+    logger.warn(`[AgentRunner] Failed to persist model aliases: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
 
 // ── 网关价格缓存（从 /v1/models 的 pricing/effective_pricing 提取）─────────────
 // 与别名刷新同范式：按 baseUrl 缓存，1h TTL，stale-while-revalidate（缺失/过期时
@@ -126,33 +214,38 @@ async function refreshGatewayPricing(baseUrl: string, apiKey?: string): Promise<
   }
 }
 
-/** 从模型 ID 列表中提取各 claude 系列的最新版本（按 major.minor 取最高） */
-function deriveAliasesFromModelIds(ids: string[]): Record<string, string> {
+/** 从模型 ID 列表中提取各 claude 系列的最新版本（按 major.minor 取最高，minor 可省略） */
+function deriveAliasesFromModelIds(ids: string[]): ModelAliases {
   // 注入已验证可用的模型（如果列表中已有则去重无影响）
   const allIds = [...new Set([...ids, ...INJECTED_MODELS])];
   const best: Record<string, { id: string; major: number; minor: number }> = {};
   for (const id of allIds) {
-    const m = id.match(/^claude-(opus|sonnet|haiku)-(\d+)-(\d+)/);
+    const m = id.match(/^claude-(opus|sonnet|haiku)-(\d+)(?:-(\d+))?/);
     if (!m) continue;
     const [, family, majorStr, minorStr] = m;
     const major = parseInt(majorStr, 10);
-    const minor = parseInt(minorStr, 10);
+    const minor = minorStr ? parseInt(minorStr, 10) : 0;
     const cur = best[family];
     if (!cur || major > cur.major || (major === cur.major && minor > cur.minor)) {
       best[family] = { id, major, minor };
     }
   }
-  const aliases: Record<string, string> = {};
-  for (const [family, info] of Object.entries(best)) aliases[family] = info.id;
+  const aliases: ModelAliases = {};
+  for (const family of MODEL_FAMILIES) {
+    const info = best[family];
+    if (info) aliases[family] = info.id;
+  }
   return aliases;
 }
 
 /** 异步刷新某 baseUrl 的别名缓存（失败静默，不抛出） */
 async function refreshModelAliases(baseUrl: string, apiKey?: string): Promise<void> {
-  if (modelAliasInFlight.has(baseUrl)) return;
-  modelAliasInFlight.add(baseUrl);
+  const cacheKey = normalizeModelGatewayUrl(baseUrl);
+  if (modelAliasInFlight.has(cacheKey)) return;
+  modelAliasInFlight.add(cacheKey);
+  loadPersistedModelAliases(cacheKey);
   try {
-    const url = `${baseUrl.replace(/\/$/, '')}/models`;
+    const url = `${cacheKey}/models`;
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 5000);
     const resp = await fetch(url, {
@@ -167,13 +260,20 @@ async function refreshModelAliases(baseUrl: string, apiKey?: string): Promise<vo
       : [];
     const aliases = deriveAliasesFromModelIds(ids);
     if (ids.length > 0 || Object.keys(aliases).length > 0) {
-      modelAliasCache.set(baseUrl, { aliases, ids, fetchedAt: Date.now() });
+      const updatedAt = Date.now();
+      modelAliasCache.set(cacheKey, { aliases, ids, fetchedAt: updatedAt });
+      if (Object.keys(aliases).length > 0) {
+        const previousAliases = modelAliasFallbacks.get(cacheKey) || {};
+        const latestAliases = { ...previousAliases, ...aliases };
+        modelAliasFallbacks.set(cacheKey, latestAliases);
+        persistModelAliases(cacheKey, latestAliases, updatedAt);
+      }
       logger.info(`[AgentRunner] Refreshed models from ${url}: ${ids.length} ids, aliases ${JSON.stringify(aliases)}`);
     }
   } catch {
-    // 网络/解析失败：保持静态回退，不打断查询
+    // 网络/解析失败：保留该网关最近一次成功结果，不打断查询
   } finally {
-    modelAliasInFlight.delete(baseUrl);
+    modelAliasInFlight.delete(cacheKey);
   }
 }
 
@@ -181,17 +281,20 @@ async function refreshModelAliases(baseUrl: string, apiKey?: string): Promise<vo
 function resolveModelAlias(model: string, baseUrl?: string): string {
   // 非短别名（已经是完整 ID）直接返回
   if (!MODEL_FAMILIES.includes(model as any)) return model;
+  const family = model as ModelFamily;
 
   // 优先使用动态缓存
   if (baseUrl) {
-    const cached = modelAliasCache.get(baseUrl);
+    const cacheKey = normalizeModelGatewayUrl(baseUrl);
+    loadPersistedModelAliases(cacheKey);
+    const cached = modelAliasCache.get(cacheKey);
     if (cached && (Date.now() - cached.fetchedAt < MODEL_ALIAS_TTL_MS)) {
-      return cached.aliases[model] || STATIC_MODEL_ALIASES[model] || model;
+      return cached.aliases[family] || modelAliasFallbacks.get(cacheKey)?.[family] || BOOTSTRAP_MODEL_ALIASES[family];
     }
+    return modelAliasFallbacks.get(cacheKey)?.[family] || BOOTSTRAP_MODEL_ALIASES[family];
   }
 
-  // 回退静态表
-  return STATIC_MODEL_ALIASES[model] || model;
+  return BOOTSTRAP_MODEL_ALIASES[family];
 }
 
 /**
@@ -378,12 +481,14 @@ export class AgentRunner {
 
   async listModels(): Promise<string[]> {
     if (this.baseUrl) {
-      let cached = modelAliasCache.get(this.baseUrl);
+      const cacheKey = normalizeModelGatewayUrl(this.baseUrl);
+      loadPersistedModelAliases(cacheKey);
+      let cached = modelAliasCache.get(cacheKey);
       const stale = !cached || (Date.now() - cached.fetchedAt > MODEL_ALIAS_TTL_MS);
       // 缓存为空（首次打开）→ 等待刷新；缓存仅过期 → 后台刷新不阻塞
       if (!cached) {
         await refreshModelAliases(this.baseUrl, this.apiKey);
-        cached = modelAliasCache.get(this.baseUrl);
+        cached = modelAliasCache.get(cacheKey);
       } else if (stale) {
         refreshModelAliases(this.baseUrl, this.apiKey);
       }
@@ -391,7 +496,8 @@ export class AgentRunner {
       if (cached && cached.ids.length > 0) return cached.ids;
     }
     // 无 baseUrl / 刷新超时或失败 → 回退短别名
-    return Object.values(STATIC_MODEL_ALIASES);
+    const fallback = this.baseUrl ? modelAliasFallbacks.get(normalizeModelGatewayUrl(this.baseUrl)) : undefined;
+    return Object.values({ ...BOOTSTRAP_MODEL_ALIASES, ...fallback });
   }
 
   /** 将短别名解析为当前代理实际使用的完整 model ID（仅用于展示，不改变持久化值） */
@@ -1171,7 +1277,7 @@ export class AgentRunner {
     }
   }
 
-  async runQuery(sessionId: string, prompt: string, projectPath: string, initialClaudeSessionId?: string, images?: ImageData[], systemPromptAppend?: string, sessionManager?: any, modelOverride?: { model?: string; effort?: string; permissionMode?: string }, runtimeEnv?: Record<string, string>): Promise<AsyncIterable<AgentEvent>> {
+  async runQuery(sessionId: string, prompt: string, projectPath: string, initialClaudeSessionId?: string, images?: ImageData[], systemPromptAppend?: string, sessionManager?: any, modelOverride?: AgentRunOverrides, runtimeEnv?: Record<string, string>): Promise<AsyncIterable<AgentEvent>> {
     // 记录当前 evolclaw session ID，用于 Agent ctl 环境变量注入
     this.currentEvolclawSessionId = sessionId;
 
@@ -1180,7 +1286,8 @@ export class AgentRunner {
 
     // 异步刷新模型别名缓存（fire-and-forget，不阻塞查询）
     if (this.baseUrl) {
-      const cached = modelAliasCache.get(this.baseUrl);
+      const cacheKey = normalizeModelGatewayUrl(this.baseUrl);
+      const cached = modelAliasCache.get(cacheKey);
       if (!cached || (Date.now() - cached.fetchedAt > MODEL_ALIAS_TTL_MS)) {
         refreshModelAliases(this.baseUrl, this.apiKey);
       }
@@ -1195,7 +1302,8 @@ export class AgentRunner {
     ensureDir(path.join(projectPath, '.claude'));
 
     // 优先使用传入的 agentSessionId（从数据库恢复），否则使用内存中的
-    let agentSessionId = initialClaudeSessionId || this.activeSessions.get(sessionId);
+    const disableTools = modelOverride?.disableTools === true;
+    let agentSessionId = disableTools ? undefined : (initialClaudeSessionId || this.activeSessions.get(sessionId));
 
     // 验证会话文件是否存在且有效（仅在有 agentSessionId 时）
     if (agentSessionId) {
@@ -1470,11 +1578,6 @@ export class AgentRunner {
         return { behavior: 'allow' as const, updatedInput: input, decisionClassification: 'user_permanent' as const };
       }
 
-      // always-allow 缓存命中：直接放行
-      if (this.permissionGateway.isAlwaysAllowed(toolName)) {
-        return { behavior: 'allow' as const, updatedInput: input, decisionClassification: 'user_permanent' as const };
-      }
-
       const summary = options.title
         || options.description
         || summarizeToolInput(toolName, input);
@@ -1516,18 +1619,19 @@ export class AgentRunner {
       logger.info(`[AgentRunner] systemPromptAppend: none`);
     }
     const sdkModel = resolveSdkModel(callModel, this.baseUrl);
-    const capabilityOptions = await this.resolveCapabilityRunOptions(projectPath);
+    const capabilityOptions = disableTools ? {} : await this.resolveCapabilityRunOptions(projectPath);
     const commonOptions = {
       cwd: projectPath,
       model: sdkModel,
       ...capabilityOptions,
+      ...(disableTools ? { tools: [] as string[], mcpServers: {}, skills: [] as string[] } : {}),
       ...(callEffort ? { effort: callEffort } : {}),
       ...(this.claudeExecutablePath ? { pathToClaudeCodeExecutable: this.claudeExecutablePath } : {}),
       autoCompactWindow: autoCompactWindowForModel(sdkModel),
       advisorModel: 'haiku',
       canUseTool: canUseToolCallback,
       permissionMode: sdkPermissionMode,
-      persistSession: true,
+      persistSession: modelOverride?.persistSession !== false,
       includePartialMessages: true,
       enableFileCheckpointing: true,
       hooks: {
@@ -1561,7 +1665,7 @@ export class AgentRunner {
           prompt: promptInput as any,
           options: {
             ...commonOptions,
-            settingSources: ['project', 'user'],
+            settingSources: disableTools ? [] : ['project', 'user'],
             systemPrompt: {
               type: 'preset' as const,
               preset: 'claude_code' as const,
@@ -1592,6 +1696,7 @@ export class AgentRunner {
         }).filter(Boolean);
 
         const globalMcpServers = (() => {
+          if (disableTools) return {};
           try {
             const mcpPath = path.join(os.homedir(), '.claude', 'mcp.json');
             if (fs.existsSync(mcpPath)) {
@@ -1602,7 +1707,11 @@ export class AgentRunner {
           return {};
         })();
 
-        const fullAppend = [...projectClaudeMds, globalClaudeMd, systemPromptAppend].filter(Boolean).join('\n\n');
+        const fullAppend = [
+          ...(disableTools ? [] : projectClaudeMds),
+          ...(disableTools ? [] : [globalClaudeMd]),
+          systemPromptAppend,
+        ].filter(Boolean).join('\n\n');
 
         return query({
           prompt: promptInput as any,

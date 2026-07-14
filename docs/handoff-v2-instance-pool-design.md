@@ -4,7 +4,9 @@
 >
 > 日期：2026-07-12
 >
-> 完整设计归档：`docs/_archive/handoff-v2-instance-pool-design-full-2026-07-12.md`
+> 二期方案：`docs/handoff-v2-phase-2-design.md`
+>
+> 历史完整设计归档：`docs/_archive/handoff-v2-instance-pool-design-full-2026-07-12.md`
 
 ## 1. 目标
 
@@ -56,19 +58,14 @@
 
 ## 3. 二期范围
 
-二期只包含从一期明确延后的增强：
+二期以 `docs/handoff-v2-phase-2-design.md` 为唯一实施基线，核心范围为：
 
-1. `return=none` 及无内容确认。
-2. agent 级 `exact|merge` 配置和 merge 消费。
-3. immutable outbound logical batch 及 batch 成员顺序。
-4. origin delivery batch、多结果合并回源。
-5. 多 SubMessage 与多 handoff 的批量提示词和逐 ID return。
-6. 通用 history mutations WAL、快照补写和完整启动重放。
-7. 已落盘但未 binding、已 binding 但未入队等崩溃窗口的自动续跑。
-8. 跨重启自动重试、退避、损坏隔离和版本冲突诊断。
-9. `ec handoff list/trace` 和完整故障注入测试。
+1. read-only `ec handoff list/trace`。
+2. 验证现有 daemon 常规重启恢复顺序和 fail-closed 行为。
+3. agent 热重载期间 pause/drain/recover/resume Handoff dispatcher。
+4. agent disabled 或热重载失败时保持 Handoff 暂停。
 
-未列入本节的设想不自动视为二期需求，后续如有需要单独立项。
+二期不包含 `return=none`、`merge`、reply candidate 自动重建、batch、通用 WAL、repair/retry/cancel、v1 迁移或未知网络发送的跨重启自动重试。历史完整稿仅用于保留决策背景，不作为实施要求。
 
 ## 4. 存储模型
 
@@ -325,10 +322,10 @@ ec handoff return -- "以 h- 开头的结果"
 handoff ID 格式：
 
 ```text
-h-<id-body>
+h-<8 位小写十六进制字符>
 ```
 
-`id-body` 仅允许 ASCII 字母、数字、`.`、`_`、`-`，且不能为空。
+新建 handoff 的 ID 例如 `h-7f93c281`。读取时继续兼容既有合法 ID，不要求迁移。
 
 ### 8.3 选择与鉴权
 
@@ -466,7 +463,7 @@ prompt builder 成功把原请求和 return content 放入模型上下文后、�
 - binding 引用的消息正文缺失；
 - JSON 损坏或无法解析。
 
-fail-closed 表示：停止该 handoff 或 target session 的自动推进、记录错误，并通过 `ec handoff status` 显示 `attention_required` 及稳定原因码。不得自动重发、重新消费或猜测修复。自动续跑和修复工具属于二期。
+fail-closed 表示：停止该 handoff 或 target session 的自动推进、记录错误，并通过 `ec handoff status` 显示 `attention_required` 及稳定原因码。不得自动重发、重新消费或猜测修复。二期仅增加只读 list/trace，不提供修复工具。
 
 ## 11. `messages.jsonl` 职责
 

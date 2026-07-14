@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildInboundEntry, classifyAunPayloadForLog } from '../../src/core/message/message-log.js';
+import { buildInboundEntry, classifyAunPayloadForLog, isTransientProtocolMessage } from '../../src/core/message/message-log.js';
 
 describe('classifyAunPayloadForLog', () => {
   const cases: Array<[string, Record<string, unknown>, string]> = [
@@ -46,5 +46,23 @@ describe('classifyAunPayloadForLog', () => {
   it('preserves slash commands only for command-capable types', () => {
     expect(buildInboundEntry({ from: 'a', to: 'b', chatType: 'private', content: '/status', msgType: 'text', payloadType: 'text' }).msgType).toBe('command');
     expect(buildInboundEntry({ from: 'a', to: 'b', chatType: 'private', content: '/status', msgType: 'event', payloadType: 'event' }).msgType).toBe('event');
+  });
+
+  it('persists the local EvolClaw session id when supplied', () => {
+    expect(buildInboundEntry({
+      from: 'a', to: 'b', sessionId: 'meta_session', chatType: 'private', content: 'hello',
+    }).sessionId).toBe('meta_session');
+  });
+
+  it('identifies protocol and status signals without hiding conversation payloads', () => {
+    for (const payloadType of [
+      'menu.query', 'menu.response', 'activity', 'activity.progress',
+      'status', 'status.changed', 'event', 'events.delivery', 'task.status',
+      'thought', 'handoff_state', 'handoff_result',
+    ]) {
+      expect(isTransientProtocolMessage({ msgType: 'custom', payloadType })).toBe(true);
+    }
+    expect(isTransientProtocolMessage({ msgType: 'json', payloadType: 'json' })).toBe(false);
+    expect(isTransientProtocolMessage({ msgType: 'text', payloadType: 'text' })).toBe(false);
   });
 });

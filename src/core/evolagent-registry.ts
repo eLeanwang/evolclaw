@@ -82,6 +82,8 @@ export interface ReloadHooks {
   drainChannel(channelName: string): Promise<void>;
   disconnectChannel(channelName: string): Promise<void>;
   startChannel(agent: EvolAgent, channelName: string): Promise<void>;
+  prepareHandoffReload?(aid: string): Promise<void>;
+  completeHandoffReload?(aid: string): Promise<void>;
 }
 
 /**
@@ -354,6 +356,7 @@ export class EvolAgentRegistry {
     }
 
     if (oldAgent.status !== 'disabled' && raw.enabled === false) {
+      await hooks.prepareHandoffReload?.(oldAgent.aid);
       for (const ch of oldAgent.channelInstanceNames()) {
         try { await hooks.drainChannel(ch); } catch {}
         try { await hooks.disconnectChannel(ch); } catch {}
@@ -368,6 +371,8 @@ export class EvolAgentRegistry {
 
     const conflict = this.checkConflictForReload(raw, oldAgent.aid);
     if (conflict) throw new Error(`Channel conflict: ${conflict}`);
+
+    await hooks.prepareHandoffReload?.(oldAgent.aid);
 
     const oldChannels = new Set(oldAgent.channelInstanceNames());
     const aunKey = oldAgent.effectiveChannelName('aun', 'main');
@@ -413,6 +418,7 @@ export class EvolAgentRegistry {
       oldAgent.status = 'running';
       this.channelIndex.clear();
       this.buildChannelIndex();
+      await hooks.completeHandoffReload?.(oldAgent.aid);
     } catch (err) {
       logger.error(`[Reload] Failed: ${err}. Attempting rollback for "${aidOrName}".`);
       for (const ch of addedSuccessfully) {

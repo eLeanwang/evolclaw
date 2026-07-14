@@ -72,7 +72,7 @@ class MainSession {
 
 ### 3.3 系统提示词集成
 
-**ECK Fragment**（`when: chatMode === 'proactive'`）：
+**ECK Fragment**（`when: { "var": "chatMode", "eq": "proactive" }`）：
 
 ```markdown
 ## 回复方式
@@ -86,7 +86,7 @@ class MainSession {
 **不要直接输出文本**，必须通过 CLI 发送。
 ```
 
-**ECK Fragment**（`when: chatMode === 'interactive'`）：
+**ECK Fragment**（`when: { "var": "chatMode", "eq": "interactive" }`）：
 
 ```markdown
 ## 回复方式
@@ -365,27 +365,37 @@ interface ECKVars {
 
 **Context Assembly Manifest**：
 
-```yaml
-sections:
-  # chatMode 说明（所有模式通用）
-  - id: chat-mode-guide-proactive
-    when: "chatMode === 'proactive'"
-    content: |
-      ## 回复方式
-      使用 CLI 命令发送回复。
-  
-  - id: chat-mode-guide-interactive
-    when: "chatMode === 'interactive'"
-    content: |
-      ## 回复方式
-      直接输出即回复。
-  
-  # mentionMode 说明（所有模式通用）
-  - id: mention-mode-guide
-    when: "mentionMode === 'mention-only'"
-    content: |
-      ## Mention 策略
-      当前启用 mention-only 模式，只处理被 @ 的消息。
+```jsonc
+{
+  "sections": [
+    // chatMode 说明（所有模式通用）
+    {
+      "id": "chat-mode-guide-proactive",
+      "type": "file",
+      "file": "$KITS_DOCS/response-system/prompts/chat-mode-proactive.md",
+      "order": 56,
+      "needsInjection": false,
+      "when": { "var": "chatMode", "eq": "proactive" }
+    },
+    {
+      "id": "chat-mode-guide-interactive",
+      "type": "file",
+      "file": "$KITS_DOCS/response-system/prompts/chat-mode-interactive.md",
+      "order": 56,
+      "needsInjection": false,
+      "when": { "var": "chatMode", "eq": "interactive" }
+    },
+    // mentionMode 说明（所有模式通用）
+    {
+      "id": "mention-mode-guide",
+      "type": "file",
+      "file": "$KITS_DOCS/response-system/prompts/mention-only-guide.md",
+      "order": 57,
+      "needsInjection": false,
+      "when": { "var": "mentionMode", "eq": "mention-only" }
+    }
+  ]
+}
 ```
 
 ---

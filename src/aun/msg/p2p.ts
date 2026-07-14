@@ -5,8 +5,7 @@ import { createShortConnection } from '../rpc/index.js';
 import { getAidStore, SLOT } from '../aid/store.js';
 import { uploadFileAndBuildPayload, type UploadProgress } from './upload.js';
 import { appendMessageLog, buildOutboundEntry, classifyAunPayloadForLog } from '../../core/message/message-log.js';
-import { readBestTaskRuntimeContext, resolveMsgSendHandoff, runtimeRefMessageIdForMsgSend } from '../../core/message/handoff.js';
-import type { TaskRuntimeContext } from '../../core/message/handoff.js';
+import { readBestTaskRuntimeContext, runtimeRefMessageIdForMsgSend, type TaskRuntimeContext } from '../../core/task-runtime-context.js';
 import { chatDirPath } from '../../core/session/session-fs-store.js';
 import { resolvePaths } from '../../paths.js';
 import { ipcQuery, type IpcAunMsgSendResponse } from '../../ipc.js';
@@ -135,33 +134,35 @@ function applyRoutingPayloadFields(
 
 function msgSendLogMetadata(args: MsgSendArgs, payload?: unknown, runtimeContext?: TaskRuntimeContext | null): {
   content: string;
+  sessionId?: string;
   msgType?: ReturnType<typeof classifyAunPayloadForLog>['msgType'];
   payloadType?: string;
   payloadSummary?: ReturnType<typeof classifyAunPayloadForLog>['payloadSummary'];
   source: 'cli' | 'msg';
-  handoff?: ReturnType<typeof resolveMsgSendHandoff>;
 } {
   const isInSession = !!process.env.EVOLCLAW_SESSION_ID || !!runtimeContext;
   const source = isInSession ? 'msg' : 'cli';
   const classified = payload === undefined ? undefined : classifyAunPayloadForLog(payload);
+  const sessionId = runtimeContext?.channel === 'aun'
+    && runtimeContext.chatType === 'private'
+    && runtimeContext.selfAid === args.from
+    && runtimeContext.peerId === args.to
+    ? runtimeContext.sessionId
+    : undefined;
   return {
     content: classified?.content ?? messageLogContent(args.body),
+    sessionId,
     msgType: classified?.msgType,
     payloadType: classified?.payloadType,
     payloadSummary: classified?.payloadSummary,
     source,
-    handoff: resolveMsgSendHandoff({
-      from: args.from,
-      to: args.to,
-      runtime: runtimeContext,
-    }),
   };
 }
 
 async function tryDaemonMsgSend(args: MsgSendArgs, payload: Record<string, unknown>, runtimeContext?: TaskRuntimeContext | null): Promise<IpcAunMsgSendResponse | null> {
   if (!runtimeContext) return null;
-  if (runtimeContext.channel !== 'aun' || runtimeContext.chatType !== 'private') return null;
   if (!runtimeContext.selfAid || runtimeContext.selfAid !== args.from) return null;
+  if (!runtimeContext.sessionId || !runtimeContext.messageId) return null;
   if (args.slotId || args.aunPath) return null;
   const payloadThread = typeof payload.thread_id === 'string' && payload.thread_id.trim()
     ? payload.thread_id.trim()
@@ -186,6 +187,43 @@ async function tryDaemonMsgSend(args: MsgSendArgs, payload: Record<string, unkno
   return response;
 }
 
+async function daemonMsgSendResult(
+  args: MsgSendArgs,
+  payload: Record<string, unknown>,
+  runtimeContext: TaskRuntimeContext | null | undefined,
+  daemonResult: IpcAunMsgSendResponse,
+): Promise<MsgSendResult | MsgError> {
+  if (!daemonResult.ok) {
+    return {
+      ok: false,
+      error: daemonResult.error || 'daemon AUN message send failed',
+      code: daemonResult.code,
+    };
+  }
+  if (!daemonResult.message_id && !daemonResult.handoff_id) {
+    return { ok: false, error: 'daemon AUN message send returned no message_id' };
+  }
+  const sent: MsgSendResult = {
+    ok: true,
+    message_id: daemonResult.message_id || daemonResult.handoff_id || '',
+    handoff_id: daemonResult.handoff_id,
+    target_session_id: daemonResult.target_session_id,
+    seq: daemonResult.seq,
+    timestamp: daemonResult.timestamp,
+    status: daemonResult.status,
+    delivery_mode: daemonResult.delivery_mode,
+  };
+  if (!daemonResult.handoff_id && !daemonResult.log_written) {
+    await appendMsgSendOutboundLog(args, sent, {
+      payload,
+      runtimeContext,
+      chatmode: daemonResult.chatmode,
+      encrypt: daemonResult.encrypt ?? args.encrypt === true,
+    });
+  }
+  return sent;
+}
+
 async function appendMsgSendOutboundLog(args: MsgSendArgs, result: MsgSendResult, opts: {
   payload: unknown;
   runtimeContext?: TaskRuntimeContext | null;
@@ -200,6 +238,7 @@ async function appendMsgSendOutboundLog(args: MsgSendArgs, result: MsgSendResult
   appendMessageLog(chatDir, buildOutboundEntry({
     from: args.from,
     to: args.to,
+    sessionId: log.sessionId,
     chatType: 'private',
     msgId: result.message_id,
     content: log.content,
@@ -209,7 +248,6 @@ async function appendMsgSendOutboundLog(args: MsgSendArgs, result: MsgSendResult
     payloadType: log.payloadType,
     payloadSummary: log.payloadSummary,
     source: log.source,
-    handoff: log.handoff,
   }));
 
   // 通知 daemon 更新 stats（如果 daemon 在运行）
@@ -242,40 +280,24 @@ export async function msgSend(args: MsgSendArgs): Promise<MsgSendResult | MsgErr
       applyRoutingPayloadFields(payload, args, runtimeContext, false);
 
       const daemonResult = await tryDaemonMsgSend(args, payload, runtimeContext);
-      if (daemonResult) {
-        if (!daemonResult.ok) {
-          return {
-            ok: false,
-            error: daemonResult.error || 'daemon AUN message send failed',
-            code: daemonResult.code,
-          };
-        }
-        if (!daemonResult.message_id && !daemonResult.handoff_id) {
-          return { ok: false, error: 'daemon AUN message send returned no message_id' };
-        }
-        const sent: MsgSendResult = {
-          ok: true,
-          message_id: daemonResult.message_id || daemonResult.handoff_id || '',
-          handoff_id: daemonResult.handoff_id,
-          target_session_id: daemonResult.target_session_id,
-          seq: daemonResult.seq,
-          timestamp: daemonResult.timestamp,
-          status: daemonResult.status,
-          delivery_mode: daemonResult.delivery_mode,
-        };
-        if (!daemonResult.handoff_id && !daemonResult.log_written) {
-          await appendMsgSendOutboundLog(args, sent, {
-            payload,
-            runtimeContext,
-            chatmode: daemonResult.chatmode,
-            encrypt: daemonResult.encrypt ?? args.encrypt === true,
-          });
-        }
-        return sent;
-      }
+      if (daemonResult) return daemonMsgSendResult(args, payload, runtimeContext, daemonResult);
     }
 
     conn = await createShortConnection(args.from, { aunPath: args.aunPath, slotId: args.slotId });
+
+    if (args.body.mode === 'file') {
+      const built = await uploadFileAndBuildPayload(conn, args.from, args.body.filePath, {
+        as: args.body.as,
+        contentType: args.body.contentType,
+        text: args.body.text,
+        transcript: args.body.transcript,
+        onProgress: args.onUploadProgress,
+      });
+      payload = built.payload;
+      applyRoutingPayloadFields(payload, args, runtimeContext, false);
+      const daemonResult = await tryDaemonMsgSend(args, payload, runtimeContext);
+      if (daemonResult) return daemonMsgSendResult(args, payload, runtimeContext, daemonResult);
+    }
 
     // 1. 解析对端身份（30天缓存）。身份解析走 HTTP+PKI（store），与发消息的短连接无关。
     const { agentsDir } = resolvePaths();
@@ -295,18 +317,7 @@ export async function msgSend(args: MsgSendArgs): Promise<MsgSendResult | MsgErr
 
     // 3. 构建 payload
     if (!payload) {
-      if (args.body.mode === 'file') {
-        const built = await uploadFileAndBuildPayload(conn, args.from, args.body.filePath, {
-          as: args.body.as,
-          contentType: args.body.contentType,
-          text: args.body.text,
-          transcript: args.body.transcript,
-          onProgress: args.onUploadProgress,
-        });
-        payload = built.payload;
-      } else {
-        payload = buildSimplePayload(args.body);
-      }
+      payload = buildSimplePayload(args.body as Exclude<MsgSendBody, { mode: 'file' }>);
     }
 
     // 4. 写入 payload.chatmode
@@ -314,18 +325,6 @@ export async function msgSend(args: MsgSendArgs): Promise<MsgSendResult | MsgErr
 
     // 5. 写入 payload.thread_id/ref_message_id（如果指定）
     applyRoutingPayloadFields(payload, args, runtimeContext, false);
-
-    const daemonResult = await tryDaemonMsgSend(args, payload, runtimeContext);
-    if (daemonResult) {
-      if (!daemonResult.ok) return { ok: false, error: daemonResult.error || 'daemon AUN message send failed', code: daemonResult.code };
-      return {
-        ok: true,
-        message_id: daemonResult.message_id || daemonResult.handoff_id || '',
-        handoff_id: daemonResult.handoff_id,
-        target_session_id: daemonResult.target_session_id,
-        status: daemonResult.status,
-      };
-    }
 
     applyRoutingPayloadFields(payload, args, runtimeContext);
 

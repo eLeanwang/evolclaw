@@ -756,6 +756,7 @@ Commands:
   ack <from> <seq> [--app <name>]                      确认已读
   recall <from> <message-id> [<message-id>...]         撤回消息
   online <from> <target-aid> [<target-aid>...]         查询在线状态
+  history <from> <target-aid> [筛选选项]               查询本地消息历史
 
 Options:
   --text-from-file <path>  从文件读取文本（UTF-8），用于超长消息或避免 Shell 转义
@@ -764,6 +765,10 @@ Options:
   --encrypt             启用端到端加密（密文发送）
   --no-encrypt          强制明文发送（优先于 --encrypt）
   --thread <id>         指定话题 ID（用于多话题路由）
+  --session <latest|all|id> 按 EvolClaw 逻辑会话过滤历史（默认 latest）
+  --before <time>       只返回该时间之前的历史
+  --after <time>        只返回该时间之后的历史
+  --direction <value>   历史方向：in|out|all
   --return <required|none> 跨会话回流策略（一期仅支持 required；跨会话默认 required）
   --content-type <mime> 显式覆盖 MIME（仅 --file 模式）
   --text <说明>          附件说明文字（仅 --file 模式）
@@ -781,7 +786,29 @@ Options:
   evolclaw msg pull alice.agentid.pub --app my-bot
   evolclaw msg ack alice.agentid.pub 42 --app my-bot
   evolclaw msg recall alice.agentid.pub msg-uuid-1 msg-uuid-2
-  evolclaw msg online alice.agentid.pub bob.agentid.pub carol.agentid.pub`);
+  evolclaw msg online alice.agentid.pub bob.agentid.pub carol.agentid.pub
+  evolclaw msg history alice.agentid.pub bob.agentid.pub --session latest --limit 50`);
+    return;
+  }
+
+  if (sub === 'history' && wantsHelp(args)) {
+    console.log(`用法: evolclaw msg history <self-aid> <target-aid> [options]
+
+查询指定 AID 对的本地 messages.jsonl，不调用 message.pull，也不影响收件箱游标。
+
+Options:
+  --session <latest|all|id> 默认 latest；all 查询全部；也可指定会话 ID
+  --limit <N>             返回最新 N 条（默认 50，最大 500）
+  --before <time>         开区间；epoch 毫秒或 ISO 时间
+  --after <time>          开区间；epoch 毫秒或 ISO 时间
+  --direction <value>     in|out|all（默认 all）
+  --format <text|json>    输出格式（默认 text）
+
+示例:
+  evolclaw msg history alice.agentid.pub bob.agentid.pub
+  evolclaw msg history alice.agentid.pub bob.agentid.pub --session latest
+  evolclaw msg history alice.agentid.pub bob.agentid.pub --session all
+  evolclaw msg history alice.agentid.pub bob.agentid.pub --session meta_20260713_1783920000000 --format json`);
     return;
   }
 
@@ -796,8 +823,86 @@ Options:
     process.exit(1);
   }
 
-  const { msgSend, msgPull, msgAck, msgRecall, msgOnline } = await import('../aun/msg/index.js');
+  const { msgSend, msgPull, msgAck, msgRecall, msgOnline, msgHistory } = await import('../aun/msg/index.js');
   const commonOpts = { aunPath, slotId: appSlot };
+
+  if (sub === 'history') {
+    const target = args[2];
+    if (!target) {
+      console.error('用法: evolclaw msg history <self-aid> <target-aid> [options]');
+      process.exit(1);
+    }
+    const historyValueFlags = new Set(['--session', '--limit', '--before', '--after', '--direction', '--format']);
+    const seenHistoryFlags = new Set<string>();
+    for (let index = 3; index < args.length; index++) {
+      const flag = args[index];
+      if (!historyValueFlags.has(flag)) {
+        console.error(`❌ 未知 history 参数: ${flag}`);
+        process.exit(1);
+      }
+      if (seenHistoryFlags.has(flag)) {
+        console.error(`❌ history 参数不能重复: ${flag}`);
+        process.exit(1);
+      }
+      seenHistoryFlags.add(flag);
+      const value = args[index + 1];
+      if (value === undefined || historyValueFlags.has(value) || value.startsWith('--')) {
+        console.error(`❌ ${flag} 缺少参数值`);
+        process.exit(1);
+      }
+      index++;
+    }
+    const format = getArgValue(args, '--format') ?? 'text';
+    if (format !== 'text' && format !== 'json') {
+      console.error(`❌ --format 仅支持 text|json: ${format}`);
+      process.exit(1);
+    }
+    const limitRaw = getArgValue(args, '--limit');
+    const limit = limitRaw === undefined ? undefined : Number(limitRaw);
+    const beforeRaw = getArgValue(args, '--before');
+    const afterRaw = getArgValue(args, '--after');
+    const before = beforeRaw === undefined ? undefined : parseMsgHistoryTime(beforeRaw);
+    const after = afterRaw === undefined ? undefined : parseMsgHistoryTime(afterRaw);
+    if (beforeRaw !== undefined && before === undefined) {
+      console.error(`❌ --before 必须是 epoch 毫秒或有效时间: ${beforeRaw}`);
+      process.exit(1);
+    }
+    if (afterRaw !== undefined && after === undefined) {
+      console.error(`❌ --after 必须是 epoch 毫秒或有效时间: ${afterRaw}`);
+      process.exit(1);
+    }
+
+    const result = msgHistory({
+      from,
+      target,
+      session: getArgValue(args, '--session'),
+      limit,
+      before,
+      after,
+      direction: (getArgValue(args, '--direction') ?? 'all') as 'in' | 'out' | 'all',
+    });
+    if (!result.ok) {
+      if (format === 'json') console.log(JSON.stringify(result));
+      else console.error(`❌ 查询失败: ${result.error}`);
+      process.exit(1);
+    }
+    if (format === 'json') {
+      console.log(JSON.stringify(result));
+      return;
+    }
+    if (result.count === 0) {
+      console.log('暂无消息历史');
+      return;
+    }
+    console.log(`✓ ${result.count} 条消息${result.session_id ? `，session=${result.session_id}` : ''}`);
+    for (const message of result.messages) {
+      const arrow = message.dir === 'in' ? '←' : '→';
+      const peer = message.dir === 'in' ? message.from : message.to;
+      const content = message.content.replace(/\r?\n/g, '\n    ');
+      console.log(`  [${message.time}] ${arrow} ${peer} [${message.msgType}] ${content}`);
+    }
+    return;
+  }
 
   if (sub === 'send') {
     const to = args[2];
@@ -1039,7 +1144,7 @@ Options:
     return;
   }
 
-  console.error(`未知子命令: ${sub}\n用法: evolclaw msg [send|pull|ack|recall|online]`);
+  console.error(`未知子命令: ${sub}\n用法: evolclaw msg [send|pull|ack|recall|online|history]`);
   process.exit(1);
 }
 
@@ -1786,4 +1891,15 @@ function collectPositional(args: string[], startIdx: number, extraValueFlags?: R
     out.push(a);                                  // 其余（含以 -- 开头的未知 token）= 正文
   }
   return out;
+}
+
+function parseMsgHistoryTime(value: string): number | undefined {
+  const trimmed = value.trim();
+  if (!trimmed) return undefined;
+  if (/^-?\d+$/.test(trimmed)) {
+    const timestamp = Number(trimmed);
+    return Number.isSafeInteger(timestamp) ? timestamp : undefined;
+  }
+  const timestamp = Date.parse(trimmed);
+  return Number.isFinite(timestamp) ? timestamp : undefined;
 }

@@ -8,8 +8,9 @@
 import fs from 'fs';
 import path from 'path';
 import { resolvePaths } from '../paths.js';
+import { resolveParentDistModule, toFileUrl } from './parent-package.js';
 import {
-  isHandoffStateMessage,
+  isTransientProtocolMessage,
   readAllJsonlLines,
   readJsonFile,
 } from '../fs-utils.js';
@@ -30,6 +31,7 @@ type ChatRecord = {
   groupName: string | null;
   updatedAt: number;
   messages: MessageLogEntry[];
+  active: Record<string, any>;
 };
 
 type ScopeInfo = {
@@ -73,6 +75,51 @@ type ChatIdentity = {
   channelId: string;
   selfAID: string;
 };
+
+type SessionContext = {
+  sessionId: string | null;
+  evolclawSessionId: string | null;
+  name: string | null;
+  baseagent: string | null;
+  chatMode: string | null;
+  permissionMode: string | null;
+  role: string | null;
+  turns: number;
+  status: 'processing' | 'idle';
+  updatedAt: number;
+};
+
+let contextModulesPromise: Promise<{ resolver: any; modelScope: any }> | null = null;
+const sessionAdapterPromises = new Map<string, Promise<any | null>>();
+
+function getContextModules(): Promise<{ resolver: any; modelScope: any }> {
+  if (!contextModulesPromise) {
+    contextModulesPromise = Promise.all([
+      import(toFileUrl(resolveParentDistModule('config', 'peer-role-resolver.js'))),
+      import(toFileUrl(resolveParentDistModule('core', 'model', 'config-scope.js'))),
+    ]).then(([resolver, modelScope]) => ({ resolver, modelScope }));
+  }
+  return contextModulesPromise;
+}
+
+function getSessionAdapter(baseagent: string): Promise<any | null> {
+  if (!sessionAdapterPromises.has(baseagent)) {
+    const classNames: Record<string, string> = {
+      claude: 'ClaudeSessionFileAdapter',
+      codex: 'CodexSessionFileAdapter',
+      gemini: 'GeminiSessionFileAdapter',
+    };
+    const className = classNames[baseagent];
+    const promise = !className
+      ? Promise.resolve(null)
+      : Promise.resolve()
+        .then(() => import(toFileUrl(resolveParentDistModule('core', 'session', 'adapters', `${baseagent}-session-file-adapter.js`))))
+        .then(mod => mod[className] ? new mod[className]() : null)
+        .catch(() => null);
+    sessionAdapterPromises.set(baseagent, promise);
+  }
+  return sessionAdapterPromises.get(baseagent)!;
+}
 
 function safeId(value: string): string {
   return Buffer.from(value, 'utf8').toString('base64url');
@@ -236,7 +283,8 @@ function loadChats(): ChatRecord[] {
   for (const file of files) {
     const dirPath = path.dirname(file);
     const active = readJsonFile<any>(path.join(dirPath, 'active.json')) ?? {};
-    const messages = readAllJsonlLines<MessageLogEntry>(file).filter(m => !isHandoffStateMessage(m));
+    const messages = readAllJsonlLines<MessageLogEntry>(file)
+      .filter(m => !isTransientProtocolMessage(m));
     if (!messages.length) continue;
     const identity = normalizeChatIdentity(sessionsDir, dirPath, active, messages);
     const { channelType, channel, channelId, selfAID } = identity;
@@ -259,6 +307,7 @@ function loadChats(): ChatRecord[] {
       groupName: display.groupName,
       updatedAt,
       messages,
+      active,
     });
   }
   return chats;
@@ -394,7 +443,75 @@ function messagesFor(chats: ChatRecord[], peer: string | null): MessageLogEntry[
   return messages.length > 1000 ? messages.slice(-1000) : messages;
 }
 
-function buildSnapshot(params: Record<string, any>): any {
+function latestInbound(chat: ChatRecord): MessageLogEntry | undefined {
+  for (let i = chat.messages.length - 1; i >= 0; i--) {
+    if (chat.messages[i].dir === 'in') return chat.messages[i];
+  }
+  return undefined;
+}
+
+async function sessionTurns(active: Record<string, any>, messages: MessageLogEntry[]): Promise<number> {
+  const baseagent = String(active.baseagent || active.agentType || '').toLowerCase();
+  const agentSessionId = typeof active.agentSessionId === 'string' ? active.agentSessionId : '';
+  const projectPath = typeof active.projectPath === 'string' ? active.projectPath : '';
+  if (baseagent && agentSessionId && projectPath) {
+    try {
+      const adapter = await getSessionAdapter(baseagent);
+      const turns = Number(adapter?.getFileInfo(projectPath, agentSessionId)?.turns);
+      if (Number.isFinite(turns) && turns > 0) return turns;
+    } catch {}
+  }
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const turns = Number(messages[i].numTurns);
+    if (Number.isFinite(turns) && turns >= 0) return turns;
+  }
+  return 0;
+}
+
+async function buildSessionContext(chat: ChatRecord | undefined): Promise<SessionContext | null> {
+  if (!chat) return null;
+  const active = chat.active || {};
+  const inbound = latestInbound(chat);
+  const actorId = String(
+    inbound?.from
+    || active.metadata?.peerId
+    || chat.peerId
+    || chat.channelId
+    || '',
+  );
+  const conversationId = String(chat.groupId || chat.channelId || chat.peerId || '');
+  let role = inbound?.permMode || null;
+  let permissionMode = active.permissionMode || null;
+  const peerKey = `${chat.channelType}#${encodeURIComponent(conversationId)}`;
+  try {
+    const { resolver, modelScope } = await getContextModules();
+    const detail = resolver.resolvePeerRoleDetail({
+      selfAid: chat.selfAID,
+      channelType: chat.channelType,
+      chatType: chat.chatType === 'group' ? 'group' : 'private',
+      actorId,
+      conversationId,
+      peerType: inbound?.peerType || active.metadata?.peerType,
+    });
+    role = detail.effectiveRole || 'none';
+    permissionMode = modelScope.resolvePermissionMode({ self: chat.selfAID, peerKey, role });
+  } catch {}
+
+  return {
+    sessionId: active.agentSessionId || active.id || null,
+    evolclawSessionId: active.id || null,
+    name: active.name || null,
+    baseagent: active.baseagent || active.agentType || null,
+    chatMode: active.chatMode || inbound?.chatmode || null,
+    permissionMode,
+    role,
+    turns: await sessionTurns(active, chat.messages),
+    status: active.activeTask ? 'processing' : 'idle',
+    updatedAt: Number(active.updatedAt || chat.updatedAt || 0),
+  };
+}
+
+async function buildSnapshot(params: Record<string, any>): Promise<any> {
   const chats = loadChats();
   const scopes = buildScopes(chats);
   const requestedScope = params.scope || params.aid || null;
@@ -407,6 +524,8 @@ function buildSnapshot(params: Record<string, any>): any {
   const inScope = selectedChats(chats, scope);
   const peers = scope ? mergePeerInfo(inScope) : [];
   const messages = scope ? messagesFor(inScope, peer) : [];
+  const currentChat = peer ? inScope.find(chat => chatKey(chat) === peer) : undefined;
+  const sessionContext = await buildSessionContext(currentChat);
 
   return {
     scopes,
@@ -416,6 +535,7 @@ function buildSnapshot(params: Record<string, any>): any {
     scope,
     aid: scope,
     peer,
+    sessionContext,
   };
 }
 
@@ -423,7 +543,7 @@ export const msgSource: WatchSource = {
   kind: 'msg',
 
   async snapshot(params: Record<string, any> = {}): Promise<any> {
-    return buildSnapshot(params);
+    return await buildSnapshot(params);
   },
 
   subscribe(params: Record<string, any>, push: (data: any) => void): () => void {
@@ -433,8 +553,8 @@ export const msgSource: WatchSource = {
 
     const fire = () => {
       if (debounce) clearTimeout(debounce);
-      debounce = setTimeout(() => {
-        try { push(buildSnapshot(params)); } catch { /* ignore */ }
+      debounce = setTimeout(async () => {
+        try { push(await buildSnapshot(params)); } catch { /* ignore */ }
       }, 150);
     };
 

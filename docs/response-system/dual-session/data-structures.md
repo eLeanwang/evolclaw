@@ -54,11 +54,14 @@ interface QueuedMessage {
   enqueuedAt: Date;                // 入队时间
   processedByAuxiliary: boolean;   // 是否已被辅助会话处理
   
-  // 如果 state = DELAY
-  transferAt?: Date;               // 计划投递时间
+  // 到期投递（DELAY 与 HOLD 统一用这一套；由所属批次统一计算，批内所有消息取同一值 → 无 skew）
+  expireAt?: Date;                 // 到期时刻：到点后由到期扫描转投到主队列
+  expireReason?: 'delay' | 'hold-timeout';
+                                   // 'delay'        —— 辅助会话主动延迟（分钟级，等意图/错开竞争）
+                                   // 'hold-timeout' —— HOLD 挂起的兜底超时（默认 1 小时，防饿死）
   
   // 如果 state = HOLD
-  holdSince?: number;              // 首次 HOLD 的时间（毫秒时间戳）
+  holdSince?: number;              // 首次 HOLD 的时间（毫秒时间戳）；expireAt = holdSince + holdTimeoutMs
   
   // 错误处理
   hasError?: boolean;              // 是否处理失败
@@ -78,9 +81,33 @@ enum MessageState {
 }
 ```
 
-**HOLD 超时机制**：
-- HOLD 状态的消息，如果 `holdSince` 超过 1 小时 → 自动投递到主队列
-- 检查时机：每次辅助会话处理时检查
+**反馈标记项（FeedbackItem）**：辅助队列除消息外，还容纳一类"反馈标记项"。主会话处理完批次后，
+代码层把 `MainFeedback` 包成 `FeedbackItem` **插入辅助队列**（不调模型）；下次辅助会话被真正触发时，
+`extractBatch()` 把队列中的反馈标记项随本批一起带出，作为**只读上下文**喂给辅助会话（见
+[auxiliary-queue-processing.md](../dual-session/auxiliary-queue-processing.md) §1.2）。这样反馈不产生
+额外 LLM 调用、也不绕过队列破坏串行化。
+
+```typescript
+interface FeedbackItem {
+  kind: 'feedback';                // 与普通消息项区分的标记
+  feedback: MainFeedback;          // 主会话反馈内容
+  enqueuedAt: Date;                // 入队时间
+}
+
+// 辅助队列元素 = 消息项 | 反馈标记项
+type AuxiliaryQueueItem = QueuedMessage | FeedbackItem;
+```
+
+**HOLD 超时机制**（与 DELAY 到期共用同一套到期扫描，见
+[auxiliary-queue-processing.md](./auxiliary-queue-processing.md) §6.2）：
+- 消息进入 HOLD 时，代码层按批次统一算出 `expireAt = holdSince + holdTimeoutMs`（默认 1 小时），
+  `expireReason = 'hold-timeout'`，写入本批每条消息（批内同值）。
+- **到期由独立定时器驱动、不依赖新消息**：到期扫描到点后转投所有 `expireAt <= now` 的消息，
+  扫完再按队列中"下一个最早的 `expireAt`"重挂定时器。
+- ⚠️ 这正是修掉旧设计"每次辅助会话处理时检查"的漏洞——旧法在队列安静（无新消息、无 delay 到期）
+  时永不触发，HOLD 会远超 1 小时；改为独立定时器后，即使队列全程安静也能按时兜底投递。
+- **重启恢复**：不持久化定时器。重启后遍历队列，`expireAt <= now` 的立即转投，其余按最早 `expireAt`
+  重挂一个定时器即可（幂等）。
 
 ---
 
@@ -88,22 +115,27 @@ enum MessageState {
 
 ```typescript
 interface AuxiliaryInput {
-  // 输入类型
-  type: 'aun-messages' | 'main-feedback';
-  
-  // 如果 type = 'aun-messages'
-  aunMessages?: {
-    newMessages: Message[];        // 本次新增的消息（触发本次判断，只给这批）
-    remainingInQueue: number;      // 【信号A】去掉本批次后，辅助队列还剩多少条待判断
+  // 一次触发的批次 = 一个带标记的项列表。
+  // 每项一个 kind 字段，辅助会话遍历时按 kind 分别对待：
+  //   - 'message'  ：待判断的新消息
+  //   - 'feedback' ：主会话反馈（只读上下文，不为它单独产出决策）
+  // 反馈保持独立类型、与新消息同批带入；不是触发源（见 TriggerReason）。
+  items: AuxItem[];
+
+  remainingInQueue: number;        // 【信号A】去掉本批次后，辅助队列还剩多少条待判断
                                    // 越大 → 判断越果断，少 hold/少 delay/优先 short，尽快清空积压
-  };
-  
-  // 如果 type = 'main-feedback'
-  mainFeedback?: MainFeedback;
-  
+
   // 主会话当前状态
   mainSession: MainSessionStatus;
 }
+
+// 批次项：消息项与反馈项平级，靠 kind 区分
+type AuxItem =
+  | { kind: 'message';  message: Message }        // 待判断的新消息
+  | { kind: 'feedback'; feedback: MainFeedback }; // 主会话反馈，只读上下文
+
+// 注：mention 模式在 message 项上追加一个 role: 'primary' | 'reference' 字段，
+// 区分被 @ 的主消息与仅供参考的引用消息（缺省 primary）。详见 MENTION-MODE-MECHANISM.md §4.4。
 
 interface MainSessionStatus {
   status: 'idle' | 'processing';
@@ -115,6 +147,9 @@ interface MainSessionStatus {
 
 > **两个信号方向相反**：`remainingInQueue`（信号A）催辅助会话**加快**清空积压；
 > `pendingCount`（信号B）提示主会话忙、要辅助会话**放慢**投递。辅助会话在两者间权衡。
+>
+> **反馈项只读**：辅助会话遍历到 `kind: 'feedback'` 的项时，只用它更新对"主会话消费了什么"的
+> 认知（供后续 hold/delay 重判参考），**不**为反馈项产出任何决策，也不产出应答。
 
 ---
 
@@ -122,14 +157,10 @@ interface MainSessionStatus {
 
 ```typescript
 interface AuxiliaryOutput {
-  // 输出类型
-  type: 'aun-decision' | 'feedback-ack';
-  
-  // 如果 type = 'aun-decision'
-  decision?: AuxiliaryDecision;
-  
-  // 如果 type = 'feedback-ack'
-  ack?: FeedbackAck;
+  // 输出只有决策一种（反馈是只读上下文，不再需要 feedback-ack 应答）
+  type: 'aun-decision';
+
+  decision: AuxiliaryDecision;
 }
 
 interface AuxiliaryDecision {
@@ -141,10 +172,9 @@ interface AuxiliaryDecision {
   
   // 如果 action = 'transfer'
   interrupt?: boolean;             // 是否打断主会话（默认false）
-  interruptReason?: string;        // 打断原因（interrupt=true 时必填）
   previousMessageStrategy?: 'ignore' | 'defer' | 'continue';  // 被打断消息处理策略（interrupt=true 时必填）
   
-  // 简短说明（<50字）
+  // 简短说明（<50字）；interrupt=true 时，在此一并说明打断原因
   reason: string;
 }
 
@@ -177,10 +207,6 @@ interface AuxiliaryDecision {
  *          （注意：无队列层"稍后重投"，靠主会话同 turn 从上下文自行捞回）
  * - continue：继续处理被打断的消息，但考虑新消息的内容
  */
-
-interface FeedbackAck {
-  reason: '已知悉' | '已更新上下文';
-}
 ```
 
 **辅助会话输出格式**：
@@ -199,9 +225,8 @@ Owner 提了一个关于报错的紧急问题，主会话正忙着处理闲聊�
 {
   "action": "transfer",
   "interrupt": true,
-  "interruptReason": "Owner 提出紧急问题",
   "previousMessageStrategy": "ignore",
-  "reason": "紧急问题优先处理，闲聊可忽略"
+  "reason": "Owner 提出紧急问题，打断优先处理，闲聊可忽略"
 }
 ```
 
@@ -307,37 +332,84 @@ interface AgentConfig {
 
 ## 三、存储数据结构
 
-### 3.1 QueueState（队列状态持久化）
+### 3.1 队列持久化
 
-持久化队列状态（支持重启后恢复）：
+#### 存储位置（话题级、主/辅分文件）
+
+```
+$AGENT_DIR/relations/<channel>#<urlEncode(peerId)>/_threads/<threadId>/_queues/
+├── main-queue.json          # 主队列（批次）
+└── auxiliary-queue.json     # 辅助队列（消息 + 反馈标记项）
+```
+
+- **话题级隔离**：`_threads/<threadId>/` 是话题级数据的根，每个话题一套独立队列
+  （与现有 queueKey `selfAID::channel#channelId#threadId::projectPath` 的话题维度对应；
+  未来话题级其它数据如 context/summary 也落这一层）。
+- **主/辅分文件**：辅助队列写入频繁（每条消息入队/状态变化）、主队列写入稀疏（批次进出），
+  分文件减少写放大；且一个文件损坏不殃及另一个。
+
+#### 文件内容
 
 ```typescript
-interface QueueState {
-  auxiliaryQueue: {
-    messages: QueuedMessage[];
-    debounceTimer?: {
-      startAt: string;             // ISO 8601
-      durationMs: number;
-    };
-    delayTimers: {
-      messageId: string;
-      transferAt: string;          // ISO 8601
-    }[];
-  };
-  
-  mainQueue: {
-    messages: Message[];
-    processing: Message[];
-  };
-  
+// auxiliary-queue.json
+interface AuxiliaryQueueState {
+  items: AuxiliaryQueueItem[];     // 消息项（QueuedMessage，自带 expireAt/expireReason）
+                                   // + 反馈标记项（FeedbackItem），保持队列顺序
+  lastUpdateAt: string;            // ISO 8601
+}
+
+// main-queue.json
+interface MainQueueState {
+  batches: TransferBatch[];        // 等待中的批次（到达顺序，各带指令）
+  processing: TransferBatch | null; // 在飞批次（崩溃恢复用，见下）
   lastUpdateAt: string;            // ISO 8601
 }
 ```
 
-**存储位置**：
+> 定时器（到期/防抖）**一律不持久化**——它们是从数据派生的（到期定时器由 `expireAt` 重建，
+> 见 §1.2；防抖不恢复，重启后新消息自然重新防抖，积压靠"最早消息 15s 强制触发"兜底，
+> 其判断依据 `enqueuedAt` 就在持久化数据里）。
+
+#### 写入（原子写，复用单会话模式的既有做法）
+
+- 每次队列变化（入队/出队/状态更新/批次进出）覆盖写对应文件；
+- 原子写：先写临时文件（`<name>.json.tmp`），再 `rename` 替换正式文件——
+  任何时刻磁盘上的正式文件要么是完整旧版、要么是完整新版，不存在半个 JSON。
+
+#### 懒加载
+
+1. 启动时给所有话题打"需要重载"标志（不逐个读文件）；
+2. 首次操作某话题的队列时检查标志，需要则从文件加载、清标志；
+3. 之后队列变化即写入。
+
+#### 恢复流程（加载后执行一次）
+
 ```
-$AGENT_DIR/relations/<channel>#<urlEncode(peerId)>/queue-state.json
+1. auxiliary-queue.json → 恢复辅助队列
+   → rebuildExpiryOnRestart()：expireAt <= now 的立即转投，其余按最早 expireAt 重挂
+     单个到期定时器（见 auxiliary-queue-processing.md §6.2）
+2. main-queue.json → 恢复主队列批次
+   → 若 processing 非空（崩溃时有在飞批次）：
+     该批次未 completeBatch、未产反馈 = 未定案 → 放回主队列【队首】重新处理
+     （旧进程的模型调用上下文已随进程消失，重处理是唯一正确语义；
+      崩溃前可能已发出的半截回复按"副作用不可撤回"处理，不补机制）
+   → 清空 processing，按 §5.2 nextBatch() 正常调度
 ```
+
+#### 损坏降级（隔离重建）
+
+任一队列文件 JSON 解析失败：
+
+```
+1. 把损坏文件改名为 <name>.json.corrupt-<ISO时间戳>（留证，不删除）
+2. 该队列以空队列启动
+3. 日志告警（含损坏文件路径）
+```
+
+- 该话题未处理的积压会丢失——可接受：消息源头在渠道侧（对端可重发），
+  且主/辅分文件使损坏只影响一半；
+- 原子写已把"写一半损坏"压到极低，剩余极端情况（磁盘坏块）任何本地方案都救不了，
+  不引入双副本轮换等更重机制（回退旧副本还会带来重复处理已回复消息的新问题）。
 
 ---
 
@@ -351,8 +423,9 @@ type TriggerReason =
   | 'max-wait'           // 最早消息超时
   | 'queue-full'         // 队列满
   | 'delay-timeout'      // 延迟投递超时
-  | 'main-feedback'      // 主会话反馈到达
   | 'retry';             // 重试（失败后）
+  // 注：主会话反馈不是触发源。反馈以 FeedbackItem 入队暂存，
+  //     被动等待下一次真实触发（防抖/超时/队列满/延迟到期）时随批带出。
 ```
 
 ---
@@ -382,7 +455,26 @@ interface SessionStatus {
 
 ---
 
-### 4.3 BatchInfo（批次信息）
+### 4.3 TransferBatch（转投批次——主队列的调度单位）
+
+```typescript
+interface TransferBatch {
+  batchId: string;         // 批次标识（反馈定案、队列移除都以批次为单位）
+  batchRole: PeerRole;     // 本批统一角色——仅作权限分组键（PreToolUse Hook 用），不代表优先级
+  messages: Message[];     // 同角色消息（保持到达顺序）
+
+  // 辅助会话对本批次的判断指令（主队列照此调度，见 interrupt-mechanism.md §3/§4）
+  interrupt: boolean;      // 是否要求打断/优先处理
+  previousMessageStrategy?: 'ignore' | 'defer' | 'continue';  // interrupt=true 时必填
+}
+```
+
+**要点**：
+- 批次在 **transfer 边界**成形（辅助队列提取即同角色，见 auxiliary-queue-processing.md §1.2），
+  主队列**不拆散重切**——辅助的批次边界就是主会话的处理边界（判断不失效）
+- `batchRole` 只是权限分组键；优先级/打断来自辅助对**内容**的判断，与角色高低无关
+
+### 4.4 BatchInfo（批次信息）
 
 ```typescript
 interface BatchInfo {
@@ -395,7 +487,7 @@ interface BatchInfo {
   
   // 主会话批次
   isInterrupted?: boolean;         // 是否是打断后的批次
-  previousMessage?: Message;       // 被打断的消息（已在上下文）
+  references?: TransferBatch[];    // 被跳过、以只读引用注入的批次（本体仍在主队列排队）
 }
 ```
 
@@ -414,10 +506,16 @@ interface AuxiliaryQueueAPI {
   getAllUndelivered(): QueuedMessage[];
   getByState(state: MessageState): QueuedMessage[];
   getOldestPending(): QueuedMessage | null;
+  getExpired(now: Date): QueuedMessage[];        // 所有 expireAt <= now（DELAY/HOLD 统一），供到期扫描
+  getEarliestExpireAt(): Date | null;            // 队列中最早的 expireAt，供 armExpiryTimer 重挂定时器
   size(): number;
   
-  // 更新
-  updateState(messageId: string, state: MessageState, transferAt?: Date): void;
+  // 更新（转 DELAY/HOLD 时传入该批次统一算好的 expireAt 与 expireReason）
+  updateState(
+    messageId: string,
+    state: MessageState,
+    expire?: { expireAt: Date; expireReason: 'delay' | 'hold-timeout' }
+  ): void;
   
   // 移除
   remove(messageIds: string[]): void;
@@ -429,26 +527,36 @@ interface AuxiliaryQueueAPI {
 
 ---
 
-### 5.2 MainQueue API
+### 5.2 MainQueue API（以批次为单位）
 
 ```typescript
 interface MainQueueAPI {
-  // 入队
-  append(messages: Message[]): Promise<void>;
-  interrupt(messages: Message[]): Promise<void>;
-  
+  // 入队（单位：同角色批次，携带辅助判断指令）
+  enqueueBatch(batch: TransferBatch): Promise<void>;
+
+  // 打断守卫：若队列中有 interrupt 批次且主会话正在处理 → 触发硬 abort
+  // （是否真的打断按 interrupt-mechanism.md §5 的四条件判断）
+  maybeInterruptInFlight(): Promise<void>;
+
   // 查询
-  size(): number;
+  size(): number;                  // 等待中的批次数
   isEmpty(): boolean;
-  peek(): Message[];
-  
-  // 批次操作
-  extractBatch(maxSize: number): Message[];
-  completeBatch(): void;
-  
+  peekBatches(): TransferBatch[];  // 按到达顺序查看等待中的批次
+
+  // 调度提取（主会话每处理完一个批次调用一次）：
+  //   有 interrupt 批次 → 取最后一个，之前被跳过的批次以 references 附带（只读，本体留队列）
+  //   无 → FIFO 取队首
+  // 详见 interrupt-mechanism.md §3（SSOT）
+  nextBatch(): { primary: TransferBatch; references: TransferBatch[] } | null;
+
+  // ignore 指令的队列侧执行：移除指定的未处理批次（interrupt-mechanism.md §4）
+  removeBatches(batchIds: string[]): void;
+
+  completeBatch(batchId: string): void;
+
   // 状态
   isProcessing(): boolean;
-  getCurrentBatch(): Message[];
+  getCurrentBatch(): TransferBatch | null;
 }
 ```
 
@@ -479,8 +587,11 @@ interface SessionAPI {
 
 interface AuxiliarySessionAPI extends SessionAPI {
   process(batch: Message[], reason: TriggerReason): Promise<void>;
-  processFeedback(feedback: MainFeedback): Promise<void>;
-  
+
+  // 接收主会话反馈：仅把 feedback 包成 FeedbackItem 入队暂存，不调模型、不触发处理。
+  // 下次辅助会话被真实触发时，随批带出作为只读上下文（见 architecture.md §3.4）。
+  enqueueFeedback(feedback: MainFeedback): void;
+
   // 错误状态
   errorState: AuxiliaryErrorState;
 }
@@ -524,8 +635,7 @@ type DualSessionEvent =
   | MainQueueInterruptEvent
   | MainSessionProcessingEvent
   | MainSessionCompletedEvent
-  | FeedbackGeneratedEvent
-  | FeedbackAckedEvent;
+  | FeedbackGeneratedEvent;
 
 interface BaseEvent {
   type: string;
@@ -576,12 +686,7 @@ interface MainSessionCompletedEvent extends BaseEvent {
 
 interface FeedbackGeneratedEvent extends BaseEvent {
   type: 'feedback-generated';
-  feedback: MainFeedback;
-}
-
-interface FeedbackAckedEvent extends BaseEvent {
-  type: 'feedback-acked';
-  batchId: string;
+  feedback: MainFeedback;          // 已包成 FeedbackItem 入队暂存，等待下次触发随批带出
 }
 ```
 

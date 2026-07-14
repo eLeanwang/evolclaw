@@ -961,6 +961,17 @@ export class SessionManager {
     return this.readActive(channel, channelId, channelType, selfAID);
   }
 
+  /** 当前聊天是否已经存在任意主 Session，用于区分首次入站创建与存量无消息边界。 */
+  hasMainSession(channel: string, channelId: string, channelType: string, selfAID?: string): boolean {
+    const chatDir = this.resolveChatDirExact(channel, channelId, channelType, selfAID);
+    const active = readJsonFile<SessionFile>(path.join(chatDir, 'active.json'));
+    if (active && !active.threadId) return true;
+    return scanMetaFiles(chatDir).some(metaFile => {
+      const session = readLastJsonlLine<SessionFile>(path.join(chatDir, metaFile));
+      return !!session && !session.threadId;
+    });
+  }
+
   async getThreadSession(channel: string, channelId: string, threadId: string): Promise<Session | undefined> {
     let chatDir: string;
     try {
@@ -1188,6 +1199,57 @@ export class SessionManager {
       channelId: sourceSession.channelId,
       projectPath: sourceSession.projectPath,
       name: session.name,
+      timestamp: Date.now(),
+    });
+    return session;
+  }
+
+  /**
+   * 为超时后的独立话题创建新会话。保留聊天路由和稳定 metadata，
+   * 但不继承任何底层 agent session 或临时任务状态。
+   */
+  async createRenewedSession(sourceSession: Session): Promise<Session> {
+    const metadata = { ...(sourceSession.metadata || {}) };
+    delete metadata.agentSessions;
+    delete metadata.resumeAt;
+    delete metadata.replyContext;
+
+    const session: Session = {
+      id: generateSessionId(),
+      channel: sourceSession.channel,
+      channelType: sourceSession.channelType || sourceSession.channel,
+      channelId: sourceSession.channelId,
+      selfAID: sourceSession.selfAID,
+      projectPath: sourceSession.projectPath,
+      threadId: '',
+      baseagent: sourceSession.baseagent,
+      sessionKey: formatSessionKey(
+        sourceSession.channelType || sourceSession.channel,
+        sourceSession.channelId,
+        DEFAULT_THREAD_ID,
+      ),
+      chatType: sourceSession.chatType || 'private',
+      chatMode: sourceSession.chatMode || this.resolveDefaultChatMode(
+        sourceSession.channel,
+        sourceSession.chatType || 'private',
+        (sourceSession.metadata as any)?.peerType,
+      ),
+      metadata,
+      name: '默认会话',
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    };
+    session.identity = sourceSession.identity;
+
+    this.persistSession(session, 'set');
+    this.eventBus.publish({
+      type: 'session:created',
+      sessionId: session.id,
+      channel: session.channel,
+      channelId: session.channelId,
+      projectPath: session.projectPath,
+      name: session.name,
+      chatType: session.chatType,
       timestamp: Date.now(),
     });
     return session;

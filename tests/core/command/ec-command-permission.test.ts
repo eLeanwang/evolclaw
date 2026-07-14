@@ -33,6 +33,12 @@ describe('EC Command Permission', () => {
       expect(parseEcOperationId('evolclaw ctl send')).toBe('ec.ctl.send');
     });
 
+    it('should parse send commands with trailing file descriptor duplication', () => {
+      expect(parseEcOperationId('ec group send self.aid group123 hello 2>&1')).toBe('ec.group.send');
+      expect(parseEcOperationId('ec msg send self.aid peer.aid hello 1>&2')).toBe('ec.msg.send');
+      expect(parseEcOperationId('ec ctl send hello 2>&1')).toBe('ec.ctl.send');
+    });
+
     it('should return null for non-ec commands', () => {
       expect(parseEcOperationId('ls -la')).toBeNull();
       expect(parseEcOperationId('npm install')).toBeNull();
@@ -54,6 +60,8 @@ describe('EC Command Permission', () => {
     it('should return null for shell control characters', () => {
       expect(parseEcOperationId('ec msg send a b; rm -rf /')).toBeNull();
       expect(parseEcOperationId('ec msg send a b | grep x')).toBeNull();
+      expect(parseEcOperationId('ec msg send a b; rm -rf / 2>&1')).toBeNull();
+      expect(parseEcOperationId('ec msg send a b 2>&1 && whoami')).toBeNull();
     });
   });
 

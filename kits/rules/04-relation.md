@@ -2,6 +2,12 @@
 
 关系层管理你对所有对端的认知。动态注入的 `peerKey`（`<channel>#<urlEncode(peerId)>`）是对端在所有渠道中的稳定标识。`peerId` 是对端在当前渠道的原生 ID（AUN 是 AID，飞书是 user_id 等），`channel` 是当前渠道类型。
 
+**对端包括群**：AID 四类型（human/agent/group/service，见 `01-overview.md`）对你而言都是对端，数据都在关系层。
+- 私聊：`peerId` = 对端 ID，`peerKey` = `<channel>#<对端ID>`。
+- 群聊：`peerId` = **群 ID**（群本身的 AID / 渠道群 ID），群内所有发言者共用同一个 `peerKey`（群的键）。群规则、群 profile 等**具体群实例数据**落 `$RELATIONS_DIR/<peerKey>/`（如群规则物化到 `relations/<peerKey>/rules.md`）。
+
+> 为什么用 `peerId` 而非直接用 AID：非 AUN 渠道的对端（飞书群、微信）没有 AID，用 `<channel>#<peerId>` 才能统一覆盖所有渠道的对端。
+
 ## 数据位置
 
 | 位置 | 内容 |

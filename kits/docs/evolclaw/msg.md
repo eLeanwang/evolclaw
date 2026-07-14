@@ -72,6 +72,41 @@ ec msg online <from> <target-aid> [<target-aid>...]
 
 输出：`🟢` 在线 / `⚫` 离线。
 
+## 查询本地消息历史
+
+```bash
+# 查询最新激活会话最近 50 条本地历史
+ec msg history <self-aid> <target-aid>
+
+# 只查询 active.json 当前激活的 EvolClaw 会话
+ec msg history <self-aid> <target-aid> --session latest
+
+# 查询指定归档会话
+ec msg history <self-aid> <target-aid> --session <session-id>
+
+# 查询该 AID 对全部本地历史（包括没有 sessionId 的旧记录）
+ec msg history <self-aid> <target-aid> --session all
+
+# 组合过滤
+ec msg history <self-aid> <target-aid> \
+  --after 2026-07-13T00:00:00+08:00 \
+  --direction in --limit 100 --format json
+```
+
+历史查询读取本地 `messages.jsonl`，不调用 `message.pull`，不会读取或推进网络收件箱游标。
+
+- 不传 `--session`：等价于 `--session latest`。
+- `--session latest`：使用该 AID 对 `active.json` 中的最新激活会话；找不到时直接报错。
+- `--session all`：包含该 AID 对全部本地历史以及没有会话标识的旧记录。
+- `--session <session-id>`：只返回精确属于该逻辑会话的消息。
+- 使用会话过滤时，旧版本中没有 `sessionId` 的消息不会返回。
+- `--limit` 默认 50，最大 500。
+- `--before` / `--after` 支持 epoch 毫秒或 ISO 时间，均为开区间。
+- `--direction` 支持 `in|out|all`，默认 `all`。
+- 内部 `handoff_state` 记录不会出现在结果中。
+
+`sessionId` 是 EvolClaw 本地逻辑会话 ID，不是 Claude/Codex 等后端的会话 ID。
+
 ## 通用约定
 
 - `--format json` — 所有子命令通用，输出 JSON

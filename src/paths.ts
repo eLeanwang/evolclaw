@@ -32,6 +32,7 @@ export function resolvePaths() {
     instanceDir: path.join(root, 'data', 'instance'),
     outboxDir: path.join(root, 'data', 'outbox'),
     dataDir: path.join(root, 'data'),
+    claudeModelCache: path.join(root, 'data', 'claude-model-cache.json'),
     logs: path.join(root, 'logs'),
     agentsDir: path.join(root, 'agents'),
     lineStats: path.join(root, 'logs', 'line-stats.log'),

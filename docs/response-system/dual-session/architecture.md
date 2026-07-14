@@ -80,7 +80,7 @@
 class AuxiliaryQueue {
   private messages: Map<string, QueuedMessage>;
   private debounceTimer: NodeJS.Timeout | null;
-  private delayTimers: Map<string, NodeJS.Timeout>;
+  private expiryTimer: NodeJS.Timeout | null;  // 全队列单个到期定时器（DELAY/HOLD 共用，见 §6.2）
   
   // 配置
   private readonly config = {
@@ -107,7 +107,8 @@ interface QueuedMessage {
   state: MessageState;
   enqueuedAt: Date;
   processedByAuxiliary: boolean;  // 是否已被辅助会话处理
-  transferAt?: Date;              // 延迟投递时间
+  expireAt?: Date;                // DELAY/HOLD 的到期时刻（批内统一；到期扫描转投）
+  expireReason?: 'delay' | 'hold-timeout';
 }
 
 enum MessageState {
@@ -125,7 +126,9 @@ enum MessageState {
 2. **最早消息超过15秒**：强制触发
 3. **队列满**：群聊50条/单聊15条，强制投递到主队列（不打断）
 4. **延迟投递超时**：该投递了
-5. **主会话反馈到达**：需要更新上下文
+
+> 主会话反馈**不是触发源**：反馈只包成 FeedbackItem 入队暂存，被动等待上述任一真实触发时
+> 随本批带出（见 §3.4）。这样不额外唤醒辅助会话、不额外调模型、不绕过队列。
 
 #### 核心方法
 
@@ -181,26 +184,27 @@ class AuxiliaryQueue {
       .map(qm => qm.message);
   }
   
-  // 更新消息状态
-  updateState(messageId: string, state: MessageState, transferAt?: Date): void {
+  // 更新消息状态（DELAY/HOLD 时写入该批次统一算好的 expireAt 与 expireReason）
+  // 注意：这里只写字段，不在此挂定时器。到期定时器是全队列单个、由 armExpiryTimer()
+  //       从各消息的 expireAt 派生维护（见 auxiliary-queue-processing.md §6.2）。
+  updateState(
+    messageId: string,
+    state: MessageState,
+    expire?: { expireAt: Date; expireReason: 'delay' | 'hold-timeout' }
+  ): void {
     const qm = this.messages.get(messageId);
     if (qm) {
       qm.state = state;
       qm.processedByAuxiliary = true;
-      qm.transferAt = transferAt;
-      
-      // 如果是延迟投递，设置定时器
-      if (state === MessageState.DELAY && transferAt) {
-        this.scheduleDelayedTransfer(messageId, transferAt);
-      }
+      qm.expireAt = expire?.expireAt;
+      qm.expireReason = expire?.expireReason;
     }
   }
   
-  // 移除已投递的消息
+  // 移除已投递的消息（不按消息清定时器；单个到期定时器由调用方随后 armExpiryTimer() 重算）
   remove(messageIds: string[]): void {
     for (const id of messageIds) {
       this.messages.delete(id);
-      this.clearDelayTimer(id);
     }
   }
 }
@@ -241,22 +245,14 @@ class AuxiliarySession {
 
 ```typescript
 interface AuxiliaryInput {
-  // 输入类型
-  type: 'aun-messages' | 'main-feedback';
-  
-  // 如果 type = 'aun-messages'
-  aunMessages?: {
-    newMessages: Message[];        // 本次新增的消息（只给这批；之前 hold/delay 的已在上下文）
-    remainingInQueue: number;      // 【信号A】去掉本批次后，辅助队列剩余待判断数（催快）
-  };
-  
-  // 如果 type = 'main-feedback'
-  mainFeedback?: {
-    processedMessageIds: string[];
-    summary: string;
-    replies: string[];
-  };
-  
+  // 一次触发的批次 = 带标记的项列表；每项 kind 区分，遍历时分别对待。
+  // 反馈保持独立类型、与新消息同批带入，但反馈不是触发源（详见 data-structures.md §1.3）。
+  items: Array<
+    | { kind: 'message';  message: Message }         // 待判断的新消息
+    | { kind: 'feedback'; feedback: MainFeedback }   // 主会话反馈，只读上下文，不单独产出决策
+  >;
+  remainingInQueue: number;        // 【信号A】去掉本批次后，辅助队列剩余待判断数（催快）
+
   // 主会话当前状态
   mainSession: {
     status: 'idle' | 'processing';
@@ -269,26 +265,20 @@ interface AuxiliaryInput {
 
 ```typescript
 interface AuxiliaryOutput {
-  // 输入类型对应的输出
-  type: 'aun-decision' | 'feedback-ack';
-  
-  // 如果 type = 'aun-decision'
-  decision?: {
+  // 输出只有决策一种（反馈是只读上下文，不再需要 feedback-ack 应答）
+  type: 'aun-decision';
+
+  decision: {
     action: 'hold' | 'delay' | 'transfer';  // 单聊无 hold
-    
+
     // 如果 action = 'delay'
     delayLevel?: 'short' | 'medium' | 'long';  // 延迟等级（默认 medium）
-    
+
     // 如果 action = 'transfer'
     interrupt?: boolean;           // 是否打断（默认false）
-    
+
     // 简短说明（<50字）
     reason: string;
-  };
-  
-  // 如果 type = 'feedback-ack'
-  ack?: {
-    reason: '已知悉' | '已更新上下文';
   };
 }
 ```
@@ -308,15 +298,12 @@ class AuxiliarySession {
     }
   }
   
-  // 处理主会话反馈
-  async processFeedback(feedback: MainFeedback): Promise<void> {
-    const input = this.buildFeedbackInput(feedback);
-    const output = await this.callModel(input);
-    
-    // 更新上下文（反馈的作用是让辅助会话知道主会话消费了哪些消息）
-    this.context.append(`[主会话反馈] ${feedback.summary}`);
-    
-    // 注：transfer 时已移除，此处不再操作队列
+  // 接收主会话反馈：只入队暂存，不调模型、不触发处理
+  enqueueFeedback(feedback: MainFeedback): void {
+    // 包成 FeedbackItem 插入辅助队列，等待下次真实触发时随批带出。
+    // 反馈是纯上下文信息，无需立刻消费 —— 零额外 LLM 调用，也不绕过队列。
+    auxiliaryQueue.enqueueFeedback(feedback);
+    // 注意：这里不调用 callModel，也不主动触发辅助会话。
   }
   
   // 执行决策
@@ -331,18 +318,10 @@ class AuxiliarySession {
         // 更新状态为 DELAY，按 delayLevel + 对端系数计算延迟（见 §3.2）
         // ...
       } else if (action === 'transfer') {
-        // 只投递辅助会话已经见过的消息。
-        // 判断期间新入队、尚未喂给辅助会话的 PENDING 消息留到下一轮。
-        const messages = auxiliaryQueue.getProcessedByAuxiliary();
-        
-        if (interrupt) {
-          await mainQueue.interrupt(messages);
-        } else {
-          await mainQueue.append(messages);
-        }
-        
-        // 从辅助队列移除
-        auxiliaryQueue.remove(messages.map(m => m.id));
+        // 只投递辅助会话已经见过的消息（判断期间新入队的 PENDING 留到一轮）。
+        // 批次在提取时已同角色成形；之前 hold/delay 的批次按序先投（不带 interrupt），
+        // 触发本次 transfer 的批次携带本次指令。详见 auxiliary-queue-processing.md §5.2
+        await transferToMain(output.decision, currentBatch);
       }
     }
   }
@@ -355,21 +334,19 @@ class AuxiliarySession {
 
 #### 职责
 
-- 接收从辅助会话投递的消息
-- 维护消息优先级
-- 支持打断（硬 abort）与打断场景特殊提取（≤100/20k，见 §3.3）
-- 提供批次提取接口
+- 接收辅助会话转投的**同角色批次**（`TransferBatch`，携带判断指令），作为调度单位维护
+- 执行批次调度：interrupt 批次优先（跳过的批次作 reference、本体留队列），否则 FIFO
+- 执行 ignore 指令的队列侧动作（移除未处理批次）
+- 打断守卫：判断是否硬 abort 在飞批次
+
+> 调度规则与打断语义的 SSOT 是 [interrupt-mechanism.md](./interrupt-mechanism.md)，本节为实现视图。
 
 #### 数据结构
 
 ```typescript
 class MainQueue {
-  private queue: Message[] = [];
-  private processing: Message[] = [];  // 当前正在处理的批次
-  
-  private readonly config = {
-    maxBatchSize: 50,
-  };
+  private batches: TransferBatch[] = [];        // 等待中的批次（到达顺序）
+  private processing: TransferBatch | null = null;  // 在飞批次
 }
 ```
 
@@ -377,90 +354,82 @@ class MainQueue {
 
 ```typescript
 class MainQueue {
-  // 追加消息
-  append(messages: Message[]): void {
-    this.queue.push(...messages);
+  // 批次入队（transfer 边界已同角色、已带指令）
+  async enqueueBatch(batch: TransferBatch): Promise<void> {
+    this.batches.push(batch);
     
-    // 如果主会话空闲，触发处理
+    // 主会话空闲 → 立即调度
     if (mainSession.isIdle()) {
       this.triggerMainSession();
     }
   }
   
-  // 打断并插入消息
-  async interrupt(messages: Message[]): Promise<void> {
-    // 检查是否应该打断
-    if (!mainSession.isProcessing() || 
-        this.processing.length >= this.config.maxBatchSize) {
-      // 主会话空闲，或当前批次已满，不打断
-      this.append(messages);
-      return;
+  // 打断守卫（enqueueBatch 后由 transferToMain 在 interrupt=true 时调用）
+  async maybeInterruptInFlight(): Promise<void> {
+    // 四条件见 interrupt-mechanism.md §5：开关、interrupt 批存在、processing、在飞批未满
+    if (!mainSession.isProcessing() ||
+        (this.processing?.messages.length ?? 0) >= this.config.maxBatchSize) {
+      return;  // 不中止在飞批；interrupt 批仍在队列，下个调度点被优先选取
     }
     
-    // 打断主会话
+    // 硬 abort 在飞批次（其消息已在上下文，不回灌；处置由 previousMessageStrategy 决定）
     await mainSession.interrupt();
+    this.processing = null;
     
-    // 新消息追加到队列末尾
-    this.queue.push(...messages);
-    
-    // 注意：this.processing（当前批次）不会重新入队
-    // 因为这些消息已经在主会话上下文中了（见 interrupt-mechanism.md §4）
-    
-    // 触发主会话处理新批次。
-    // 注意：打断场景的批次提取不同于普通 extractBatch（≤50）——
-    // 需一次性提取主队列全部消息（上限 100 条 / 20k 字节），
-    // 确保紧急消息一定在批次内。提取规则见 interrupt-mechanism.md §5
-    this.triggerMainSession();
+    this.triggerMainSession();  // 立即进入下一轮调度
   }
   
-  // 提取批次
-  extractBatch(): Message[] {
-    // 群聊：检查角色一致性
-    if (this.chatType === 'group') {
-      return this.extractBatchWithRoleConsistency();
+  // 调度提取：主会话每处理完一个批次调用（规则 SSOT：interrupt-mechanism.md §3）
+  nextBatch(): { primary: TransferBatch; references: TransferBatch[] } | null {
+    if (this.batches.length === 0) return null;
+    
+    // 1. 找「最后一个」interrupt=true 的批次（最新的紧急判断）
+    let idx = -1;
+    for (let i = this.batches.length - 1; i >= 0; i--) {
+      if (this.batches[i].interrupt) { idx = i; break; }
     }
     
-    // 单聊：直接提取
-    const batch = this.queue.splice(0, this.config.maxBatchSize);
-    this.processing = batch;
-    return batch;
+    if (idx === -1) {
+      // 2. 无 interrupt 批次 → FIFO
+      const primary = this.batches.shift()!;
+      this.processing = primary;
+      return { primary, references: [] };
+    }
+    
+    // 3. interrupt 批次优先；被跳过的更早批次作 reference（只读注入），本体留队列排队
+    const primary = this.batches.splice(idx, 1)[0];
+    const references = this.batches.slice(0, idx);  // 不移除——仍在队列
+    
+    // 4. 执行 primary 的 previousMessageStrategy 对队列的动作（interrupt-mechanism.md §4）
+    if (primary.previousMessageStrategy === 'ignore') {
+      // ignore：之前未处理的已转投批次从队列真实移除（对在飞批则靠提示词，见 §3.3）
+      this.batches = this.batches.slice(idx);  // 移除 primary 之前的所有批次
+      references.length = 0;                   // 被移除的不再作为 reference
+    }
+    
+    this.processing = primary;
+    return { primary, references };
   }
   
-  // 提取批次（群聊，角色一致性）
-  private extractBatchWithRoleConsistency(): Message[] {
-    const batch: Message[] = [];
-    let batchRole: string | undefined;
-    
-    for (let i = 0; i < Math.min(this.queue.length, this.config.maxBatchSize); i++) {
-      const message = this.queue[i];
-      const messageRole = message.peerRole;
-      
-      if (i === 0) {
-        batchRole = messageRole;
-        batch.push(message);
-      } else if (batchRole === messageRole) {
-        batch.push(message);
-      } else {
-        break;  // 角色不一致，停止提取
-      }
-    }
-    
-    this.queue.splice(0, batch.length);
-    this.processing = batch;
-    return batch;
+  // ignore 指令：移除指定的未处理批次
+  removeBatches(batchIds: string[]): void {
+    this.batches = this.batches.filter(b => !batchIds.includes(b.batchId));
   }
   
   // 标记批次处理完成
-  completeBatch(): void {
-    this.processing = [];
+  completeBatch(batchId: string): void {
+    this.processing = null;
     
-    // 如果队列还有消息，继续处理
-    if (this.queue.length > 0) {
+    // 队列还有批次 → 继续调度
+    if (this.batches.length > 0) {
       this.triggerMainSession();
     }
   }
 }
 ```
+
+> **角色一致性不在这里检查**——批次在 transfer 边界已同角色成形（见 §5、
+> auxiliary-queue-processing.md §1.2），主队列不拆散重切，`batchRole` 天然唯一。
 
 ---
 
@@ -484,6 +453,7 @@ class MainSession {
   private chatMode: 'interactive' | 'proactive';  // 交互方式
   private status: 'idle' | 'processing' = 'idle';
   private currentBatch: Message[] = [];
+  private generation = 0;  // 处理代号：开始新批次/打断时 +1；过期续体静默退出（interrupt-mechanism.md §8.2）
   
   private readonly config = {
     maxTokens: 160000,
@@ -528,8 +498,8 @@ class MainSession {
       replies,
     };
     
-    // 通知辅助会话
-    await auxiliarySession.processFeedback(feedback);
+    // 通知辅助会话：仅入队暂存反馈，不调模型、不触发（被动带入）
+    auxiliarySession.enqueueFeedback(feedback);
     
     // 标记完成
     mainQueue.completeBatch();
@@ -543,8 +513,9 @@ class MainSession {
   }
   
   // 打断：硬打断，中止正在进行的模型调用
-  // 契约（详见 interrupt-mechanism.md §3、§4）：
+  // 契约（详见 interrupt-mechanism.md §6、§8.2）：
   //   - 必须真正中止进行中的模型调用，不能只把 status 置为 idle
+  //   - 必须 generation++，使所有在飞续体过期（旧 catch/finally 醒来后静默退出）
   //   - 当前批次的处理随之停止：不产出回复、不生成反馈、不标记批次完成
   //   - 被打断批次的消息已在上下文中，保留；不回灌队列
   async interrupt(): Promise<void>;
@@ -603,9 +574,12 @@ const levelMs = baseLevelMs(delayLevel);        // short=60k / medium=120k / lon
 const peerFactor = isAgentPeer(batch) ? 1.0 : 0.5;  // 含 agent→1.0，全是人→0.5
 const actualDelay = config.baseDelayMs + Math.random() * (levelMs * peerFactor);
 
-setTimeout(() => {
-  triggerDelayExpired();  // 到期扫描转投；期间来新消息则重判
-}, actualDelay);
+// 批内统一写 expireAt（无 skew），再维护全队列单个到期定时器
+const expireAt = new Date(Date.now() + actualDelay);
+for (const msg of batch) {
+  auxiliaryQueue.updateState(msg.id, MessageState.DELAY, { expireAt, expireReason: 'delay' });
+}
+armExpiryTimer();  // DELAY 与 HOLD 共用；到期扫描转投，期间来新消息则重判
 ```
 
 **延迟的双重目的**：①群聊多 agent 时错开、避免竞态回复；②等待用户完整意图输入。
@@ -614,36 +588,42 @@ setTimeout(() => {
 **对端系数**：对端是人 ×0.5、agent ×1.0（人打字慢但不竞态，等待可更短）。
 群聊按"消息集合含 agent 就算 agent"判定，单聊看对端本身。
 
-### 3.3 打断机制
+### 3.3 打断与批次调度
 
-> **唯一事实源**：打断机制的完整论述见 [interrupt-mechanism.md](./interrupt-mechanism.md)。本节为摘要，冲突时以专题文档为准。
+> **唯一事实源**：完整论述见 [interrupt-mechanism.md](./interrupt-mechanism.md)。本节为摘要，冲突时以专题文档为准。
 
-#### 打断条件
+#### 打断条件（中止在飞批次）
 
-1. 辅助会话判断需要打断（`interrupt: true`）
-2. 主会话正在处理（`status === 'processing'`）
-3. 当前批次未满（`currentBatchSize < 50`）
+1. `interruptEnabled === true`
+2. 批次携带 `interrupt: true`（辅助会话判断）
+3. 主会话正在处理（`status === 'processing'`）
+4. 在飞批次未满（`< 50`）
+
+任一不满足 → 不中止在飞批次，但 interrupt 批次仍入队，下个调度点被优先选取。
 
 #### 打断行为
 
 打断成立后依次发生：
 
-1. **硬打断主会话**：中止正在进行的模型调用，当前批次的处理立即停止，
+1. **硬打断主会话**：中止正在进行的模型调用，在飞批次的处理立即停止，
    不再产出回复、不生成反馈、不标记批次完成。
-2. **被打断批次保留在上下文**：这些消息已在主会话上下文中，不回灌队列。
-3. **新消息追加到主队列末尾**。
-4. **特殊提取新批次**：打断场景下一次性提取主队列全部消息（上限 100 条 /
-   20k 字节，区别于普通批次的 ≤50 条），确保紧急消息一定在新批次内。
-5. **主会话处理新批次**：被打断的消息仍在上下文中，如何对待由
-   `previousMessageStrategy` 通过打断通知指导。
+2. **被打断批次保留在上下文**：这些消息已在主会话上下文中，不回灌队列；
+   如何对待由 `previousMessageStrategy` 决定（ignore 对在飞批 = 提示词提示忽略）。
+3. **进入调度**：遍历主队列取最后一个 interrupt 批次优先处理；
+   被跳过的更早批次作为 reference（只读引用）注入，本体留队列排队；
+   若指令为 ignore，primary 之前的未处理批次**从队列真实移除**。
+4. **主会话处理 primary 批次**：同角色、带打断通知与 references。
 
-> 完整论述见 [interrupt-mechanism.md](./interrupt-mechanism.md) §3–§6。
+> 主队列以批次为单位调度，紧急批次天然完整入队、整批优先处理。见 interrupt-mechanism.md §2。
 
 **副作用无法撤回**：
 - 已发送的回复无法撤回
 - 已执行的工具调用无法撤回
 
-### 3.4 反馈机制
+### 3.4 反馈机制（被动带入，不额外调模型）
+
+反馈是纯上下文信息：让辅助会话知道主会话消费了哪些消息、回了什么，供它下次重判 hold/delay 时参考。
+因此**不需要立刻处理**——包成 FeedbackItem 入队暂存，等下次辅助会话被真实触发时随批带出即可。
 
 ```
 主会话处理完批次
@@ -654,12 +634,23 @@ setTimeout(() => {
   - summary: 从主会话输出提取
   - replies: 从工具调用历史提取
   ↓
-直接调用 auxiliarySession.processFeedback()
+auxiliarySession.enqueueFeedback()
+  → 包成 FeedbackItem 插入辅助队列（不调模型、不触发处理）
   ↓
-辅助会话更新上下文
+……（被动等待）……
   ↓
-从辅助队列移除已处理消息
+下次辅助会话被真实触发（防抖/超时/队列满/延迟到期）
+  ↓
+extractBatch() 把队列中的 FeedbackItem 随本批新消息一起带出
+  ↓
+辅助会话遍历批次：kind='feedback' 的项作为只读上下文吸收
+（不为反馈单独产出决策、不产出 ack）
 ```
+
+**三条不变量**（对齐 lite P1-4 / P1-6）：
+- **零额外 LLM 调用**：反馈搭下一次决策的便车，不单独唤起模型
+- **零额外延迟**：不主动触发，也就不打乱既有节奏
+- **不绕过队列**：反馈经辅助队列流转，串行化不变量保持
 
 ### 3.5 会话压缩机制
 
@@ -703,9 +694,13 @@ setTimeout(() => {
 | 最早消息强制触发 | 15秒 | 15秒 |
 | **队列满强制触发** | **50条** | **15条** |
 | 延迟到期 / 期间新消息重判 | 有 | 有（同群聊） |
+| HOLD 超时兜底投递 | 1 小时（独立定时器驱动） | —（单聊无 HOLD） |
 
-> **已移除"主会话空闲触发"机制**：既然是延迟投递，就老实等到超时（`triggerDelayExpired`
+> **已移除"主会话空闲触发"机制**：既然是延迟投递，就老实等到超时（`triggerExpiredScan`
 > 扫描转投）或等延迟期间来新消息再判断——与群聊完全一致，不再因主会话空闲而抢跑。
+
+> **HOLD/DELAY 到期统一由独立定时器驱动**：不依赖新消息到来，队列安静也能按时兜底投递；
+> 全队列单个定时器，重启后按 `expireAt` 重建。详见 auxiliary-queue-processing.md §6.2。
 
 ---
 
@@ -717,38 +712,31 @@ setTimeout(() => {
 
 如果一个批次包含不同角色的发送者（如 owner 和 guest），会导致权限判断不明确。
 
-### 解决方案
+### 解决方案：批次在 transfer 边界成形（同角色）
 
-**批次提取时检查角色一致性**：
+角色同质在**辅助队列提取时**就完成：`extractBatch()` 遇到不同 `peerRole` 即截批
+（机械字段分组，非权限判断，见 auxiliary-queue-processing.md §1.2/§7.3）。
+transfer 投出的每个 `TransferBatch` 天然同角色、携带 `batchRole` 字段。
 
-```typescript
-// 群聊模式
-if (chatType === 'group') {
-  let batchRole: string | undefined;
-  
-  for (const message of queue) {
-    if (batch.length === 0) {
-      batchRole = message.peerRole;
-      batch.push(message);
-    } else if (message.peerRole === batchRole) {
-      batch.push(message);  // 角色相同
-    } else {
-      break;  // 角色不同，停止提取
-    }
-  }
-}
-```
+**主队列以批次为调度单位，不拆散重切**——这同时保证了：
+1. **权限清晰**：`batchRole` 唯一，PreToolUse Hook 判断不含糊；
+2. **判断有效**：辅助会话的指令（打断/忽略/优先）精确作用于它判断的那批消息；
+3. **打断不破窗**：打断/优先调度均以同角色批次为单位，不存在跨角色混批
+   （打断/优先均以批次为调度单位，见 interrupt-mechanism.md §2/§3）。
 
-**权限判断**：
+**权限判断**（主会话侧，PreToolUse Hook）：
 
 ```typescript
-const role = batchRole || message.peerRole || 'anonymous';
+const role = batch.batchRole || 'anonymous';
 
 // 基础设施字段：只有 owner 能改
 if (isInfrastructureField(field) && role !== 'owner') {
   return { decision: 'block', reason: '仅 owner 可修改' };
 }
 ```
+
+> 被跳过批次以 reference（只读引用）注入当前批次时，**不影响 `batchRole`**——
+> reference 不作为响应对象、不触发带权限操作（见 interrupt-mechanism.md §3）。
 
 ---
 
@@ -757,16 +745,24 @@ if (isInfrastructureField(field) && role !== 'owner') {
 ### 6.1 主会话失败
 
 ```
-主会话调用失败
+主会话调用失败（callModel 抛错）
   ↓
-重试3次（退避：5秒、10秒、30秒）
+generation 守卫检查：myGen === mainSession.generation ？
+  ├─ 否 → 静默退出（这是被打断的旧续体，不重试、不回灌、不碰状态）
+  │       （打断会使 generation +1，见 interrupt-mechanism.md §8.2——实现必做）
+  └─ 是 → 当前批次的真实失败，继续 ↓
+重试3次（退避：5秒、10秒、30秒；每次重试前同样过 generation 守卫）
   ↓
 重试成功？
   ├─ 是 → 继续处理
-  └─ 否 → 消息回退到主队列
+  └─ 否 → 批次回退到主队列
          标记 hasError: true
          向对端发送通知
 ```
+
+> **失败重试与打断的边界**：只有"当前代"的失败才进入重试/回退流程。被 abort 的旧续体
+> 从 catch/finally 醒来时已过代，一律静默退出——否则会出现旧批次复活重试、被打断批次
+> 回灌队列、旧 finally 踩掉新批次状态等竞态（详见 interrupt-mechanism.md §8.2）。
 
 ### 6.2 辅助会话失败降级
 

@@ -129,6 +129,7 @@ baseLevelMs: short=60000, medium=120000, long=180000（辅助会话决策输出�
 | 参数 | 等级 | 可选值/范围 | 默认值 | 用途 |
 |------|------|-----------|--------|------|
 | `baseDelayMs` | 高级 | ≥0 | 0 | 延迟基础偏移，打底叠加在随机延迟之上 |
+| `holdTimeoutMs` | 高级 | ≥0 | 3600000（1小时） | HOLD 挂起兜底超时（仅群聊）：挂起超过此时长由独立到期定时器转投主队列，防饿死。与 DELAY 到期共用同一套扫描 |
 
 > `delayLevel`（short/medium/long）**不是配置参数**，而是辅助会话每次决策的输出字段
 > （见 [data-structures.md AuxiliaryDecision](./dual-session/data-structures.md)）。
@@ -293,6 +294,7 @@ baseLevelMs: short=60000, medium=120000, long=180000（辅助会话决策输出�
 | `maxBatchSize` | 单批最多消息数 | config·特有 | dual-session | 正整数 | 50 | ☆ |
 | `maxBatchBytes` | 单批最多字节数 | config·特有 | dual-session | 正整数 | 10240 | ☆ |
 | `baseDelayMs` | 延迟基础偏移 | config·特有 | dual-session | ≥0 | 0 | ☆ |
+| `holdTimeoutMs` | HOLD 兜底超时（仅群聊） | config·特有 | dual-session | ≥0 | 3600000 | ☆ |
 | `auxiliaryMaxTokens` | 辅助会话压缩 token 阈值 | config·特有 | dual-session | 20000-80000 | 40000 | ☆ |
 | `auxiliaryMaxMessages` | 辅助会话压缩消息数阈值 | config·特有 | dual-session | 正整数 | 100 | ☆ |
 | `mainMaxTokens` | 主会话压缩 token 阈值 | config·特有 | dual-session | 80000-500000 | 160000 | ☆ |

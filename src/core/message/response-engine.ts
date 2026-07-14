@@ -4,17 +4,7 @@ import os from 'os';
 import crypto from 'crypto';
 import { BaseagentRunnerUnavailableError, type AgentRunnerFull, hasCompact, hasClearSession, type AgentEvent, type Compactable, type AgentTokenUsage, type AgentContextUsage, type AgentLastModelCall, type AgentModelCall, autoCompactWindowForModel, isClaudeContextUsageModel } from '../../agents/runner-types.js';
 import { SessionManager } from '../session/session-manager.js';
-import { appendMessageLog, buildOutboundEntry } from './message-log.js';
-import {
-  appendHandoffConsumedEvent,
-  buildHandoffReturnMessageId,
-  buildTaskRuntimeEnv,
-  selectConsumableHandoff,
-  toConsumedHandoffContext,
-  type ConsumedHandoffContext,
-  type HandoffReturnIpcResponse,
-  type TaskRuntimeContext,
-} from './handoff.js';
+import { buildTaskRuntimeEnv, type TaskRuntimeContext } from '../task-runtime-context.js';
 import { IMRenderer } from './im-renderer.js';
 import { MessageCache } from './message-cache.js';
 import type { MessageQueue } from './message-queue.js';
@@ -373,6 +363,7 @@ export class ResponseEngine implements IMessageProcessor {
     if (!channelInfo) return;
     const available = error.availableBaseagents.length ? error.availableBaseagents.join(', ') : '(none)';
     const text = `❌ 当前会话绑定的 baseagent 不可用: ${error.baseagent}\nAgent: ${error.evolagentName}\n可用: ${available}\n请使用 /baseagent 切换到可用后端。`;
+    const sessionReplyContext = { ...(replyContext ?? {}), sessionId: session.id };
     await channelInfo.adapter.send(buildEnvelope({
       taskId: `system-${crypto.randomUUID().replace(/-/g, '').slice(0, 10)}`,
       sessionId: session.id,
@@ -380,7 +371,7 @@ export class ResponseEngine implements IMessageProcessor {
       channelId,
       agentName: error.evolagentName,
       chatmode: this.resolveEffectiveChatmodeForSession(session, channelKey, channelId),
-      replyContext,
+      replyContext: sessionReplyContext,
     }), { kind: 'system.error', text, subtype: 'baseagent_unavailable', recoverable: true });
   }
 
@@ -483,108 +474,22 @@ export class ResponseEngine implements IMessageProcessor {
     this.agentDelegationRegistry = registry;
   }
 
-  async returnHandoffResult(params: { sessionId?: string; handoffId?: string; content: string }): Promise<HandoffReturnIpcResponse | HandoffReturnResponse> {
-    if (this.handoffRuntime) {
-      const runtime = params.sessionId ? this.activeTaskRuntimeContexts.get(params.sessionId) : undefined;
-      if (!params.sessionId) return { ok: false, code: 'HANDOFF_ID_REQUIRED', error: 'current session is required' };
-      const session = await this.sessionManager.getSessionById(params.sessionId);
-      const selfAid = runtime?.selfAid || session?.selfAID;
-      if (!selfAid) return { ok: false, code: 'HANDOFF_NOT_FOUND', error: 'self agent not found' };
-      return this.handoffRuntime.returnHandoff({
-        selfAid,
-        currentSessionId: params.sessionId,
-        handoffId: params.handoffId,
-        currentTaskHandoffIds: runtime?.handoffIds,
-        content: params.content,
-      });
+  async returnHandoffResult(params: { sessionId?: string; handoffId?: string; content: string }): Promise<HandoffReturnResponse> {
+    if (!this.handoffRuntime) {
+      return { ok: false, code: 'HANDOFF_NOT_FOUND', error: 'handoff runtime not configured' };
     }
-    const runtime = params.sessionId
-      ? this.activeTaskRuntimeContexts.get(params.sessionId)
-      : undefined;
-    if (!runtime) return { ok: false, error: 'active task runtime context not found' };
-    const consumed = runtime.consumedHandoff;
-    if (!consumed || consumed.kind !== 'request_to_target') {
-      return { ok: false, error: 'current task did not consume request_to_target handoff' };
-    }
-    const originSessionId = consumed.origin?.session_id;
-    if (!originSessionId) return { ok: false, error: 'handoff origin session_id missing' };
-    const originSession = await this.sessionManager.getSessionById(originSessionId);
-    if (!originSession) return { ok: false, error: `origin session not found: ${originSessionId}` };
-    if (!this.messageQueue) return { ok: false, error: 'message queue not configured' };
-
-    const content = params.content.trim();
-    if (!content) return { ok: false, error: 'empty handoff return content' };
-
-    const resultMessageId = buildHandoffReturnMessageId(consumed);
-    const chatDir = this.sessionManager.getChatDir(originSession);
-    appendMessageLog(chatDir, buildOutboundEntry({
-      from: runtime.selfAid || originSession.selfAID || 'self',
-      to: originSession.channelId,
-      chatType: originSession.chatType === 'group' ? 'group' : 'private',
-      groupId: originSession.chatType === 'group' ? originSession.channelId : null,
-      msgId: resultMessageId,
-      msgType: 'handoff_result',
-      content,
-      replyTo: consumed.origin.message_id ?? null,
-      source: 'handoff',
-      handoff: {
-        kind: 'response_to_origin',
-        request_content: consumed.sourceMessage.content,
-        origin: {
-          session_id: runtime.sessionId,
-          message_id: runtime.messageId,
-          channel: runtime.channel,
-          peerId: runtime.peerId,
-          threadId: runtime.threadId,
-          peerName: runtime.peerName,
-          peerType: runtime.peerType,
-          role: runtime.peerRole,
-        },
-      },
-    }));
-
-    const owningAgent = this.agentRegistry?.resolveByChannel(originSession.metadata?.channelKey || originSession.channel);
-    const message: Message = {
-      channel: originSession.channel,
-      channelType: originSession.channelType,
-      channelId: originSession.channelId,
-      selfAID: originSession.selfAID,
-      baseagent: originSession.baseagent,
-      threadId: originSession.threadId || undefined,
-      chatType: originSession.chatType === 'group' ? 'group' : 'private',
-      peerId: originSession.channelId,
-      peerName: originSession.metadata?.peerName || originSession.channelId,
-      peerType: (originSession.metadata as { peerType?: string } | undefined)?.peerType,
-      content,
-      messageId: resultMessageId,
-      timestamp: Date.now(),
-      source: 'handoff',
-      replyContext: {
-        sessionId: originSession.id,
-        threadId: originSession.threadId || undefined,
-        replyToMessageId: resultMessageId,
-        metadata: {
-          refMessageId: resultMessageId,
-          handoff: true,
-        },
-      },
-    };
-    void this.messageQueue.enqueue(originSession.id, message, originSession.projectPath, {
-      interruptible: originSession.chatType !== 'group',
-      interruptSamePeer: originSession.chatType === 'group',
-      agentName: owningAgent?.name ?? '<unknown>',
-      role: originSession.chatType === 'group' ? (originSession.identity?.role ?? 'anonymous') : undefined,
-      sessionKeyField: originSession.sessionKey,
-      selfAID: originSession.selfAID,
-    }).catch(error => {
-      logger.error(`[ResponseEngine] handoff return enqueue failed: ${error instanceof Error ? error.message : String(error)}`);
+    if (!params.sessionId) return { ok: false, code: 'HANDOFF_ID_REQUIRED', error: 'current session is required' };
+    const runtime = this.activeTaskRuntimeContexts.get(params.sessionId);
+    const session = await this.sessionManager.getSessionById(params.sessionId);
+    const selfAid = runtime?.selfAid || session?.selfAID;
+    if (!selfAid) return { ok: false, code: 'HANDOFF_NOT_FOUND', error: 'self agent not found' };
+    return this.handoffRuntime.returnHandoff({
+      selfAid,
+      currentSessionId: params.sessionId,
+      handoffId: params.handoffId,
+      currentTaskHandoffIds: runtime?.handoffIds,
+      content: params.content,
     });
-
-    return {
-      ok: true,
-      result_message_id: resultMessageId,
-      origin_session_id: originSession.id,
-    };
   }
 
   private agentRegistry?: EvolAgentRegistryHandle;
@@ -1229,6 +1134,7 @@ export class ResponseEngine implements IMessageProcessor {
       const base = this.getReplyContext(message);
       return {
         ...(base ?? {}),
+        sessionId: session.id,
         metadata: withTaskMetadata(base?.metadata),
       };
     };
@@ -1403,6 +1309,7 @@ export class ResponseEngine implements IMessageProcessor {
               firstReply = false;
             }
           }
+          opts.sessionId = session.id;
           if (payload.kind === 'result.text' && payload.isFinal) {
             opts.title = '\u2705 \u6700\u7ec8\u56de\u590d:';
           }
@@ -1442,19 +1349,14 @@ export class ResponseEngine implements IMessageProcessor {
         ? formatPeerKey(session.channelType, authConversationId)
         : undefined;
       const owningAgentForAuth = this.agentRegistry?.resolveByChannel(channelKey);
-      const crossSessionApproval = (() => {
+      const approvalRouting = (() => {
         if (!owningAgentForAuth) return undefined;
         const owners = Array.from(new Set((owningAgentForAuth.config.owners ?? []).filter(Boolean)));
-        if (owners.length === 0) return undefined;
-        const currentPeer = message.peerId || session.metadata?.peerId || session.channelId;
-        const ownerAid = owners.find(owner => owner !== currentPeer && owner.includes('.'));
-        if (!ownerAid) return undefined;
         const aunAdapter = (owningAgentForAuth as any).channels?.get(`aun#${owningAgentForAuth.aid}#main`);
-        if (!aunAdapter?.capabilities?.interaction) return undefined;
         return {
-          adapter: aunAdapter,
-          ownerAid,
+          approverPolicy: 'agent_owner' as const,
           owners,
+          ownerAdapter: aunAdapter?.capabilities?.interaction ? aunAdapter : undefined,
           selfAid: owningAgentForAuth.aid,
           originSessionId: session.id,
           originMessageId: message.messageId,
@@ -1485,7 +1387,7 @@ export class ResponseEngine implements IMessageProcessor {
         chatType: authChatType,
         selfAid: session.selfAID || message.selfAID,
         peerKey: authPeerKey,
-        crossSessionApproval,
+        approvalRouting,
         flushPending: async () => {
           await renderer.flush(false);
         },
@@ -1552,12 +1454,9 @@ export class ResponseEngine implements IMessageProcessor {
       let usedFallback = false;
       let skipEvolclawModel = false;
       let agentModel: string | undefined;
-      let consumedHandoff: ConsumedHandoffContext | null = null;
       let v2HandoffId: string | undefined;
       let v2HandoffDirection: 'target' | 'origin' | undefined;
       let handoffPromptRendered = false;
-      let handoffConsumedRecorded = false;
-      let handoffChatDir: string | undefined;
       let runtimeEnv: Record<string, string> | undefined;
 
       try {
@@ -1807,49 +1706,7 @@ export class ResponseEngine implements IMessageProcessor {
                 return [item];
               }
             }
-            if (this.handoffRuntime) return rawPeerItems;
-            const isAunPrivateHandoffCandidate = currentChannelType === 'aun' && chatType === 'private';
-            const isInternalHandoffCandidate = message.source === 'handoff';
-            if (!isAunPrivateHandoffCandidate && !isInternalHandoffCandidate) return rawPeerItems;
-            const getChatDir = (this.sessionManager as unknown as { getChatDir?: (s: Session) => string }).getChatDir;
-            if (typeof getChatDir !== 'function') return rawPeerItems;
-            try {
-              handoffChatDir = getChatDir.call(this.sessionManager, session);
-            } catch (error) {
-              logger.warn(`[ResponseEngine] handoff chat dir unavailable, skipping handoff match: ${error instanceof Error ? error.message : String(error)}`);
-              return rawPeerItems;
-            }
-            const inboundRefMessageId = typeof message.replyContext?.metadata?.refMessageId === 'string'
-              ? message.replyContext.metadata.refMessageId
-              : null;
-            const match = selectConsumableHandoff(handoffChatDir, {
-              replyToMessageId: inboundRefMessageId,
-              inboundMessageId: message.messageId,
-              inboundTs: message.timestamp ?? Date.now(),
-              kinds: isInternalHandoffCandidate ? ['response_to_origin'] : ['request_to_target'],
-            });
-            if (!match) return rawPeerItems;
-
-            const consumedBy = message.messageId || `${message.channel}-${message.channelId}-${message.timestamp ?? Date.now()}`;
-            const ctx = toConsumedHandoffContext(match, consumedBy);
-            if (!ctx) return rawPeerItems;
-            consumedHandoff = ctx;
-
-            const combinedContent = rawPeerItems.map(item => item.content).filter(Boolean).join('\n\n') || message.content;
-            const combinedImages = rawPeerItems.flatMap(item => item.images ?? []);
-            const base = rawPeerItems[rawPeerItems.length - 1] ?? {};
-            return [{
-              ...base,
-              kind: 'handoff',
-              content: combinedContent,
-              images: combinedImages.length > 0 ? combinedImages : undefined,
-              handoff: {
-                kind: ctx.kind,
-                origin: ctx.origin,
-                previousContent: ctx.sourceMessage.content,
-                previousMessageId: ctx.sourceMessage.msgId,
-              },
-            }];
+            return rawPeerItems;
           })();
 
           // 观察者插话（v0.3）：消费 (对端, thread) 的待用提示，包成 owner-hint item 排在对端消息前。
@@ -1890,13 +1747,9 @@ export class ResponseEngine implements IMessageProcessor {
             }
             if (renderResult.body.trim()) effectivePrompt = wrapPrompt(renderResult.body);
             else effectivePrompt = wrapPrompt(composeHintFallback(hintItems, fallbackContent));
-            handoffPromptRendered = !!consumedHandoff && !!renderResult.body.trim();
           } catch (e) {
             logger.warn(`[ResponseEngine] renderMessageBody failed, using raw content: ${e instanceof Error ? e.message : String(e)}`);
             effectivePrompt = wrapPrompt(composeHintFallback(hintItems, fallbackContent));
-          }
-          if (consumedHandoff && !handoffPromptRendered) {
-            consumedHandoff = null;
           }
           if (v2HandoffId && renderResult?.body.trim()) handoffPromptRendered = true;
         }
@@ -1924,7 +1777,6 @@ export class ResponseEngine implements IMessageProcessor {
           peerType: message.peerType || (session.metadata as any)?.peerType || undefined,
           peerRole,
           threadId: session.threadId || undefined,
-          consumedHandoff,
           handoffIds: v2HandoffId && v2HandoffDirection === 'target' ? [v2HandoffId] : undefined,
         };
         this.activeTaskRuntimeContexts.set(session.id, taskRuntimeContext);
@@ -1943,16 +1795,6 @@ export class ResponseEngine implements IMessageProcessor {
             issuedRole: peerRole,
           });
           runtimeEnv[AGENT_DELEGATION_TOKEN_ENV] = delegationToken;
-        }
-
-        if (consumedHandoff && handoffPromptRendered && !handoffConsumedRecorded && handoffChatDir) {
-          appendHandoffConsumedEvent(
-            handoffChatDir,
-            consumedHandoff,
-            selfAid || session.selfAID || message.selfAID || 'self',
-            message.peerId || message.channelId,
-          );
-          handoffConsumedRecorded = true;
         }
 
         // 可重试错误（403/429/5xx/模型繁忙）按明确退避序列重试。
@@ -2680,6 +2522,7 @@ export class ResponseEngine implements IMessageProcessor {
         // 注入 taskId / chatmode（与任务主流程保持一致）
         sendOpts = {
           ...(sendOpts ?? {}),
+          sessionId: session.id,
           metadata: withTaskMetadata(sendOpts?.metadata),
         };
         const errorPayload = {

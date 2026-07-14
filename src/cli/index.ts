@@ -265,6 +265,7 @@ Commands:
   trigger       daemon 级触发器管理（list/show/history/create/update/run）
   handoff       跨会话任务回流
                   handoff return [id] <content>  将当前子会话结果交回来源会话处理
+                  handoff list/trace             查询实例和审计事件
   queue          消息队列查询与操作
                   queue --agent <aid>          查看 agent 的所有队列
                   queue --agent <aid> --clear  清空待处理消息

@@ -1,4 +1,6 @@
-import { describe, expect, it, beforeEach } from 'vitest';
+import { afterEach, describe, expect, it, beforeEach, vi } from 'vitest';
+import fs from 'fs';
+import path from 'path';
 import {
   constrainResolvedModelForRole,
   filterModelsForRole,
@@ -7,6 +9,7 @@ import {
 } from '../src/core/model/model-permission.js';
 import { clearRolesCache } from '../src/config/roles.js';
 import { ConfigTarget, write } from '../src/config/config-manager.js';
+import { AgentRunner } from '../src/agents/claude-runner.js';
 
 describe('model permission helpers', () => {
   beforeEach(() => {
@@ -105,5 +108,50 @@ describe('model permission helpers', () => {
       requestedModel: 'gpt-5',
       models: ['gpt-5'],
     })).toMatchObject({ ok: true, model: 'gpt-5' });
+  });
+});
+
+describe('claude model alias fallback', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('persists the last successful alias, keeps it while refreshing, and restores it after restart', async () => {
+    const baseUrl = `https://model-alias-${Date.now()}.test`;
+    const response = (ids: string[]) => ({
+      ok: true,
+      json: async () => ({ data: ids.map(id => ({ id })) }),
+    } as Response);
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(response(['claude-sonnet-5']));
+    const runner = new AgentRunner('test-key', 'sonnet', undefined, baseUrl);
+
+    await runner.listModels();
+    expect(runner.resolveModelId('sonnet')).toBe('claude-sonnet-5');
+
+    let finishRefresh!: (value: Response) => void;
+    fetchSpy.mockImplementationOnce(() => new Promise(resolve => {
+      finishRefresh = resolve;
+    }));
+    const refreshedAt = Date.now();
+    vi.spyOn(Date, 'now').mockReturnValue(refreshedAt + 6 * 60 * 1000);
+
+    await runner.listModels();
+    expect(runner.resolveModelId('sonnet')).toBe('claude-sonnet-5');
+
+    finishRefresh(response(['claude-sonnet-6']));
+    await new Promise(resolve => setImmediate(resolve));
+    expect(runner.resolveModelId('sonnet')).toBe('claude-sonnet-6');
+
+    const cachePath = path.join(process.env.EVOLCLAW_HOME!, 'data', 'claude-model-cache.json');
+    const persisted = fs.readFileSync(cachePath, 'utf-8');
+    expect(persisted).toContain('claude-sonnet-6');
+    expect(persisted).not.toContain(baseUrl);
+
+    vi.resetModules();
+    const { AgentRunner: ReloadedAgentRunner } = await import('../src/agents/claude-runner.js');
+    const reloadedRunner = new ReloadedAgentRunner('test-key', 'sonnet', undefined, baseUrl);
+    expect(reloadedRunner.resolveModelId('sonnet')).toBe('claude-sonnet-6');
+    fetchSpy.mockRejectedValue(new Error('gateway unavailable after restart'));
+    await expect(reloadedRunner.listModels()).resolves.toContain('claude-sonnet-6');
   });
 });

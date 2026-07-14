@@ -413,34 +413,52 @@ interface ECKVars {
 
 ### 7.2 Context Assembly Manifest
 
-```yaml
-sections:
-  # 辅助会话提示词（dual-session 特有）
-  - id: auxiliary-session-prompt
-    when: "responseMode === 'dual-session' && sessionType === 'auxiliary'"
-    source:
-      type: file
-      path: "$KITS_DOCS/response-system/dual-session/prompts/auxiliary-base.md"
-  
-  # 主会话提示词（dual-session 特有）
-  - id: main-session-prompt
-    when: "responseMode === 'dual-session' && sessionType === 'main'"
-    source:
-      type: file
-      path: "$KITS_DOCS/response-system/dual-session/prompts/main-base.md"
-  
-  # chatMode 说明（所有模式通用）
-  - id: chat-mode-guide-proactive
-    when: "chatMode === 'proactive'"
-    content: |
-      ## 回复方式
-      使用 CLI 命令发送回复。
-  
-  - id: chat-mode-guide-interactive
-    when: "chatMode === 'interactive'"
-    content: |
-      ## 回复方式
-      直接输出即回复。
+```jsonc
+{
+  "sections": [
+    // 辅助会话提示词（dual-session 特有）
+    {
+      "id": "auxiliary-session-prompt",
+      "type": "file",
+      "file": "$KITS_DOCS/response-system/dual-session/prompts/auxiliary-base.md",
+      "order": 20,
+      "needsInjection": true,
+      "when": { "and": [
+        { "var": "responseMode", "eq": "dual-session" },
+        { "var": "sessionType", "eq": "auxiliary" }
+      ] }
+    },
+    // 主会话提示词（dual-session 特有）
+    {
+      "id": "main-session-prompt",
+      "type": "file",
+      "file": "$KITS_DOCS/response-system/dual-session/prompts/main-base.md",
+      "order": 20,
+      "needsInjection": true,
+      "when": { "and": [
+        { "var": "responseMode", "eq": "dual-session" },
+        { "var": "sessionType", "eq": "main" }
+      ] }
+    },
+    // chatMode 说明（所有模式通用）
+    {
+      "id": "chat-mode-guide-proactive",
+      "type": "file",
+      "file": "$KITS_DOCS/response-system/prompts/chat-mode-proactive.md",
+      "order": 56,
+      "needsInjection": false,
+      "when": { "var": "chatMode", "eq": "proactive" }
+    },
+    {
+      "id": "chat-mode-guide-interactive",
+      "type": "file",
+      "file": "$KITS_DOCS/response-system/prompts/chat-mode-interactive.md",
+      "order": 56,
+      "needsInjection": false,
+      "when": { "var": "chatMode", "eq": "interactive" }
+    }
+  ]
+}
 ```
 
 ---

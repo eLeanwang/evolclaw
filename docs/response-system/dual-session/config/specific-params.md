@@ -32,6 +32,10 @@ interface DualSessionConfig extends CommonResponseModeConfig {
   // delayLevel 由辅助会话输出；对端系数由代码按发送者类型自动判定
   baseDelayMs?: number;         // 延迟基础偏移（默认 0）【高级】
   
+  // === HOLD 超时兜底（仅群聊；DELAY/HOLD 到期共用同一套扫描/定时器）===
+  holdTimeoutMs?: number;       // HOLD 挂起多久后兜底转投主队列（默认 3600000ms=1小时）【高级】
+                                // 由独立到期定时器驱动，不依赖新消息；防止 HOLD 消息饿死
+  
   // === 辅助会话配置 ===
   auxiliaryModel?: string;      // 辅助会话模型（默认 'deepseek-v4-flash'）
   auxiliaryMaxTokens?: number;  // 辅助会话压缩阈值（默认 40000）【高级】
@@ -355,12 +359,12 @@ T15: 强制触发（最早消息已等待15秒）
   ↓
 打断主会话（硬打断，调用 SDK abort）
   ↓
-新消息追加到主队列：[B, C, D-紧急]
+紧急批次（携带指令）入主队列：[G, O-紧急]
   ↓
-打断场景特殊提取：一次性提取主队列全部消息（上限 100 条 / 20k 字节）
-批次：[B, C, D]
+批次调度：取最后一个 interrupt 批次 O 优先处理
+（被跳过的 G 作 reference 注入、本体留队列；ignore 指令则移除更早批次）
   ↓
-主会话处理新批次（消息A仍在上下文，不回灌队列）
+主会话处理 O（消息A仍在上下文，不回灌队列）
 ```
 
 **副作用**（固有特性，非缺陷；靠辅助会话谨慎决策规避）：
