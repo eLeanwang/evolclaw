@@ -73,21 +73,22 @@ describe('ResponseModeResolver', () => {
 
   beforeEach(() => {
     reg = new ResponseModeRegistry();
+    reg.registerBuiltin(makeMode('single-session', 'builtin', ['private', 'group']));
     reg.registerBuiltin(makeMode('interactive', 'builtin', ['private']));
     reg.registerBuiltin(makeMode('proactive', 'builtin', ['private', 'group']));
     reg.registerBuiltin(makeMode('dual-session', 'builtin', ['group']));
     resolver = new ResponseModeResolver(reg);
   });
 
-  it('falls back to interactive for private when no config', () => {
+  it('falls back to single-session for private when no config', () => {
     const r = resolver.resolve('private', undefined, undefined);
-    expect(r.mode.id).toBe('interactive');
+    expect(r.mode.id).toBe('single-session');
     expect(r.source).toBe('fallback');
   });
 
-  it('falls back to proactive for group when no config', () => {
+  it('falls back to single-session for group when no config', () => {
     const r = resolver.resolve('group', undefined, undefined);
-    expect(r.mode.id).toBe('proactive');
+    expect(r.mode.id).toBe('single-session');
     expect(r.source).toBe('fallback');
   });
 

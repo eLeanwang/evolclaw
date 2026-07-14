@@ -37,31 +37,39 @@ describe('ResponseModeCoordinator', () => {
     coord = new ResponseModeCoordinator(reg);
   });
 
-  it('falls back to session.chatMode when no config', async () => {
+  // 解耦后（步骤 4）：resolveInbound 恒解析到 single-session（无 response_modes 配置时兜底），
+  // chatMode 不再决定「用哪个模式」而是注入 modeConfig；modeId 恒为 single-session。
+  it('无配置时兜底 single-session，chatMode 注入 modeConfig', async () => {
     const r = await coord.resolveInbound(msg('private'), makeDeps(), 'proactive');
-    expect(r?.modeId).toBe('proactive'); // session.chatMode 回落
+    expect(r?.modeId).toBe('single-session');
+    expect((r?.context as any).modeConfig?.chatMode).toBe('proactive');
   });
 
-  it('uses system default when no config and no chatMode', async () => {
+  it('私聊/群聊均兜底 single-session（chatMode 缺省不影响选模式）', async () => {
     const r = await coord.resolveInbound(msg('private'), makeDeps(), undefined);
-    expect(r?.modeId).toBe('interactive'); // private 系统兜底
+    expect(r?.modeId).toBe('single-session');
     const g = await coord.resolveInbound(msg('group'), makeDeps(), undefined);
-    expect(g?.modeId).toBe('proactive'); // group 系统兜底
+    expect(g?.modeId).toBe('single-session');
   });
 
-  it('session.chatMode fallback wins over response_modes default (现行兼容语义)', async () => {
-    // 活代码语义（coordinator.ts resolveInbound）：source !== 'override' 时一律回落
-    // session.chatMode——response_modes 的 default 配置不压过会话 chatmode。
-    // 注：single-session 合并的步骤 4 会移除 chatModeFallback 参数，届时本用例重写。
-    const deps = makeDeps({ response_modes: { default_private: 'interactive' } });
+  it('response_modes.default 指定的模式优先于兜底', async () => {
+    const deps = makeDeps({ response_modes: { default_private: 'single-session' } });
     const r = await coord.resolveInbound(msg('private'), deps, 'proactive');
-    expect(r?.modeId).toBe('proactive');
+    expect(r?.modeId).toBe('single-session');
+    expect((r?.context as any).modeConfig?.chatMode).toBe('proactive');
   });
 
-  it('relation override remains higher priority than session.chatMode', async () => {
-    const deps = makeDeps({ response_modes: { overrides: { 'aun#p1': { mode: 'interactive' } } } }, 'aun#p1');
+  it('relation override 选模式优先级最高；chatMode 仍按注入', async () => {
+    const deps = makeDeps({ response_modes: { overrides: { 'aun#p1': { mode: 'single-session' } } } }, 'aun#p1');
     const r = await coord.resolveInbound(msg('private'), deps, 'proactive');
-    expect(r?.modeId).toBe('interactive');
+    expect(r?.modeId).toBe('single-session');
+    expect((r?.context as any).modeConfig?.chatMode).toBe('proactive');
+  });
+
+  it('config 显式 chatMode 覆盖注入值', async () => {
+    const deps = makeDeps({ response_modes: { default_private: 'single-session', configs: { 'single-session': { chatMode: 'interactive' } } } });
+    const r = await coord.resolveInbound(msg('private'), deps, 'proactive');
+    expect((r?.context as any).modeConfig?.chatMode).toBe('interactive');
   });
 
   it('proactive inbound carries runtimeState', async () => {

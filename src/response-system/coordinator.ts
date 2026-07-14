@@ -62,25 +62,24 @@ export class ResponseModeCoordinator {
    * @param chatType 会话类型
    * @param peerKey 对端标识（override 查找）
    * @param rmConfig response_modes 配置
-   * @param chatModeFallback 现有 session.chatMode（config 未设时回落）
+   * @param resolvedChatMode 本会话生效的 chatMode（宿主按配置层级解析后传入），
+   *        注入进模式 config.chatMode；模式据此分流投递方式。与「选哪个模式」无关。
    * @param contextDeps 构建 context 所需依赖
    */
   resolveMode(
     chatType: 'private' | 'group',
     peerKey: string | undefined,
     rmConfig: any,
-    chatModeFallback: string | undefined,
+    resolvedChatMode: string | undefined,
     contextDeps: Omit<ContextDeps, 'modeConfig'>,
   ): { mode: ResponseMode; context: ResponseModeContext; source: string } | null {
     try {
-      let resolved = this.resolver.resolve(chatType, peerKey, rmConfig);
-      if (resolved.source !== 'override' && chatModeFallback && this.registry.has(chatModeFallback)) {
-        const mode = this.registry.get(chatModeFallback)!;
-        resolved = { mode, config: rmConfig?.configs?.[chatModeFallback] ?? {}, source: 'session' };
-      }
+      const resolved = this.resolver.resolve(chatType, peerKey, rmConfig);
       const mode = resolved.mode;
-      contextDeps.logger.debug('[ResponseSystem] resolveMode mode=' + mode.id + ' source=' + resolved.source + ' chatType=' + chatType + ' peerKey=' + (peerKey ?? 'none'));
-      const context = this.contextBuilder.build(mode.id, { ...contextDeps, modeConfig: resolved.config });
+      // chatMode 是模式配置参数：注入宿主解析出的值（config 未显式设 chatMode 时用它）。
+      const modeConfig = { chatMode: resolvedChatMode, ...resolved.config };
+      contextDeps.logger.debug('[ResponseSystem] resolveMode mode=' + mode.id + ' source=' + resolved.source + ' chatMode=' + (modeConfig.chatMode ?? 'none') + ' chatType=' + chatType + ' peerKey=' + (peerKey ?? 'none'));
+      const context = this.contextBuilder.build(mode.id, { ...contextDeps, modeConfig });
       return { mode, context, source: resolved.source };
     } catch (e) {
       contextDeps.logger.warn(`[Coordinator] resolveMode failed: ${e instanceof Error ? e.message : String(e)}`);
@@ -97,25 +96,21 @@ export class ResponseModeCoordinator {
   async resolveInbound(
     message: InboundMessage,
     deps: CoordinatorInboundDeps,
-    chatModeFallback: string | undefined,
+    resolvedChatMode: string | undefined,
   ): Promise<ResolvedInbound | null> {
     try {
       const chatType = message.chatType ?? 'private';
       const rmConfig = deps.agentConfig.response_modes;
 
-      // 解析模式：config 优先；config 未命中时用 session.chatMode 回落（兼容现状）
-      let resolved = this.resolver.resolve(chatType, deps.peerKey, rmConfig);
-      if (resolved.source !== 'override' && chatModeFallback && this.registry.has(chatModeFallback)) {
-        // config 没指定 → 用现有 session.chatMode（interactive/proactive）
-        const mode = this.registry.get(chatModeFallback)!;
-        resolved = { mode, config: rmConfig?.configs?.[chatModeFallback] ?? {}, source: 'session' };
-      }
-
+      // 解析模式（override > default > 兜底 single-session）。chatMode 不参与选模式。
+      const resolved = this.resolver.resolve(chatType, deps.peerKey, rmConfig);
       const mode = resolved.mode;
-      deps.contextDeps.logger.debug('[ResponseSystem] resolveInbound mode=' + mode.id + ' source=' + resolved.source + ' chatType=' + chatType + ' peerKey=' + (deps.peerKey ?? 'none') + ' fallback=' + (chatModeFallback ?? 'none'));
+      // chatMode 是模式配置参数：注入宿主解析出的值（config 显式设 chatMode 时以 config 为准）。
+      const modeConfig = { chatMode: resolvedChatMode, ...resolved.config };
+      deps.contextDeps.logger.debug('[ResponseSystem] resolveInbound mode=' + mode.id + ' source=' + resolved.source + ' chatMode=' + (modeConfig.chatMode ?? 'none') + ' chatType=' + chatType + ' peerKey=' + (deps.peerKey ?? 'none'));
       const context = this.contextBuilder.build(mode.id, {
         ...deps.contextDeps,
-        modeConfig: resolved.config,
+        modeConfig,
       });
 
       await mode.initialize(context);
@@ -124,7 +119,7 @@ export class ResponseModeCoordinator {
       return { modeId: mode.id, decision, mode, context };
     } catch (e) {
       deps.contextDeps.logger.warn(
-        `[Coordinator] resolveInbound failed, falling back to chatMode='${chatModeFallback}': ${e instanceof Error ? e.message : String(e)}`,
+        `[Coordinator] resolveInbound failed: ${e instanceof Error ? e.message : String(e)}`,
       );
       return null;
     }

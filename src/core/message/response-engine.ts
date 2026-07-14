@@ -1095,16 +1095,18 @@ export class ResponseEngine implements IMessageProcessor {
         );
 
     if (resolvedMode) {
-      logger.info('[ResponseSystem] selected mode=' + resolvedMode.mode.id + ' source=' + resolvedMode.source + ' chatType=' + chatType + ' peerKey=' + (peerKey ?? 'none') + ' fallback=' + chatModeFallback);
+      logger.info('[ResponseSystem] selected mode=' + resolvedMode.mode.id + ' source=' + resolvedMode.source + ' chatType=' + chatType + ' peerKey=' + (peerKey ?? 'none') + ' chatMode=' + chatModeFallback);
     } else {
-      logger.info('[ResponseSystem] selected mode=override/fallback source=trigger-or-resolve-failed chatType=' + chatType + ' peerKey=' + (peerKey ?? 'none') + ' fallback=' + chatModeFallback);
+      logger.info('[ResponseSystem] selected mode=override/fallback source=trigger-or-resolve-failed chatType=' + chatType + ' peerKey=' + (peerKey ?? 'none') + ' chatMode=' + chatModeFallback);
     }
 
-    // 最终 chatMode：system/service 运行时约束 > trigger override > 插件解析结果 > fallback
+    // 最终 chatMode（怎么投递，与「选哪个模式」正交）：
+    //   system/service 运行时硬约束 > trigger override > 配置层级解析（chatModeFallback）。
+    // 注：mode.id 不再参与——单会话合并后 mode.id 恒为 single-session，
+    //     chatMode 由 resolveChatModeForPeer 按配置层级解析（步骤 1/4）。
     const effectiveChatMode = systemOrServicePeer
       ? 'interactive'
       : triggerChatModeOverride
-      ?? resolvedMode?.mode.id
       ?? chatModeFallback;
     const chatmode = effectiveChatMode;
     const isProactive = effectiveChatMode === 'proactive';

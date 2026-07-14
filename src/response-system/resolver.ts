@@ -6,10 +6,11 @@
  * 解析优先级（高→低）：
  *   1. relation override（overrides[peerKey].mode）—— 特定对端/群的指定模式
  *   2. chatType 默认（default_private / default_group）
- *   3. 系统兜底（private→interactive, group→proactive）
+ *   3. 系统兜底（single-session）
  *
- * 注：response_modes 配置块在 Phase 4 接入 AgentConfig；
- *    此处定义独立的输入形状，Phase 4 直接对接，无需改 resolver。
+ * 注：chatMode（interactive/proactive）不再决定「用哪个模式」，而是 single-session
+ *    的配置参数。旧配置里 default_private / default_group / overrides 指向
+ *    interactive 或 proactive 的，在配置迁移（步骤 5）后统一改写为 single-session + chatMode。
  */
 
 import type { ResponseMode } from './types.js';
@@ -20,9 +21,9 @@ import type { ResponseModesConfig } from '../types.js';
 // 此处 re-export，方便响应模式系统内部引用。
 export type { ResponseModesConfig };
 
-/** 系统兜底模式 id（response_modes 完全缺失时使用） */
-const FALLBACK_PRIVATE = 'interactive';
-const FALLBACK_GROUP = 'proactive';
+/** 系统兜底模式 id（response_modes 完全缺失时使用）——单会话合并后统一为 single-session。 */
+const FALLBACK_PRIVATE = 'single-session';
+const FALLBACK_GROUP = 'single-session';
 
 export interface ResolvedMode {
   mode: ResponseMode;
