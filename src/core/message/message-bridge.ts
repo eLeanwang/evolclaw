@@ -6,7 +6,7 @@ import { buildEnvelope } from './message-utils.js';
 import { chatDirPath } from '../session/session-fs-store.js';
 import { tryParseChannelKey } from '../channel-loader.js';
 import { resolvePaths } from '../../paths.js';
-import { resolvePeerRoleDetail, type ResolvedPeerRole } from '../../config/peer-role-resolver.js';
+import { addStaticAgentOwner, hasStaticAgentOwner, resolvePeerRoleDetail, type ResolvedPeerRole } from '../../config/peer-role-resolver.js';
 import { handlePendingDingtalkContactBindMessage } from '../../channels/dingtalk.js';
 import { authorizeAccess, buildAuthSubject } from '../auth/auth-gateway.js';
 import {
@@ -154,6 +154,10 @@ export class MessageBridge {
           }
         }
         const resolvedChannelType = msg.channelType || parsedChannelKey?.type || effectiveChannelType;
+
+        if (!menuControl.isMenu && selfAid && actorId) {
+          await this.autoBindOwner(selfAid, channelKey, actorId);
+        }
 
         if (!menuControl.isMenu) {
           const contactBind = handlePendingDingtalkContactBindMessage({
@@ -693,6 +697,13 @@ export class MessageBridge {
       return;
     }
     await sendReply(msg.channelId, text, msg.replyContext);
+  }
+
+  private async autoBindOwner(selfAid: string, channelKey: string, userId: string): Promise<void> {
+    if (hasStaticAgentOwner(selfAid)) return;
+    addStaticAgentOwner(selfAid, userId);
+    logger.info(`[Owner] Auto-bound ${channelKey} owner: ${userId}`);
+    this.eventBus.publish({ type: 'channel:owner-bound', channel: channelKey, userId });
   }
 
   private resolveInboundRole(ctx: {

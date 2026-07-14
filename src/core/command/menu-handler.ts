@@ -955,6 +955,7 @@ function buildMenuAuthContext(
     role: params.identity.role,
     isDaemonOwner,
     fromControlChannel: params.fromControlChannel,
+    allowExplicitRelationTarget: params.source === 'menu.cli',
     source: params.source,
   };
 }
@@ -2749,6 +2750,7 @@ export async function execMenuAction(this: any,
           role: authCtx.role,
           isDaemonOwner: authCtx.isDaemonOwner,
           fromControlChannel: authCtx.fromControlChannel,
+          allowExplicitRelationTarget: authCtx.allowExplicitRelationTarget,
           source: authCtx.source,
         })
       : authorizeMenuContext(authCtx);

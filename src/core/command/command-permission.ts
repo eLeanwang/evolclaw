@@ -576,6 +576,20 @@ function checkResolvedConfigTarget(
     }
     return { ok: true };
   }
+  if (ctx.allowExplicitRelationTarget && ctx.role === 'owner') {
+    if (!ctx.selfAid || !command.self || command.self !== ctx.selfAid) {
+      return { ok: false, reason: 'Only the current agent relation can be targeted' };
+    }
+    if (!command.peerKey) {
+      return { ok: false, reason: 'Explicit relation target is required' };
+    }
+    try {
+      normalizeRelationPeer(command.peerKey);
+      return { ok: true };
+    } catch {
+      return { ok: false, reason: 'Cannot verify the explicit relation target' };
+    }
+  }
   return checkCurrentRelation(ctx, command);
 }
 

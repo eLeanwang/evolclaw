@@ -1298,6 +1298,12 @@ export interface CommandAuthorizationContext {
 
   isDaemonOwner?: boolean;
   fromControlChannel?: boolean;
+  /**
+   * An authenticated menu CLI request may intentionally select a relation
+   * other than the transport relation. The permission layer only honors this
+   * for the agent owner identity and still requires the current self AID.
+   */
+  allowExplicitRelationTarget?: boolean;
   source: CommandSource;
 }
 

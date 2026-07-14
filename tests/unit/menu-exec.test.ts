@@ -1349,6 +1349,52 @@ describe('/cli config authorization', () => {
       '--self', TEST_AID, '--peer', formatPeerKey('aun', 'group1'),
     ]);
   });
+
+  it('lets an authenticated owner target a group relation from the App p2p control relation', async () => {
+    ownersMock.value = [];
+    const { handler } = createHandler();
+    const passthrough = installPassthroughSpy(handler);
+    const groupPeer = formatPeerKey('aun', 'group.example/42');
+
+    const result = await handler.execMenuAction(
+      '/cli', 'exec',
+      { argv: [
+        'config', 'set', 'chatmode.group', 'proactive',
+        '--self', TEST_AID, '--peer', groupPeer,
+      ] },
+      'aun', 'owner.agentid.pub', 'owner.agentid.pub',
+      { role: 'owner', mode: 'interactive' },
+    );
+
+    expect(result).toEqual({ data: { ok: true } });
+    expect(passthrough).toHaveBeenCalledWith([
+      'config', 'set', 'chatmode.group', 'proactive',
+      '--self', TEST_AID, '--peer', groupPeer,
+    ]);
+  });
+
+  it('lets an authenticated owner target a peer AID relation from the App p2p control relation', async () => {
+    ownersMock.value = [];
+    const { handler } = createHandler();
+    const passthrough = installPassthroughSpy(handler);
+    const targetPeer = formatPeerKey('aun', 'peer.agentid.pub');
+
+    const result = await handler.execMenuAction(
+      '/cli', 'exec',
+      { argv: [
+        'config', 'set', 'chatmode.private', 'proactive',
+        '--self', TEST_AID, '--peer', targetPeer,
+      ] },
+      'aun', 'owner.agentid.pub', 'owner.agentid.pub',
+      { role: 'owner', mode: 'interactive' },
+    );
+
+    expect(result).toEqual({ data: { ok: true } });
+    expect(passthrough).toHaveBeenCalledWith([
+      'config', 'set', 'chatmode.private', 'proactive',
+      '--self', TEST_AID, '--peer', targetPeer,
+    ]);
+  });
 });
 
 describe('/file fetch control response', () => {

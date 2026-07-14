@@ -626,6 +626,54 @@ describe('Command Permission', () => {
       }
     });
 
+    it('allows authenticated owner menu CLI to select another relation of the current agent', () => {
+      const context: Omit<CommandAuthorizationContext, 'intent'> = {
+        actorId: 'owner.agentid.pub',
+        chatType: 'private',
+        selfAid: 'agent1',
+        peerKey: 'aun#owner.agentid.pub',
+        role: 'owner',
+        isDaemonOwner: false,
+        allowExplicitRelationTarget: true,
+        source: 'menu.cli',
+      };
+
+      expect(authorizeConfigCommand([
+        'config', 'set', 'chatmode.group', 'proactive',
+        '--self', 'agent1', '--peer', 'aun#group.example/42',
+      ], context).allow).toBe(true);
+      expect(authorizeConfigCommand([
+        'config', 'set', 'chatmode.private', 'proactive',
+        '--self', 'agent1', '--peer', 'aun#peer.agentid.pub',
+      ], context).allow).toBe(true);
+    });
+
+    it('does not allow explicit cross-relation targets for user roles or non-menu sources', () => {
+      const targetArgv = [
+        'config', 'get', 'chatmode.group',
+        '--self', 'agent1', '--peer', 'aun#group.example/42',
+      ];
+
+      const memberDecision = authorizeConfigCommand(targetArgv, {
+        ...memberConfigContext,
+        allowExplicitRelationTarget: true,
+      });
+      expect(memberDecision.allow).toBe(false);
+      if (!memberDecision.allow) expect(memberDecision.code).toBe('ARGUMENT_MISMATCH');
+
+      const agentToolDecision = authorizeConfigCommand(targetArgv, {
+        actorId: 'owner.agentid.pub',
+        chatType: 'private',
+        selfAid: 'agent1',
+        peerKey: 'aun#owner.agentid.pub',
+        role: 'owner',
+        isDaemonOwner: false,
+        source: 'agent-tool',
+      });
+      expect(agentToolDecision.allow).toBe(false);
+      if (!agentToolDecision.allow) expect(agentToolDecision.code).toBe('ARGUMENT_MISMATCH');
+    });
+
     it('allows a daemon owner private global access but preserves the group mutation ceiling', () => {
       const privateContext: Omit<CommandAuthorizationContext, 'intent'> = {
         actorId: 'daemon-owner',
