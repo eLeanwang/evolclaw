@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { formatSessionKey, parseSessionKey, DEFAULT_THREAD_ID } from '../../src/core/session/session-key.js';
+import { shouldAutoFillSessionTitle } from '../../src/core/session/session-title.js';
 
 describe('session-key', () => {
   it('formats with default threadId', () => {
@@ -25,5 +26,18 @@ describe('session-key', () => {
   });
   it('exports DEFAULT_THREAD_ID', () => {
     expect(DEFAULT_THREAD_ID).toBe('main');
+  });
+});
+
+describe('shouldAutoFillSessionTitle', () => {
+  it('allows generated titles for default main sessions and unnamed topics', () => {
+    expect(shouldAutoFillSessionTitle('默认会话')).toBe(true);
+    expect(shouldAutoFillSessionTitle('话题会话', 'topic-1')).toBe(true);
+  });
+
+  it('does not replace explicit topic titles or treat main sessions as topics', () => {
+    expect(shouldAutoFillSessionTitle('需求讨论', 'topic-1')).toBe(false);
+    expect(shouldAutoFillSessionTitle('话题会话')).toBe(false);
+    expect(shouldAutoFillSessionTitle('话题会话', DEFAULT_THREAD_ID)).toBe(false);
   });
 });

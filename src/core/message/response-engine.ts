@@ -46,6 +46,7 @@ import { ResponseModeCoordinator, type ResolvedInbound } from '../../response-sy
 import { ResponseModeRegistry } from '../../response-system/registry.js';
 import { registerBuiltinModes } from '../../response-system/modes/index.js';
 import type { ProcessContext, ToolUseContext, CompleteContext, AfterProcessContext, RunConfig } from '../../response-system/types.js';
+import { shouldAutoFillSessionTitle } from '../session/session-title.js';
 
 function isShowActivitiesMode(value: unknown): value is ShowActivitiesMode {
   return value === 'all' || value === 'text' || value === 'none';
@@ -2981,7 +2982,7 @@ export class ResponseEngine implements IMessageProcessor {
           logger.info(`[ResponseEngine] ${isAbort ? 'task interrupted' : 'complete event'}: isError=${event.isError} terminalReason=${event.terminalReason ?? 'none'} subtype=${event.subtype ?? 'none'} hasReceivedText=${hasReceivedText}`);
 
           // 自动回填会话名称
-          if (event.sessionTitle && session.name === '默认会话') {
+          if (event.sessionTitle && shouldAutoFillSessionTitle(session.name, session.threadId)) {
             await this.sessionManager.renameSession(session.id, event.sessionTitle);
             logger.info(`[ResponseEngine] Auto-filled session name: ${event.sessionTitle}`);
           }
@@ -3056,7 +3057,7 @@ export class ResponseEngine implements IMessageProcessor {
       }
 
       // 自动回填会话名称
-      if (event.sessionTitle && session.name === '默认会话') {
+      if (event.sessionTitle && shouldAutoFillSessionTitle(session.name, session.threadId)) {
         await this.sessionManager.renameSession(session.id, event.sessionTitle);
         logger.info(`[ResponseEngine] Auto-filled session name: ${event.sessionTitle}`);
       }

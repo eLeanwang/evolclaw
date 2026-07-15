@@ -27,3 +27,9 @@ export function sanitizeSessionTitle(title: unknown): string | undefined {
 export function displaySessionTitle(title: unknown, fallback = '默认会话'): string {
   return sanitizeSessionTitle(title) || sanitizeSessionTitle(fallback) || fallback;
 }
+
+export function shouldAutoFillSessionTitle(title: unknown, threadId?: string): boolean {
+  const normalized = sanitizeSessionTitle(title);
+  if (normalized === '默认会话') return true;
+  return !!threadId && threadId !== 'main' && normalized === '话题会话';
+}
