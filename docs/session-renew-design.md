@@ -27,7 +27,6 @@ agents/defaults.json
   "session_renew": {
     "enabled": false,
     "after_hours": 24,
-    "model": "claude-haiku-4-5-20251001",
     "effort": "low",
     "fallback_action": "continue"
   }
@@ -40,17 +39,10 @@ agents/defaults.json
 |---|---:|---|
 | `enabled` | `false` | 只有最终有效配置严格等于 `true` 时启用 |
 | `after_hours` | `24` | 当前会话最后一条有效对话消息距今超过该时长才触发 |
-| `model` | 无 | Claude Models API 返回的精确模型名称；进入模型判定前必须配置 |
 | `effort` | `low` | 判定调用的推理强度 |
 | `fallback_action` | `continue` | 模型失败、超时或输出非法时的降级动作 |
 
-模型分支不读取响应模式的 `config.auxiliaryModel`，也不跟随候选旧 Session 的 `baseagent` 或普通 Agent 会话模型。它固定使用当前 EvolAgent 的 Claude 普通模型 API，并将 `session_renew.model` 原样作为精确模型 ID 发送。
-
-`model` 不接受 `haiku`、`sonnet`、`opus` 等隐式别名。可使用以下命令在对应配置层指定完整名称：
-
-```bash
-ec config set session_renew.model claude-haiku-4-5-20251001 --self <aid>
-```
+模型分支不读取响应模式的 `config.auxiliaryModel`，也不跟随候选旧 Session 的 `baseagent` 或普通 Agent 会话模型。它固定使用当前 EvolAgent 的 Claude 普通模型 API，并从 Models API 返回列表中自动选择版本最高、同版本日期最新的 Haiku 精确模型 ID。
 
 `session_renew` 保持扁平子字段，适配配置系统的字典第一层覆盖规则。
 
@@ -128,10 +120,10 @@ ec config set session_renew.model claude-haiku-4-5-20251001 --self <aid>
 
 1. 调用 `GET /v1/models`，处理 `has_more` / `last_id` 分页；
 2. 对模型列表按网关和凭证缓存 5 分钟；
-3. 精确检查 `session_renew.model` 是否在返回列表中；
-4. 通过后调用 `POST /v1/messages`，请求中的 `model` 原样使用配置值。
+3. 从返回列表中选择版本最高、同版本日期最新的 Haiku；
+4. 通过 `POST /v1/messages` 调用选中的精确模型 ID。
 
-判定不进入 `AgentRunner`，不创建或恢复 Claude/Codex Agent 会话，也没有 project path、工具、MCP、hook、权限模式或会话持久化参数。模型未配置、Claude provider/Models API 不可用、模型不在列表中、Messages API 失败或响应非法时，均执行 `fallback_action`。严格显式信号、明确回复和 `missing_history` 不受影响。
+判定不进入 `AgentRunner`，不创建或恢复 Claude/Codex Agent 会话，也没有 project path、工具、MCP、hook、权限模式或会话持久化参数。Claude provider/Models API 不可用、列表中没有 Haiku、Messages API 失败或响应非法时，均执行 `fallback_action`。严格显式信号、明确回复和 `missing_history` 不受影响。
 
 模型输入由以下部分组成：
 
@@ -206,7 +198,7 @@ decision=continue|new
 source=explicit|reply|model|fallback|missing_history
 idleHours=<number>
 baseagent=claude|none
-model=<session_renew.model>|none
+model=<selected haiku model>|none
 ```
 
 不把模型思考过程写入消息日志，不向用户发送“正在判断会话”提示。

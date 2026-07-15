@@ -10,6 +10,7 @@ import {
   SessionRenewService,
   classifyExplicitSessionRenewSignal,
   isSessionRenewConversationEntry,
+  selectLatestHaikuModel,
   selectSessionRenewContext,
 } from '../../src/core/session/session-renew.js';
 import { appendJsonl, readAllJsonlLines } from '../../src/core/session/session-fs-store.js';
@@ -81,6 +82,22 @@ describe('session renew history selection', () => {
   });
 });
 
+describe('selectLatestHaikuModel', () => {
+  it('selects the highest Haiku version and then the newest dated release', () => {
+    expect(selectLatestHaikuModel([
+      'claude-3-5-haiku-20241022',
+      'claude-sonnet-4-6',
+      'claude-haiku-4-5-20250929',
+      JUDGE_MODEL,
+      'claude-opus-4-8',
+    ])).toBe(JUDGE_MODEL);
+  });
+
+  it('returns undefined when the provider exposes no Haiku model', () => {
+    expect(selectLatestHaikuModel(['claude-sonnet-4-6', 'claude-opus-4-8'])).toBeUndefined();
+  });
+});
+
 describe('SessionRenewService', () => {
   it('creates a fresh logical session for an explicit new signal without calling the model', async () => {
     const fixture = await createFixture({ modelResult: modelDecision('continue', 1) });
@@ -135,23 +152,22 @@ describe('SessionRenewService', () => {
     });
   });
 
-  it('uses the configured Claude model regardless of the candidate session baseagent', async () => {
+  it('uses the latest listed Haiku model regardless of the candidate session baseagent', async () => {
     const codex = await createFixture({
       baseagent: 'codex',
-      config: { model: 'claude-sonnet-4-6' },
-      availableModels: ['claude-sonnet-4-6'],
+      availableModels: ['claude-3-5-haiku-20241022', 'claude-sonnet-4-6', JUDGE_MODEL],
     });
     const result = await codex.service.resolve(codex.request('帮我规划一次旅行'));
 
     expect(result.source).toBe('model');
     expect(codex.requestedBaseagents()).toEqual(['claude']);
     expect(codex.lastRequest()).toMatchObject({
-      model: 'claude-sonnet-4-6',
+      model: JUDGE_MODEL,
       effort: 'low',
     });
   });
 
-  it('uses fallback when the Claude provider or configured model is unavailable', async () => {
+  it('uses fallback when the Claude provider is unavailable or exposes no Haiku model', async () => {
     const unavailable = await createFixture({ baseagent: 'codex', unavailableBaseagents: ['claude'], config: { fallback_action: 'new' } });
     const unavailableResult = await unavailable.service.resolve(unavailable.request('帮我规划一次旅行'));
     expect(unavailableResult.decision).toBe('new');
@@ -160,24 +176,17 @@ describe('SessionRenewService', () => {
     expect(unavailable.modelCalls()).toBe(0);
     expect(unavailable.requestedBaseagents()).toEqual(['claude']);
 
-    const missingModel = await createFixture({ config: { model: undefined, fallback_action: 'new' } });
-    const missingModelResult = await missingModel.service.resolve(missingModel.request('帮我规划一次旅行'));
-    expect(missingModelResult.decision).toBe('new');
-    expect(missingModelResult.source).toBe('fallback');
-    expect(missingModel.modelListCalls()).toBe(0);
-    expect(missingModel.requestedBaseagents()).toEqual([]);
-
-    const unavailableModel = await createFixture({
+    const noHaikuModel = await createFixture({
       availableModels: ['claude-sonnet-4-6'],
-      config: { model: JUDGE_MODEL, fallback_action: 'new' },
+      config: { fallback_action: 'new' },
     });
-    const unavailableModelResult = await unavailableModel.service.resolve(unavailableModel.request('帮我规划一次旅行'));
-    expect(unavailableModelResult.decision).toBe('new');
-    expect(unavailableModelResult.source).toBe('fallback');
-    expect(unavailableModel.modelListCalls()).toBe(1);
-    expect(unavailableModel.modelCalls()).toBe(0);
+    const noHaikuResult = await noHaikuModel.service.resolve(noHaikuModel.request('帮我规划一次旅行'));
+    expect(noHaikuResult.decision).toBe('new');
+    expect(noHaikuResult.source).toBe('fallback');
+    expect(noHaikuModel.modelListCalls()).toBe(1);
+    expect(noHaikuModel.modelCalls()).toBe(0);
 
-    const explicit = await createFixture({ baseagent: 'gemini', config: { model: undefined } });
+    const explicit = await createFixture({ baseagent: 'gemini' });
     const explicitResult = await explicit.service.resolve(explicit.request('新话题：帮我规划一次旅行'));
     expect(explicitResult.decision).toBe('new');
     expect(explicitResult.source).toBe('explicit');
@@ -400,7 +409,6 @@ async function createFixture(options: {
   const config: SessionRenewConfig = {
     enabled: options.enabled ?? true,
     after_hours: 24,
-    model: JUDGE_MODEL,
     fallback_action: 'continue',
     ...options.config,
   };

@@ -172,7 +172,6 @@ export function resolveConfigFieldRule(fieldPath: string): ConfigFieldRule {
     if (parts.length !== 2) return { class: 'unknown' };
     if (parts[1] === 'enabled') return scalar('session_renew', 'boolean');
     if (parts[1] === 'after_hours') return scalar('session_renew', 'positive-number');
-    if (parts[1] === 'model') return scalar('session_renew', 'string');
     if (parts[1] === 'effort') return scalar('session_renew', 'effort');
     if (parts[1] === 'fallback_action') return scalar('session_renew', 'session-renew-action');
     return { class: 'unknown' };

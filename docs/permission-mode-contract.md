@@ -150,8 +150,8 @@ Codex 的 `request` 有效。旧实现使用 `approvalPolicy=never` 和 `danger-
 ### 5.4 无状态纯文本推理
 
 - session-renew 连续性判断固定调用独立 Claude `TextInferenceProvider`，不进入 `AgentRunner`，也不创建或恢复 Claude/Codex Agent 会话。
-- 该接口没有 project path、session id、工具、MCP、hook、权限模式或会话持久化参数；先通过 Claude Models API 精确校验 `session_renew.model`，再直接调用 Messages API。
-- provider 只复用当前 EvolAgent effective config 的 Claude 模型网关地址和凭证。模型未配置、不在 API 列表中、凭证不可用或请求失败时，调用方按显式 fallback 策略处理。
+- 该接口没有 project path、session id、工具、MCP、hook、权限模式或会话持久化参数；先通过 Claude Models API 选择列表中最新的 Haiku，再直接调用 Messages API。
+- provider 只复用当前 EvolAgent effective config 的 Claude 模型网关地址和凭证。列表中没有 Haiku、凭证不可用或请求失败时，调用方按显式 fallback 策略处理。
 - 纯文本推理不能作为普通用户任务入口；普通用户任务始终保留工具，由 `readonly` 等公开权限模式限制工具能力。
 
 ## 6. H 类绝对边界

@@ -74,7 +74,6 @@
       "properties": {
         "enabled": { "type": "boolean", "default": false },
         "after_hours": { "type": "number", "exclusiveMinimum": 0, "default": 24 },
-        "model": { "type": "string", "minLength": 1 },
         "effort": { "type": "string", "enum": ["low", "medium", "high", "xhigh", "max"], "default": "low" },
         "fallback_action": { "type": "string", "enum": ["continue", "new"], "default": "continue" }
       }

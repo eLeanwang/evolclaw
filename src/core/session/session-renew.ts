@@ -33,10 +33,14 @@ export interface SessionRenewResult {
   source?: SessionRenewDecisionSource;
 }
 
-interface SessionRenewModelResult {
+interface SessionRenewModelDecision {
   decision: SessionRenewDecision;
   confidence: number;
   reasonCode?: string;
+}
+
+interface SessionRenewModelResult extends SessionRenewModelDecision {
+  model: string;
 }
 
 interface TextInferenceProviderResolver {
@@ -97,6 +101,44 @@ export function selectSessionRenewContext(entries: MessageLogEntry[]): MessageLo
   if (entries.length <= MAX_CONTEXT_MESSAGES) return trimContextByChars(entries);
   const selected = [entries[0], ...entries.slice(-(MAX_CONTEXT_MESSAGES - 1))];
   return trimContextByChars(selected);
+}
+
+export function selectLatestHaikuModel(models: string[]): string | undefined {
+  let selected: { id: string; major: number; minor: number; date: number } | undefined;
+
+  for (const rawModel of models) {
+    const id = rawModel.trim();
+    if (!id) continue;
+    const leaf = id.toLowerCase().split('/').at(-1) ?? '';
+    const tokens = leaf.split('-');
+    const haikuIndex = tokens.indexOf('haiku');
+    if (haikuIndex < 0) continue;
+
+    const versionTokens = haikuIndex <= 1
+      ? tokens.slice(haikuIndex + 1)
+      : tokens.slice(1, haikuIndex);
+    const versions = versionTokens
+      .filter(token => /^\d{1,2}$/.test(token))
+      .map(Number);
+    const dates = tokens
+      .filter(token => /^\d{8}$/.test(token))
+      .map(Number);
+    const candidate = {
+      id,
+      major: versions[0] ?? 0,
+      minor: versions[1] ?? 0,
+      date: dates.length > 0 ? Math.max(...dates) : 0,
+    };
+
+    if (!selected
+      || candidate.major > selected.major
+      || (candidate.major === selected.major && candidate.minor > selected.minor)
+      || (candidate.major === selected.major && candidate.minor === selected.minor && candidate.date > selected.date)) {
+      selected = candidate;
+    }
+  }
+
+  return selected?.id;
 }
 
 function trimContextByChars(entries: MessageLogEntry[]): MessageLogEntry[] {
@@ -198,16 +240,16 @@ export class SessionRenewService {
       decision = 'continue';
       source = 'reply';
     } else {
+      let judgeModel: string | undefined;
       try {
-        const model = config.model?.trim();
-        if (!model) throw new Error('session_renew.model is required when model judging is enabled');
         const provider = this.inferenceProviderResolver.getTextInferenceProvider(
           request.channelName,
           JUDGE_BASEAGENT,
           request.selfAid,
         );
         if (!provider) throw new Error(`text inference provider unavailable: ${JUDGE_BASEAGENT}`);
-        const judged = await this.judgeWithModel(request, config, entries, idleMs, model, provider);
+        const judged = await this.judgeWithModel(request, config, entries, idleMs, provider);
+        judgeModel = judged.model;
         decision = judged.decision === 'new' && judged.confidence < NEW_CONFIDENCE_THRESHOLD
           ? 'continue'
           : judged.decision;
@@ -217,7 +259,7 @@ export class SessionRenewService {
         source = 'fallback';
         logger.warn(`[SessionRenew] judge failed, using fallback=${decision}: ${error instanceof Error ? error.message : String(error)}`);
       }
-      return await this.finishDecision(routeKey, request, decision, source, idleMs, config.model?.trim());
+      return await this.finishDecision(routeKey, request, decision, source, idleMs, judgeModel);
     }
 
     return await this.finishDecision(routeKey, request, decision, source, idleMs);
@@ -276,7 +318,6 @@ export class SessionRenewService {
     config: SessionRenewConfig,
     entries: MessageLogEntry[],
     idleMs: number,
-    model: string,
     provider: TextInferenceProvider,
   ): Promise<SessionRenewModelResult> {
     const context = selectSessionRenewContext(entries).map(entry => ({
@@ -306,14 +347,16 @@ export class SessionRenewService {
       const operation = (async () => {
         if (!provider.listModels) throw new Error('Claude text inference provider does not expose a model list');
         const models = await provider.listModels(controller.signal);
-        if (!models.includes(model)) throw new Error(`configured session renew model is unavailable: ${model}`);
-        return await provider.completeText({
+        const model = selectLatestHaikuModel(models);
+        if (!model) throw new Error('Claude model list contains no Haiku model');
+        const text = await provider.completeText({
           model,
           effort: config.effort || DEFAULT_EFFORT,
           system: systemPrompt,
           input: prompt,
           signal: controller.signal,
         });
+        return { model, text };
       })();
       const timeout = new Promise<never>((_resolve, reject) => {
         timer = setTimeout(() => {
@@ -321,7 +364,8 @@ export class SessionRenewService {
           reject(new Error(`judge timed out after ${MODEL_TIMEOUT_MS}ms`));
         }, MODEL_TIMEOUT_MS);
       });
-      return parseModelResult(await Promise.race([operation, timeout]));
+      const result = await Promise.race([operation, timeout]);
+      return { ...parseModelResult(result.text), model: result.model };
     } finally {
       if (timer) clearTimeout(timer);
     }
@@ -351,7 +395,7 @@ function validPositiveNumber(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : undefined;
 }
 
-function parseModelResult(text: string): SessionRenewModelResult {
+function parseModelResult(text: string): SessionRenewModelDecision {
   const match = text.match(/\{[\s\S]*\}/);
   if (!match) throw new Error('judge returned no JSON object');
   const parsed = JSON.parse(match[0]) as Record<string, unknown>;
