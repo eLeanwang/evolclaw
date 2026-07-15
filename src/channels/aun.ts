@@ -24,6 +24,7 @@ import type { AidStatsCollector } from '../utils/stats.js';
 import { loadAgent, saveAgent } from '../config-store.js';
 import { activeBaseagent } from '../core/model/config-scope.js';
 import { resolveEffective } from '../config/config-manager.js';
+import { mentionModeToDispatch } from '../config/mention-mode.js';
 import { getProcessStartTime } from '../utils/process-introspect.js';
 import * as outbox from '../aun/outbox.js';
 import { guessMime, formatSize } from '../utils/media-cache.js';
@@ -4140,11 +4141,13 @@ export class AUNChannelPlugin implements ChannelPlugin {
 
         if (typeof channel.setDispatchModeResolver === 'function') {
           channel.setDispatchModeResolver(async (channelId: string) => {
-            const mode = resolveEffective({
+            // 配置层用 mentionMode（mention-only/disabled），翻译成 AUN 协议
+            // dispatch_mode（mention/broadcast）；未设值返回 undefined，回退服务端下发值。
+            const mentionMode = resolveEffective({
               self: aid,
               peerKey: formatPeerKey('aun', channelId),
-            }, { cache: true }).dispatch;
-            return mode === 'mention' || mode === 'broadcast' ? mode : undefined;
+            }, { cache: true }).mentionMode;
+            return mentionModeToDispatch(mentionMode);
           });
         }
       },

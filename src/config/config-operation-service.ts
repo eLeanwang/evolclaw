@@ -26,6 +26,15 @@ import {
   type VersionDiff,
 } from './snapshot.js';
 import { readBootLog, type BootLogEntry } from './boot-log.js';
+import {
+  currentVersion,
+  isSchemaName,
+  listSchemaNames,
+  listSchemaVersions,
+  readRawSchema,
+  schemaHistoryEntry,
+  type LogicalSchemaName,
+} from './schema-registry.js';
 import { resolvePaths } from '../paths.js';
 import type {
   ResolvedConfigCommand,
@@ -49,7 +58,6 @@ export type ConfigExecutionResult =
       field: string;
       value: unknown;
       scope: ResolvedConfigOp['configScope'];
-      permission: string;
       file: string;
     }
   | {
@@ -72,6 +80,16 @@ export type ConfigExecutionResult =
   | { ok: true; subcommand: 'restore'; version: string; appliedFiles: number }
   | { ok: true; subcommand: 'current'; current: CurrentPointer | null; lastBoot: BootLogEntry | null }
   | { ok: true; subcommand: 'boots'; boots: BootLogEntry[] }
+  | { ok: true; subcommand: 'schema'; mode: 'overview'; schemas: Array<{ name: string; current: number }> }
+  | {
+      ok: true;
+      subcommand: 'schema';
+      mode: 'versions';
+      name: string;
+      current: number;
+      versions: Array<{ version: number; current: boolean; date?: string; description?: string }>;
+    }
+  | { ok: true; subcommand: 'schema'; mode: 'content'; name: string; version: number; current: boolean; content: unknown }
   | { ok: false; code: string; error: string };
 
 export function executeResolvedConfigCommand(command: ResolvedConfigCommand): ConfigExecutionResult {
@@ -198,7 +216,65 @@ function executeGlobal(command: ResolvedGlobalConfigCommand): ConfigExecutionRes
       lastBoot: readBootLog(1)[0] ?? null,
     };
   }
+  if (command.subcommand === 'schema') {
+    return executeSchema(command);
+  }
   return { ok: true, subcommand: 'boots', boots: readBootLog(command.count ?? 10) };
+}
+
+function executeSchema(command: ResolvedGlobalConfigCommand): ConfigExecutionResult {
+  // 无 name：列出全部 schema 及各自当前版本
+  if (!command.schemaName) {
+    return {
+      ok: true,
+      subcommand: 'schema',
+      mode: 'overview',
+      schemas: listSchemaNames().map(name => ({ name, current: currentVersion(name) })),
+    };
+  }
+
+  const name = command.schemaName;
+  if (!isSchemaName(name)) {
+    return {
+      ok: false,
+      code: 'UNKNOWN_SCHEMA',
+      error: `Unknown schema: ${name} (known: ${listSchemaNames().join(', ')})`,
+    };
+  }
+
+  const current = currentVersion(name);
+
+  // --list：列出磁盘上全部版本，标记当前，附 history 元信息
+  if (command.schemaList) {
+    const versions = listSchemaVersions(name).map(version => {
+      const history = schemaHistoryEntry(name, version);
+      return {
+        version,
+        current: version === current,
+        ...(history ? { date: history.date, description: history.description } : {}),
+      };
+    });
+    return { ok: true, subcommand: 'schema', mode: 'versions', name, current, versions };
+  }
+
+  // 内容：指定版本，缺省取当前版本
+  const version = command.schemaVersion ?? current;
+  if (!listSchemaVersions(name).includes(version)) {
+    return {
+      ok: false,
+      code: 'SCHEMA_VERSION_NOT_FOUND',
+      error: `Schema ${name} has no version ${version} (available: ${listSchemaVersions(name).join(', ')})`,
+    };
+  }
+  return {
+    ok: true,
+    subcommand: 'schema',
+    mode: 'content',
+    name,
+    version,
+    current: version === current,
+    content: readRawSchema(name as LogicalSchemaName, version),
+  };
 }
 
 function executeGet(op: ResolvedConfigOp): ConfigExecutionResult {
@@ -251,7 +327,6 @@ function executeSet(op: ResolvedConfigOp): ConfigExecutionResult {
     field: op.field,
     value: op.value,
     scope: op.configScope,
-    permission: op.route.permission,
     file: op.route.schema,
   };
 }

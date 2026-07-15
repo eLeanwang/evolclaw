@@ -14,18 +14,24 @@
 
 ## 二、通用参数清单
 
+通用参数全部在**配置顶层**（与 responseMode 平级），不包在某个 config 对象里：
+
 ```typescript
-interface CommonResponseModeConfig {
-  // 1. 交互方式（必选）
-  chatMode: 'interactive' | 'proactive';
-  
-  // 2. Mention 处理策略（可选）
+// 顶层字段（非嵌套在 config 内）
+{
+  // 1. 交互方式：场景表字典，按对端类型（private/nothuman/group）取键
+  chatmode?: { private?: ChatMode; nothuman?: ChatMode; group?: ChatMode };
+  //   ChatMode = 'interactive' | 'proactive'；出厂默认来自 schema
+
+  // 2. Mention 处理策略（标量）
   mentionMode?: 'disabled' | 'mention-only';
-  
-  // 3. 模型选择（可选）
+
+  // 3. 模型选择（标量）
   model?: string;
 }
 ```
+
+> 完整语义/解析优先级/层级合并以 [config-reference.md](../../config-reference.md) 为准。
 
 ---
 
@@ -33,11 +39,13 @@ interface CommonResponseModeConfig {
 
 ### 3.1 定义
 
-**语义**：决定主会话如何投递回复
+**语义**：决定主会话如何投递回复。存放为顶层**场景表字典** `chatmode`，
+实际生效值由对端类型选键（私聊人→`private`，私聊 agent→`nothuman`，群聊→`group`）。
+每个键的值是标量 `interactive` | `proactive`。
 
 | 值 | 说明 | 典型场景 |
 |---|------|---------|
-| `interactive` | 输出即回复 | coding 模式（无渠道） |
+| `interactive` | 输出即回复 | coding 模式（无渠道，对端 system → 硬约束） |
 | `proactive` | CLI 回复 | 单聊/群聊（有渠道） |
 
 ### 3.2 在双会话中的实现
@@ -99,20 +107,13 @@ class MainSession {
 ### 3.4 配置示例
 
 ```json
-// coding 模式
-{
-  "responseMode": "dual-session",
-  "config": {
-    "chatMode": "interactive"
-  }
-}
+// coding 模式（对端 system → 硬约束 interactive，通常无需配 chatmode）
+{ "responseMode": "dual-session" }
 
-// 单聊/群聊
+// 单聊/群聊：chatmode 场景表在顶层，按对端类型取键
 {
   "responseMode": "dual-session",
-  "config": {
-    "chatMode": "proactive"
-  }
+  "chatmode": { "private": "interactive", "group": "proactive" }
 }
 ```
 
@@ -184,19 +185,13 @@ await auxiliaryQueue.enqueue(message);
 // 默认配置（所有消息都处理）
 {
   "responseMode": "dual-session",
-  "config": {
-    "chatMode": "proactive",
-    "mentionMode": "disabled"
-  }
+  "mentionMode": "disabled"
 }
 
 // 只响应 @（未 @ 消息作引用上下文）
 {
   "responseMode": "dual-session",
-  "config": {
-    "chatMode": "proactive",
-    "mentionMode": "mention-only"
-  }
+  "mentionMode": "mention-only"
 }
 ```
 
@@ -270,29 +265,21 @@ class MainSession {
 
 ```json
 // 使用默认模型
-{
-  "responseMode": "dual-session",
-  "config": {
-    "chatMode": "proactive"
-  }
-}
+{ "responseMode": "dual-session" }
 
-// 自定义主会话模型
+// 自定义主会话模型（model 是顶层通用参数）
 {
   "responseMode": "dual-session",
-  "config": {
-    "chatMode": "proactive",
-    "model": "claude-sonnet"
-  }
+  "model": "claude-sonnet"
 }
 
 // 同时自定义主会话和辅助会话模型
+// model 顶层；auxiliaryModel 是 dual-session 特有参数，放 responseModeParams 桶
 {
   "responseMode": "dual-session",
-  "config": {
-    "chatMode": "proactive",
-    "model": "claude-sonnet",
-    "auxiliaryModel": "claude-haiku"
+  "model": "claude-sonnet",
+  "responseModeParams": {
+    "dual-session": { "auxiliaryModel": "claude-haiku" }
   }
 }
 ```
@@ -304,36 +291,30 @@ class MainSession {
 通用参数可以在多个层级配置，优先级从高到低：
 
 1. **关系级配置**（`$RELATIONS_DIR/<peerKey>/config.json`）
-2. **环境级配置**（`$VENUES_DIR/<venueKey>/config.json`）
+2. **环境级配置**（预留，存储路径待环境层定型）
 3. **Agent 级配置**（`$AGENT_DIR/config.json`）
-4. **出厂默认值**
+4. **出厂默认值**（`chatmode` 出厂表来自 schema；`mentionMode` schema default）
 
-**示例**：
+**示例**（通用参数均在顶层；`mentionMode` 标量整体覆盖，`chatmode` 字典逐键覆盖）：
 
 ```json
 // Agent 级配置（$AGENT_DIR/config.json）
 {
   "responseMode": "dual-session",
-  "config": {
-    "chatMode": "proactive",
-    "mentionMode": "disabled"
-  }
+  "chatmode": { "private": "interactive", "group": "proactive" },
+  "mentionMode": "disabled"
 }
 
 // 关系级覆盖（$RELATIONS_DIR/aun#alice.aid.pub/config.json）
 {
-  "config": {
-    "mentionMode": "mention-only"  // 只覆盖 mentionMode
-  }
+  "mentionMode": "mention-only"  // 只覆盖 mentionMode（标量）
 }
 
 // 最终生效配置
 {
   "responseMode": "dual-session",
-  "config": {
-    "chatMode": "proactive",          // 继承 Agent 级
-    "mentionMode": "mention-only"     // 关系级覆盖
-  }
+  "chatmode": { "private": "interactive", "group": "proactive" },  // 继承 Agent 级
+  "mentionMode": "mention-only"                                      // 关系级覆盖
 }
 ```
 
@@ -347,15 +328,15 @@ class MainSession {
 interface ECKVars {
   // 响应模式
   responseMode: 'dual-session';
-  
-  // 通用参数（从 config 中提取）
+
+  // 通用参数（chatMode 是宿主按对端类型从顶层 chatmode 字典解析出的标量）
   chatMode: 'interactive' | 'proactive';
   mentionMode: 'disabled' | 'mention-only';
   model: string;
-  
-  // dual-session 特有
-  sessionType?: 'auxiliary' | 'main';
-  
+
+  // dual-session 会话原型（系统级；取代旧的 sessionType）
+  sessionPrototype?: 'auxiliary' | 'main';
+
   // 其他参数
   chatType: 'private' | 'group' | null;
   channel: string;

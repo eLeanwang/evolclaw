@@ -38,7 +38,6 @@ export interface FieldSpec {
 export interface SchemaEntry {
   logicalName: LogicalSchemaName;
   version: number;
-  permission: 'H' | 'HA';
   scope: string;
   raw: any;
   validate: ValidateFunction;
@@ -73,6 +72,48 @@ export function currentVersion(name: LogicalSchemaName): number {
   const v = meta.schemas[name]?.currentVersion;
   if (typeof v !== 'number') throw new Error(`[schema] no currentVersion for "${name}" in _meta.json`);
   return v;
+}
+
+/** 全部逻辑 schema 名（来自 _meta.json，键序）。 */
+export function listSchemaNames(): LogicalSchemaName[] {
+  return Object.keys(loadMeta().schemas) as LogicalSchemaName[];
+}
+
+/** 是否为已知逻辑 schema 名。 */
+export function isSchemaName(name: string): name is LogicalSchemaName {
+  return Object.prototype.hasOwnProperty.call(loadMeta().schemas, name);
+}
+
+/** 某版本的 history 元信息（date/description），无则 undefined。 */
+export function schemaHistoryEntry(
+  name: LogicalSchemaName,
+  version: number,
+): { date: string; description: string } | undefined {
+  const entry = loadMeta().history.find(h => h.schema === name && h.version === version);
+  return entry ? { date: entry.date, description: entry.description } : undefined;
+}
+
+/** 扫描 kits/schemas/ 得到某 schema 磁盘上存在的版本号（升序）。 */
+export function listSchemaVersions(name: LogicalSchemaName): number[] {
+  const prefix = `${name}.schema.`;
+  const suffix = '.json';
+  const versions: number[] = [];
+  for (const file of fs.readdirSync(kitsSchemasDir())) {
+    if (!file.startsWith(prefix) || !file.endsWith(suffix)) continue;
+    const middle = file.slice(prefix.length, file.length - suffix.length);
+    if (!/^\d+$/.test(middle)) continue;
+    versions.push(Number(middle));
+  }
+  return versions.sort((a, b) => a - b);
+}
+
+/** 读指定版本的原始 schema（解析为对象，用于内容展示，不做 ajv 编译）。 */
+export function readRawSchema(name: LogicalSchemaName, version: number): unknown {
+  const file = schemaFilePath(name, version);
+  if (!fs.existsSync(file)) {
+    throw new Error(`[schema] no schema file for "${name}" v${version}`);
+  }
+  return JSON.parse(fs.readFileSync(file, 'utf-8'));
 }
 
 const _cache = new Map<string, SchemaEntry>();
@@ -118,7 +159,6 @@ export function loadSchema(name: LogicalSchemaName, version?: number): SchemaEnt
   const entry: SchemaEntry = {
     logicalName: name,
     version: ver,
-    permission: (raw['x-permission'] as 'H' | 'HA') || 'H',
     scope: raw['x-scope'] || name,
     raw,
     validate: ajv().compile(raw),

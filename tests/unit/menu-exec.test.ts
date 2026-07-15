@@ -71,7 +71,7 @@ beforeEach(() => {
     active_baseagent: 'claude',
     baseagents: { claude: { model: 'sonnet' } },
     chatmode: { private: 'interactive', group: 'proactive' },
-    dispatch: 'mention',
+    mentionMode: 'mention-only',
     permissionMode: 'auto',
     show_activities: 'all',
   }));
@@ -304,10 +304,10 @@ describe('execMenuQuery', () => {
     });
   });
 
-  describe('/dispatch', () => {
+  describe('/mentionmode', () => {
     it('returns NOT_APPLICABLE for private chat', async () => {
       const { handler } = createHandler();
-      const result = await handler.execMenuQuery('/dispatch', 'aun', 'chat1', 'user1') as any;
+      const result = await handler.execMenuQuery('/mentionmode', 'aun', 'chat1', 'user1') as any;
       expect(result.code).toBe('NOT_APPLICABLE');
     });
 
@@ -320,8 +320,8 @@ describe('execMenuQuery', () => {
         }),
       });
       const { handler } = createHandler({ sessionManager: sm });
-      const result = await handler.execMenuQuery('/dispatch', 'aun', 'chat1', 'user1');
-      expect(result).toEqual({ data: { mode: 'mention', scope: 'relation', field: 'dispatch', self: TEST_AID, peerKey: formatPeerKey('aun', 'chat1') } });
+      const result = await handler.execMenuQuery('/mentionmode', 'aun', 'chat1', 'user1');
+      expect(result).toEqual({ data: { mode: 'mention-only', scope: 'relation', field: 'mentionMode', self: TEST_AID, peerKey: formatPeerKey('aun', 'chat1') } });
     });
   });
 
@@ -630,7 +630,7 @@ describe('execMenuUpdate', () => {
     });
   });
 
-  describe('/dispatch', () => {
+  describe('/mentionmode', () => {
     it('switches mode in group session', async () => {
       const sm = createMockSessionManager({
         getActiveSession: vi.fn().mockResolvedValue({
@@ -640,18 +640,18 @@ describe('execMenuUpdate', () => {
         }),
       });
       const { handler } = createHandler({ sessionManager: sm });
-      const result = await handler.execMenuUpdate('/dispatch', 'broadcast', 'aun', 'chat1', 'user1');
-      expect(result).toEqual({ data: { mode: 'broadcast', scope: 'relation', field: 'dispatch', self: TEST_AID, peerKey: formatPeerKey('aun', 'chat1') } });
-      expect(readRelationConfig('chat1').dispatch).toBe('broadcast');
+      const result = await handler.execMenuUpdate('/mentionmode', 'disabled', 'aun', 'chat1', 'user1');
+      expect(result).toEqual({ data: { mode: 'disabled', scope: 'relation', field: 'mentionMode', self: TEST_AID, peerKey: formatPeerKey('aun', 'chat1') } });
+      expect(readRelationConfig('chat1').mentionMode).toBe('disabled');
     });
 
     it('rejects in private chat', async () => {
       const { handler } = createHandler();
-      const result = await handler.execMenuUpdate('/dispatch', 'broadcast', 'aun', 'chat1', 'user1') as any;
+      const result = await handler.execMenuUpdate('/mentionmode', 'disabled', 'aun', 'chat1', 'user1') as any;
       expect(result.code).toBe('NOT_APPLICABLE');
     });
 
-    it('clear removes agent dispatch override', async () => {
+    it('clear removes agent mentionMode override', async () => {
       const sm = createMockSessionManager({
         getActiveSession: vi.fn().mockResolvedValue({
           id: 'sess-1', chatType: 'group', sessionMode: 'interactive',
@@ -660,12 +660,12 @@ describe('execMenuUpdate', () => {
         }),
       });
       const { handler } = createHandler({ sessionManager: sm });
-      const result = await handler.execMenuUpdate('/dispatch', 'clear', 'aun', 'chat1', 'user1');
-      expect(result).toEqual({ data: { mode: null, scope: 'relation', field: 'dispatch', self: TEST_AID, peerKey: formatPeerKey('aun', 'chat1') } });
-      expect(readRelationConfig('chat1').dispatch).toBeUndefined();
+      const result = await handler.execMenuUpdate('/mentionmode', 'clear', 'aun', 'chat1', 'user1');
+      expect(result).toEqual({ data: { mode: null, scope: 'relation', field: 'mentionMode', self: TEST_AID, peerKey: formatPeerKey('aun', 'chat1') } });
+      expect(readRelationConfig('chat1').mentionMode).toBeUndefined();
     });
 
-    it('rejects /dispatch update through the chat command path for visitor', async () => {
+    it('rejects /mentionmode update through the chat command path for visitor', async () => {
       const sm = createMockSessionManager({
         getActiveSession: vi.fn().mockResolvedValue({
           id: 'sess-1', chatType: 'group', sessionMode: 'interactive',
@@ -676,9 +676,9 @@ describe('execMenuUpdate', () => {
         resolveIdentity: vi.fn().mockReturnValue({ role: 'visitor' }),
       });
       const { handler } = createHandler({ sessionManager: sm });
-      const result = await handler.handle('/dispatch broadcast', 'aun', 'chat1', undefined, 'user1') as any;
+      const result = await handler.handle('/mentionmode disabled', 'aun', 'chat1', undefined, 'user1') as any;
       expect(result.kind).toBe('command.error');
-      expect(readTestAgentConfig().dispatch).toBe('mention');
+      expect(readTestAgentConfig().mentionMode).toBe('mention-only');
     });
   });
 
@@ -1813,8 +1813,8 @@ describe('getSubMenuItems — selected field', () => {
     expect(interactive?.selected).toBe(false);
   });
 
-  it('/dispatch marks current mode as selected', async () => {
-    writeTestAgentConfig({ dispatch: 'broadcast' });
+  it('/mentionmode marks current mode as selected', async () => {
+    writeTestAgentConfig({ mentionMode: 'disabled' });
     const sm = createMockSessionManager({
       getActiveSession: vi.fn().mockResolvedValue({
         id: 'sess-1', agentId: 'claude', chatType: 'group', sessionMode: 'interactive',
@@ -1823,11 +1823,11 @@ describe('getSubMenuItems — selected field', () => {
       }),
     });
     const { handler } = createHandler({ sessionManager: sm });
-    const items = await handler.getSubMenuItems('/dispatch', 'aun', 'chat1');
-    const broadcast = items?.find(i => i.value === 'broadcast');
-    const mention = items?.find(i => i.value === 'mention');
-    expect(broadcast?.selected).toBe(true);
-    expect(mention?.selected).toBe(false);
+    const items = await handler.getSubMenuItems('/mentionmode', 'aun', 'chat1');
+    const disabled = items?.find(i => i.value === 'disabled');
+    const mentionOnly = items?.find(i => i.value === 'mention-only');
+    expect(disabled?.selected).toBe(true);
+    expect(mentionOnly?.selected).toBe(false);
   });
 
   it('/perm marks current mode as selected', async () => {

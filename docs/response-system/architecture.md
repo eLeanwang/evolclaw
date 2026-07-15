@@ -12,12 +12,12 @@
 
 ```
 ┌─────────────────────────────────────────┐
-│         用户配置层                        │
-│   responseMode: 'single-session'        │
-│   config: {                             │
-│     chatMode: 'proactive',              │
-│     mentionMode: 'disabled'             │
-│   }                                     │
+│         用户配置层（全部顶层）             │
+│   responseMode: 'single-session'        │  选模式（标量，注册表兜底）
+│   chatmode: { private, group, ... }     │  通用（字典，按对端类型）
+│   mentionMode: 'disabled'               │  通用（标量）
+│   model: 'claude-opus'                  │  通用（标量）
+│   responseModeParams: { <modeId>: {} }  │  模式特有参数（按模式分桶）
 └────────────────┬────────────────────────┘
                  ↓
 ┌─────────────────────────────────────────┐
@@ -128,20 +128,28 @@ docs/response-system/
 
 ## 三、通用参数
 
-### 3.1 接口定义
+### 3.1 通用参数（全部顶层，与选模式正交）
+
+通用参数不包在某个 config 对象里，而是**分散在配置顶层**（与 responseMode 平级）：
 
 ```typescript
-interface CommonResponseModeConfig {
-  // 1. 交互方式（必选）
-  chatMode: 'interactive' | 'proactive';
-  
-  // 2. Mention 处理策略（可选）
+// 顶层字段（非嵌套在 config 内）
+{
+  // 1. 交互方式：场景表字典，按对端类型（private/nothuman/group）取键
+  chatmode?: { private?: ChatMode; nothuman?: ChatMode; group?: ChatMode };
+  //   ChatMode = 'interactive' | 'proactive'；出厂默认来自 schema
+
+  // 2. Mention 处理策略（标量）
   mentionMode?: 'disabled' | 'mention-only';
-  
-  // 3. 模型选择（可选，默认由响应模式决定）
-  model?: string;  // 如 'claude-opus', 'claude-sonnet'
+
+  // 3. 模型选择（标量，默认由响应模式/全局决定）
+  model?: string;
 }
 ```
+
+- 三者所有响应模式共用，与「选哪个模式」正交；
+- `chatmode` 是**字典**（实际生效值由对端类型选键），`mentionMode`/`model` 是标量；
+- 完整语义、解析优先级、层级合并见 [config-reference.md](./config-reference.md)。
 
 ### 3.2 chatMode（交互方式）
 
@@ -201,14 +209,15 @@ interface CommonResponseModeConfig {
 **特有参数**：无
 
 ```typescript
-interface SingleSessionConfig extends CommonResponseModeConfig {
+// 模式特有参数（存 responseModeParams['single-session']）；通用参数在顶层，不在此
+interface SingleSessionParams {
   // 无特有参数
 }
 ```
 
 **适用场景**：
-- coding 模式（`chatMode: 'interactive'`）
-- 传统单聊/群聊（`chatMode: 'proactive'`）
+- coding 模式（对端 system → 硬约束 interactive）
+- 传统单聊/群聊（chatmode 按对端类型解析 interactive/proactive）
 - 简单的直接响应场景
 
 ---
@@ -224,7 +233,8 @@ interface SingleSessionConfig extends CommonResponseModeConfig {
 **特有参数**：
 
 ```typescript
-interface DualSessionConfig extends CommonResponseModeConfig {
+// 模式特有参数（存 responseModeParams['dual-session']）；通用参数在顶层，不在此
+interface DualSessionParams {
   // 辅助队列触发配置
   debounceMs?: number;        // 防抖时间（默认 3000ms）
   maxWaitMs?: number;         // 最早消息最长等待（默认 15000ms）
@@ -262,7 +272,8 @@ interface DualSessionConfig extends CommonResponseModeConfig {
 **特有参数**：
 
 ```typescript
-interface WorkflowConfig extends CommonResponseModeConfig {
+// 模式特有参数（存 responseModeParams['workflow']）；通用参数在顶层，不在此
+interface WorkflowParams {
   // 工作流引擎选择
   workflowEngine?: 'simple' | 'advanced';
   
@@ -293,16 +304,21 @@ export interface ResponseModeDescriptor {
   description: string;
   factory: (config: any) => ResponseModeImpl;
   configSchema: object;
-  supportedCommonParams: string[];  // 声明支持的通用参数
-  specificParams: string[];         // 声明特有参数
+  supportedCommonParams: string[];  // 声明支持的通用参数（chatmode/mentionMode/model）
+  specificParams: string[];         // 声明特有参数（读自 responseModeParams[name]）
 }
+
+// responseMode 是标量参数，走特殊路线：候选清单与默认值来自注册表，不来自 schema。
+// 注册时可标记「首选模式」，作为 responseMode 解析链的最终兜底（关系级>agent级>首选）。
+// 当前实现：registry.registerBuiltin(mode, preferred=true) + registry.getPreferred()。
+// single-session 为首选。
 
 export const responseModeRegistry: Record<string, ResponseModeDescriptor> = {
   'single-session': {
     name: 'single-session',
     displayName: '单会话模式',
     description: '直接响应，无辅助会话',
-    factory: (config: SingleSessionConfig) => new SingleSession(config),
+    factory: (config: SingleSessionParams) => new SingleSession(config),
     configSchema: singleSessionConfigSchema,
     supportedCommonParams: ['chatMode', 'mentionMode', 'model'],
     specificParams: [],  // 无特有参数
@@ -312,7 +328,7 @@ export const responseModeRegistry: Record<string, ResponseModeDescriptor> = {
     name: 'dual-session',
     displayName: '双会话模式',
     description: '辅助会话判断，主会话处理',
-    factory: (config: DualSessionConfig) => new DualSession(config),
+    factory: (config: DualSessionParams) => new DualSession(config),
     configSchema: dualSessionConfigSchema,
     supportedCommonParams: ['chatMode', 'mentionMode', 'model'],
     specificParams: [
@@ -332,15 +348,13 @@ export const responseModeRegistry: Record<string, ResponseModeDescriptor> = {
 
 ## 六、配置示例
 
+> 配置全部在顶层：`chatmode`（字典）/ `mentionMode` / `model` 通用参数直接放顶层；
+> 模式特有参数放 `responseModeParams[modeId]` 桶。详见 [config-reference.md](./config-reference.md)。
+
 ### 6.1 coding 模式（无渠道）
 
 ```json
-{
-  "responseMode": "single-session",
-  "config": {
-    "chatMode": "interactive"
-  }
-}
+{ "responseMode": "single-session" }
 ```
 
 ### 6.2 传统单聊/群聊
@@ -348,10 +362,8 @@ export const responseModeRegistry: Record<string, ResponseModeDescriptor> = {
 ```json
 {
   "responseMode": "single-session",
-  "config": {
-    "chatMode": "proactive",
-    "mentionMode": "disabled"
-  }
+  "chatmode": { "private": "interactive", "group": "proactive" },
+  "mentionMode": "disabled"
 }
 ```
 
@@ -360,10 +372,7 @@ export const responseModeRegistry: Record<string, ResponseModeDescriptor> = {
 ```json
 {
   "responseMode": "single-session",
-  "config": {
-    "chatMode": "proactive",
-    "mentionMode": "mention-only"
-  }
+  "mentionMode": "mention-only"
 }
 ```
 
@@ -372,12 +381,14 @@ export const responseModeRegistry: Record<string, ResponseModeDescriptor> = {
 ```json
 {
   "responseMode": "dual-session",
-  "config": {
-    "chatMode": "proactive",
-    "mentionMode": "disabled",
-    "debounceMs": 3000,
-    "maxWaitMs": 15000,
-    "auxiliaryModel": "deepseek-v4-flash"
+  "chatmode": { "group": "proactive" },
+  "mentionMode": "disabled",
+  "responseModeParams": {
+    "dual-session": {
+      "debounceMs": 3000,
+      "maxWaitMs": 15000,
+      "auxiliaryModel": "deepseek-v4-flash"
+    }
   }
 }
 ```

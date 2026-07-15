@@ -1,20 +1,29 @@
+/**
+ * V1 引擎 —— 主动流（proactive）
+ *
+ * 行为自合并前的 modes/proactive（ProactiveMode）下沉，语义不变：
+ * 工具调用才回复，普通文本作为思考过程（thought 投影）；含首发表态、
+ * 工具汇报提醒、队列未读提醒、Unknown skill 兜底。
+ *
+ * flow 是无状态单例：per-message 运行时状态存 ctx.state['proactive']，
+ * 依赖全部由调用点显式传入。
+ */
+
 import type {
-  ResponseMode,
-  InboundDecision,
-  OutboundDecision,
-  ResponseModeContext,
+  V1Context,
   InboundMessage,
+  InboundDecision,
   OutboundPayload,
-  MessageQueueInterface,
+  OutboundDecision,
   ProcessContext,
   RunConfig,
   ToolUseContext,
   CompleteContext,
   AfterProcessContext,
-} from '../types.js';
-import { FIFOQueue } from '../queues/fifo-queue.js';
+} from './types.js';
+import type { V1Flow } from './types.js';
 
-/** proactive 模式的 per-message 运行时状态（存 ctx.state['proactive']） */
+/** proactive 流的 per-message 运行时状态（存 ctx.state['proactive']） */
 export interface ProactiveState {
   firstToolDone: boolean;
   toolCount: number;
@@ -57,59 +66,39 @@ function buildState(message: InboundMessage, cfg: Record<string, any>): Proactiv
   };
 }
 
-export class ProactiveMode implements ResponseMode {
-  readonly id = 'proactive';
-  readonly displayName = '主动模式';
-  readonly description = '工具调用才回复，普通文本作为思考过程。Agent 对话默认。';
-  readonly type = 'builtin' as const;
-  readonly applicableScenes = ['private', 'group'] as ('private' | 'group')[];
-  readonly configSchema = {
-    type: 'object' as const,
-    properties: {
-      pre_tool_1stmsgchk: { type: 'boolean' as const, default: true },
-      tool_use_reminder: { type: 'boolean' as const, default: true },
-    },
-  };
+export const proactiveFlow: V1Flow = {
+  chatMode: 'proactive',
 
-  private queue = new FIFOQueue();
-  private context!: ResponseModeContext;
-
-  async initialize(context: ResponseModeContext): Promise<void> {
-    this.context = context;
-  }
-
-  async cleanup(): Promise<void> { await this.queue.clear(); }
-
-  // ─── 入站决策（迁移点 1：runtimeState 构造）───
-  async handleInbound(message: InboundMessage): Promise<InboundDecision> {
-    const cfg = this.context?.modeConfig ?? {};
-    const state = buildState(message, cfg);
+  // ─── 入站决策：构造 runtimeState ───
+  handleInbound(message: InboundMessage, ctx: V1Context): InboundDecision {
+    ctx.logger.debug('[V1Engine] proactive inbound chatType=' + message.chatType + ' peerId=' + message.peerId);
+    const state = buildState(message, ctx.modeConfig ?? {});
     return {
       action: 'process',
       queueBehavior: 'enqueue',
       runtimeState: { proactive: state },
     };
-  }
+  },
 
-  // ─── 出站决策（迁移点 3：thought 投影）───
-  async handleOutbound(payload: OutboundPayload): Promise<OutboundDecision> {
+  // ─── 出站决策：activity.batch → thought 投影 ───
+  handleOutbound(payload: OutboundPayload, ctx: V1Context): OutboundDecision {
+    ctx.logger.debug('[V1Engine] proactive outbound kind=' + ((payload as any).kind ?? 'unknown'));
     if (payload.kind === 'activity.batch') {
-      if (!this.context?.channel.capabilities.supportsThought) {
+      if (!ctx.channel.capabilities.supportsThought) {
         return { method: 'suppress', reason: 'channel does not support thought' };
       }
       return { method: 'direct', type: 'thought' };
     }
     return { method: 'direct', type: 'message' };
-  }
+  },
 
-  // ─── beforeProcess（迁移点 1：把 runtimeState 落入 ctx.state，供后续钩子共享）───
+  // ─── beforeProcess：把 runtimeState 落入 ctx.state，供后续钩子共享 ───
   beforeProcess(ctx: ProcessContext): void {
-    const cfg = ctx.modeConfig ?? {};
-    const state = buildState(ctx.message, cfg);
+    const state = buildState(ctx.message, ctx.modeConfig ?? {});
     ctx.state.set(STATE_KEY, state);
-  }
+  },
 
-  // ─── configureRun（迁移点 2：policyHook 首工具表态）───
+  // ─── configureRun：policyHook 首工具表态 ───
   configureRun(ctx: ProcessContext): RunConfig | undefined {
     const state = ctx.state.get(STATE_KEY) as ProactiveState | undefined;
     if (!state || (!state.firstSendRequired && !state.toolReportRequired)) return undefined;
@@ -136,9 +125,9 @@ export class ProactiveMode implements ResponseMode {
         return undefined;
       },
     };
-  }
+  },
 
-  // ─── onToolUse（迁移点 4：工具汇报提醒）───
+  // ─── onToolUse：队列未读提醒 + 工具汇报提醒 ───
   onToolUse(ctx: ToolUseContext): void {
     const state = ctx.state.get(STATE_KEY) as ProactiveState | undefined;
     if (!state || !state.toolUseReminder) return;
@@ -166,22 +155,20 @@ export class ProactiveMode implements ResponseMode {
       const target = state.chatType === 'group' ? '群里' : '对方';
       ctx.injectToModel(`⚠️ 工具调用已达到 ${state.toolCount} 次，请立即用 ${cmdHint} 向${target}汇报当前情况和下一步意图。`);
     }
-  }
+  },
 
-  // ─── onComplete（迁移点 5：标志位检查）───
+  // ─── onComplete：标志位检查 ───
   async onComplete(ctx: CompleteContext): Promise<void> {
     if (/\[PROACTIVE:REPLY_CONFIRMED_(SENT|NONE)\]/.test(ctx.lastReplyText)) {
       await ctx.updateSessionMeta({ lastProactiveFlag: true });
     }
-  }
+  },
 
-  // ─── afterProcess（迁移点 6：Unknown skill 兜底）───
+  // ─── afterProcess：Unknown skill 兜底 ───
   async afterProcess(ctx: AfterProcessContext): Promise<void> {
     if (!ctx.streamResult.hasReceivedText && /^Unknown skill:\s+\S+/i.test(ctx.fullText.trim())) {
       // SDK 本地兜底：直接发送绕过 silent renderer
       await ctx.send({ kind: 'result.text', text: ctx.fullText, isFinal: true } as OutboundPayload);
     }
-  }
-
-  getQueue(): MessageQueueInterface { return this.queue; }
-}
+  },
+};

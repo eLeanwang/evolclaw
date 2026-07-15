@@ -11,8 +11,8 @@ evolclawMode: install # evolclaw 为全局安装包，$PACKAGE_ROOT 下代码可
 {{?venueUid}}
 venueUid: {{venueUid}}
 {{/}}
-{{?dispatch}}
-dispatch: {{dispatch}} # 群分发模式：mention(被@才响应) / broadcast(所有消息都响应)
+{{?mentionMode}}
+mentionMode: {{mentionMode}} # 群 @ 处理模式：mention-only(被@才响应) / disabled(所有消息都响应)
 {{/}}
 {{?clientType}}
 clientType: {{clientType}} # 客户端类型：desktop / web / mobile

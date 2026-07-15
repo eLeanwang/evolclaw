@@ -248,7 +248,7 @@ const PARAM_DESCRIPTIONS: Record<string, string> = {
   chatType: '聊天类型（private=私聊 / group=群聊 / null=本地开发）',
   channel: '渠道类型（aun/feishu/wechat/dingtalk/qqbot/wecom）',
   venueUid: '场所唯一标识（预留）',
-  dispatch: '群分发模式（mention=被@才响应 / broadcast=所有消息都响应）',
+  mentionMode: '群 @ 处理模式（mention-only=被@才响应 / disabled=所有消息都响应）',
   clientType: '客户端类型（desktop/web/mobile）',
   permissionMode: '权限模式（auto/bypass/request/edit/plan/noask/readonly）',
   capabilities: '当前渠道支持的能力列表',

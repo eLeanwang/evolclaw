@@ -1,8 +1,8 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { ResponseModeRegistry } from '../../src/response-modes/registry.js';
-import { ResponseModeResolver } from '../../src/response-modes/resolver.js';
-import type { ResponseMode, MessageQueueInterface } from '../../src/response-modes/types.js';
-import { FIFOQueue } from '../../src/response-modes/queues/fifo-queue.js';
+import { ResponseModeRegistry } from '../../src/response-system/registry.js';
+import { ResponseModeResolver } from '../../src/response-system/resolver.js';
+import type { ResponseMode, MessageQueueInterface } from '../../src/response-system/types.js';
+import { FIFOQueue } from '../../src/response-system/queues/fifo-queue.js';
 
 function makeMode(id: string, type: 'builtin' | 'extension', scenes: ('private' | 'group')[]): ResponseMode {
   const queue = new FIFOQueue();
@@ -73,53 +73,27 @@ describe('ResponseModeResolver', () => {
 
   beforeEach(() => {
     reg = new ResponseModeRegistry();
-    reg.registerBuiltin(makeMode('interactive', 'builtin', ['private']));
-    reg.registerBuiltin(makeMode('proactive', 'builtin', ['private', 'group']));
+    // single-session 标记为注册表首选（responseMode 解析链的最终兜底）
+    reg.registerBuiltin(makeMode('single-session', 'builtin', ['private', 'group']), true);
     reg.registerBuiltin(makeMode('dual-session', 'builtin', ['group']));
     resolver = new ResponseModeResolver(reg);
   });
 
-  it('falls back to interactive for private when no config', () => {
-    const r = resolver.resolve('private', undefined, undefined);
-    expect(r.mode.id).toBe('interactive');
-    expect(r.source).toBe('fallback');
+  it('无 responseMode 配置时兜底注册表首选 single-session', () => {
+    const r = resolver.resolve(undefined);
+    expect(r.mode.id).toBe('single-session');
+    expect(r.source).toBe('preferred');
   });
 
-  it('falls back to proactive for group when no config', () => {
-    const r = resolver.resolve('group', undefined, undefined);
-    expect(r.mode.id).toBe('proactive');
-    expect(r.source).toBe('fallback');
-  });
-
-  it('uses chatType default', () => {
-    const r = resolver.resolve('group', undefined, { default_group: 'dual-session' });
+  it('标量 responseMode 指定的模式优先于首选', () => {
+    const r = resolver.resolve('dual-session');
     expect(r.mode.id).toBe('dual-session');
-    expect(r.source).toBe('default');
+    expect(r.source).toBe('config');
   });
 
-  it('override wins over default', () => {
-    const r = resolver.resolve('group', 'aun#grp1', {
-      default_group: 'proactive',
-      overrides: { 'aun#grp1': { mode: 'dual-session' } },
-    });
-    expect(r.mode.id).toBe('dual-session');
-    expect(r.source).toBe('override');
-  });
-
-  it('merges config: override.config over configs[id]', () => {
-    const r = resolver.resolve('group', 'aun#grp1', {
-      configs: { 'dual-session': { a: 1, b: 2 } },
-      overrides: { 'aun#grp1': { mode: 'dual-session', config: { b: 99 } } },
-    });
-    expect(r.config).toEqual({ a: 1, b: 99 });
-  });
-
-  it('bad override mode falls back to default', () => {
-    const r = resolver.resolve('group', 'aun#grp1', {
-      default_group: 'proactive',
-      overrides: { 'aun#grp1': { mode: 'nonexistent' } },
-    });
-    expect(r.mode.id).toBe('proactive');
-    expect(r.source).toBe('default');
+  it('responseMode 指向不存在的模式时回落注册表首选', () => {
+    const r = resolver.resolve('nonexistent');
+    expect(r.mode.id).toBe('single-session');
+    expect(r.source).toBe('preferred');
   });
 });

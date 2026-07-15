@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { DecisionExecutor, type ExecutorSinks } from '../../src/response-modes/decision-executor.js';
-import type { InboundMessage, OutboundPayload, ResponseModeContext } from '../../src/response-modes/types.js';
+import { DecisionExecutor, type ExecutorSinks } from '../../src/response-system/decision-executor.js';
+import type { InboundMessage, OutboundPayload, ResponseModeContext } from '../../src/response-system/types.js';
 
 function makeSinks(): ExecutorSinks & { calls: Record<string, any[]> } {
   const calls: Record<string, any[]> = { enqueue: [], clearQueue: [], interrupt: [], switchModel: [], injectContext: [], send: [] };

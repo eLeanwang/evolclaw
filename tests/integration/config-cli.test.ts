@@ -61,8 +61,6 @@ describe('integration: ec config CLI', () => {
       console.log('setRes:', JSON.stringify(setRes, null, 2));
     }
     expect(setRes.ok).toBe(true);
-    // v3: 不再区分 H/HA 权限
-    expect(setRes.permission).toBe('human-only');
     // v3: 所有字段都在 config.json
     const cfg = JSON.parse(fs.readFileSync(path.join(root, 'agents', AID, 'config.json'), 'utf-8'));
     expect(cfg.chatmode.private).toBe('proactive');
@@ -71,10 +69,9 @@ describe('integration: ec config CLI', () => {
     expect(getRes.value).toBe('proactive');
   });
 
-  it('set H 字段 → config.json', async () => {
+  it('set 字段 → config.json', async () => {
     const setRes = await runJson(['set', 'observable', 'true', '--self', AID]);
     expect(setRes.ok).toBe(true);
-    expect(setRes.permission).toBe('human-only');
     const cfg = JSON.parse(fs.readFileSync(path.join(root, 'agents', AID, 'config.json'), 'utf-8'));
     expect(cfg.observable).toBe(true);
   });
@@ -102,7 +99,6 @@ describe('integration: ec config CLI', () => {
         field: 'show_activities',
         value: 'none',
         scope: 'relation',
-        permission: 'HA',
         file: 'relation-config',
       },
     });

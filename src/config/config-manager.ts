@@ -603,12 +603,12 @@ export function resolveEffective(sel: Selector, opts: ReadOpts = {}): EffectiveA
     active_baseagent: config.active_baseagent,
     baseagents: config.baseagents,
     chatmode: config.chatmode,
-    response_modes: config.response_modes,
+    mentionMode: config.mentionMode,
+    model: config.model,
     responseMode: config.responseMode,
-    config: config.config,
+    responseModeParams: config.responseModeParams,
     flush_delay: config.flush_delay,
     debounce: config.debounce,
-    dispatch: config.dispatch,
     show_activities: config.show_activities,
     proactive: config.proactive,
     session_renew: config.session_renew,
@@ -635,7 +635,8 @@ export function resolveEffective(sel: Selector, opts: ReadOpts = {}): EffectiveA
         'baseagents.claude.model',
         'baseagents.claude.effort',
         'chatmode',
-        'dispatch',
+        'mentionMode',
+        'model',
         'show_activities',
         'flush_delay',
         'debounce',
@@ -724,9 +725,6 @@ export function validateConfigWrite(
 }
 
 function normalizeEffectiveCompatibility<T extends EffectiveAgentConfig>(effective: T): T {
-  if ((effective as any).dispatch === 'all' || (effective as any).dispatch === 'none') {
-    (effective as any).dispatch = 'broadcast';
-  }
   normalizeShowActivitiesCompat(effective as any);
   const behavior: Record<string, unknown> = {};
   for (const field of EFFECTIVE_BEHAVIOR_FIELDS) {
@@ -744,7 +742,6 @@ export interface FieldRoute {
   field: string;
   target: ConfigTarget;
   schema: LogicalSchemaName;
-  permission: 'H' | 'HA';
   merge: string;
   enum?: string[];
 }
@@ -755,9 +752,9 @@ const EFFECTIVE_BEHAVIOR_FIELDS = [
   'active_baseagent',
   'baseagents',
   'chatmode',
+  'mentionMode',
   'flush_delay',
   'debounce',
-  'dispatch',
   'show_activities',
   'proactive',
   'session_renew',
@@ -816,7 +813,6 @@ function routeIn(name: LogicalSchemaName, target: ConfigTarget, topField: string
       field: topField,
       target,
       schema: name,
-      permission: 'H',
       merge: 'replace' as const,
       enum: undefined
     };
@@ -829,7 +825,7 @@ function routeIn(name: LogicalSchemaName, target: ConfigTarget, topField: string
 
 function mkRoute(s: SchemaEntry, target: ConfigTarget, topField: string): FieldRoute {
   const spec = s.fields.get(topField)!;
-  return { field: topField, target, schema: s.logicalName, permission: s.permission, merge: spec.merge, enum: spec.enum };
+  return { field: topField, target, schema: s.logicalName, merge: spec.merge, enum: spec.enum };
 }
 
 /** 鍒楀嚭鏌愪綔鐢ㄥ煙涓嬫墍鏈夊彲璁惧瓧娈碉紙ec config fields 鐢級銆?*/

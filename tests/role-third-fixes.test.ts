@@ -15,7 +15,7 @@ describe('resolveEffective role constraints', () => {
     write(
       ConfigTarget.Relation,
       {
-        dispatch: 'broadcast',
+        mentionMode: 'disabled',
         chatmode: { private: 'proactive' },
         baseagents: { claude: { model: 'claude-opus-4-8' } },
       },
@@ -23,7 +23,7 @@ describe('resolveEffective role constraints', () => {
     );
 
     const effective = resolveEffective({ self: aid, peerKey, role: 'owner' });
-    expect(effective.dispatch).toBe('broadcast');
+    expect(effective.mentionMode).toBe('disabled');
     expect(effective.chatmode?.private).toBe('proactive');
     expect(effective.baseagents?.claude?.model).toBe('claude-opus-4-8');
   });
@@ -34,7 +34,7 @@ describe('resolveEffective role constraints', () => {
       ConfigTarget.Relation,
       {
         permissionMode: 'bypass',
-        dispatch: 'broadcast',
+        mentionMode: 'disabled',
         baseagents: { claude: { model: 'claude-opus-4-8' } },
       },
       { self: aid, peerKey },
@@ -42,7 +42,7 @@ describe('resolveEffective role constraints', () => {
 
     const effective = resolveEffective({ self: aid, peerKey, role: 'visitor' });
     expect(effective.permissionMode).toBe('readonly');
-    expect(effective.dispatch).toBe('broadcast');
+    expect(effective.mentionMode).toBe('disabled');
     expect(effective.baseagents?.claude?.model).toBe('claude-opus-4-8');
   });
 
@@ -52,7 +52,7 @@ describe('resolveEffective role constraints', () => {
       ConfigTarget.Relation,
       {
         permissionMode: 'bypass',
-        dispatch: 'broadcast',
+        mentionMode: 'disabled',
         baseagents: { claude: { model: 'claude-opus-4-8' } },
       },
       { self: aid, peerKey },
@@ -60,7 +60,7 @@ describe('resolveEffective role constraints', () => {
 
     const effective = resolveEffective({ self: aid, peerKey });
     expect(effective.permissionMode).toBe('bypass');
-    expect(effective.dispatch).toBe('broadcast');
+    expect(effective.mentionMode).toBe('disabled');
     expect(effective.baseagents?.claude?.model).toBe('claude-opus-4-8');
   });
 

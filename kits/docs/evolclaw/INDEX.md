@@ -47,7 +47,7 @@
 |--------|------|--------|------|
 | `ec model` | 模型管理（按作用域持久化） | 切模型/列模型/看当前/改强度 | `model.md` |
 | `ec response` | 响应模式管理（按作用域持久化） | 切换响应模式/列响应模式/看当前模式/改响应配置 | `response.md` |
-| `ec config` | 配置体系底层入口（读写/快照/回滚） | 看配置/改配置/查字段/校验/快照/回滚/历史/启动记录 | `config.md` |
+| `ec config` | 配置体系底层入口（读写/快照/回滚） | 看配置/改配置/查字段/查schema/校验/快照/回滚/历史/启动记录 | `config.md` |
 | `ec stats` | Token 用量与费用统计 | 用量/费用/统计/预算/token/cost | `stats.md` |
 | `ec trigger` | 定时与事件触发器管理 | 触发器/定时任务/cron/提醒/定时检查/自动执行/巡检/禁用 trigger/删除 trigger | `trigger.md` |
 | `ec trigger event` | EventBus 事件目录 | 事件触发/事件目录/EventBus/source.type=event/filter.match | `event.md` |

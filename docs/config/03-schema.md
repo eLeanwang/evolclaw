@@ -115,6 +115,8 @@ export function migrate(old: object): object;   // 旧版本完整 JSON → 新�
 }
 ```
 
+> 查看 schema 定义本身（各 schema 的字段/类型/版本、`_meta.json` 里的 currentVersion 与 history）用 `ec config schema [<name>] [<version>] [--list]`，命令详解见 [06-cli-commands.md](./06-cli-commands.md#schema---查看-schema-定义)。
+
 ---
 
 ## 五、Schema 示例

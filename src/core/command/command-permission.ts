@@ -43,7 +43,7 @@ export const USER_PLANE_CAPABILITY_CEILING = {
     'permission.answer',
     'chatmode.current',
     'chatmode.update',
-    'dispatch.current',
+    'mentionmode.current',
     'session.list',
     'session.create',
     'session.rename',

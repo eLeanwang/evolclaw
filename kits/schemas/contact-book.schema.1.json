@@ -3,7 +3,6 @@
   "$id": "contact-book.schema.1.json",
   "title": "ContactBook (agents/{aid}/contact.json)",
   "x-logical-name": "contact-book",
-  "x-permission": "H",
   "x-scope": "contact",
   "type": "object",
   "additionalProperties": true,

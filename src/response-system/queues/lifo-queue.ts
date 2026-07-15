@@ -25,6 +25,10 @@ export class LIFOQueue implements MessageQueueInterface {
     return this.queue[this.queue.length - 1];
   }
 
+  peekSync(): InboundMessage | undefined {
+    return this.queue[this.queue.length - 1];
+  }
+
   size(): number {
     return this.queue.length;
   }

@@ -727,23 +727,19 @@ T10: Owner: "@agent 这个问题"（被@）
 
 ## 八、配置示例
 
+`mentionMode` 是顶层通用参数（`chatmode` 场景表按对端类型自动解析，通常无需显式配）：
+
 ```json
 // 默认配置
 {
   "responseMode": "dual-session",
-  "config": {
-    "chatMode": "proactive",
-    "mentionMode": "disabled"
-  }
+  "mentionMode": "disabled"
 }
 
 // 提及模式
 {
   "responseMode": "dual-session",
-  "config": {
-    "chatMode": "proactive",
-    "mentionMode": "mention-only"
-  }
+  "mentionMode": "mention-only"
 }
 ```
 

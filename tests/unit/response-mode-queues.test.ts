@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { FIFOQueue, LIFOQueue, PriorityQueue } from '../../src/response-modes/queues/index.js';
-import type { InboundMessage } from '../../src/response-modes/types.js';
+import { FIFOQueue, LIFOQueue, PriorityQueue } from '../../src/response-system/queues/index.js';
+import type { InboundMessage } from '../../src/response-system/types.js';
 
 function msg(content: string): InboundMessage {
   return { peerId: 'p1', content, chatType: 'private' };

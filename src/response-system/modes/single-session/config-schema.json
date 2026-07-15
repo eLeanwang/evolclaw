@@ -1,0 +1,20 @@
+{
+  "type": "object",
+  "properties": {
+    "chatMode": {
+      "type": "string",
+      "enum": ["interactive", "proactive"],
+      "description": "回复投递方式：interactive=输出即回复；proactive=CLI 回复 + 思考投影。每会话生效值由宿主按配置层级解析（关系级 > agent 级 chatmode 表 > 出厂默认表）后注入。"
+    },
+    "pre_tool_1stmsgchk": {
+      "type": "boolean",
+      "default": true,
+      "description": "proactive 首工具表态检查（仅 chatMode=proactive 生效）"
+    },
+    "tool_use_reminder": {
+      "type": "boolean",
+      "default": true,
+      "description": "proactive 工具汇报提醒（仅 chatMode=proactive 生效）"
+    }
+  }
+}

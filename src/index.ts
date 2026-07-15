@@ -801,24 +801,15 @@ async function main() {
     return roleToSessionIdentity(detail.effectiveRole);
   };
 
-  const modeIdToChatMode = (modeId: unknown): 'interactive' | 'proactive' | undefined => (
-    modeId === 'interactive' || modeId === 'proactive' ? modeId : undefined
-  );
-
   const sessionManager = new SessionManager(paths.sessionsDir, eventBus,
     resolveSessionIdentity,
     (channel) => {
       const owningAgent = agentRegistry.resolveByChannel(channel);
       if (!owningAgent?.aid) return undefined;
       try {
+        // chatMode 默认表：合并后的顶层 chatmode 字典（关系级>agent级，出厂默认走 schema）。
         const effective = resolveEffective({ self: owningAgent.aid }, { cache: true });
-        const legacy = effective.chatmode ?? owningAgent.config.chatmode;
-        const responseModes = effective.response_modes;
-        return {
-          private: modeIdToChatMode(responseModes?.default_private) ?? legacy?.private,
-          group: modeIdToChatMode(responseModes?.default_group) ?? legacy?.group,
-          nothuman: legacy?.nothuman,
-        };
+        return effective.chatmode ?? owningAgent.config.chatmode;
       } catch (e) {
         logger.warn('[SessionManager] resolve chatMode defaults failed for channel=' + channel + ': ' + (e instanceof Error ? e.message : String(e)));
         return owningAgent.config.chatmode;

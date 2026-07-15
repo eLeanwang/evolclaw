@@ -23,7 +23,7 @@ describe('role constraints integration', () => {
       {
         permissionMode: 'bypass',
         baseagents: { claude: { model: 'claude-opus-4-8' } },
-        dispatch: 'broadcast',
+        mentionMode: 'disabled',
       },
       { self: aid, peerKey },
     );
@@ -31,12 +31,12 @@ describe('role constraints integration', () => {
     const visitorEffective = resolveEffective({ self: aid, peerKey, role: 'visitor' });
     expect(visitorEffective.permissionMode).toBe('readonly');
     expect(visitorEffective.baseagents?.claude?.model).toBe('claude-opus-4-8');
-    expect(visitorEffective.dispatch).toBe('broadcast');
+    expect(visitorEffective.mentionMode).toBe('disabled');
 
     const ownerEffective = resolveEffective({ self: aid, peerKey, role: 'owner' });
     expect(ownerEffective.permissionMode).toBe('bypass');
     expect(ownerEffective.baseagents?.claude?.model).toBe('claude-opus-4-8');
-    expect(ownerEffective.dispatch).toBe('broadcast');
+    expect(ownerEffective.mentionMode).toBe('disabled');
   });
 
   it('does not infer a role from peerKey when selector role is missing', () => {
