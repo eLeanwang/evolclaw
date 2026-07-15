@@ -28,6 +28,7 @@ import { modelMatches, resolveCommandModelResolution } from './model-resolve.js'
 import { filterModelsForRole, validateModelSelectionForRole } from '../model/model-permission.js';
 import { displaySessionTitle } from '../session/session-title.js';
 import { chatmodeFieldForPeer } from '../message/peer-mode.js';
+import { normalizePermissionMode as normalizePermissionModeContract, PUBLIC_PERMISSION_MODES } from '../permission-mode.js';
 import {
   guardIdleCommand,
   guardKnownCommand,
@@ -39,7 +40,7 @@ import {
 
 const allEfforts = ['low', 'medium', 'high', 'xhigh', 'max'] as const;
 type Effort = typeof allEfforts[number];
-const PERMISSION_MODE_KEYS = ['auto', 'bypass', 'readonly', 'plan', 'edit', 'request', 'noask'] as const;
+const PERMISSION_MODE_KEYS = PUBLIC_PERMISSION_MODES;
 const PERMISSION_MODE_USAGE = PERMISSION_MODE_KEYS.join('|');
 
 type SlashChatmodeField = 'private' | 'group' | 'nothuman';
@@ -728,6 +729,34 @@ export async function handleSlashCommand(this: any,
   // /perm 命令：权限模式切换 + 权限审批（快速路径，不进入消息队列）
   if (normalizedContent.startsWith('/perm')) {
     const args = normalizedContent.slice(5).trim();
+    const permissionDecisionLabels: Record<PermissionDecision, string> = {
+      allow: '✓ 已授权（本次），继续执行……',
+      always: '✓ 已授权（同会话同操作 30 分钟），继续执行……',
+      deny: '✓ 已拒绝',
+    };
+
+    // Explicit request IDs are globally unique and already bound to an exact
+    // authenticated approver in PermissionGateway. Handle this before session
+    // lookup so an owner can answer a handoff in an otherwise idle AUN chat.
+    const explicitParts = args.split(/\s+/);
+    if (
+      explicitParts.length === 2
+      && (explicitParts[1] === 'allow' || explicitParts[1] === 'always' || explicitParts[1] === 'deny')
+    ) {
+      if (!this.permissionGateway) {
+        return { kind: 'command.error' as const, text: '❌ 权限审批未启用' };
+      }
+      const decision = explicitParts[1] as PermissionDecision;
+      const resolved = this.permissionGateway.resolvePermissionByRequestId(
+        explicitParts[0],
+        decision,
+        userId,
+      );
+      if (!resolved) {
+        return { kind: 'command.error' as const, text: '❌ 请求不存在或无法验证审批人身份，权限请求保持待处理' };
+      }
+      return { kind: 'command.result' as const, text: permissionDecisionLabels[decision] };
+    }
 
     // 权限审批和关系级模式依附于现有会话；查询/审批不应隐式创建空会话。
     const permSession = await getExistingSessionForCommand();
@@ -746,6 +775,37 @@ export async function handleSlashCommand(this: any,
     const permRole = permSession.identity?.role || identity.role || 'none';
     const permScope = { self: permSelfAid || undefined, peerKey: permPeerKey, role: permRole };
     const permIntentArgs = { self: permScope.self };
+    const authorizePermissionAnswer = async (decision: PermissionDecision) => authorizeSlashIntent({
+      intent: {
+        operation: 'permission.answer',
+        scope: 'relation',
+        source: 'slash',
+        args: { ...permIntentArgs, value: decision },
+      },
+      identity,
+      session: permSession,
+      explicitChatType: permSession.chatType === 'group' ? 'group' : 'private',
+      channel,
+      channelId,
+      userId,
+      selfAid: permScope.self,
+      isDaemonOwner,
+    });
+    const resolvePermissionAnswer = (requestId: string, decision: PermissionDecision) => {
+      if (!this.permissionGateway) {
+        return { kind: 'command.error' as const, text: '❌ 权限审批未启用' };
+      }
+      const pendingIds = this.permissionGateway.getPendingRequests(permSession.id);
+      if (!pendingIds.includes(requestId)) {
+        return { kind: 'command.error' as const, text: `❌ 当前会话没有待审批请求: ${requestId}` };
+      }
+
+      const resolved = this.permissionGateway.resolvePermissionByRequestId(requestId, decision, userId);
+      if (!resolved) {
+        return { kind: 'command.error' as const, text: '❌ 无法验证审批人身份，权限请求保持待处理' };
+      }
+      return { kind: 'command.result' as const, text: permissionDecisionLabels[decision] };
+    };
 
     // /perm（无参数）：显示当前模式和可选模式
     if (!args) {
@@ -769,7 +829,7 @@ export async function handleSlashCommand(this: any,
         isDaemonOwner,
       });
       if (authDenied) return authDenied;
-      const currentMode = resolvePermissionMode(permScope);
+      const currentMode = normalizePermissionModeContract(resolvePermissionMode(permScope)).mode;
       const modes = permAgent.listModes();
 
       // 尝试发送 CommandCard 卡片
@@ -808,30 +868,9 @@ export async function handleSlashCommand(this: any,
       const arg = parts[0];
 
       // /perm allow|always|deny：快捷审批
-      // 优先走 InteractionRouter fallback（统一降级路径）
       if (arg === 'allow' || arg === 'always' || arg === 'deny') {
-        const authDenied = await authorizeSlashIntent({
-          intent: {
-            operation: 'permission.answer',
-            scope: 'relation',
-            source: 'slash',
-            args: { ...permIntentArgs, value: arg },
-          },
-          identity,
-          session: permSession,
-          explicitChatType: permSession.chatType === 'group' ? 'group' : 'private',
-          channel,
-          channelId,
-          userId,
-          selfAid: permScope.self,
-          isDaemonOwner,
-        });
+        const authDenied = await authorizePermissionAnswer(arg);
         if (authDenied) return authDenied;
-
-        const fb = await this.handleInteractionFallback('perm', arg, permSession.id, userId);
-        if (fb.matched) return { kind: 'command.result' as const, text: fb.result ?? '✓ 已回答' };
-
-        // fallback 不命中：走 permissionGateway 直接审批（兼容旧路径）
         if (!this.permissionGateway) {
           return { kind: 'command.error' as const, text: '❌ 权限审批未启用' };
         }
@@ -843,14 +882,7 @@ export async function handleSlashCommand(this: any,
           return { kind: 'command.error' as const, text: `❌ 当前有 ${pendingIds.length} 个待审批请求，请指定 requestId：\n${pendingIds.map((id: string) => `  /perm ${id} ${arg}`).join('\n')}` };
         }
         const requestId = pendingIds[0];
-        const decision: PermissionDecision = arg;
-        this.permissionGateway.resolvePermission(permSession.id, requestId, decision);
-        const labels: Record<PermissionDecision, string> = {
-          allow: '✓ 已授权（本次），继续执行……',
-          always: '✓ 已授权（始终允许该工具），继续执行……',
-          deny: '✓ 已拒绝'
-        };
-        return { kind: 'command.result' as const, text: labels[decision] };
+        return resolvePermissionAnswer(requestId, arg);
       }
 
       // /perm <mode>：切换权限模式
@@ -891,9 +923,8 @@ export async function handleSlashCommand(this: any,
       return { kind: 'command.error' as const, text: `❌ 未知参数: ${arg}\n用法: /perm <${modeKeys}> 或 /perm allow|always|deny` };
     }
 
-    // 双参数不再支持，提示正确用法
     const allModeKeys = hasPermissionController(permAgent) ? permAgent.listModes().map(m => m.key).join('|') : PERMISSION_MODE_USAGE;
-    return { kind: 'command.error' as const, text: `❌ 未知参数: ${args}\n用法: /perm <${allModeKeys}> 或 /perm allow|always|deny` };
+    return { kind: 'command.error' as const, text: `❌ 未知参数: ${args}\n用法: /perm <${allModeKeys}>、/perm allow|always|deny 或 /perm <requestId> allow|always|deny` };
   }
 
   // /ask 命令：回答 AskUserQuestion / ExitPlanMode 的交互式问题
@@ -1684,7 +1715,6 @@ export async function handleSlashCommand(this: any,
       normalizedContent === '/storage' || normalizedContent.startsWith('/storage ')) {
     return { kind: 'command.error' as const, text: '❌ 此命令仅限 ctl 调用，不支持 slash 输入' };
   }
-
 
   if (normalizedContent === '/activity' || normalizedContent.startsWith('/activity ')) {
     const activityArg = normalizedContent.slice(9).trim();

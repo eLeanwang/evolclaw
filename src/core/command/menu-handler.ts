@@ -39,6 +39,7 @@ import { authorizeCommand, authorizeResolvedConfigCommand } from './command-perm
 import { auditCommandAuthorization, hashArgv } from './command-audit.js';
 import type { CommandAuthorizationContext, CommandIntent, CommandScope } from '../../types.js';
 import { chatmodeFieldForPeer } from '../message/peer-mode.js';
+import { normalizePermissionMode as normalizePermissionModeContract, PUBLIC_PERMISSION_MODES } from '../permission-mode.js';
 
 /**
  * 获取 baseagent CLI 的版本号（claude/gemini/codex）。
@@ -85,7 +86,7 @@ export type MenuChatType = 'private' | 'group';
 
 const allEfforts = ['low', 'medium', 'high', 'xhigh', 'max'] as const;
 type Effort = typeof allEfforts[number];
-const PERMISSION_MODE_KEYS = ['auto', 'bypass', 'readonly', 'plan', 'edit', 'request', 'noask'] as const;
+const PERMISSION_MODE_KEYS = PUBLIC_PERMISSION_MODES;
 
 /** menu file: fetch 文件大小上限（与 /file 一致） */
 const FILE_FETCH_MAX_SIZE = 10 * 1024 * 1024;
@@ -701,10 +702,10 @@ function readMenuPermission(target: MenuPermissionTarget): MenuPermissionValue {
     : target.sel;
   try {
     const mode = resolveEffective(sel, { cache: true }).permissionMode;
-    if (isMenuPermissionValue(mode)) return mode;
+    if (typeof mode === 'string') return normalizePermissionModeContract(mode).mode;
   } catch {}
   const fallback = resolvePermissionMode(sel);
-  return isMenuPermissionValue(fallback) ? fallback : 'auto';
+  return normalizePermissionModeContract(fallback).mode;
 }
 
 function writeMenuPermission(target: MenuPermissionTarget, value: MenuPermissionValue): void {
@@ -1161,15 +1162,12 @@ export function getMenuItems(this: any, role: string, chatType: string = 'privat
       group: '权限管理',
       commands: [
         { cmd: '/perm', label: '权限模式管理', desc: '控制工具调用的审批策略', next: { type: 'select', items: [
-          { value: 'auto', label: '自动模式', desc: '根据风险等级自动决定是否审批' },
-          { value: 'bypass', label: '免审批模式', desc: '普通操作自动放行，危险操作仍需确认' },
-          { value: 'readonly', label: '只读模式', desc: '允许读取和临时目录写入，拒绝项目文件修改' },
-          { value: 'plan', label: '计划模式', desc: '仅允许只读操作，写操作需审批' },
-          { value: 'edit', label: '编辑模式', desc: '允许文件编辑，其他操作需审批' },
-          { value: 'request', label: '请求模式', desc: '所有操作均需审批' },
-          { value: 'noask', label: '静默模式', desc: '不弹出审批，自动拒绝未授权操作' },
+          { value: 'readonly', label: '只读模式', desc: '只读操作自动执行，写入直接拒绝' },
+          { value: 'auto', label: '自动模式', desc: '常规操作自动执行，危险操作自动拒绝' },
+          { value: 'request', label: '审批模式', desc: '需要升级的操作进入人工审批' },
+          { value: 'bypass', label: '放行模式', desc: '常规操作自动执行，危险操作仍需审批' },
           { value: 'allow', label: '允许此操作', desc: '本次允许当前待审批操作' },
-          { value: 'always', label: '始终允许', desc: '永久允许同类操作' },
+          { value: 'always', label: '同操作 30 分钟', desc: '当前会话精确操作临时授权' },
           { value: 'deny', label: '拒绝此操作', desc: '拒绝当前待审批操作' },
         ] } },
       ]

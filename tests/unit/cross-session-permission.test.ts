@@ -1,7 +1,7 @@
 import path from 'path';
 import { describe, expect, it, vi } from 'vitest';
 import { PermissionGateway, planApprovalRoute } from '../../src/core/permission.js';
-import { InteractionRouter } from '../../src/core/interaction-router.js';
+import { InteractionRouter, renderActionAsText } from '../../src/core/interaction-router.js';
 import type { AuthorizationChallenge, ChannelAdapter, OutboundEnvelope, OutboundPayload } from '../../src/types.js';
 
 function waitTick(): Promise<void> {
@@ -63,6 +63,207 @@ describe('cross-session permission approval', () => {
         originSessionId: 'session-2',
       },
     })).toEqual({ kind: 'unavailable', reason: 'no_agent_owner_configured' });
+  });
+
+  it('fails requester approval closed when no requester identity is available', () => {
+    const challenge: AuthorizationChallenge = {
+      id: 'challenge-no-requester',
+      sessionId: 'session-no-requester',
+      toolName: 'Bash',
+      toolInput: { command: 'npm install' },
+      summary: 'npm install',
+      grantable: true,
+      approverPolicy: 'requester',
+      createdAt: Date.now(),
+    };
+
+    expect(planApprovalRoute(challenge)).toEqual({
+      kind: 'unavailable',
+      reason: 'no_requester_approver',
+    });
+    expect(planApprovalRoute(challenge, { channelId: 'group.agentid.pub/room' })).toEqual({
+      kind: 'unavailable',
+      reason: 'no_requester_approver',
+    });
+    expect(planApprovalRoute({ ...challenge, approverPolicy: 'agent_owner' }, {
+      approvalRouting: {
+        approverPolicy: 'agent_owner',
+        owners: ['owner.agentid.pub'],
+        ownerAdapter: fakeAunAdapter([]),
+        originSessionId: 'session-no-requester',
+      },
+    })).toEqual({
+      kind: 'unavailable',
+      reason: 'no_requester_approver',
+    });
+  });
+
+  it('treats an unknown local approval action as deny', async () => {
+    const gateway = new PermissionGateway();
+    const decision = gateway.requestPermission(
+      'session-unknown-action',
+      'Bash',
+      { command: 'npm install' },
+      async () => {},
+      { userId: 'user.agentid.pub', channelId: 'user.agentid.pub' },
+    );
+    await waitTick();
+    const [requestId] = gateway.getPendingRequests('session-unknown-action');
+    expect(gateway.resolvePermission('session-unknown-action', requestId, 'unexpected-action', 'user.agentid.pub')).toBe(true);
+    await expect(decision).resolves.toBe('deny');
+  });
+
+  it('registers a local approval before the adapter can deliver an immediate response', async () => {
+    const router = new InteractionRouter();
+    const gateway = new PermissionGateway();
+    let handled = false;
+    const adapter: ChannelAdapter = {
+      channelName: 'aun#self.agentid.pub#main',
+      channelKey: 'aun#self.agentid.pub#main',
+      capabilities: { interaction: true, file: false, image: false, markdown: true, thought: false, status: false, thread: false },
+      async send(_envelope, payload) {
+        if (payload.kind !== 'interaction') return;
+        handled = router.handle({
+          type: 'interaction.response',
+          id: payload.interaction.id,
+          action: 'allow',
+          operatorId: 'owner.agentid.pub',
+        });
+      },
+    };
+
+    const decisionPromise = gateway.requestPermission(
+      'immediate-local-session',
+      'Bash',
+      { command: 'npm install' },
+      async () => {},
+      {
+        adapter,
+        channelId: 'owner.agentid.pub',
+        interactionRouter: router,
+        userId: 'owner.agentid.pub',
+        chatType: 'private',
+        approvalRouting: {
+          approverPolicy: 'agent_owner',
+          owners: ['owner.agentid.pub'],
+          ownerAdapter: adapter,
+          originSessionId: 'immediate-local-session',
+        },
+      },
+    );
+
+    await waitTick();
+    if (!handled) gateway.cancelAll('immediate-local-session', 'test_cleanup');
+    expect(handled).toBe(true);
+    await expect(decisionPromise).resolves.toBe('allow');
+  });
+
+  it('registers an owner handoff before the adapter can deliver an immediate response', async () => {
+    const router = new InteractionRouter();
+    const gateway = new PermissionGateway();
+    let handled = false;
+    const ownerAdapter: ChannelAdapter = {
+      channelName: 'aun#self.agentid.pub#main',
+      channelKey: 'aun#self.agentid.pub#main',
+      capabilities: { interaction: true, file: false, image: false, markdown: true, thought: false, status: false, thread: false },
+      async send(_envelope, payload) {
+        if (payload.kind !== 'interaction') return;
+        handled = router.handle({
+          type: 'interaction.response',
+          id: payload.interaction.id,
+          action: 'approve_once',
+          operatorId: 'owner.agentid.pub',
+        });
+      },
+    };
+
+    const decisionPromise = gateway.requestPermission(
+      'immediate-handoff-session',
+      'Bash',
+      { command: 'sudo make install' },
+      async () => {},
+      {
+        channelId: 'admin.agentid.pub',
+        interactionRouter: router,
+        userId: 'admin.agentid.pub',
+        role: 'admin',
+        chatType: 'private',
+        approvalRouting: {
+          approverPolicy: 'agent_owner',
+          owners: ['owner.agentid.pub'],
+          ownerAdapter,
+          originSessionId: 'immediate-handoff-session',
+          originPeerId: 'admin.agentid.pub',
+          originRole: 'admin',
+        },
+      },
+    );
+
+    await waitTick();
+    if (!handled) gateway.cancelAll('immediate-handoff-session', 'test_cleanup');
+    expect(handled).toBe(true);
+    await expect(decisionPromise).resolves.toBe('allow');
+  });
+
+  it('allows the bound owner to use the explicit /perm text fallback across sessions', async () => {
+    const sent: Array<{ envelope: OutboundEnvelope; payload: OutboundPayload }> = [];
+    const router = new InteractionRouter();
+    const gateway = new PermissionGateway();
+    const ownerAdapter = {
+      ...fakeAunAdapter(sent),
+      capabilities: {
+        interaction: false,
+        file: false,
+        image: false,
+        markdown: true,
+        thought: false,
+        status: false,
+        thread: false,
+      },
+    } as ChannelAdapter;
+
+    const decisionPromise = gateway.requestPermission(
+      'text-fallback-origin-session',
+      'Bash',
+      { command: 'sudo make install' },
+      async () => {},
+      {
+        channelId: 'admin.agentid.pub',
+        interactionRouter: router,
+        userId: 'admin.agentid.pub',
+        role: 'admin',
+        chatType: 'private',
+        approvalRouting: {
+          approverPolicy: 'agent_owner',
+          owners: ['owner.agentid.pub'],
+          ownerAdapter,
+          originSessionId: 'text-fallback-origin-session',
+          originPeerId: 'admin.agentid.pub',
+          originRole: 'admin',
+        },
+      },
+    );
+
+    await waitTick();
+    const payload = sent[0]?.payload;
+    if (payload?.kind !== 'interaction') throw new Error('expected interaction payload');
+    const requestId = payload.interaction.id;
+    const fallback = renderActionAsText(payload.interaction);
+    expect(fallback).toContain(`/perm ${requestId} allow`);
+    expect(fallback).toContain(`/perm ${requestId} always`);
+    expect(fallback).toContain(`/perm ${requestId} deny`);
+    expect(payload.fallbackText).toBe(fallback);
+
+    expect(gateway.resolvePermissionByRequestId(requestId, 'allow', 'other.agentid.pub')).toBe(false);
+    expect(gateway.getPendingRequests('text-fallback-origin-session')).toEqual([requestId]);
+    expect(gateway.resolvePermissionByRequestId(requestId, 'always', 'owner.agentid.pub')).toBe(true);
+    await expect(decisionPromise).resolves.toBe('allow');
+    expect(router.handle({
+      type: 'interaction.response',
+      id: requestId,
+      action: 'approve_once',
+      operatorId: 'owner.agentid.pub',
+    })).toBe(false);
   });
 
   it('routes an admin challenge to the AUN owner and resolves allow on owner approval', async () => {
@@ -137,6 +338,13 @@ describe('cross-session permission approval', () => {
     expect(interactionPayload.interaction.kind.body).not.toContain('仅同一 session');
     expect(sent[0].envelope.replyContext?.metadata?.source).toBe('handoff');
     expect(sent[0].envelope.replyContext?.metadata?.handoff).toBeUndefined();
+
+    expect(router.handle({
+      type: 'interaction.response',
+      id: interactionPayload.interaction.id,
+      action: 'approve_once',
+    })).toBe(false);
+    expect(gateway.getPendingRequests('origin-session')).toEqual([interactionPayload.interaction.id]);
 
     router.handle({
       type: 'interaction.response',

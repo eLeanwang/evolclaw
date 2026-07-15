@@ -27,6 +27,7 @@ agents/defaults.json
   "session_renew": {
     "enabled": false,
     "after_hours": 24,
+    "model": "claude-haiku-4-5-20251001",
     "effort": "low",
     "fallback_action": "continue"
   }
@@ -39,10 +40,17 @@ agents/defaults.json
 |---|---:|---|
 | `enabled` | `false` | 只有最终有效配置严格等于 `true` 时启用 |
 | `after_hours` | `24` | 当前会话最后一条有效对话消息距今超过该时长才触发 |
+| `model` | 无 | Claude Models API 返回的精确模型名称；进入模型判定前必须配置 |
 | `effort` | `low` | 判定调用的推理强度 |
 | `fallback_action` | `continue` | 模型失败、超时或输出非法时的降级动作 |
 
-模型分支不读取响应模式的 `config.auxiliaryModel`。判定 runner 和轻量模型由候选旧 Session 的 `baseagent` 确定，避免辅助配置与实际 runner 不匹配。
+模型分支不读取响应模式的 `config.auxiliaryModel`，也不跟随候选旧 Session 的 `baseagent` 或普通 Agent 会话模型。它固定使用当前 EvolAgent 的 Claude 普通模型 API，并将 `session_renew.model` 原样作为精确模型 ID 发送。
+
+`model` 不接受 `haiku`、`sonnet`、`opus` 等隐式别名。可使用以下命令在对应配置层指定完整名称：
+
+```bash
+ec config set session_renew.model claude-haiku-4-5-20251001 --self <aid>
+```
 
 `session_renew` 保持扁平子字段，适配配置系统的字典第一层覆盖规则。
 
@@ -116,26 +124,14 @@ agents/defaults.json
 
 ## 5. 模型判定
 
-规则无法决定时，根据候选旧 Session 的 `session.baseagent` 选择判定 runner 和固定轻量模型：
+规则无法决定时，固定使用当前 EvolAgent 的 Claude API 配置：
 
-| Session baseagent | 判定 runner | 判定模型 |
-|---|---|---|
-| `claude` | Claude | `haiku`（由 Claude runner 解析实际模型 ID） |
-| `codex` | Codex | `gpt-5.6-luna` |
+1. 调用 `GET /v1/models`，处理 `has_more` / `last_id` 分页；
+2. 对模型列表按网关和凭证缓存 5 分钟；
+3. 精确检查 `session_renew.model` 是否在返回列表中；
+4. 通过后调用 `POST /v1/messages`，请求中的 `model` 原样使用配置值。
 
-其他 baseagent 或对应 runner 不可用时，只跳过模型判断并继续当前 Session，不跨 runner 兜底，也不执行 `fallback_action`。严格显式信号、明确回复和 `missing_history` 不受影响。
-
-判定使用一次性内部辅助会话：
-
-- 不恢复旧主会话；
-- 不预创建新主会话；
-- 不向渠道发送输出；
-- 以单次调用参数禁用工具；即使 backend 仍上报 `tool_use`，也立即中断并按失败降级；
-- backend 支持时不持久化内部会话；
-- 使用最小 system prompt；
-- 完成一次判断后立即关闭。
-
-工具隔离按 backend 能力实现：Claude 调用移除内置工具、MCP、skill 和项目/用户 setting source；Codex 使用 ephemeral thread，并清空动态工具、capability root 和 environment。任何 backend 一旦仍上报 `tool_use`，该次判定立即中断，结果无效并走降级动作。
+判定不进入 `AgentRunner`，不创建或恢复 Claude/Codex Agent 会话，也没有 project path、工具、MCP、hook、权限模式或会话持久化参数。模型未配置、Claude provider/Models API 不可用、模型不在列表中、Messages API 失败或响应非法时，均执行 `fallback_action`。严格显式信号、明确回复和 `missing_history` 不受影响。
 
 模型输入由以下部分组成：
 
@@ -165,7 +161,7 @@ agents/defaults.json
 }
 ```
 
-输出不合法、调用失败或超过 10 秒时按 `fallback_action` 降级，默认继续旧会话。这里的“调用失败”指已经取得对应 runner 并实际发起判定后的失败；runner 不支持或不可用仍按前述规则直接跳过。
+输出不合法、调用失败或“模型列表校验 + Messages 请求”整体超过 10 秒时按 `fallback_action` 降级，默认继续旧会话。
 
 模型输出 `new` 时还要求 `confidence >= 0.85`；低于该阈值按 `continue` 处理。严格句首新建信号不受该阈值影响。
 
@@ -209,8 +205,8 @@ session=<old id>
 decision=continue|new
 source=explicit|reply|model|fallback|missing_history
 idleHours=<number>
-baseagent=claude|codex|none
-model=haiku|gpt-5.6-luna|none
+baseagent=claude|none
+model=<session_renew.model>|none
 ```
 
 不把模型思考过程写入消息日志，不向用户发送“正在判断会话”提示。
@@ -223,8 +219,9 @@ model=haiku|gpt-5.6-luna|none
 - `sessionId` 历史过滤；
 - 未过期、processing、thread、无历史时跳过；
 - 明确回复直接继续；
-- Claude/Haiku 与 Codex/Luna 路由；
-- 不支持或不可用 runner 时跳过模型分支；
+- Claude Models API 分页、缓存和精确模型名称校验；
+- 候选 Session 为 Claude/Codex/Gemini 时均使用 Claude judge provider；
+- 模型未配置、provider 不可用或指定模型不在列表时执行 fallback；
 - 模型 `continue` / `new` / 非法输出 / 异常降级；
 - 并发消息只创建一个新 Session；
 - renew 后入站消息写入最终 Session。

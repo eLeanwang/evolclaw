@@ -251,11 +251,11 @@ const BUILTIN_PERMISSION_BY_ROLE: Record<string, string> = {
   visitor: 'readonly',
   none: 'readonly',
 };
-const FALLBACK_PERMISSION_MODE = 'auto';
+const FALLBACK_PERMISSION_MODE = 'readonly';
 
 /**
  * 解析实际生效的 permissionMode。不抛出——运行时 per-message 调用。
- * 链：关系 > 角色(roles.<role>) > agent > 出厂默认[role] > 'auto'。
+ * 链：关系 > 角色(roles.<role>) > agent > 出厂默认[role] > 'readonly'。
  * 经 ConfigManager.resolveEffective（含角色层）取合并后的 permissionMode。
  */
 export function resolvePermissionMode(sel: ScopeSelector): string {

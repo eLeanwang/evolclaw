@@ -11,12 +11,15 @@ import fs from 'fs';
 import os from 'os';
 import crypto from 'crypto';
 import { logger } from '../utils/logger.js';
-import { checkBlacklist, checkReadonly, checkHClassWrite, isEvolclawHandoffReturnCommand, parseEvolclawSendCommand, summarizeToolInput, requestDangerousCommandPermission } from '../core/permission.js';
+import { checkBlacklist, checkDangerousCommand, checkReadonly, checkHClassWrite, isEvolclawHandoffReturnCommand, parseEvolclawSendCommand, summarizeToolInput, requestDangerousCommandPermission } from '../core/permission.js';
 import { authorizeEcCommand } from '../core/command/ec-command-permission.js';
 import { encodePath } from '../utils/cross-platform.js';
 import { resolvePaths } from '../paths.js';
 import { resolveEffective } from '../config/config-manager.js';
 import { resolveClaudeCapabilityRunOptionsForProject } from '../core/capability/capability-manager.js';
+import { normalizePermissionMode } from '../core/permission-mode.js';
+import { getHClassSandboxPatterns } from '../core/protected-paths.js';
+import { prependExecutableDirectory, resolveBubblewrapPath } from '../core/sandbox-runtime.js';
 import type { AgentPlugin, AgentInstance, AgentCallbacks } from '../core/baseagent-loader.js';
 import type { AgentEvent, ImageData, PermissionContext, PermissionModeInfo, AgentTokenUsage, AgentContextUsage, AgentLastModelCall, AgentModelCall, AgentRunOverrides } from './runner-types.js';
 import type { GatewayPricingCache, PriceQuad } from '../stats/price-resolver.js';
@@ -39,6 +42,67 @@ export type {
   QueryRequest,
 } from './runner-types.js';
 export { hasCompact, hasModelSwitcher, hasPermissionController } from './runner-types.js';
+
+// Built-in tools execute inside the Claude runtime and are covered by the
+// runner's filesystem/shell policy. MCP and future unknown tools can perform
+// side effects in another process or service, outside that sandbox, so they
+// must never inherit auto-allow behavior merely because they are not Bash.
+const CLAUDE_BUILTIN_TOOLS = new Set([
+  'Agent',
+  'AskUserQuestion',
+  'Bash',
+  'CronCreate',
+  'CronDelete',
+  'CronList',
+  'Edit',
+  'EnterPlanMode',
+  'ExitPlanMode',
+  'Glob',
+  'Grep',
+  'NotebookEdit',
+  'Read',
+  'SendMessage',
+  'Skill',
+  'Task',
+  'TaskCreate',
+  'TaskGet',
+  'TaskList',
+  'TaskOutput',
+  'TaskStop',
+  'TaskUpdate',
+  'TeamCreate',
+  'TeamDelete',
+  'TodoWrite',
+  'ToolSearch',
+  'WebFetch',
+  'WebSearch',
+  'Write',
+]);
+
+function isExternalOrUnknownClaudeTool(toolName: string): boolean {
+  return toolName.startsWith('mcp__') || !CLAUDE_BUILTIN_TOOLS.has(toolName);
+}
+
+function stableExternalConfigValue(value: unknown): string {
+  if (value === undefined) return 'undefined';
+  if (value === null || typeof value !== 'object') return JSON.stringify(value) ?? String(value);
+  if (Array.isArray(value)) return `[${value.map(stableExternalConfigValue).join(',')}]`;
+  const record = value as Record<string, unknown>;
+  return `{${Object.keys(record).sort().map(key => `${JSON.stringify(key)}:${stableExternalConfigValue(record[key])}`).join(',')}}`;
+}
+
+function claudeExternalConfigFingerprint(config: unknown): string {
+  return crypto.createHash('sha256').update(stableExternalConfigValue(config)).digest('hex');
+}
+
+function buildClaudeManagedLockdownSettings() {
+  return {
+    allowManagedHooksOnly: true,
+    disableSkillShellExecution: true,
+    allowedHttpHookUrls: [] as string[],
+    allowManagedPermissionRulesOnly: true,
+  };
+}
 
 // ── 模型别名解析 ──
 // SDK 内置的别名表可能落后于代理实际可用的最新模型，
@@ -406,7 +470,6 @@ export class AgentRunner {
   private permissionGateway?: PermissionGateway;
   private sendPromptFn?: (text: string) => Promise<void>;
   private permissionContexts = new Map<string, PermissionContext>();
-  private currentEvolclawSessionId?: string;
   private claudeExecutablePath?: string;
   /** 每个 session 最近的子进程 stderr 行（环形缓冲），用于子进程崩溃时还原真正原因 */
   private recentStderr = new Map<string, string[]>();
@@ -431,22 +494,23 @@ export class AgentRunner {
     }
   }
 
-  private getAgentEnv(runtimeEnv?: Record<string, string>): Record<string, string | undefined> {
-    // SDK 0.3.x 起，CLI 在以 root 运行时会拒绝 --dangerously-skip-permissions
-    // （bypassPermissions 模式映射而来），报错 "cannot be used with root/sudo privileges"
-    // 并以 code 1 退出。IS_SANDBOX=1 是 CLI 提供的 root 守卫豁免开关。
-    // 仅在以 root 运行时注入，非 root 部署行为不变。
-    const isRoot = typeof process.getuid === 'function' && process.getuid() === 0;
-    return {
+  private getAgentEnv(
+    runtimeEnv?: Record<string, string>,
+    evolclawSessionId?: string,
+  ): Record<string, string | undefined> {
+    const env = {
       ...process.env,
       ANTHROPIC_AUTH_TOKEN: this.apiKey,
       PATH: process.env.PATH,
       DISABLE_AUTOUPDATER: '1',
-      ...(isRoot ? { IS_SANDBOX: '1' } : {}),
       ...(this.baseUrl ? { ANTHROPIC_BASE_URL: this.baseUrl } : {}),
-      ...(this.currentEvolclawSessionId ? { EVOLCLAW_SESSION_ID: this.currentEvolclawSessionId } : {}),
+      ...(evolclawSessionId ? { EVOLCLAW_SESSION_ID: evolclawSessionId } : {}),
       ...(runtimeEnv ?? {}),
     };
+    const bubblewrapPath = resolveBubblewrapPath();
+    return bubblewrapPath
+      ? prependExecutableDirectory(env as Record<string, string>, bubblewrapPath)
+      : env;
   }
 
   setModel(model: string): void {
@@ -520,19 +584,15 @@ export class AgentRunner {
   }
 
   getMode(): string {
-    return this.permissionMode;
+    return normalizePermissionMode(this.permissionMode).mode;
   }
 
   listModes(): PermissionModeInfo[] {
-    // readonly 模式暂时禁用：与 proactive 模式系统提示词存在语义冲突，
-    // 且 READONLY_WRITE_PATTERNS 未覆盖 evolclaw ctl send/file，契约不稳固
     return [
-      { key: 'auto', nameZh: '自动', description: 'AI 分类器自动判断', available: true },
-      { key: 'bypass', nameZh: '放行', description: '跳过 AI 判断，危险操作仍需确认', available: true },
-      { key: 'request', nameZh: '审批', description: '部分自动，部分询问', available: true },
-      { key: 'edit', nameZh: '编辑', description: '自动接受编辑，其他询问', available: true },
-      { key: 'plan', nameZh: '规划', description: '只规划不执行', available: true },
-      { key: 'noask', nameZh: '静默', description: '未批准则拒绝', available: true },
+      { key: 'readonly', nameZh: '只读', description: '只读操作自动执行，写入直接拒绝', available: true },
+      { key: 'auto', nameZh: '自动', description: '常规操作自动执行，危险操作自动拒绝', available: true },
+      { key: 'request', nameZh: '审批', description: '需要升级的操作进入人工审批', available: true },
+      { key: 'bypass', nameZh: '放行', description: '常规操作自动执行，危险操作仍需审批', available: true },
     ];
   }
 
@@ -548,17 +608,11 @@ export class AgentRunner {
     this.permissionContexts.set(sessionId, context);
   }
 
-  private toSdkPermissionMode(mode?: string): 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan' | 'dontAsk' | 'auto' {
-    const map: Record<string, 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan' | 'dontAsk' | 'auto'> = {
-      'auto': 'auto',         // AI 分类器自动判断
-      'bypass': 'bypassPermissions',  // 跳过 SDK 分类器，canUseTool/Hook 仍保留安全检查
-      'request': 'default',   // 部分自动，部分询问
-      'edit': 'acceptEdits',
-      'plan': 'plan',
-      'noask': 'dontAsk',
-      'readonly': 'default',
-    };
-    return map[mode ?? this.permissionMode] || 'auto';
+  private toSdkPermissionMode(mode?: string): 'default' | 'plan' {
+    const normalized = normalizePermissionMode(mode ?? this.permissionMode);
+    // Public permission policy is enforced by PreToolUse. Keeping the SDK in
+    // default mode preserves canUseTool reachability for request mode.
+    return normalized.workflow === 'plan' ? 'plan' : 'default';
   }
 
   // ── Compactable 接口 ──
@@ -1279,7 +1333,6 @@ export class AgentRunner {
 
   async runQuery(sessionId: string, prompt: string, projectPath: string, initialClaudeSessionId?: string, images?: ImageData[], systemPromptAppend?: string, sessionManager?: any, modelOverride?: AgentRunOverrides, runtimeEnv?: Record<string, string>): Promise<AsyncIterable<AgentEvent>> {
     // 记录当前 evolclaw session ID，用于 Agent ctl 环境变量注入
-    this.currentEvolclawSessionId = sessionId;
 
     // 同步用户级配置到内存
     this.syncFromUserSettings();
@@ -1302,8 +1355,7 @@ export class AgentRunner {
     ensureDir(path.join(projectPath, '.claude'));
 
     // 优先使用传入的 agentSessionId（从数据库恢复），否则使用内存中的
-    const disableTools = modelOverride?.disableTools === true;
-    let agentSessionId = disableTools ? undefined : (initialClaudeSessionId || this.activeSessions.get(sessionId));
+    let agentSessionId = initialClaudeSessionId || this.activeSessions.get(sessionId);
 
     // 验证会话文件是否存在且有效（仅在有 agentSessionId 时）
     if (agentSessionId) {
@@ -1355,19 +1407,77 @@ export class AgentRunner {
     // 本次调用使用的权限模式：优先 permissionModeOverride（message-processor 按 关系>角色>出厂默认 解析后传入），
     // 缺省回落 agent 级 this.permissionMode。作为 per-call 入参（hook/canUseTool 闭包捕获），
     // 不写实例字段，多对端并发互不污染（与 model/effort 同构）。
-    const callPermissionMode = modelOverride?.permissionMode || this.permissionMode;
+    const requestedPermissionMode = modelOverride?.permissionMode || this.permissionMode;
+    const normalizedPermission = normalizePermissionMode(requestedPermissionMode);
+    const callPermissionMode = normalizedPermission.mode;
+    const permissionPrompt = this.permissionContexts.get(sessionId)?.sendPrompt ?? this.sendPromptFn;
+    let externalToolGrantFingerprint = claudeExternalConfigFingerprint({});
+    const requestExternalToolPermission = async (
+      toolName: string,
+      toolInput: Record<string, unknown>,
+      summary?: string,
+      reason?: string,
+    ): Promise<PermissionDecision> => {
+      if (!this.permissionGateway || !permissionPrompt) return 'deny';
+      return this.permissionGateway.requestPermission(
+        sessionId,
+        toolName,
+        toolInput,
+        permissionPrompt,
+        this.permissionContexts.get(sessionId),
+        summary || summarizeToolInput(toolName, toolInput),
+        reason || '外部或未知工具不受 Claude 本地 sandbox 的完整约束',
+        `claude:${callPermissionMode}:external:${externalToolGrantFingerprint}`,
+      );
+    };
+
+    const hookDecision = (
+      decision: 'allow' | 'deny' | 'defer',
+      reason?: string,
+      updatedInput?: Record<string, unknown>,
+    ) => ({
+      hookSpecificOutput: {
+        hookEventName: 'PreToolUse' as const,
+        permissionDecision: decision,
+        ...(reason ? { permissionDecisionReason: reason } : {}),
+        ...(updatedInput ? { updatedInput } : {}),
+      },
+    });
 
     // PreToolUse Hook - 黑名单检查 + input 修正（不可绕过，所有模式都走）
     const preToolUseHook = async (input: any) => {
+      const toolName = input.tool_name as string;
+      const originalInput = (input.tool_input || {}) as Record<string, unknown>;
+      let toolInput = originalInput;
+
+      // Remove fields known to be rejected by the SDK schema without granting
+      // permission as a side effect. The cleaned input still goes through the
+      // complete policy below.
+      const sanitizeRules: Record<string, string[]> = {
+        'EnterPlanMode': ['reason'],
+        'ExitPlanMode': ['reason'],
+        'ExitWorktree': ['reason'],
+      };
+      const fieldsToRemove = sanitizeRules[toolName];
+      if (fieldsToRemove?.some(field => field in toolInput)) {
+        toolInput = { ...toolInput };
+        for (const field of fieldsToRemove) delete toolInput[field];
+      }
+      if (toolName === 'Read' && toolInput.pages === '') {
+        if (toolInput === originalInput) toolInput = { ...toolInput };
+        delete toolInput.pages;
+      }
+      const updatedInput = toolInput === originalInput ? undefined : toolInput;
+
       // proactive 模式行为策略（首次工具调用必须是 ec msg send）
-      const policyResult = this.permissionContexts.get(sessionId)?.policyHook?.(input.tool_name, input.tool_input || {});
+      const policyResult = this.permissionContexts.get(sessionId)?.policyHook?.(toolName, toolInput);
       if (policyResult?.block) {
-        return { decision: 'block' as const, reason: policyResult.reason };
+        return hookDecision('deny', policyResult.reason || '当前会话策略拒绝此工具调用', updatedInput);
       }
 
-      const result = await checkBlacklist(input.tool_name, input.tool_input || {});
+      const result = await checkBlacklist(toolName, toolInput);
       if (result.behavior === 'deny') {
-        return { decision: 'block' as const, reason: result.message };
+        return hookDecision('deny', result.message, updatedInput);
       }
 
       // H 类文件保护检查（所有权限模式都生效）
@@ -1377,18 +1487,19 @@ export class AgentRunner {
         channel: permCtx?.channel,
         peerId: permCtx?.userId,
         role: permCtx?.role,
+        projectPath,
       };
-      const hResult = checkHClassWrite(input.tool_name, input.tool_input || {}, hClassContext);
+      const hResult = checkHClassWrite(toolName, toolInput, hClassContext);
       if (hResult.behavior === 'deny') {
-        return { decision: 'block' as const, reason: hResult.message };
+        return hookDecision('deny', hResult.message, updatedInput);
       }
 
       // ec 命令权限控制（ec msg send / ec group send / ec ctl send|file）
       // 优先于只读模式检查，因为 ec 命令有独立的角色权限策略（commandPermissions）
-      if (input.tool_name === 'Bash') {
-        const command = typeof input.tool_input?.command === 'string' ? input.tool_input.command : '';
+      if (toolName === 'Bash') {
+        const command = typeof toolInput.command === 'string' ? toolInput.command : '';
         if (isEvolclawHandoffReturnCommand(command)) {
-          return {};
+          return hookDecision('allow', undefined, updatedInput);
         }
         const permCtx = this.permissionContexts.get(sessionId);
         const ecAuthCtx = {
@@ -1407,12 +1518,17 @@ export class AgentRunner {
           // 这是一条被识别的 ec 命令，必须依据鉴权结果放行或拒绝
           if (!ecDecision.allow) {
             const reason = `🔒 EC 命令权限拒绝: ${ecDecision.reason}`;
-            return { decision: 'block' as const, reason };
+            return hookDecision('deny', reason, updatedInput);
           }
-          // ec 命令鉴权通过，放行（跳过后续只读检查和危险命令检查，避免误伤）
-          return {};
+          // EC 命令使用独立角色鉴权；通过后不再由通用权限模式重复审批。
+          return hookDecision('allow', undefined, updatedInput);
         }
         // 非 ec 命令或无法识别的 ec 子命令，继续走后续逻辑
+      }
+
+      // These tools need the dedicated canUseTool interaction handlers below.
+      if (toolName === 'AskUserQuestion' || toolName === 'ExitPlanMode') {
+        return hookDecision('defer', undefined, updatedInput);
       }
 
       if (callPermissionMode === 'readonly') {
@@ -1423,57 +1539,65 @@ export class AgentRunner {
           peerId: permCtx?.userId,
           role: permCtx?.role,
         };
-        const roResult = checkReadonly(input.tool_name, input.tool_input || {}, projectPath, readonlyContext);
+        const roResult = checkReadonly(toolName, toolInput, projectPath, readonlyContext);
         if (roResult.behavior === 'deny') {
-          return { decision: 'block' as const, reason: roResult.message };
+          return hookDecision('deny', roResult.message, updatedInput);
         }
+        return hookDecision('allow', undefined, updatedInput);
       }
 
-      // 修正 SDK schema 不兼容问题：部分工具被 system prompt 或 skills 指示传入
-      // SDK 未定义的参数（如 EnterPlanMode 的 reason），导致 InputValidationError
-      const toolInput = input.tool_input || {};
-      const sanitizeRules: Record<string, string[]> = {
-        'EnterPlanMode': ['reason'],
-        'ExitPlanMode': ['reason'],
-        'ExitWorktree': ['reason'],
-      };
-      const fieldsToRemove = sanitizeRules[input.tool_name];
-      if (fieldsToRemove && fieldsToRemove.some((f: string) => f in toolInput)) {
-        const cleaned = { ...toolInput };
-        for (const f of fieldsToRemove) delete cleaned[f];
-        return {
-          hookSpecificOutput: {
-            hookEventName: 'PreToolUse' as const,
-            permissionDecision: 'allow' as const,
-            updatedInput: cleaned
-          }
-        };
+      if (isExternalOrUnknownClaudeTool(toolName)) {
+        if (callPermissionMode === 'auto') {
+          return hookDecision(
+            'deny',
+            `auto 模式拒绝外部或未知工具 ${toolName}：该工具不受 Claude 本地 sandbox 的完整约束`,
+            updatedInput,
+          );
+        }
+        const decision = await requestExternalToolPermission(toolName, toolInput);
+        if (decision === 'deny') {
+          return hookDecision('deny', '外部或未知工具未获人工批准', updatedInput);
+        }
+        return hookDecision('allow', undefined, updatedInput);
       }
 
-      // gpt-5.5 等非 Claude 模型调用 Read 时会传 pages:"", SDK 校验器拒绝空字符串
-      if (input.tool_name === 'Read' && toolInput.pages === '') {
-        const cleaned = { ...toolInput };
-        delete cleaned.pages;
-        return {
-          hookSpecificOutput: {
-            hookEventName: 'PreToolUse' as const,
-            permissionDecision: 'allow' as const,
-            updatedInput: cleaned
-          }
-        };
+      const danger = checkDangerousCommand(toolName, toolInput);
+      if (danger.isDangerous) {
+        if (callPermissionMode === 'auto') {
+          return hookDecision('deny', `危险操作已由 auto 模式拒绝：${danger.reason}`, updatedInput);
+        }
+        const approval = await requestDangerousCommandPermission(
+          this.permissionGateway,
+          sessionId,
+          toolName,
+          toolInput,
+          permissionPrompt,
+          this.permissionContexts.get(sessionId),
+          `claude:${callPermissionMode}`,
+        );
+        if (approval.matched && approval.decision === 'deny') {
+          return hookDecision('deny', '危险操作未获人工批准', updatedInput);
+        }
+        return hookDecision('allow', undefined, updatedInput);
       }
 
-      return {};
+      if (callPermissionMode === 'auto' || callPermissionMode === 'bypass') {
+        return hookDecision('allow', undefined, updatedInput);
+      }
+
+      // request mode deliberately delegates routine escalation classification
+      // to the SDK, which invokes canUseTool only when elevation is needed.
+      return hookDecision('defer', undefined, updatedInput);
     };
 
     // PermissionDenied Hook - auto 模式下 SDK 拒绝操作时通知用户
     const permissionDeniedHook = async (input: any) => {
-      if (callPermissionMode === 'auto' && this.sendPromptFn) {
+      if (callPermissionMode === 'auto' && permissionPrompt) {
         const toolName = input.tool_name || '未知工具';
         const reason = input.reason || 'AI 判断此操作有风险';
         const message = `⚠️ 操作已自动拦截\n工具: ${toolName}\n原因: ${reason}`;
         try {
-          await this.sendPromptFn(message);
+          await permissionPrompt(message);
         } catch (err) {
           logger.error('[PermissionDenied] Failed to send notification:', err);
         }
@@ -1499,59 +1623,49 @@ export class AgentRunner {
         return await this.handleExitPlanMode(sessionId, input, options);
       }
 
-      // bypass 模式：跳过 SDK/AI 分类器，但保留人工维护的危险命令审批规则。
-      if (callPermissionMode === 'bypass') {
-        const dangerDecision = await requestDangerousCommandPermission(
-          this.permissionGateway,
-          sessionId,
-          toolName,
-          input,
-          this.sendPromptFn,
-          this.permissionContexts.get(sessionId)
-        );
-        if (dangerDecision.matched) {
-          if (dangerDecision.decision === 'deny') {
-            return { behavior: 'deny' as const, message: '用户拒绝了危险操作', decisionClassification: 'user_reject' as const };
-          }
-          return {
-            behavior: 'allow' as const,
-            updatedInput: input,
-            decisionClassification: dangerDecision.decision === 'always' ? 'user_permanent' as const : 'user_temporary' as const
-          };
-        }
-        return { behavior: 'allow' as const, updatedInput: input, decisionClassification: 'user_permanent' as const };
+      const blacklist = await checkBlacklist(toolName, input);
+      if (blacklist.behavior === 'deny') {
+        return { behavior: 'deny' as const, message: blacklist.message, decisionClassification: 'user_reject' as const };
+      }
+      const permCtx = this.permissionContexts.get(sessionId);
+      const hClass = checkHClassWrite(toolName, blacklist.updatedInput, {
+        sessionId,
+        channel: permCtx?.channel,
+        peerId: permCtx?.userId,
+        role: permCtx?.role,
+        projectPath,
+      });
+      if (hClass.behavior === 'deny') {
+        return { behavior: 'deny' as const, message: hClass.message, decisionClassification: 'user_reject' as const };
       }
 
-      // evolclaw ctl send/file 白名单：proactive 模式下 agent 必须通过这些命令发送消息，
-      // 任何权限模式下都不应拦截，否则 agent 无法回复用户
+      // EC commands use their own role-aware authorization and are not a
+      // blanket shell whitelist.
       if (toolName === 'Bash') {
         const cmd = typeof input.command === 'string' ? input.command : '';
-        if (parseEvolclawSendCommand(cmd)?.scope === 'ctl' || isEvolclawHandoffReturnCommand(cmd)) {
+        if (isEvolclawHandoffReturnCommand(cmd)) {
+          return { behavior: 'allow' as const, updatedInput: input, decisionClassification: 'user_permanent' as const };
+        }
+        const ecDecision = authorizeEcCommand(cmd, {
+          actorId: permCtx?.userId,
+          channel: permCtx?.channel,
+          channelId: permCtx?.channelId,
+          chatType: permCtx?.chatType,
+          selfAid: permCtx?.selfAid,
+          peerKey: permCtx?.peerKey,
+          role: permCtx?.role || 'none',
+          isDaemonOwner: false,
+          fromControlChannel: permCtx?.channel?.startsWith('control#') || false,
+        });
+        if (ecDecision) {
+          if (!ecDecision.allow) {
+            return { behavior: 'deny' as const, message: `EC 命令权限拒绝: ${ecDecision.reason}`, decisionClassification: 'user_reject' as const };
+          }
           return { behavior: 'allow' as const, updatedInput: input, decisionClassification: 'user_permanent' as const };
         }
       }
 
-      // 危险命令检测：需要用户审批的高风险操作（rm -rf, sudo 等）
-      const dangerDecision = await requestDangerousCommandPermission(
-        this.permissionGateway,
-        sessionId,
-        toolName,
-        input,
-        this.sendPromptFn,
-        this.permissionContexts.get(sessionId)
-      );
-      if (dangerDecision.matched) {
-        if (dangerDecision.decision === 'deny') {
-          return { behavior: 'deny' as const, message: '用户拒绝了危险操作', decisionClassification: 'user_reject' as const };
-        }
-        return {
-          behavior: 'allow' as const,
-          updatedInput: input,
-          decisionClassification: dangerDecision.decision === 'always' ? 'user_permanent' as const : 'user_temporary' as const
-        };
-      }
-
-      // readonly 模式：二次拦截（belt-and-suspenders）
+      // Defensive duplicate of PreToolUse enforcement for SDK edge cases.
       if (callPermissionMode === 'readonly') {
         const permCtx = this.permissionContexts.get(sessionId);
         const readonlyContext = {
@@ -1567,20 +1681,54 @@ export class AgentRunner {
         return { behavior: 'allow' as const, updatedInput: input, decisionClassification: 'user_permanent' as const };
       }
 
-      // auto 模式：SDK 内置分类器自动判断，正常情况下不会触发 canUseTool 回调。
-      // 防御性兜底：确保即使 SDK 边界场景或版本变化意外调用了此回调，也不会阻塞流程。
+      if (isExternalOrUnknownClaudeTool(toolName)) {
+        if (callPermissionMode === 'auto') {
+          return {
+            behavior: 'deny' as const,
+            message: `auto 模式拒绝外部或未知工具 ${toolName}：该工具不受 Claude 本地 sandbox 的完整约束`,
+            decisionClassification: 'user_reject' as const,
+          };
+        }
+        const decision = await requestExternalToolPermission(
+          toolName,
+          input,
+          options.title || options.description,
+          options.decisionReason,
+        );
+        if (decision === 'deny') {
+          return { behavior: 'deny' as const, message: '外部或未知工具未获人工批准', decisionClassification: 'user_reject' as const };
+        }
+        return { behavior: 'allow' as const, updatedInput: input, decisionClassification: 'user_temporary' as const };
+      }
+
       if (callPermissionMode === 'auto') {
+        const danger = checkDangerousCommand(toolName, input);
+        if (danger.isDangerous) {
+          return { behavior: 'deny' as const, message: `auto 模式拒绝危险操作：${danger.reason}`, decisionClassification: 'user_reject' as const };
+        }
         return { behavior: 'allow' as const, updatedInput: input, decisionClassification: 'user_permanent' as const };
       }
 
-      // 如果 PermissionGateway 未设置（如测试环境），回退到一律 allow
-      if (!this.permissionGateway || !this.sendPromptFn) {
-        return { behavior: 'allow' as const, updatedInput: input, decisionClassification: 'user_permanent' as const };
+      if (callPermissionMode === 'bypass') {
+        const dangerDecision = await requestDangerousCommandPermission(
+          this.permissionGateway,
+          sessionId,
+          toolName,
+          input,
+          permissionPrompt,
+          this.permissionContexts.get(sessionId),
+          `claude:${callPermissionMode}`,
+        );
+        if (dangerDecision.matched && dangerDecision.decision === 'deny') {
+          return { behavior: 'deny' as const, message: '危险操作未获人工批准', decisionClassification: 'user_reject' as const };
+        }
+        return { behavior: 'allow' as const, updatedInput: input, decisionClassification: 'user_temporary' as const };
       }
 
-      // always-allow 缓存命中：直接放行
-      if (this.permissionGateway.isAlwaysAllowed(toolName)) {
-        return { behavior: 'allow' as const, updatedInput: input, decisionClassification: 'user_permanent' as const };
+      // request mode must fail closed if the EvolClaw approval channel is not
+      // installed; otherwise the SDK escalation callback becomes a bypass.
+      if (!this.permissionGateway || !permissionPrompt) {
+        return { behavior: 'deny' as const, message: '审批通道不可用，操作已拒绝', decisionClassification: 'user_reject' as const };
       }
 
       const summary = options.title
@@ -1591,10 +1739,11 @@ export class AgentRunner {
         sessionId,
         toolName,
         input,
-        this.sendPromptFn,
+        permissionPrompt,
         this.permissionContexts.get(sessionId),
         summary,
-        options.decisionReason
+        options.decisionReason,
+        `claude:${callPermissionMode}`,
       );
 
       if (decision === 'deny') {
@@ -1603,7 +1752,7 @@ export class AgentRunner {
       return {
         behavior: 'allow' as const,
         updatedInput: input,
-        decisionClassification: decision === 'always' ? 'user_permanent' as const : 'user_temporary' as const
+        decisionClassification: 'user_temporary' as const
       };
     };
 
@@ -1612,31 +1761,50 @@ export class AgentRunner {
     const excludeDynamic = this.config?.agents?.claude?.excludeDynamicSections === true;
 
     // 公共 options（新旧模式共用）
-    const sdkPermissionMode = this.toSdkPermissionMode(callPermissionMode);
+    const sdkPermissionMode = this.toSdkPermissionMode(requestedPermissionMode);
     // 本次调用使用的模型/强度：优先 modelOverride（message-processor 按 关系>agent>全局 解析后传入），
     // 缺省回落 agent 级 this.model。作为 per-call 入参传入，无共享状态，多对端并发互不污染。
     const callModel = modelOverride?.model || this.model;
     const callEffort = (modelOverride?.effort ?? this.effort) as ('low' | 'medium' | 'high' | 'xhigh' | 'max' | undefined);
-    logger.info(`[AgentRunner] runQuery model=${callModel} effort=${callEffort ?? 'auto'} permMode=${callPermissionMode} sdkMode=${sdkPermissionMode}`);
+    logger.info(`[AgentRunner] runQuery model=${callModel} effort=${callEffort ?? 'auto'} permMode=${requestedPermissionMode}->${callPermissionMode} sdkMode=${sdkPermissionMode}`);
     if (systemPromptAppend) {
       logger.info(`[AgentRunner] systemPromptAppend: ${systemPromptAppend.length} chars`);
     } else {
       logger.info(`[AgentRunner] systemPromptAppend: none`);
     }
     const sdkModel = resolveSdkModel(callModel, this.baseUrl);
-    const capabilityOptions = disableTools ? {} : await this.resolveCapabilityRunOptions(projectPath);
+    const capabilityOptions = await this.resolveCapabilityRunOptions(projectPath);
+    if (callPermissionMode !== 'request' && callPermissionMode !== 'bypass') {
+      capabilityOptions.mcpServers = {};
+    }
+    externalToolGrantFingerprint = claudeExternalConfigFingerprint(capabilityOptions.mcpServers ?? {});
     const commonOptions = {
       cwd: projectPath,
       model: sdkModel,
       ...capabilityOptions,
-      ...(disableTools ? { tools: [] as string[], mcpServers: {}, skills: [] as string[] } : {}),
+      strictMcpConfig: true,
+      managedSettings: buildClaudeManagedLockdownSettings(),
       ...(callEffort ? { effort: callEffort } : {}),
       ...(this.claudeExecutablePath ? { pathToClaudeCodeExecutable: this.claudeExecutablePath } : {}),
       autoCompactWindow: autoCompactWindowForModel(sdkModel),
       advisorModel: 'haiku',
       canUseTool: canUseToolCallback,
       permissionMode: sdkPermissionMode,
-      persistSession: modelOverride?.persistSession !== false,
+      sandbox: {
+        enabled: true,
+        failIfUnavailable: true,
+        allowUnsandboxedCommands: false,
+        network: {
+          allowUnixSockets: [],
+          allowAllUnixSockets: false,
+          allowLocalBinding: false,
+        },
+        filesystem: {
+          denyRead: getHClassSandboxPatterns(resolvePaths().root),
+          denyWrite: getHClassSandboxPatterns(resolvePaths().root),
+        },
+      },
+      persistSession: true,
       includePartialMessages: true,
       enableFileCheckpointing: true,
       hooks: {
@@ -1660,17 +1828,16 @@ export class AgentRunner {
           logger.debug(`[Claude-stderr] ${trimmed}`);
         }
       },
-      env: this.getAgentEnv(runtimeEnv)
+      env: this.getAgentEnv(runtimeEnv, sessionId)
     };
 
     const createQuery = (promptInput: string | MessageStream, resumeSessionId?: string, resumeAt?: string) => {
       if (useSettingSources) {
-        // 新方式：SDK 自动加载 CLAUDE.md 和 MCP 配置
         return query({
           prompt: promptInput as any,
           options: {
             ...commonOptions,
-            settingSources: disableTools ? [] : ['project', 'user'],
+            settingSources: ['project', 'user'],
             systemPrompt: {
               type: 'preset' as const,
               preset: 'claude_code' as const,
@@ -1682,7 +1849,6 @@ export class AgentRunner {
           }
         });
       } else {
-        // 旧方式：手动加载 CLAUDE.md 和 MCP 配置（保留用于回滚）
         const globalClaudeMd = (() => {
           try {
             const globalPath = path.join(os.homedir(), '.claude', 'CLAUDE.md');
@@ -1700,21 +1866,9 @@ export class AgentRunner {
           try { return fs.existsSync(p) ? fs.readFileSync(p, 'utf-8').trim() : ''; } catch { return ''; }
         }).filter(Boolean);
 
-        const globalMcpServers = (() => {
-          if (disableTools) return {};
-          try {
-            const mcpPath = path.join(os.homedir(), '.claude', 'mcp.json');
-            if (fs.existsSync(mcpPath)) {
-              const config = JSON.parse(fs.readFileSync(mcpPath, 'utf-8'));
-              return config.mcpServers || {};
-            }
-          } catch {}
-          return {};
-        })();
-
         const fullAppend = [
-          ...(disableTools ? [] : projectClaudeMds),
-          ...(disableTools ? [] : [globalClaudeMd]),
+          ...projectClaudeMds,
+          globalClaudeMd,
           systemPromptAppend,
         ].filter(Boolean).join('\n\n');
 
@@ -1722,9 +1876,9 @@ export class AgentRunner {
           prompt: promptInput as any,
           options: {
             ...commonOptions,
+            settingSources: [],
             ...(resumeSessionId ? { resume: resumeSessionId } : {}),
             ...(resumeAt ? { resumeSessionAt: resumeAt } : {}),
-            ...(Object.keys(globalMcpServers).length > 0 ? { mcpServers: globalMcpServers } : {}),
             ...(fullAppend ? {
               systemPrompt: {
                 type: 'preset' as const,
@@ -1826,6 +1980,12 @@ export class AgentRunner {
         model: resolveSdkModel(this.model, this.baseUrl),
         resume: agentSessionId,
         maxTurns: 1,
+        tools: [],
+        skills: [],
+        mcpServers: {},
+        strictMcpConfig: true,
+        settingSources: [],
+        managedSettings: buildClaudeManagedLockdownSettings(),
         permissionMode: this.toSdkPermissionMode(),
         env: this.getAgentEnv()
       }
@@ -1924,6 +2084,12 @@ export class AgentRunner {
         cwd: projectPath,
         resume: agentSessionId,
         enableFileCheckpointing: true,
+        tools: [],
+        skills: [],
+        mcpServers: {},
+        strictMcpConfig: true,
+        settingSources: [],
+        managedSettings: buildClaudeManagedLockdownSettings(),
         permissionMode: this.toSdkPermissionMode(),
         stderr: (data: string) => { stderrChunks.push(data); },
         env: this.getAgentEnv(),

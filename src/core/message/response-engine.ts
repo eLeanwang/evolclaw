@@ -8,6 +8,7 @@ import { buildTaskRuntimeEnv, type TaskRuntimeContext } from '../task-runtime-co
 import { IMRenderer } from './im-renderer.js';
 import { MessageCache } from './message-cache.js';
 import type { MessageQueue } from './message-queue.js';
+import { createTextInferenceProvider, type TextInferenceProvider } from '../inference/text-inference.js';
 import type { HandoffRuntime } from '../handoff/runtime.js';
 import type { HandoffReturnResponse } from '../handoff/types.js';
 import { StreamIdleMonitor } from './stream-idle-monitor.js';
@@ -343,6 +344,14 @@ export class ResponseEngine implements IMessageProcessor {
     }
     if (this.agentMap.has(this.primaryRunnerKey)) return this.agentMap.get(this.primaryRunnerKey)!;
     return this.agentMap.values().next().value!;
+  }
+
+  getTextInferenceProvider(channel?: string, baseagent?: string, selfAID?: string): TextInferenceProvider | undefined {
+    if (!baseagent) return undefined;
+    const aid = selfAID || (channel ? this.agentRegistry?.resolveByChannel(channel)?.aid : undefined);
+    if (!aid) return undefined;
+    const config = resolveEffective({ self: aid }, { cache: true, expand: true });
+    return createTextInferenceProvider(baseagent, config);
   }
 
   private getAvailableBaseagentsForOwner(evolName: string): string[] {
@@ -1337,9 +1346,10 @@ export class ResponseEngine implements IMessageProcessor {
       const capturedReplyContext = taskReplyContext();
 
       // 设置权限审批的消息发送回调（指向当前渠道）
-      agent.setSendPrompt(async (text: string) => {
+      const permissionPrompt = async (text: string) => {
         await adapter.send({ ...envelope, replyContext: capturedReplyContext }, { kind: 'result.text', text, isFinal: true });
-      });
+      };
+      agent.setSendPrompt(permissionPrompt);
 
       const authChatType = chatType === 'group' ? 'group' : 'private';
       const authConversationId = authChatType === 'group'
@@ -1356,7 +1366,7 @@ export class ResponseEngine implements IMessageProcessor {
         return {
           approverPolicy: 'agent_owner' as const,
           owners,
-          ownerAdapter: aunAdapter?.capabilities?.interaction ? aunAdapter : undefined,
+          ownerAdapter: aunAdapter,
           selfAid: owningAgentForAuth.aid,
           originSessionId: session.id,
           originMessageId: message.messageId,
@@ -1374,6 +1384,7 @@ export class ResponseEngine implements IMessageProcessor {
 
       // 设置权限审批的交互上下文（支持交互卡片）
       agent.setPermissionContext?.(session.id, {
+        sendPrompt: permissionPrompt,
         adapter,
         channelId: capturedChannelId,
         replyContext: capturedReplyContext,
@@ -1491,7 +1502,7 @@ export class ResponseEngine implements IMessageProcessor {
             ?? resolvePermissionMode({ self: selfAid || undefined, peerKey, role: peerRole });
         } catch (e) {
           logger.warn(`[ResponseEngine] resolvePermissionMode failed, using fallback: ${e instanceof Error ? e.message : String(e)}`);
-          effectivePermissionMode = message.triggerMeta?.permissionModeOverride ?? 'auto';
+          effectivePermissionMode = message.triggerMeta?.permissionModeOverride ?? 'readonly';
         }
 
         // 按 关系级 > agent级 > 全局 解析本次调用的模型/强度，作为 per-call 入参传入 runQuery。

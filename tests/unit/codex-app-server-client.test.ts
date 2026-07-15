@@ -207,16 +207,29 @@ describe('CodexAppServerClient extended thread methods', () => {
     });
   });
 
-  it('reads model list and provider capabilities', async () => {
+  it('reads model, config, provider, and installed plugin metadata', async () => {
     const { client, request } = makeClient();
     request.mockResolvedValueOnce({ data: [{ id: 'gpt-5.4' }] });
     request.mockResolvedValueOnce({ webSearch: true });
+    request.mockResolvedValueOnce({ config: { mcp_servers: {} } });
+    request.mockResolvedValueOnce({ marketplaces: [] });
+    request.mockResolvedValueOnce({ plugin: { mcpServers: ['helper'] } });
 
     await expect(client.modelList()).resolves.toEqual({ data: [{ id: 'gpt-5.4' }] });
     await expect(client.modelProviderCapabilitiesRead()).resolves.toEqual({ webSearch: true });
+    await expect(client.configRead('/repo')).resolves.toEqual({ config: { mcp_servers: {} } });
+    await expect(client.pluginInstalled('/repo')).resolves.toEqual({ marketplaces: [] });
+    await expect(client.pluginRead('formatter', { name: 'market', path: '/market.json' }))
+      .resolves.toEqual({ plugin: { mcpServers: ['helper'] } });
 
     expect(request).toHaveBeenNthCalledWith(1, 'model/list', { includeHidden: false });
     expect(request).toHaveBeenNthCalledWith(2, 'modelProvider/capabilities/read', {});
+    expect(request).toHaveBeenNthCalledWith(3, 'config/read', { cwd: '/repo', includeLayers: false });
+    expect(request).toHaveBeenNthCalledWith(4, 'plugin/installed', { cwds: ['/repo'] });
+    expect(request).toHaveBeenNthCalledWith(5, 'plugin/read', {
+      pluginName: 'formatter',
+      marketplacePath: '/market.json',
+    });
   });
 });
 

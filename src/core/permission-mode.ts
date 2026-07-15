@@ -31,8 +31,3 @@ export function normalizePermissionMode(value: unknown): NormalizedPermissionMod
   if (value === 'plan') return { mode: 'readonly', workflow: 'plan', migratedFrom: 'plan' };
   return { mode: 'readonly' };
 }
-
-export function normalizeInternalPermissionMode(value: unknown, disableTools = false): NormalizedPermissionMode {
-  if (disableTools) return { mode: 'readonly', migratedFrom: 'noask' };
-  return normalizePermissionMode(value);
-}

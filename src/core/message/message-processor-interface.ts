@@ -10,6 +10,7 @@ import type { SessionManager } from '../session/session-manager.js';
 import type { ChannelAdapter, ChannelPolicy, ChannelOptions, Message, EvolAgentRegistryHandle } from '../../types.js';
 import type { InteractionRouter } from '../interaction-router.js';
 import type { MessageQueue } from './message-queue.js';
+import type { TextInferenceProvider } from '../inference/text-inference.js';
 
 /**
  * 消息处理器接口
@@ -27,6 +28,9 @@ export interface IMessageProcessor {
    * @param baseagent baseagent 标识（可选）
    */
   getAgent(channel?: string, baseagent?: string): AgentRunnerFull;
+
+  /** Resolve a stateless model API provider without creating an Agent session. */
+  getTextInferenceProvider(channel?: string, baseagent?: string, selfAID?: string): TextInferenceProvider | undefined;
 
   /**
    * 获取所有可用的 Agent 标识列表

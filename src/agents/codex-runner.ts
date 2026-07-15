@@ -9,7 +9,10 @@
 import type { Config, InteractionRequest } from '../types.js';
 import type { AgentPlugin, AgentInstance, AgentCallbacks } from '../core/baseagent-loader.js';
 import type { AgentEvent, AgentRunnerFull, AgentRunOverrides, ModelSwitcher, PermissionContext, PermissionModeInfo } from './runner-types.js';
-import { checkBlacklist, checkReadonly, checkDangerousCommand, isEvolclawHandoffReturnCommand, parseEvolclawSendCommand, requestDangerousCommandPermission, type PermissionGateway } from '../core/permission.js';
+import { checkBlacklist, checkReadonly, checkDangerousCommand, checkHClassWrite, isEvolclawHandoffReturnCommand, requestDangerousCommandPermission, type PermissionGateway } from '../core/permission.js';
+import { authorizeEcCommand } from '../core/command/ec-command-permission.js';
+import { normalizePermissionMode } from '../core/permission-mode.js';
+import { buildCodexHClassFilesystemRules, isSameOrDescendant, resolveProtectedCandidate } from '../core/protected-paths.js';
 import { CodexAppServerClient, type CodexServerNotification, type CodexServerRequest, type CodexThreadResponse, type CodexTurnItem } from './codex-app-server-client.js';
 import { resolveOpenaiConfig, type OpenaiResolved } from './baseagent.js';
 import { logger } from '../utils/logger.js';
@@ -20,6 +23,7 @@ import { resolveCodexCapabilityThreadConfigForProject } from '../core/capability
 import { compareVersions } from '../utils/npm-ops.js';
 import { resolveRoot } from '../paths.js';
 import { execFileSync } from 'child_process';
+import { createHash } from 'crypto';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
@@ -84,11 +88,30 @@ interface AppServerStreamState {
   tokenUsage?: any;
 }
 
+interface TrackedApprovalItem {
+  threadId: string;
+  turnId: string;
+  itemId: string;
+  item: Record<string, any>;
+}
+
 type CompleteAgentEvent = Extract<AgentEvent, { type: 'complete' }>;
 type NormalizedTokenUsage = NonNullable<CompleteAgentEvent['tokenUsage']>;
 type NormalizedContextUsage = NonNullable<CompleteAgentEvent['contextUsage']>;
 type CodexJsonValue = null | boolean | number | string | CodexJsonValue[] | { [key: string]: CodexJsonValue };
 type CodexJsonObject = { [key: string]: CodexJsonValue };
+
+function stableSecurityValue(value: unknown): string {
+  if (value === undefined) return 'undefined';
+  if (value === null || typeof value !== 'object') return JSON.stringify(value) ?? String(value);
+  if (Array.isArray(value)) return `[${value.map(stableSecurityValue).join(',')}]`;
+  const record = value as Record<string, unknown>;
+  return `{${Object.keys(record).sort().map(key => `${JSON.stringify(key)}:${stableSecurityValue(record[key])}`).join(',')}}`;
+}
+
+function externalToolConfigFingerprint(config: Record<string, unknown>): string {
+  return createHash('sha256').update(stableSecurityValue(config)).digest('hex');
+}
 
 const CODEX_CATALOG_FALLBACK: CodexModelInfo[] = [
   { slug: 'gpt-5.5', efforts: ['low', 'medium', 'high', 'xhigh'] },
@@ -99,7 +122,10 @@ const CODEX_CATALOG_FALLBACK: CodexModelInfo[] = [
 ];
 let codexCatalogCache: CodexModelInfo[] | null = null;
 
-export const MIN_CODEX_CLI_VERSION = '0.117.0';
+// The permission bridge is version-locked to the v2 schema audited below:
+// named profiles, approvalsReviewer, additional/network approval context, and
+// item/permissions/requestApproval must all be present together.
+export const MIN_CODEX_CLI_VERSION = '0.144.1';
 
 export interface CodexAppServerAvailability {
   available: boolean;
@@ -201,6 +227,9 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
   private activeStreams = new Map<string, AsyncIterable<any>>();
   private activeSessions = new Map<string, string>(); // sessionId → threadId
   private activeTurns = new Map<string, { threadId: string; turnId: string }>();
+  private threadProjectPaths = new Map<string, string>();
+  private threadExternalToolFingerprints = new Map<string, string>();
+  private trackedApprovalItems = new Map<string, TrackedApprovalItem>();
   private pendingInterrupts = new Map<string, number>();
   private appServerClient: CodexAppServerClient | null = null;
   private onSessionIdUpdate?: (sessionId: string, agentSessionId: string) => void;
@@ -233,15 +262,17 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
 
   private getAppServerClient(): CodexAppServerClient {
     if (!this.appServerClient) {
-      this.appServerClient = new CodexAppServerClient({
+      const client = new CodexAppServerClient({
         apiKey: this.resolvedConfig.apiKey,
         baseUrl: this.resolvedConfig.baseUrl,
         model: this.model,
         effort: this.effort,
         enableRequestUserInput: this.resolvedConfig.enableRequestUserInput,
-        approvalsReviewer: this.resolvedConfig.approvalsReviewer,
+        approvalsReviewer: 'user',
         onServerRequest: request => this.handleAppServerRequest(request),
       });
+      client.onNotification(notification => this.trackApprovalItemNotification(notification));
+      this.appServerClient = client;
     }
     return this.appServerClient;
   }
@@ -249,6 +280,8 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
   private resetAppServerClient(): void {
     const client = this.appServerClient;
     this.appServerClient = null;
+    this.threadExternalToolFingerprints.clear();
+    this.trackedApprovalItems.clear();
     client?.close().catch(error => {
       logger.debug(`[CodexRunner] Failed to close stale app-server client: ${error}`);
     });
@@ -288,6 +321,254 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
     }
   }
 
+  private configRecord(value: unknown): Record<string, unknown> | undefined {
+    return value && typeof value === 'object' && !Array.isArray(value)
+      ? value as Record<string, unknown>
+      : undefined;
+  }
+
+  private projectConfigKeys(
+    source: Record<string, unknown>,
+    aliases: Record<string, string>,
+  ): Record<string, unknown> {
+    const result: Record<string, unknown> = {};
+    for (const [inputKey, outputKey] of Object.entries(aliases)) {
+      const value = source[inputKey];
+      if (value !== undefined && value !== null && result[outputKey] === undefined) result[outputKey] = value;
+    }
+    return result;
+  }
+
+  private projectMcpServerConfig(entry: Record<string, unknown>): Record<string, unknown> {
+    const projected = this.projectConfigKeys(entry, {
+      command: 'command',
+      args: 'args',
+      env: 'env',
+      env_vars: 'env_vars',
+      envVars: 'env_vars',
+      cwd: 'cwd',
+      url: 'url',
+      serverUrl: 'url',
+      bearer_token_env_var: 'bearer_token_env_var',
+      bearerTokenEnvVar: 'bearer_token_env_var',
+      http_headers: 'http_headers',
+      httpHeaders: 'http_headers',
+      env_http_headers: 'env_http_headers',
+      envHttpHeaders: 'env_http_headers',
+      startup_timeout_sec: 'startup_timeout_sec',
+      startupTimeoutSec: 'startup_timeout_sec',
+      startup_timeout_ms: 'startup_timeout_ms',
+      startupTimeoutMs: 'startup_timeout_ms',
+      tool_timeout_sec: 'tool_timeout_sec',
+      toolTimeoutSec: 'tool_timeout_sec',
+      enabled: 'enabled',
+      required: 'required',
+      enabled_tools: 'enabled_tools',
+      enabledTools: 'enabled_tools',
+      disabled_tools: 'disabled_tools',
+      disabledTools: 'disabled_tools',
+      scopes: 'scopes',
+      auth: 'auth',
+      oauth_resource: 'oauth_resource',
+      oauthResource: 'oauth_resource',
+      experimental_environment: 'experimental_environment',
+      experimentalEnvironment: 'experimental_environment',
+      default_tools_approval_mode: 'default_tools_approval_mode',
+      defaultToolsApprovalMode: 'default_tools_approval_mode',
+      tools: 'tools',
+    });
+    const tools = this.configRecord(projected.tools);
+    if (tools) {
+      projected.tools = Object.fromEntries(Object.entries(tools).map(([tool, config]) => [tool, {
+        ...this.projectConfigKeys(this.configRecord(config) ?? {}, {
+          enabled: 'enabled',
+          approval_mode: 'approval_mode',
+          approvalMode: 'approval_mode',
+        }),
+      }]));
+    }
+    return projected;
+  }
+
+  private projectAppConfig(entry: Record<string, unknown>): Record<string, unknown> {
+    const projected = this.projectConfigKeys(entry, {
+      enabled: 'enabled',
+      approvals_reviewer: 'approvals_reviewer',
+      approvalsReviewer: 'approvals_reviewer',
+      destructive_enabled: 'destructive_enabled',
+      destructiveEnabled: 'destructive_enabled',
+      open_world_enabled: 'open_world_enabled',
+      openWorldEnabled: 'open_world_enabled',
+      default_tools_approval_mode: 'default_tools_approval_mode',
+      defaultToolsApprovalMode: 'default_tools_approval_mode',
+      default_tools_enabled: 'default_tools_enabled',
+      defaultToolsEnabled: 'default_tools_enabled',
+      tools: 'tools',
+    });
+    const tools = this.configRecord(projected.tools);
+    if (tools) {
+      projected.tools = Object.fromEntries(Object.entries(tools).map(([tool, config]) => [tool, {
+        ...this.projectConfigKeys(this.configRecord(config) ?? {}, {
+          enabled: 'enabled',
+          approval_mode: 'approval_mode',
+          approvalMode: 'approval_mode',
+        }),
+      }]));
+    }
+    return projected;
+  }
+
+  private externalToolPromptPolicy(entry: Record<string, unknown> | undefined, includeReviewer = false): Record<string, unknown> {
+    const tools = this.configRecord(entry?.tools);
+    return {
+      ...(entry ?? {}),
+      ...(includeReviewer ? { approvals_reviewer: 'user' } : {}),
+      default_tools_approval_mode: 'prompt',
+      ...(tools && Object.keys(tools).length > 0 ? {
+        tools: Object.fromEntries(Object.entries(tools).map(([tool, config]) => [tool, {
+          ...(this.configRecord(config) ?? {}),
+          approval_mode: 'prompt',
+        }])),
+      } : {}),
+    };
+  }
+
+  private buildExternalToolApprovalConfig(
+    effectiveConfig: Record<string, unknown>,
+    capabilityConfig: Record<string, unknown>,
+    discoveredPluginConfig: Record<string, unknown> = {},
+    mode = 'readonly',
+  ): Record<string, unknown> {
+    const sources = [effectiveConfig, capabilityConfig, discoveredPluginConfig];
+    const result: Record<string, unknown> = {};
+    const allowExternalTools = mode === 'request' || mode === 'bypass';
+
+    const mcpSections = sources.map(source => this.configRecord(source.mcp_servers)).filter(Boolean) as Record<string, unknown>[];
+    const mcpIds = new Set(mcpSections.flatMap(section => Object.keys(section)));
+    if (mcpIds.size > 0) {
+      const mcpOverrides: Record<string, unknown> = {};
+      for (const id of mcpIds) {
+        const mergedEntry = this.mergeThreadConfig(...mcpSections.map(section => this.configRecord(section[id]))) ?? {};
+        const entry = this.projectMcpServerConfig(mergedEntry);
+        const isRemote = typeof entry.url === 'string' || typeof entry.serverUrl === 'string';
+        const isStdio = typeof entry.command === 'string' || !isRemote;
+        mcpOverrides[id] = isStdio || !allowExternalTools
+          ? { ...entry, enabled: false }
+          : this.externalToolPromptPolicy(entry as Record<string, unknown>);
+      }
+      result.mcp_servers = mcpOverrides;
+    }
+
+    const appSections = sources.map(source => this.configRecord(source.apps)).filter(Boolean) as Record<string, unknown>[];
+    const appIds = new Set(appSections.flatMap(section => Object.keys(section)).filter(id => id !== '_default'));
+    const appDefault = this.projectAppConfig(
+      this.mergeThreadConfig(...appSections.map(section => this.configRecord(section._default))) ?? {},
+    );
+    const appOverrides: Record<string, unknown> = {
+      _default: this.externalToolPromptPolicy(
+        allowExternalTools ? appDefault : { ...appDefault, enabled: false },
+        true,
+      ),
+    };
+    for (const id of appIds) {
+      const entry = this.projectAppConfig(
+        this.mergeThreadConfig(...appSections.map(section => this.configRecord(section[id]))) ?? {},
+      );
+      appOverrides[id] = this.externalToolPromptPolicy(
+        allowExternalTools ? entry : { ...entry, enabled: false },
+        true,
+      );
+    }
+    result.apps = appOverrides;
+
+    const pluginSections = sources.map(source => this.configRecord(source.plugins)).filter(Boolean) as Record<string, unknown>[];
+    const pluginIds = new Set(pluginSections.flatMap(section => Object.keys(section)));
+    const pluginOverrides: Record<string, unknown> = {};
+    for (const pluginId of pluginIds) {
+      const plugin = this.mergeThreadConfig(...pluginSections.map(section => this.configRecord(section[pluginId]))) ?? {};
+      const servers = this.configRecord(plugin.mcp_servers);
+      if (!servers) continue;
+      pluginOverrides[pluginId] = {
+        ...this.projectConfigKeys(plugin, { enabled: 'enabled' }),
+        mcp_servers: Object.fromEntries(Object.keys(servers).map(serverId => [serverId, { enabled: false }])),
+      };
+    }
+    if (Object.keys(pluginOverrides).length > 0) result.plugins = pluginOverrides;
+
+    return result;
+  }
+
+  private async discoverPluginMcpConfig(
+    appServer: CodexAppServerClient,
+    projectPath: string,
+  ): Promise<Record<string, unknown>> {
+    const pluginInstalled = (appServer as any).pluginInstalled;
+    const pluginRead = (appServer as any).pluginRead;
+    if (typeof pluginInstalled !== 'function' || typeof pluginRead !== 'function') return {};
+
+    const response = await pluginInstalled.call(appServer, projectPath);
+    const marketplaces = Array.isArray(response?.marketplaces) ? response.marketplaces : undefined;
+    if (!marketplaces) throw new Error('Codex plugin/installed 未返回有效清单，无法建立 plugin MCP 边界');
+    if (Array.isArray(response?.marketplaceLoadErrors) && response.marketplaceLoadErrors.length > 0) {
+      throw new Error('Codex plugin marketplace 存在加载错误，无法证明 bundled MCP 已全部禁用');
+    }
+
+    const plugins: Record<string, unknown> = {};
+    for (const marketplace of marketplaces) {
+      const summaries = Array.isArray(marketplace?.plugins) ? marketplace.plugins : [];
+      for (const summary of summaries) {
+        if (summary?.installed !== true) continue;
+        const pluginId = typeof summary.id === 'string' && summary.id
+          ? summary.id
+          : typeof summary.name === 'string' && summary.name
+            ? summary.name
+            : undefined;
+        const pluginName = typeof summary.name === 'string' && summary.name ? summary.name : pluginId;
+        if (!pluginId || !pluginName) {
+          throw new Error('Codex 已安装 plugin 缺少稳定标识，无法建立 plugin MCP 边界');
+        }
+        const detail = await pluginRead.call(appServer, pluginName, {
+          name: typeof marketplace?.name === 'string' ? marketplace.name : undefined,
+          path: typeof marketplace?.path === 'string' ? marketplace.path : undefined,
+        });
+        const mcpServers = detail?.plugin?.mcpServers;
+        if (!Array.isArray(mcpServers)) {
+          throw new Error(`Codex plugin ${pluginId} 未返回 MCP 清单，无法建立外部工具边界`);
+        }
+        const serverIds = mcpServers.filter((serverId: unknown): serverId is string =>
+          typeof serverId === 'string' && serverId.length > 0);
+        if (serverIds.length === 0) continue;
+        const existing = this.configRecord(plugins[pluginId]) ?? {};
+        const existingServers = this.configRecord(existing.mcp_servers) ?? {};
+        plugins[pluginId] = {
+          ...existing,
+          mcp_servers: {
+            ...existingServers,
+            ...Object.fromEntries(serverIds.map(serverId => [serverId, { enabled: false }])),
+          },
+        };
+      }
+    }
+    return Object.keys(plugins).length > 0 ? { plugins } : {};
+  }
+
+  private async resolveExternalToolApprovalConfig(
+    appServer: CodexAppServerClient,
+    projectPath: string,
+    capabilityConfig: Record<string, unknown>,
+    mode = 'readonly',
+  ): Promise<Record<string, unknown>> {
+    const configRead = (appServer as any).configRead;
+    if (typeof configRead !== 'function') {
+      return this.buildExternalToolApprovalConfig({}, capabilityConfig, {}, mode);
+    }
+    const response = await configRead.call(appServer, projectPath);
+    const effectiveConfig = this.configRecord(response?.config);
+    if (!effectiveConfig) throw new Error('Codex config/read 未返回有效配置，无法建立外部工具审批边界');
+    const discoveredPluginConfig = await this.discoverPluginMcpConfig(appServer, projectPath);
+    return this.buildExternalToolApprovalConfig(effectiveConfig, capabilityConfig, discoveredPluginConfig, mode);
+  }
+
   // ── ModelSwitcher ──
 
   setModel(model: string): void { this.model = model; this.resetAppServerClient(); }
@@ -312,49 +593,71 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
 
   // ── Permission ──
 
-  private currentMode: string = 'auto';
-  private approvalPolicy: string = 'never';
-  private sandboxMode: string = 'danger-full-access';
+  private currentMode: string = 'readonly';
   // per-call/per-session 权限模式：runQuery 按本次解析结果写入，审批回调（异步、按 sessionKey 路由）据此判定。
   // 避免多会话共享 this.currentMode 时的并发污染（与 claude-runner 的 per-call permissionMode 同构）。
   private chatModes = new Map<string, string>();
 
   /** 将权限模式映射为 Codex app-server 的 approvalPolicy（纯函数，无副作用，供 per-call 派生用）。 */
   private toApprovalPolicy(mode: string): string {
-    const map: Record<string, string> = {
-      'auto': 'never', 'bypass': 'never',
-      'readonly': 'on-request', 'request': 'on-request',
-      'noask': 'untrusted',
+    // `untrusted` guarantees that commands outside Codex's trusted read-only
+    // set reach the EvolClaw bridge for EvolClaw's per-mode decision.
+    void mode;
+    return 'untrusted';
+  }
+
+  private permissionProfileName(sessionId: string): string {
+    const normalized = sessionId.replace(/[^A-Za-z0-9_-]/g, '_');
+    if (normalized && normalized === sessionId && normalized.length <= 64) {
+      return `__evolclaw_${normalized}_hclass_v1`;
+    }
+
+    // Sanitizing and truncating alone can collapse distinct EvolClaw sessions
+    // onto one Codex profile (for example `a/b` and `a?b`). Keep a readable
+    // prefix, but bind every lossy name to the original session id with a
+    // collision-resistant suffix.
+    const label = normalized.slice(0, 40) || 'session';
+    const digest = createHash('sha256').update(sessionId).digest('hex').slice(0, 24);
+    return `__evolclaw_${label}_${digest}_hclass_v1`;
+  }
+
+  private buildPermissionProfileConfig(sessionId: string, mode: string): Record<string, unknown> {
+    const profileName = this.permissionProfileName(sessionId);
+    return {
+      default_permissions: profileName,
+      permissions: {
+        [profileName]: {
+          extends: mode === 'readonly' ? ':read-only' : ':workspace',
+          filesystem: buildCodexHClassFilesystemRules(resolveRoot()),
+        },
+      },
     };
-    return map[mode] || 'never';
+  }
+
+  private buildLifecycleLockdownConfig(): Record<string, unknown> {
+    return {
+      features: {
+        hooks: false,
+      },
+    };
   }
 
   setMode(mode: string): void {
-    // Codex app-server also supports auto_review, but EvolClaw auto currently means:
-    // run local blacklist/readonly guards, then approve app-server requests without
-    // app-server reviewer escalation. Changing this requires a semantic decision.
-    this.currentMode = mode;
-    this.approvalPolicy = this.toApprovalPolicy(mode);
-    this.sandboxMode = this.toSandboxMode(mode);
+    const normalized = normalizePermissionMode(mode);
+    this.currentMode = normalized.mode;
   }
   getMode(): string { return this.currentMode; }
   listModes(): PermissionModeInfo[] {
     return [
-      { key: 'auto', nameZh: '自动', description: '全部自动（受 sandbox 约束）', available: true },
-      { key: 'bypass', nameZh: '放行', description: '跳过 AI 判断，危险操作仍需确认', available: true },
-      { key: 'readonly', nameZh: '只读', description: '允许读取和临时目录写入，拒绝项目文件修改', available: true },
-      { key: 'request', nameZh: '审批', description: '需要审批时询问', available: true },
-      { key: 'noask', nameZh: '静默', description: '只执行已知安全操作', available: true },
+      { key: 'readonly', nameZh: '只读', description: '只读操作自动执行，写入直接拒绝', available: true },
+      { key: 'auto', nameZh: '自动', description: '常规操作自动执行，危险操作自动拒绝', available: true },
+      { key: 'request', nameZh: '审批', description: '需要升级的操作进入人工审批', available: true },
+      { key: 'bypass', nameZh: '放行', description: '常规操作自动执行，危险操作仍需审批', available: true },
     ];
   }
   setSendPrompt(fn: (text: string) => Promise<void>): void { this.sendPromptFn = fn; }
   setPermissionContext(sessionId: string, context: PermissionContext): void { this.permissionContexts.set(sessionId, context); }
   setPermissionGateway(gw: PermissionGateway): void { this.permissionGateway = gw; }
-
-  private toSandboxMode(mode: string): string {
-    if (mode === 'request' || mode === 'readonly' || mode === 'noask') return 'read-only';
-    return 'danger-full-access';
-  }
 
   // ── Stream management (needed by MessageProcessor) ──
 
@@ -385,49 +688,40 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
     modelOverride?: AgentRunOverrides,
     runtimeEnv?: Record<string, string>
   ): Promise<AsyncIterable<AgentEvent>> {
-    const disableTools = modelOverride?.disableTools === true;
-    let agentSessionId = disableTools ? undefined : (initialAgentSessionId || this.activeSessions.get(sessionId));
+    let agentSessionId = initialAgentSessionId || this.activeSessions.get(sessionId);
     const callModel = modelOverride?.model || this.model;
     const callEffort = modelOverride?.effort ?? this.effort;
     // per-call 权限模式：优先 override（message-processor 解析后传入），缺省回落实例级 currentMode。
     // 写入 chatModes 供异步审批回调按 sessionKey 读取，并据此派生本次 thread 的 approvalPolicy/sandbox，
     // 不依赖共享的 this.approvalPolicy/this.sandboxMode（多会话并发互不污染）。
-    const callMode = disableTools ? 'noask' : (modelOverride?.permissionMode || this.currentMode);
+    const requestedPermissionMode = modelOverride?.permissionMode || this.currentMode;
+    const normalizedPermission = normalizePermissionMode(requestedPermissionMode);
+    const callMode = normalizedPermission.mode;
     this.chatModes.set(sessionId, callMode);
     const callApprovalPolicy = this.toApprovalPolicy(callMode);
-    const callSandboxMode = this.toSandboxMode(callMode);
+    const permissionProfile = this.permissionProfileName(sessionId);
     const appServer = this.getAppServerClient();
     this.dropExpiredPendingInterrupt(sessionId);
 
-    // policyHook 需要审批回调才能生效；关闭 proactive pre-tool policy 时不额外升级。
-    const context = this.permissionContexts.get(sessionId);
-    const effectiveApprovalPolicy = (context?.policyHook && callApprovalPolicy === 'never')
-      ? 'on-request'
-      : callApprovalPolicy;
+    const effectiveApprovalPolicy = callApprovalPolicy;
 
-    if (effectiveApprovalPolicy !== callApprovalPolicy) {
-      logger.info(`[CodexRunner] Proactive mode: upgraded approvalPolicy from ${callApprovalPolicy} to ${effectiveApprovalPolicy} for session=${sessionId}`);
-    }
-
-    const capabilityConfig = disableTools ? {} : await this.resolveCapabilityThreadConfig(projectPath);
+    const capabilityConfig = await this.resolveCapabilityThreadConfig(projectPath);
+    const externalToolConfig = await this.resolveExternalToolApprovalConfig(appServer, projectPath, capabilityConfig, callMode);
     const threadOptions = {
       model: callModel,
       effort: callEffort,
       approvalPolicy: effectiveApprovalPolicy,
-      approvalsReviewer: this.resolvedConfig.approvalsReviewer,
-      sandbox: callSandboxMode,
+      approvalsReviewer: 'user',
+      permissions: permissionProfile,
       config: this.mergeThreadConfig(
         this.buildEvolclawShellEnvironmentConfig(sessionId),
+        this.buildPermissionProfileConfig(sessionId, callMode),
         runtimeEnv ? { shell_environment_policy: { set: runtimeEnv } } : undefined,
         capabilityConfig,
+        externalToolConfig,
+        this.buildLifecycleLockdownConfig(),
       ),
       ...(systemPromptAppend ? { developerInstructions: systemPromptAppend } : {}),
-      ...(disableTools ? {
-        selectedCapabilityRoots: [],
-        dynamicTools: [],
-        environments: [],
-      } : {}),
-      ...(modelOverride?.persistSession === false ? { ephemeral: true } : {}),
     };
 
     const threadResponse = agentSessionId
@@ -438,6 +732,8 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
 
     agentSessionId = threadId;
     this.activeSessions.set(sessionId, threadId);
+    this.threadProjectPaths.set(threadId, path.resolve(projectPath));
+    this.threadExternalToolFingerprints.set(threadId, externalToolConfigFingerprint(externalToolConfig));
     this.onSessionIdUpdate?.(sessionId, threadId);
 
     const controller = new AbortController();
@@ -492,7 +788,7 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
         model: callModel,
         effort: callEffort,
         approvalPolicy: effectiveApprovalPolicy,
-        sandbox: callSandboxMode,
+        permissions: permissionProfile,
       });
       const turnId = turnResponse.turn?.id;
       if (turnId && !state.turnId) {
@@ -574,6 +870,12 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
   // ── Session commands ──
 
   updateSessionId(sessionId: string, agentSessionId: string): void {
+    const previousThreadId = this.activeSessions.get(sessionId);
+    if (previousThreadId && previousThreadId !== agentSessionId) {
+      this.threadProjectPaths.delete(previousThreadId);
+      this.threadExternalToolFingerprints.delete(previousThreadId);
+      this.clearTrackedApprovalItemsForThread(previousThreadId);
+    }
     if (agentSessionId) {
       this.activeSessions.set(sessionId, agentSessionId);
     } else {
@@ -583,12 +885,19 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
   }
 
   async closeSession(sessionId: string): Promise<void> {
+    const threadId = this.activeSessions.get(sessionId);
     this.activeSessions.delete(sessionId);
     this.activeStreams.delete(sessionId);
     this.activeAbortControllers.delete(sessionId);
     this.activeTurns.delete(sessionId);
     this.pendingInterrupts.delete(sessionId);
     this.permissionContexts.delete(sessionId);
+    this.chatModes.delete(sessionId);
+    if (threadId) {
+      this.threadProjectPaths.delete(threadId);
+      this.threadExternalToolFingerprints.delete(threadId);
+    }
+    this.clearTrackedApprovalItemsForThread(threadId);
   }
 
   resolveSessionFile(agentSessionId: string, _projectPath: string): string | null {
@@ -614,8 +923,12 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
 
   async clearSession(sessionId: string, _agentSessionId: string, _projectPath: string): Promise<boolean> {
     // Codex: 清空会话 = 下次 runQuery 不传 resumeId，自动创建新 thread
+    const threadId = this.activeSessions.get(sessionId) ?? _agentSessionId;
     this.activeSessions.delete(sessionId);
     this.chatModes.delete(sessionId);
+    this.threadProjectPaths.delete(threadId);
+    this.threadExternalToolFingerprints.delete(threadId);
+    this.clearTrackedApprovalItemsForThread(threadId);
     this.onSessionIdUpdate?.(sessionId, '');
     return true;
   }
@@ -629,25 +942,28 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
       } catch (error) {
         if (!this.isThreadNotFoundError(error)) throw error;
         logger.info(`[CodexRunner] Compact thread not loaded, resuming before compact: ${agentSessionId}`);
-        const ctx = this.permissionContexts.get(_sessionId);
         // 优先用 per-session 模式派生（与 runQuery 一致），缺省回落实例级
         const compactMode = this.chatModes.get(_sessionId) ?? this.currentMode;
         const compactPolicy = this.toApprovalPolicy(compactMode);
-        const compactApprovalPolicy = (ctx?.policyHook && compactPolicy === 'never')
-          ? 'on-request'
-          : compactPolicy;
+        const permissionProfile = this.permissionProfileName(_sessionId);
         const capabilityConfig = await this.resolveCapabilityThreadConfig(_projectPath);
+        const externalToolConfig = await this.resolveExternalToolApprovalConfig(appServer, _projectPath, capabilityConfig, compactMode);
         await appServer.threadResume(agentSessionId, _projectPath, {
           model: this.model,
           effort: this.effort,
-          approvalPolicy: compactApprovalPolicy,
-          approvalsReviewer: this.resolvedConfig.approvalsReviewer,
-          sandbox: this.toSandboxMode(compactMode),
+          approvalPolicy: compactPolicy,
+          approvalsReviewer: 'user',
+          permissions: permissionProfile,
           config: this.mergeThreadConfig(
             this.buildEvolclawShellEnvironmentConfig(_sessionId),
+            this.buildPermissionProfileConfig(_sessionId, compactMode),
             capabilityConfig,
+            externalToolConfig,
+            this.buildLifecycleLockdownConfig(),
           ),
         });
+        this.threadProjectPaths.set(agentSessionId, path.resolve(_projectPath));
+        this.threadExternalToolFingerprints.set(agentSessionId, externalToolConfigFingerprint(externalToolConfig));
         return await this.startAndWaitForCompact(appServer, agentSessionId);
       }
     } catch (error) {
@@ -768,9 +1084,30 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
   }
 
   async forkSession(agentSessionId: string, projectPath: string, title?: string): Promise<string> {
-    const response = await this.getAppServerClient().threadFork(agentSessionId, projectPath, title);
+    const sessionKey = this.findSessionKeyByThread(agentSessionId);
+    const mode = this.chatModes.get(sessionKey) ?? this.currentMode;
+    const permissionProfile = this.permissionProfileName(sessionKey);
+    const capabilityConfig = await this.resolveCapabilityThreadConfig(projectPath);
+    const appServer = this.getAppServerClient();
+    const externalToolConfig = await this.resolveExternalToolApprovalConfig(appServer, projectPath, capabilityConfig, mode);
+    const response = await appServer.threadFork(agentSessionId, projectPath, title, {
+      model: this.model,
+      effort: this.effort,
+      approvalPolicy: this.toApprovalPolicy(mode),
+      approvalsReviewer: 'user',
+      permissions: permissionProfile,
+      config: this.mergeThreadConfig(
+        this.buildEvolclawShellEnvironmentConfig(sessionKey),
+        this.buildPermissionProfileConfig(sessionKey, mode),
+        capabilityConfig,
+        externalToolConfig,
+        this.buildLifecycleLockdownConfig(),
+      ),
+    });
     const forkedThreadId = response.thread?.id;
     if (!forkedThreadId) throw new Error('Codex fork did not return a thread id');
+    this.threadProjectPaths.set(forkedThreadId, path.resolve(projectPath));
+    this.threadExternalToolFingerprints.set(forkedThreadId, externalToolConfigFingerprint(externalToolConfig));
     return forkedThreadId;
   }
 
@@ -794,28 +1131,134 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
     return this.mapThreadToSessionMessages(response, agentSessionId);
   }
 
+  private approvalItemKey(threadId: unknown, turnId: unknown, itemId: unknown): string | undefined {
+    if (typeof threadId !== 'string' || typeof turnId !== 'string' || typeof itemId !== 'string') return undefined;
+    return JSON.stringify([threadId, turnId, itemId]);
+  }
+
+  private trackApprovalItemNotification(notification: CodexServerNotification): void {
+    const params = (notification.params || {}) as Record<string, any>;
+    const item = params.item && typeof params.item === 'object' ? params.item as Record<string, any> : undefined;
+    const itemId = item?.id ?? params.itemId;
+    const key = this.approvalItemKey(params.threadId, params.turnId, itemId);
+
+    if (notification.method === 'item/started' && key && item) {
+      this.trackedApprovalItems.set(key, {
+        threadId: params.threadId,
+        turnId: params.turnId,
+        itemId,
+        item: { ...item },
+      });
+      return;
+    }
+
+    if (notification.method === 'item/fileChange/patchUpdated' && key) {
+      const tracked = this.trackedApprovalItems.get(key);
+      this.trackedApprovalItems.set(key, {
+        threadId: params.threadId,
+        turnId: params.turnId,
+        itemId,
+        item: {
+          ...(tracked?.item ?? { id: itemId, type: 'fileChange' }),
+          changes: params.changes,
+        },
+      });
+      return;
+    }
+
+    if (notification.method === 'item/completed' && key) {
+      this.trackedApprovalItems.delete(key);
+      return;
+    }
+
+    if (notification.method === 'turn/completed' && typeof params.threadId === 'string') {
+      const completedTurnId = typeof params.turnId === 'string'
+        ? params.turnId
+        : typeof params.turn?.id === 'string'
+          ? params.turn.id
+          : undefined;
+      for (const [trackedKey, tracked] of this.trackedApprovalItems) {
+        if (tracked.threadId === params.threadId && (!completedTurnId || tracked.turnId === completedTurnId)) {
+          this.trackedApprovalItems.delete(trackedKey);
+        }
+      }
+    }
+  }
+
+  private findTrackedApprovalItem(params: Record<string, any>): Record<string, any> | undefined {
+    const key = this.approvalItemKey(params.threadId, params.turnId, params.itemId);
+    return key ? this.trackedApprovalItems.get(key)?.item : undefined;
+  }
+
+  private clearTrackedApprovalItemsForThread(threadId: string | undefined): void {
+    if (!threadId) return;
+    for (const [key, tracked] of this.trackedApprovalItems) {
+      if (tracked.threadId === threadId) this.trackedApprovalItems.delete(key);
+    }
+  }
+
   private async handleAppServerRequest(request: CodexServerRequest): Promise<any> {
     const params = (request.params || {}) as Record<string, any>;
+    if (request.method === 'mcpServer/elicitation/request') {
+      logger.warn(`[CodexRunner] MCP elicitation cancelled because EvolClaw has no audited elicitation bridge: thread=${params.threadId ?? '<missing>'} server=${params.serverName ?? '<missing>'}`);
+      return { action: 'cancel', content: null, _meta: null };
+    }
     if (request.method === 'item/tool/requestUserInput') {
+      const trackedItem = this.findTrackedApprovalItem(params);
+      if (trackedItem?.type === 'mcpToolCall') {
+        return this.handleMcpToolApproval(params, trackedItem);
+      }
+      if (this.looksLikeExternalToolApproval(params.questions)) {
+        return this.denyUntrackedExternalToolApproval(params);
+      }
       return this.handleToolRequestUserInput(params);
     }
 
+    const approvalMethods = new Set([
+      'item/commandExecution/requestApproval',
+      'item/fileChange/requestApproval',
+      'item/permissions/requestApproval',
+      'applyPatchApproval',
+      'execCommandApproval',
+    ]);
+    if (!approvalMethods.has(request.method)) {
+      throw new Error(`Unsupported Codex app-server request: ${request.method}`);
+    }
+
     const sessionKey = this.findSessionKeyByThread(params.threadId || params.conversationId);
-    const toolName = request.method.includes('fileChange') || request.method === 'applyPatchApproval' ? 'FileChange' : 'Bash';
+    const toolName = request.method === 'item/permissions/requestApproval'
+      ? 'PermissionGrant'
+      : request.method.includes('fileChange') || request.method === 'applyPatchApproval'
+        ? 'FileChange'
+        : 'Bash';
     const toolInput = this.buildPermissionInput(request.method, params);
 
     // proactive 模式行为策略（首次工具调用必须是 ec msg send）
     const policyResult = this.permissionContexts.get(sessionKey)?.policyHook?.(toolName, toolInput);
     if (policyResult?.block) {
-      return this.toAppServerApprovalResponse(request.method, 'deny');
+      return this.toAppServerApprovalResponse(request.method, 'deny', toolInput);
     }
     const summary = this.summarizeAppServerRequest(request.method, params);
     const reason = params.reason || params.decisionReason || undefined;
-    const projectPath = this.resolvePermissionProjectPath(params);
-    logger.info(`[CodexRunner] app-server approval request id=${request.id} method=${request.method} session=${sessionKey} mode=${this.currentMode} tool=${toolName} summary=${summary}`);
+    const workspacePath = this.resolvePermissionWorkspacePath(params);
+    if (!workspacePath) {
+      logger.warn(`[CodexRunner] approval denied because thread workspace is unknown: method=${request.method} thread=${params.threadId ?? params.conversationId ?? '<missing>'}`);
+      return this.toAppServerApprovalResponse(request.method, 'deny', toolInput);
+    }
+    const operationCwd = this.resolvePermissionOperationCwd(params, workspacePath, toolName);
+    const sessionMode = this.chatModes.get(sessionKey) ?? this.currentMode;
+    logger.info(`[CodexRunner] app-server approval request id=${request.id} method=${request.method} session=${sessionKey} mode=${sessionMode} tool=${toolName} summary=${summary}`);
     try {
-      const decision = await this.resolvePermissionDecision(sessionKey, toolName, toolInput, summary, reason, projectPath);
-      const response = this.toAppServerApprovalResponse(request.method, decision);
+      const decision = await this.resolvePermissionDecision(
+        sessionKey,
+        toolName,
+        toolInput,
+        summary,
+        reason,
+        workspacePath,
+        operationCwd,
+      );
+      const response = this.toAppServerApprovalResponse(request.method, decision, toolInput);
       logger.info(`[CodexRunner] app-server approval response id=${request.id} method=${request.method} decision=${decision} response=${JSON.stringify(response)}`);
       return response;
     } catch (error) {
@@ -823,6 +1266,140 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
       logger.warn(`[CodexRunner] app-server approval failed id=${request.id} method=${request.method}: ${message}`);
       throw error;
     }
+  }
+
+  private classifyMcpApprovalLabel(label: string): 'allow_once' | 'allow_persistent' | 'deny' | 'other' {
+    const normalized = label.trim().toLowerCase().replace(/[\s_-]+/g, ' ');
+    const negative = /\b(decline|deny|reject|cancel|no|block|stop)\b|do not|don't|not\s+(?:accept|approve|allow)|拒绝|不同意|不允许|取消|否|停止/i.test(normalized);
+    if (negative) return 'deny';
+    const positive = /\b(accept|approve|allow|yes|ok|okay|proceed|continue)\b|同意|允许|批准|确认|继续/i.test(normalized);
+    if (!positive) return 'other';
+    const persistent = /\b(always|session|chat|conversation|remember|across)\b|don't ask|do not ask|永久|始终|会话|不再询问|记住/i.test(normalized);
+    return persistent ? 'allow_persistent' : 'allow_once';
+  }
+
+  private selectMcpApprovalAnswer(question: Record<string, any>, allow: boolean): string {
+    const options = Array.isArray(question.options) ? question.options : [];
+    const labels = options
+      .map((option: any) => typeof option?.label === 'string' ? option.label.trim() : '')
+      .filter(Boolean);
+
+    if (allow) {
+      const oneShot = labels.find(label => this.classifyMcpApprovalLabel(label) === 'allow_once'
+        && /\b(once|this time)\b|本次|仅此次/i.test(label));
+      if (oneShot) return oneShot;
+      const explicit = labels.find(label => this.classifyMcpApprovalLabel(label) === 'allow_once');
+      if (explicit) return explicit;
+    } else {
+      const decline = labels.find(label => this.classifyMcpApprovalLabel(label) === 'deny'
+        && !/\bcancel\b|取消/i.test(label));
+      if (decline) return decline;
+      const cancel = labels.find(label => this.classifyMcpApprovalLabel(label) === 'deny');
+      if (cancel) return cancel;
+    }
+
+    throw new Error(`Codex MCP 审批缺少可验证的${allow ? '单次允许' : '拒绝'}选项`);
+  }
+
+  private looksLikeExternalToolApproval(rawQuestions: unknown): boolean {
+    if (!Array.isArray(rawQuestions) || rawQuestions.length === 0) return false;
+    return rawQuestions.every(question => {
+      if (!question || typeof question !== 'object' || Array.isArray(question)) return false;
+      const options = Array.isArray((question as Record<string, any>).options)
+        ? (question as Record<string, any>).options
+        : [];
+      const labels = options
+        .map((option: any) => typeof option?.label === 'string' ? option.label : '')
+        .filter(Boolean);
+      const hasAllow = labels.some((label: string) => {
+        const kind = this.classifyMcpApprovalLabel(label);
+        return kind === 'allow_once' || kind === 'allow_persistent';
+      });
+      const hasDeny = labels.some((label: string) => this.classifyMcpApprovalLabel(label) === 'deny');
+      return hasAllow && hasDeny;
+    });
+  }
+
+  private denyUntrackedExternalToolApproval(params: Record<string, any>): Record<string, unknown> {
+    const questions = Array.isArray(params.questions) ? params.questions : [];
+    const answers: Record<string, { answers: string[] }> = {};
+    for (const question of questions) {
+      const questionId = typeof question.id === 'string' ? question.id : `q-${Object.keys(answers).length + 1}`;
+      answers[questionId] = { answers: [this.selectMcpApprovalAnswer(question, false)] };
+    }
+    logger.warn(`[CodexRunner] external tool approval denied because mcpToolCall metadata is missing: thread=${params.threadId ?? '<missing>'} item=${params.itemId ?? '<missing>'}`);
+    return { answers };
+  }
+
+  private async handleMcpToolApproval(
+    params: Record<string, any>,
+    trackedItem: Record<string, any>,
+  ): Promise<Record<string, unknown>> {
+    const questions = Array.isArray(params.questions) ? params.questions : [];
+    if (questions.length === 0) throw new Error('Codex MCP 审批未包含问题，已拒绝');
+
+    const hasExactIdentity = typeof trackedItem.server === 'string'
+      && trackedItem.server.length > 0
+      && typeof trackedItem.tool === 'string'
+      && trackedItem.tool.length > 0
+      && Object.prototype.hasOwnProperty.call(trackedItem, 'arguments');
+    if (!hasExactIdentity) {
+      logger.warn(`[CodexRunner] MCP approval denied because exact tool metadata is missing: thread=${params.threadId ?? '<missing>'} item=${params.itemId ?? '<missing>'}`);
+      return this.denyUntrackedExternalToolApproval(params);
+    }
+
+    const threadId = typeof params.threadId === 'string' ? params.threadId : undefined;
+    const configFingerprint = threadId ? this.threadExternalToolFingerprints.get(threadId) : undefined;
+    if (!configFingerprint) {
+      logger.warn(`[CodexRunner] MCP approval denied because the hardened external-tool config is unbound: thread=${threadId ?? '<missing>'}`);
+      return this.denyUntrackedExternalToolApproval(params);
+    }
+
+    const sessionKey = this.findSessionKeyByThread(params.threadId);
+    const server = trackedItem.server as string;
+    const tool = trackedItem.tool as string;
+    const toolName = `MCP:${server}/${tool}`;
+    const toolInput: Record<string, unknown> = {
+      server,
+      tool,
+      arguments: trackedItem.arguments,
+      ...(typeof trackedItem.pluginId === 'string' ? { pluginId: trackedItem.pluginId } : {}),
+      ...(typeof trackedItem.mcpAppResourceUri === 'string' ? { mcpAppResourceUri: trackedItem.mcpAppResourceUri } : {}),
+      ...(trackedItem.appContext && typeof trackedItem.appContext === 'object' ? { appContext: trackedItem.appContext } : {}),
+    };
+    const policyResult = this.permissionContexts.get(sessionKey)?.policyHook?.(toolName, toolInput);
+    const workspacePath = this.resolvePermissionWorkspacePath(params);
+    const reason = questions
+      .map((question: any) => typeof question?.question === 'string' ? question.question : '')
+      .filter(Boolean)
+      .join('\n') || 'Codex 请求调用外部 MCP/app 工具';
+    const decision = policyResult?.block || !workspacePath
+      ? 'deny'
+      : await this.resolvePermissionDecision(
+        sessionKey,
+        toolName,
+        toolInput,
+        `MCP ${server}/${tool}`,
+        policyResult?.reason || reason,
+        workspacePath,
+        workspacePath,
+        `external:${configFingerprint}`,
+      );
+    let allow = decision !== 'deny';
+    if (allow) {
+      try {
+        for (const question of questions) this.selectMcpApprovalAnswer(question, true);
+      } catch {
+        allow = false;
+        logger.warn(`[CodexRunner] MCP approval denied because Codex offered no one-shot accept option: thread=${params.threadId ?? '<missing>'} item=${params.itemId ?? '<missing>'}`);
+      }
+    }
+    const answers: Record<string, { answers: string[] }> = {};
+    for (const question of questions) {
+      const questionId = typeof question.id === 'string' ? question.id : `q-${Object.keys(answers).length + 1}`;
+      answers[questionId] = { answers: [this.selectMcpApprovalAnswer(question, allow)] };
+    }
+    return { answers };
   }
 
   private async handleToolRequestUserInput(params: Record<string, any>): Promise<Record<string, unknown>> {
@@ -979,30 +1556,84 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
   }
 
   private buildPermissionInput(method: string, params: Record<string, any>): Record<string, unknown> {
-    if (method.includes('fileChange') || method === 'applyPatchApproval') {
-      return { fileChanges: params.fileChanges, grantRoot: params.grantRoot, reason: params.reason };
+    if (method === 'item/permissions/requestApproval') {
+      return { permissions: params.permissions, cwd: params.cwd, reason: params.reason };
     }
-    const command = Array.isArray(params.command) ? params.command.join(' ') : (params.command || '');
-    return { command, cwd: params.cwd, reason: params.reason, commandActions: params.commandActions || params.parsedCmd };
+    const trackedItem = this.findTrackedApprovalItem(params);
+    if (method.includes('fileChange') || method === 'applyPatchApproval') {
+      return {
+        fileChanges: params.fileChanges ?? trackedItem?.changes,
+        grantRoot: params.grantRoot,
+        reason: params.reason,
+      };
+    }
+    const rawCommand = params.command ?? trackedItem?.command;
+    const command = Array.isArray(rawCommand) ? rawCommand.join(' ') : (rawCommand || '');
+    return {
+      command,
+      ...(Array.isArray(rawCommand) ? { commandArgv: rawCommand } : {}),
+      cwd: params.cwd ?? trackedItem?.cwd,
+      reason: params.reason,
+      commandActions: params.commandActions || params.parsedCmd || trackedItem?.commandActions,
+      additionalPermissions: params.additionalPermissions,
+      networkApprovalContext: params.networkApprovalContext,
+      proposedNetworkPolicyAmendments: params.proposedNetworkPolicyAmendments,
+      proposedExecpolicyAmendment: params.proposedExecpolicyAmendment,
+      environmentId: params.environmentId,
+    };
   }
 
   private summarizeAppServerRequest(method: string, params: Record<string, any>): string {
+    if (method === 'item/permissions/requestApproval') {
+      return params.reason || '运行时权限升级';
+    }
     if (method.includes('fileChange') || method === 'applyPatchApproval') {
       if (params.grantRoot) return '允许写入：' + params.grantRoot;
-      const changes = params.fileChanges && typeof params.fileChanges === 'object' ? Object.keys(params.fileChanges) : [];
-      return changes.length ? changes.join(', ') : '文件变更审批';
+      const trackedItem = this.findTrackedApprovalItem(params);
+      const changes = this.normalizeFileChanges(params.fileChanges ?? trackedItem?.changes);
+      const descriptions = changes.map(change => this.describeFileChange(change)).filter(Boolean);
+      return descriptions.length ? descriptions.join(', ') : '文件变更审批';
     }
-    const command = Array.isArray(params.command) ? params.command.join(' ') : params.command;
+    const networkContext = params.networkApprovalContext;
+    if (networkContext && typeof networkContext === 'object' && !Array.isArray(networkContext)) {
+      const host = typeof networkContext.host === 'string' ? networkContext.host : '';
+      const protocol = typeof networkContext.protocol === 'string' ? networkContext.protocol : '';
+      if (host) return `允许网络访问：${protocol ? `${protocol}://` : ''}${host}`;
+    }
+    const trackedItem = this.findTrackedApprovalItem(params);
+    const rawCommand = params.command ?? trackedItem?.command;
+    const command = Array.isArray(rawCommand) ? rawCommand.join(' ') : rawCommand;
     return command || '命令执行审批';
   }
 
-  private resolvePermissionProjectPath(params: Record<string, any>): string {
-    const candidates = [params.cwd, params.projectPath, params.grantRoot]
-      .filter((value): value is string => typeof value === 'string' && value.length > 0);
-    for (const candidate of candidates) {
-      if (path.isAbsolute(candidate)) return candidate;
+  private resolvePermissionWorkspacePath(params: Record<string, any>): string | undefined {
+    const threadId = typeof params.threadId === 'string'
+      ? params.threadId
+      : typeof params.conversationId === 'string'
+        ? params.conversationId
+        : undefined;
+    if (threadId) {
+      const threadProjectPath = this.threadProjectPaths.get(threadId);
+      if (threadProjectPath) return threadProjectPath;
     }
-    return process.cwd();
+    return undefined;
+  }
+
+  private resolvePermissionOperationCwd(
+    params: Record<string, any>,
+    workspacePath: string,
+    toolName: string,
+  ): string {
+    if (toolName === 'FileChange') return resolveProtectedCandidate(workspacePath);
+    const trackedItem = this.findTrackedApprovalItem(params);
+    const rawCwd = typeof params.cwd === 'string' && params.cwd
+      ? params.cwd
+      : typeof trackedItem?.cwd === 'string' && trackedItem.cwd
+        ? trackedItem.cwd
+        : undefined;
+    if (!rawCwd) return resolveProtectedCandidate(workspacePath);
+    const absolute = path.isAbsolute(rawCwd) ? rawCwd : path.resolve(workspacePath, rawCwd);
+    return resolveProtectedCandidate(absolute);
   }
 
   private checkCodexReadonly(
@@ -1020,27 +1651,59 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
     } : undefined;
 
     if (toolName === 'Bash') return checkReadonly(toolName, input, projectPath, readonlyContext);
-    if (toolName !== 'FileChange') return { behavior: 'allow' };
+    return { behavior: 'deny', message: '🔒 只读模式：权限升级和文件写入请求已拒绝' };
+  }
 
-    const tmpDir = path.resolve(projectPath, '.evolclaw', 'tmp');
-    const isAllowedPath = (filePath: string): boolean => {
-      const resolved = path.resolve(projectPath, filePath);
-      const relative = path.relative(tmpDir, resolved);
-      return relative === '' || (!!relative && !relative.startsWith('..') && !path.isAbsolute(relative));
-    };
-
-    const grantRoot = input.grantRoot;
-    if (typeof grantRoot === 'string' && grantRoot && !isAllowedPath(grantRoot)) {
-      return { behavior: 'deny', message: '🔒 只读模式：禁止修改项目文件。如需生成文件请写入 .evolclaw/tmp/ 目录' };
+  private hasAdditionalPermissionRequest(input: Record<string, unknown>): boolean {
+    const permissions = input.additionalPermissions;
+    if (!permissions || typeof permissions !== 'object' || Array.isArray(permissions)) return false;
+    const profile = permissions as Record<string, unknown>;
+    const network = profile.network;
+    if (network && typeof network === 'object' && !Array.isArray(network)) {
+      if ((network as Record<string, unknown>).enabled === true) return true;
     }
+    const fileSystem = profile.fileSystem;
+    if (!fileSystem || typeof fileSystem !== 'object' || Array.isArray(fileSystem)) return false;
+    const fsProfile = fileSystem as Record<string, unknown>;
+    if (Array.isArray(fsProfile.read) && fsProfile.read.length > 0) return true;
+    if (Array.isArray(fsProfile.write) && fsProfile.write.length > 0) return true;
+    return Array.isArray(fsProfile.entries) && fsProfile.entries.some(entry => {
+      if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return false;
+      return (entry as Record<string, unknown>).access !== 'deny';
+    });
+  }
 
-    const fileChanges = input.fileChanges;
-    const paths = fileChanges && typeof fileChanges === 'object' ? Object.keys(fileChanges as Record<string, unknown>) : [];
-    if (paths.some(filePath => !isAllowedPath(filePath))) {
-      return { behavior: 'deny', message: '🔒 只读模式：禁止修改项目文件。如需生成文件请写入 .evolclaw/tmp/ 目录' };
+  private hasNetworkPermissionRequest(input: Record<string, unknown>): boolean {
+    const context = input.networkApprovalContext;
+    if (context && typeof context === 'object' && !Array.isArray(context)) {
+      const record = context as Record<string, unknown>;
+      if (typeof record.host === 'string' && record.host.length > 0) return true;
     }
+    return Array.isArray(input.proposedNetworkPolicyAmendments)
+      && input.proposedNetworkPolicyAmendments.length > 0;
+  }
 
-    return { behavior: 'allow' };
+  private fileChangeRequiresExpansion(input: Record<string, unknown>, projectPath: string): boolean {
+    if (typeof input.grantRoot === 'string' && input.grantRoot.length > 0) return true;
+    const paths: string[] = [];
+    for (const change of this.normalizeFileChanges(input.fileChanges)) {
+      for (const candidate of [
+        change?.path,
+        change?.move_path,
+        change?.movePath,
+        change?.kind?.move_path,
+        change?.kind?.movePath,
+      ]) {
+        if (typeof candidate === 'string' && candidate.length > 0) paths.push(candidate);
+      }
+    }
+    if (paths.length === 0) return true;
+    const workspace = resolveProtectedCandidate(projectPath);
+    return paths.some(candidate => {
+      const absolute = path.isAbsolute(candidate) ? path.resolve(candidate) : path.resolve(workspace, candidate);
+      const canonical = resolveProtectedCandidate(absolute);
+      return !isSameOrDescendant(canonical, workspace);
+    });
   }
 
   private async resolvePermissionDecision(
@@ -1049,80 +1712,164 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
     toolInput: Record<string, unknown>,
     summary: string,
     reason?: string,
-    projectPath = process.cwd()
+    workspacePath = process.cwd(),
+    operationCwd = workspacePath,
+    grantScopeSuffix?: string,
   ): Promise<'allow' | 'always' | 'deny'> {
     const blacklist = await checkBlacklist(toolName, toolInput);
     if (blacklist.behavior === 'deny') return 'deny';
 
-    if (toolName === 'Bash' && this.isEvolclawInternalCommand(blacklist.updatedInput)) {
-      return 'allow';
+    const permissionContext = this.permissionContexts.get(sessionKey);
+    const permissionPrompt = permissionContext?.sendPrompt ?? this.sendPromptFn;
+    const hClass = checkHClassWrite(toolName, blacklist.updatedInput, {
+      sessionId: sessionKey,
+      channel: permissionContext?.channel,
+      peerId: permissionContext?.userId,
+      role: permissionContext?.role,
+      projectPath: operationCwd,
+      workspacePath,
+    });
+    if (hClass.behavior === 'deny') return 'deny';
+
+    const hasAdditionalPermissions = toolName === 'Bash'
+      && this.hasAdditionalPermissionRequest(blacklist.updatedInput);
+    const hasNetworkPermissions = toolName === 'Bash'
+      && this.hasNetworkPermissionRequest(blacklist.updatedInput);
+    const hasPermissionExpansion = hasAdditionalPermissions || hasNetworkPermissions;
+    const hasFileChangeExpansion = toolName === 'FileChange'
+      && this.fileChangeRequiresExpansion(blacklist.updatedInput, workspacePath);
+
+    if (toolName === 'FileChange') {
+      const hasGrantRoot = typeof blacklist.updatedInput.grantRoot === 'string'
+        && blacklist.updatedInput.grantRoot.length > 0;
+      const hasConcreteChanges = this.normalizeFileChanges(blacklist.updatedInput.fileChanges)
+        .some(change => typeof change?.path === 'string' && change.path.length > 0);
+      if (!hasGrantRoot && !hasConcreteChanges) return 'deny';
+    }
+
+    if (toolName === 'Bash' && !hasPermissionExpansion) {
+      const command = typeof blacklist.updatedInput.command === 'string'
+        ? blacklist.updatedInput.command.trim()
+        : '';
+      if (!command) return 'deny';
+    }
+
+    if (toolName === 'Bash' && !hasPermissionExpansion) {
+      const command = typeof blacklist.updatedInput.command === 'string' ? blacklist.updatedInput.command : '';
+      if (isEvolclawHandoffReturnCommand(command)) return 'allow';
+      const ecDecision = authorizeEcCommand(command, {
+        actorId: permissionContext?.userId,
+        channel: permissionContext?.channel,
+        channelId: permissionContext?.channelId,
+        chatType: permissionContext?.chatType,
+        selfAid: permissionContext?.selfAid,
+        peerKey: permissionContext?.peerKey,
+        role: permissionContext?.role || 'none',
+        isDaemonOwner: false,
+        fromControlChannel: permissionContext?.channel?.startsWith('control#') || false,
+      });
+      if (ecDecision) {
+        if (!ecDecision.allow) return 'deny';
+        return 'allow';
+      }
     }
 
     // per-session 权限模式（runQuery 写入）；缺省回落实例级 currentMode（兼容无 runQuery 上下文的调用）
-    const mode = this.chatModes.get(sessionKey) ?? this.currentMode;
+    const rawMode = this.chatModes.get(sessionKey) ?? this.currentMode;
+    const mode = normalizePermissionMode(rawMode).mode;
+    const baseGrantScope = `codex:${this.permissionProfileName(sessionKey)}:${mode}`;
+    const grantScope = grantScopeSuffix ? `${baseGrantScope}:${grantScopeSuffix}` : baseGrantScope;
 
     if (mode === 'readonly') {
-      const readonly = this.checkCodexReadonly(toolName, blacklist.updatedInput, projectPath, sessionKey);
+      const readonly = this.checkCodexReadonly(toolName, blacklist.updatedInput, operationCwd, sessionKey);
       if (readonly.behavior === 'deny') return 'deny';
       return 'allow';
     }
 
+    if (toolName.startsWith('MCP:')) {
+      if (mode === 'auto') return 'deny';
+      if (!this.permissionGateway || !permissionPrompt) return 'deny';
+      return this.permissionGateway.requestPermission(
+        sessionKey,
+        toolName,
+        blacklist.updatedInput,
+        permissionPrompt,
+        this.permissionContexts.get(sessionKey),
+        summary,
+        reason || '外部 MCP/app 工具不受 Codex 本地 command sandbox 的完整约束',
+        grantScope,
+      );
+    }
+
     // auto 模式下检查危险命令，危险命令自动拒绝
     if (mode === 'auto') {
+      if (toolName === 'PermissionGrant' || hasFileChangeExpansion || hasPermissionExpansion) return 'deny';
       const dangerous = checkDangerousCommand(toolName, toolInput);
       if (dangerous.isDangerous) return 'deny';
       return 'allow';
     }
 
     if (mode === 'bypass') {
+      if (toolName === 'PermissionGrant' || hasFileChangeExpansion || hasPermissionExpansion) {
+        if (!this.permissionGateway || !permissionPrompt) return 'deny';
+        return this.permissionGateway.requestPermission(
+          sessionKey,
+          toolName,
+          toolInput,
+          permissionPrompt,
+          this.permissionContexts.get(sessionKey),
+          summary,
+          reason || 'Codex 请求扩大当前命令或 turn 的沙箱权限',
+          grantScope,
+        );
+      }
       const dangerous = await requestDangerousCommandPermission(
         this.permissionGateway,
         sessionKey,
         toolName,
         toolInput,
-        this.sendPromptFn,
-        this.permissionContexts.get(sessionKey)
+        permissionPrompt,
+        this.permissionContexts.get(sessionKey),
+        grantScope,
       );
       if (dangerous.matched) return dangerous.decision;
       return 'allow';
     }
-    if (mode === 'noask') return 'deny';
-    if (!this.permissionGateway || !this.sendPromptFn) return 'allow';
-    if (this.permissionGateway.isAlwaysAllowed(toolName)) return 'always';
+    if (!this.permissionGateway || !permissionPrompt) return 'deny';
     return this.permissionGateway.requestPermission(
       sessionKey,
       toolName,
       toolInput,
-      this.sendPromptFn,
+      permissionPrompt,
       this.permissionContexts.get(sessionKey),
       summary,
-      reason
+      reason,
+      grantScope,
     );
   }
 
-  private isEvolclawCtlSendOrFile(input: Record<string, unknown>): boolean {
-    const command = typeof input.command === 'string' ? input.command : '';
-    return parseEvolclawSendCommand(command)?.scope === 'ctl';
-  }
-
-  private isEvolclawInternalCommand(input: Record<string, unknown>): boolean {
-    const command = typeof input.command === 'string' ? input.command : '';
-    return this.isEvolclawCtlSendOrFile(input) || isEvolclawHandoffReturnCommand(command);
-  }
-
-  private toAppServerApprovalResponse(method: string, decision: 'allow' | 'always' | 'deny'): Record<string, unknown> {
+  private toAppServerApprovalResponse(
+    method: string,
+    decision: 'allow' | 'always' | 'deny',
+    toolInput?: Record<string, unknown>,
+  ): Record<string, unknown> {
     if (method === 'execCommandApproval' || method === 'applyPatchApproval') {
-      return { decision: decision === 'deny' ? 'denied' : decision === 'always' ? 'approved_for_session' : 'approved' };
+      return { decision: decision === 'deny' ? 'denied' : 'approved' };
     }
     if (method === 'item/commandExecution/requestApproval') {
-      return { decision: decision === 'deny' ? 'decline' : decision === 'always' ? 'acceptForSession' : 'accept' };
+      return { decision: decision === 'deny' ? 'decline' : 'accept' };
     }
     if (method === 'item/fileChange/requestApproval') {
-      return { decision: decision === 'deny' ? 'decline' : decision === 'always' ? 'acceptForSession' : 'accept' };
+      return { decision: decision === 'deny' ? 'decline' : 'accept' };
     }
     if (method === 'item/permissions/requestApproval') {
       if (decision === 'deny') throw new Error('Permission request denied');
-      return { permissions: {}, scope: decision === 'always' ? 'session' : 'turn' };
+      const permissions = toolInput?.permissions;
+      return {
+        permissions: permissions && typeof permissions === 'object' ? permissions : {},
+        scope: 'turn',
+        strictAutoReview: true,
+      };
     }
     throw new Error('Unsupported Codex app-server request: ' + method);
   }
@@ -1684,6 +2431,9 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
     this.activeStreams.clear();
     this.activeSessions.clear();
     this.activeTurns.clear();
+    this.threadProjectPaths.clear();
+    this.threadExternalToolFingerprints.clear();
+    this.trackedApprovalItems.clear();
     this.pendingInterrupts.clear();
     this.permissionContexts.clear();
     this.chatModes.clear();

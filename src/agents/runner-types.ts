@@ -18,6 +18,8 @@ export class BaseagentRunnerUnavailableError extends Error {
 
 /** 权限审批的渠道交互上下文 */
 export interface PermissionContext {
+  /** Session-bound prompt delivery; avoids shared-runner callback races. */
+  sendPrompt?: (text: string) => Promise<void>;
   adapter?: ChannelAdapter;
   channelId?: string;
   replyContext?: ReplyContext;
@@ -53,10 +55,6 @@ export interface AgentRunOverrides {
   model?: string;
   effort?: string;
   permissionMode?: string;
-  /** Internal model-only calls should remove or deny every available tool. */
-  disableTools?: boolean;
-  /** Avoid retaining one-shot internal sessions when the backend supports it. */
-  persistSession?: boolean;
 }
 
 export interface ImageData {

@@ -17,11 +17,15 @@ import os from 'os';
 import crypto from 'crypto';
 import type { Config } from '../types.js';
 import type { AgentPlugin, AgentInstance, AgentCallbacks } from '../core/baseagent-loader.js';
-import type { AgentEvent, AgentRunnerFull, AgentRunOverrides, ModelSwitcher, PermissionModeInfo } from './runner-types.js';
+import type { AgentEvent, AgentRunnerFull, AgentRunOverrides, ModelSwitcher, PermissionContext, PermissionModeInfo } from './runner-types.js';
 import { resolveGoogleConfig, type GoogleResolved } from './baseagent.js';
 import { commandExists } from '../utils/cross-platform.js';
 import { GeminiSessionFileAdapter } from '../core/session/adapters/gemini-session-file-adapter.js';
 import { logger } from '../utils/logger.js';
+import { normalizePermissionMode } from '../core/permission-mode.js';
+import { authorizeEcCommand } from '../core/command/ec-command-permission.js';
+import { workspaceContainsHClassPaths } from '../core/protected-paths.js';
+import { buildBubblewrapCommand } from '../core/sandbox-runtime.js';
 
 // Strip ANSI escape codes from Gemini CLI text output.
 // Gemini embeds raw terminal colors from tool stdout (e.g. vitest, npm)
@@ -47,6 +51,147 @@ const GEMINI_MODELS = [
   'gemini-2.5-flash-lite',
 ];
 
+const GEMINI_READONLY_TOOLS = [
+  'read_file', 'list_directory', 'glob', 'grep_search', 'google_web_search',
+  'codebase_investigator', 'cli_help', 'get_internal_docs', 'update_topic', 'complete_task',
+];
+const GEMINI_AUTO_TOOLS = [
+  ...GEMINI_READONLY_TOOLS,
+  'write_file', 'replace', 'web_fetch', 'activate_skill',
+];
+
+const GEMINI_H_CLASS_PATTERNS = [
+  String.raw`evolclaw\.json`,
+  String.raw`agents[/\\]defaults\.json`,
+  String.raw`agents[/\\]defaults_\d+\.json`,
+  String.raw`agents[/\\][^/\\"]+[/\\]config\.json`,
+  String.raw`agents[/\\][^/\\"]+[/\\]contact\.json`,
+  String.raw`agents[/\\][^/\\"]+[/\\]relations[/\\][^/\\"]+[/\\]config\.json`,
+  String.raw`backups[/\\]config`,
+  String.raw`\.snapshots`,
+  String.raw`(?:^|[/\\"])CA(?:[/\\"]|$)`,
+  String.raw`(?:AIDs|aids)[/\\][^/\\"]+[/\\](?:cert|keys)`,
+  String.raw`(?:^|[/\\"])\.device_id(?:[/\\"]|$)`,
+  String.raw`(?:^|[/\\"])\.env(?:[/\\"]|$)`,
+  String.raw`(?:^|[/\\"])\.seed(?:[/\\"]|$)`,
+  String.raw`(?:^|[/\\"])\.seed\.[^/\\"]+`,
+  String.raw`(?:^|[/\\"])\.migrated-[^/\\"]+`,
+  String.raw`(?:^|[/\\"])\.lock(?:[/\\"]|$)`,
+  String.raw`(?:^|[/\\"])daemon\.pid(?:[/\\"]|$)`,
+  String.raw`\.json_`,
+  String.raw`\.json\.migrated`,
+];
+const GEMINI_CTL_SEND_PATTERNS = [
+  String.raw`"command":"[ ]*(?:ec|evolclaw)[ ]+ctl[ ]+send[ ]*"`,
+  String.raw`"command":"[ ]*(?:ec|evolclaw)[ ]+ctl[ ]+send[ ]+[^"\\;&|$()<>\x60\r\n]*"`,
+];
+const GEMINI_CTL_FILE_PATTERNS = [
+  String.raw`"command":"[ ]*(?:ec|evolclaw)[ ]+ctl[ ]+file[ ]*"`,
+  String.raw`"command":"[ ]*(?:ec|evolclaw)[ ]+ctl[ ]+file[ ]+[^"\\;&|$()<>\x60\r\n]*"`,
+];
+
+export interface GeminiPolicyCapabilities {
+  ctlSend?: boolean;
+  ctlFile?: boolean;
+}
+
+export interface GeminiPermissionProfile {
+  mode: 'readonly' | 'auto';
+  approvalMode: 'plan' | 'auto_edit' | 'default';
+  degradedFrom?: 'request' | 'bypass';
+}
+
+export function resolveGeminiPermissionProfile(value: unknown): GeminiPermissionProfile {
+  const normalized = normalizePermissionMode(value);
+  if (normalized.mode === 'auto') return { mode: 'auto', approvalMode: 'auto_edit' };
+  if (normalized.mode === 'request' || normalized.mode === 'bypass') {
+    return { mode: 'readonly', approvalMode: 'plan', degradedFrom: normalized.mode };
+  }
+  return { mode: 'readonly', approvalMode: 'plan' };
+}
+
+function appendGeminiPolicyRule(
+  lines: string[],
+  toolName: string | string[],
+  decision: 'allow' | 'deny',
+  priority: number,
+  argsPattern?: string,
+): void {
+  lines.push('[[rule]]');
+  lines.push(`toolName = ${Array.isArray(toolName) ? JSON.stringify(toolName) : JSON.stringify(toolName)}`);
+  if (argsPattern) lines.push(`argsPattern = '${argsPattern}'`);
+  lines.push(`decision = "${decision}"`);
+  lines.push(`priority = ${priority}`, '');
+}
+
+export function buildGeminiAdminPolicy(
+  profile: GeminiPermissionProfile,
+  capabilities: GeminiPolicyCapabilities = {},
+): string {
+  const lines: string[] = [];
+  // H-class protection is mode-independent and applies to built-in and MCP tools.
+  for (const pattern of GEMINI_H_CLASS_PATTERNS) {
+    appendGeminiPolicyRule(lines, '*', 'deny', 999, pattern);
+  }
+
+  if (capabilities.ctlSend) {
+    for (const pattern of GEMINI_CTL_SEND_PATTERNS) {
+      appendGeminiPolicyRule(lines, 'run_shell_command', 'allow', 980, pattern);
+    }
+  }
+  if (capabilities.ctlFile) {
+    for (const pattern of GEMINI_CTL_FILE_PATTERNS) {
+      appendGeminiPolicyRule(lines, 'run_shell_command', 'allow', 980, pattern);
+    }
+  }
+
+  if (profile.mode === 'readonly') {
+    appendGeminiPolicyRule(lines, GEMINI_READONLY_TOOLS, 'allow', 950);
+    appendGeminiPolicyRule(lines, '*', 'deny', 900);
+    return lines.join('\n');
+  }
+
+  appendGeminiPolicyRule(lines, 'run_shell_command', 'deny', 970);
+  appendGeminiPolicyRule(lines, 'ask_user', 'deny', 960);
+  appendGeminiPolicyRule(lines, GEMINI_AUTO_TOOLS, 'allow', 950);
+  appendGeminiPolicyRule(lines, '*', 'deny', 900);
+  return lines.join('\n');
+}
+
+export function buildGeminiPermissionArgs(
+  profile: GeminiPermissionProfile,
+  policyPath: string,
+  externallySandboxed = false,
+): string[] {
+  return [
+    '--admin-policy', policyPath,
+    ...(!externallySandboxed ? ['--sandbox'] : []),
+    `--approval-mode=${profile.approvalMode}`,
+  ];
+}
+
+function standardGeminiAdminPolicyDirectory(): string | undefined {
+  if (process.platform === 'win32') {
+    const programData = process.env.ProgramData;
+    return programData ? path.join(programData, 'gemini-cli', 'policies') : undefined;
+  }
+  if (process.platform === 'darwin') {
+    return '/Library/Application Support/GeminiCli/policies';
+  }
+  return '/etc/gemini-cli/policies';
+}
+
+export function hasStandardGeminiAdminPolicy(): boolean {
+  const directory = standardGeminiAdminPolicyDirectory();
+  if (!directory) return false;
+  try {
+    return fs.readdirSync(directory, { withFileTypes: true })
+      .some(entry => entry.isFile() && entry.name.endsWith('.toml'));
+  } catch {
+    return false;
+  }
+}
+
 // ── Gemini Runner ──
 
 export class GeminiRunner implements AgentRunnerFull, ModelSwitcher {
@@ -59,7 +204,8 @@ export class GeminiRunner implements AgentRunnerFull, ModelSwitcher {
   private activeStreams = new Map<string, AsyncIterable<any>>();
   private activeSessions = new Map<string, string>(); // sessionId → geminiSessionId
   private onSessionIdUpdate?: (sessionId: string, agentSessionId: string) => void;
-  private currentMode: string = 'auto';
+  private currentMode: string = 'readonly';
+  private permissionContexts = new Map<string, PermissionContext>();
 
   constructor(config: Config, callbacks: AgentCallbacks) {
     this.resolved = resolveGoogleConfig(config);
@@ -80,21 +226,43 @@ export class GeminiRunner implements AgentRunnerFull, ModelSwitcher {
 
   // ── Permission ──
 
-  setMode(mode: string): void { this.currentMode = mode; }
+  setMode(mode: string): void { this.currentMode = normalizePermissionMode(mode).mode; }
   getMode(): string { return this.currentMode; }
 
   listModes(): PermissionModeInfo[] {
     return [
-      { key: 'auto', nameZh: '自动', description: '全部自动（--yolo 模式）', available: true },
-      { key: 'bypass', nameZh: '放行', description: '全部自动（--yolo 模式）', available: true },
-      { key: 'edit', nameZh: '编辑', description: '仅 Claude 支持', available: false, unavailableReason: 'Gemini CLI 不支持此模式' },
-      { key: 'plan', nameZh: '规划', description: 'Gemini 规划模式', available: true },
-      { key: 'noask', nameZh: '静默', description: '仅 Claude 支持', available: false, unavailableReason: 'Gemini CLI 不支持此模式' },
+      { key: 'readonly', nameZh: '只读', description: '只读操作自动执行，写入直接拒绝', available: true },
+      { key: 'auto', nameZh: '自动', description: '常规操作自动执行，危险操作自动拒绝', available: true },
+      { key: 'request', nameZh: '审批', description: '需要升级的操作进入人工审批', available: false, unavailableReason: 'Gemini headless 不提供审批回调；请使用 ACP 集成' },
+      { key: 'bypass', nameZh: '放行', description: '常规操作自动执行，危险操作仍需审批', available: false, unavailableReason: 'Gemini headless 不提供审批回调；请使用 ACP 集成' },
     ];
   }
 
   setSendPrompt(_fn: (text: string) => Promise<void>): void {}
   setPermissionGateway(_gw: any): void {}
+  setPermissionContext(sessionId: string, context: PermissionContext): void {
+    this.permissionContexts.set(sessionId, context);
+  }
+
+  private resolvePolicyCapabilities(sessionId: string): GeminiPolicyCapabilities {
+    const context = this.permissionContexts.get(sessionId);
+    if (!context) return {};
+    const authorizationContext = {
+      actorId: context.userId,
+      channel: context.channel,
+      channelId: context.channelId,
+      chatType: context.chatType,
+      selfAid: context.selfAid,
+      peerKey: context.peerKey,
+      role: context.role || 'none',
+      isDaemonOwner: false,
+      fromControlChannel: context.channel?.startsWith('control#') || false,
+    };
+    return {
+      ctlSend: authorizeEcCommand('ec ctl send', authorizationContext)?.allow === true,
+      ctlFile: authorizeEcCommand('ec ctl file file.txt', authorizationContext)?.allow === true,
+    };
+  }
 
   private buildAgentEnv(sessionId: string, runtimeEnv?: Record<string, string>): Record<string, string> {
     const env: Record<string, string> = {
@@ -134,11 +302,20 @@ export class GeminiRunner implements AgentRunnerFull, ModelSwitcher {
     modelOverride?: AgentRunOverrides,
     runtimeEnv?: Record<string, string>
   ): Promise<AsyncIterable<AgentEvent>> {
-    const disableTools = modelOverride?.disableTools === true;
-    let geminiSessionId = disableTools ? undefined : (initialAgentSessionId || this.activeSessions.get(sessionId));
+    let geminiSessionId = initialAgentSessionId || this.activeSessions.get(sessionId);
     // per-call 权限模式/模型：优先 override，缺省回落实例级（多会话并发互不污染）
-    const callMode = modelOverride?.permissionMode || this.currentMode;
+    const requestedPermissionMode = modelOverride?.permissionMode || this.currentMode;
+    const permissionProfile = resolveGeminiPermissionProfile(requestedPermissionMode);
     const callModel = modelOverride?.model || this.model;
+    const geminiHome = path.join(os.homedir(), '.gemini');
+    fs.mkdirSync(geminiHome, { recursive: true, mode: 0o700 });
+    const sandboxProbe = buildBubblewrapCommand(this.resolved.cliPath, [], {
+      projectPath,
+      writablePaths: [geminiHome],
+    });
+    if (!sandboxProbe && workspaceContainsHClassPaths(projectPath)) {
+      throw new Error('Gemini 缺少可用的路径级隔离运行时，且项目覆盖 EvolClaw 受保护根；已拒绝启动本轮任务');
+    }
 
     // Build CLI args
     const args: string[] = [];
@@ -153,17 +330,18 @@ export class GeminiRunner implements AgentRunnerFull, ModelSwitcher {
 
     // Handle images: write to temp files, prepend @file references
     const tempFiles: string[] = [];
-    if (disableTools) {
-      const policyPath = path.join(os.tmpdir(), `evolclaw-gemini-no-tools-${crypto.randomUUID()}.toml`);
-      fs.writeFileSync(policyPath, [
-        '[[rule]]',
-        'toolName = "*"',
-        'decision = "deny"',
-        'priority = 999',
-        '',
-      ].join('\n'), { mode: 0o600 });
+    {
+      if (hasStandardGeminiAdminPolicy()) {
+        throw new Error('Gemini 系统级 admin policy 会忽略 EvolClaw 的临时安全策略，已拒绝启动本轮任务');
+      }
+      const policyPath = path.join(os.tmpdir(), `evolclaw-gemini-permission-${crypto.randomUUID()}.toml`);
+      fs.writeFileSync(
+        policyPath,
+        buildGeminiAdminPolicy(permissionProfile, this.resolvePolicyCapabilities(sessionId)),
+        { mode: 0o600, flag: 'wx' },
+      );
       tempFiles.push(policyPath);
-      args.push('--policy', policyPath);
+      args.push(...buildGeminiPermissionArgs(permissionProfile, policyPath, !!sandboxProbe));
     }
     if (images?.length) {
       const tmpDir = os.tmpdir();
@@ -185,14 +363,8 @@ export class GeminiRunner implements AgentRunnerFull, ModelSwitcher {
     args.push('-m', callModel);
 
     // Permission mode
-    if (disableTools) {
-      args.push('--approval-mode=default');
-    } else if (callMode === 'plan') {
-      args.push('--approval-mode=plan');
-    } else if (callMode === 'noask') {
-      args.push('--approval-mode=default');
-    } else {
-      args.push('--yolo');
+    if (permissionProfile.degradedFrom) {
+      logger.warn(`[GeminiRunner] permission mode ${permissionProfile.degradedFrom} is unavailable in headless mode; degraded to readonly`);
     }
 
     // Resume session
@@ -202,8 +374,12 @@ export class GeminiRunner implements AgentRunnerFull, ModelSwitcher {
 
     // Spawn subprocess
     const env = this.buildAgentEnv(sessionId, runtimeEnv);
-
-    const child = spawn(this.resolved.cliPath, args, {
+    const sandboxedCommand = buildBubblewrapCommand(this.resolved.cliPath, args, {
+      projectPath,
+      writablePaths: [geminiHome],
+      readonlyPaths: tempFiles,
+    });
+    const child = spawn(sandboxedCommand?.command ?? this.resolved.cliPath, sandboxedCommand?.args ?? args, {
       cwd: projectPath,
       stdio: ['pipe', 'pipe', 'pipe'],
       env,
@@ -462,6 +638,7 @@ export class GeminiRunner implements AgentRunnerFull, ModelSwitcher {
     this.activeSessions.delete(sessionId);
     this.activeStreams.delete(sessionId);
     this.activeProcesses.delete(sessionId);
+    this.permissionContexts.delete(sessionId);
   }
 
   resolveSessionFile(agentSessionId: string, projectPath: string): string | null {
@@ -495,6 +672,7 @@ export class GeminiRunner implements AgentRunnerFull, ModelSwitcher {
     this.activeProcesses.clear();
     this.activeStreams.clear();
     this.activeSessions.clear();
+    this.permissionContexts.clear();
   }
 }
 

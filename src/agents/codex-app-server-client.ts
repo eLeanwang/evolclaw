@@ -1,6 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'child_process';
 import readline from 'readline';
 import { logger } from '../utils/logger.js';
+import { buildHClassGuardCommand } from '../core/sandbox-runtime.js';
 
 type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
 type JsonObject = { [key: string]: JsonValue };
@@ -67,6 +68,35 @@ export interface CodexProviderCapabilitiesResponse {
   [key: string]: unknown;
 }
 
+export interface CodexConfigReadResponse {
+  config?: JsonObject;
+  origins?: JsonObject;
+  layers?: JsonObject[] | null;
+}
+
+export interface CodexPluginInstalledResponse {
+  marketplaces?: Array<{
+    name?: string;
+    path?: string | null;
+    plugins?: Array<{
+      id?: string;
+      name?: string;
+      installed?: boolean;
+      enabled?: boolean;
+      [key: string]: unknown;
+    }>;
+    [key: string]: unknown;
+  }>;
+  marketplaceLoadErrors?: unknown[];
+}
+
+export interface CodexPluginReadResponse {
+  plugin?: {
+    mcpServers?: string[];
+    [key: string]: unknown;
+  };
+}
+
 interface CodexAppServerClientOptions {
   apiKey: string;
   baseUrl?: string;
@@ -85,6 +115,7 @@ interface CodexThreadOptions {
   approvalPolicy?: string;
   approvalsReviewer?: string;
   sandbox?: string;
+  permissions?: string;
   config?: JsonObject | null;
   baseInstructions?: string;
   developerInstructions?: string;
@@ -120,7 +151,7 @@ export class CodexAppServerClient {
       model: options?.model ?? this.options.model ?? null,
       approvalPolicy: options?.approvalPolicy ?? null,
       approvalsReviewer: options?.approvalsReviewer ?? this.options.approvalsReviewer ?? null,
-      sandbox: options?.sandbox ?? null,
+      ...(options?.permissions ? { permissions: options.permissions } : { sandbox: options?.sandbox ?? null }),
       config: this.buildThreadConfig(effort, options?.config),
       ...(options?.baseInstructions ? { baseInstructions: options.baseInstructions } : {}),
       ...(options?.developerInstructions ? { developerInstructions: options.developerInstructions } : {}),
@@ -143,7 +174,7 @@ export class CodexAppServerClient {
       model: options?.model ?? this.options.model ?? null,
       approvalPolicy: options?.approvalPolicy ?? null,
       approvalsReviewer: options?.approvalsReviewer ?? this.options.approvalsReviewer ?? null,
-      sandbox: options?.sandbox ?? null,
+      ...(options?.permissions ? { permissions: options.permissions } : { sandbox: options?.sandbox ?? null }),
       config: this.buildThreadConfig(effort, options?.config),
       ...(options?.baseInstructions ? { baseInstructions: options.baseInstructions } : {}),
       ...(options?.developerInstructions ? { developerInstructions: options.developerInstructions } : {}),
@@ -154,15 +185,16 @@ export class CodexAppServerClient {
   async turnStart(
     threadId: string,
     input: JsonValue[],
-    options?: { cwd?: string; model?: string; effort?: string; approvalPolicy?: string; sandbox?: string }
+    options?: { cwd?: string; model?: string; effort?: string; approvalPolicy?: string; sandbox?: string; permissions?: string }
   ): Promise<{ turn?: Record<string, any> }> {
-    const sandboxPolicy = this.toTurnSandboxPolicy(options?.sandbox);
+    const sandboxPolicy = options?.permissions ? undefined : this.toTurnSandboxPolicy(options?.sandbox);
     return this.request('turn/start', {
       threadId,
       input,
       ...(options?.cwd ? { cwd: options.cwd } : {}),
       ...(options?.model ? { model: options.model } : {}),
       ...(options?.approvalPolicy ? { approvalPolicy: options.approvalPolicy } : {}),
+      ...(options?.permissions ? { permissions: options.permissions } : {}),
       ...(sandboxPolicy ? { sandboxPolicy } : {}),
       ...(options?.effort ? { effort: options.effort } : {}),
     }) as Promise<{ turn?: Record<string, any> }>;
@@ -196,14 +228,16 @@ export class CodexAppServerClient {
     threadId: string,
     projectPath: string,
     title?: string,
-    options?: Pick<CodexThreadOptions, 'model' | 'effort' | 'approvalsReviewer' | 'config'>
+    options?: Pick<CodexThreadOptions, 'model' | 'effort' | 'approvalPolicy' | 'approvalsReviewer' | 'permissions' | 'sandbox' | 'config'>
   ): Promise<CodexThreadResponse> {
     const effort = options?.effort ?? this.options.effort;
     const response = await this.request('thread/fork', {
       threadId,
       cwd: projectPath,
       model: options?.model ?? this.options.model ?? null,
+      approvalPolicy: options?.approvalPolicy ?? null,
       approvalsReviewer: options?.approvalsReviewer ?? this.options.approvalsReviewer ?? null,
+      ...(options?.permissions ? { permissions: options.permissions } : { sandbox: options?.sandbox ?? null }),
       config: this.buildThreadConfig(effort, options?.config),
       excludeTurns: false,
       persistExtendedHistory: false,
@@ -275,6 +309,33 @@ export class CodexAppServerClient {
     return this.request('modelProvider/capabilities/read', {}) as Promise<CodexProviderCapabilitiesResponse>;
   }
 
+  async configRead(cwd?: string): Promise<CodexConfigReadResponse> {
+    return this.request('config/read', {
+      ...(cwd ? { cwd } : {}),
+      includeLayers: false,
+    }) as Promise<CodexConfigReadResponse>;
+  }
+
+  async pluginInstalled(cwd?: string): Promise<CodexPluginInstalledResponse> {
+    return this.request('plugin/installed', {
+      ...(cwd ? { cwds: [cwd] } : {}),
+    }) as Promise<CodexPluginInstalledResponse>;
+  }
+
+  async pluginRead(
+    pluginName: string,
+    marketplace: { name?: string; path?: string | null },
+  ): Promise<CodexPluginReadResponse> {
+    return this.request('plugin/read', {
+      pluginName,
+      ...(marketplace.path
+        ? { marketplacePath: marketplace.path }
+        : marketplace.name
+          ? { remoteMarketplaceName: marketplace.name }
+          : {}),
+    }) as Promise<CodexPluginReadResponse>;
+  }
+
   async close(): Promise<void> {
     const proc = this.proc;
     this.proc = null;
@@ -342,7 +403,11 @@ export class CodexAppServerClient {
 
     const args = this.buildProcessArgs();
 
-    this.proc = spawn('codex', args, {
+    const guardedCommand = buildHClassGuardCommand('codex', args);
+    if (process.platform === 'linux' && !guardedCommand) {
+      throw new Error('Codex 缺少 EvolClaw H 类路径隔离运行时，已拒绝启动 app-server');
+    }
+    this.proc = spawn(guardedCommand?.command ?? 'codex', guardedCommand?.args ?? args, {
       cwd: this.options.cwd,
       env,
       stdio: ['pipe', 'pipe', 'pipe'],

@@ -98,9 +98,8 @@ export class InteractionRouter {
     // Initiator 校验（集中式 backstop）：非发起者的操作直接丢弃，不消费 handler、不解除等待，
     // 让真正的发起者仍可继续操作。身份只信渠道传入的已认证 operatorId（来自消息信封，非 payload 自报）。
     // 渠道层若已自行校验（如飞书的 reject toast），此处不会重复命中（operatorId 已匹配）。
-    if (handler.initiatorId && response.operatorId
-        && response.operatorId !== handler.initiatorId) {
-      logger.info(`[InteractionRouter] rejected non-initiator: operator=${response.operatorId} initiator=${handler.initiatorId} id=${response.id}`);
+    if (handler.initiatorId && response.operatorId !== handler.initiatorId) {
+      logger.info(`[InteractionRouter] rejected unauthenticated or non-initiator response: operator=${response.operatorId ?? '<missing>'} initiator=${handler.initiatorId} id=${response.id}`);
       return false;
     }
 

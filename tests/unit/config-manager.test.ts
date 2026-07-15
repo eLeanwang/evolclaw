@@ -217,7 +217,7 @@ describe('resolveEffective (v3 覆盖链: defaults → agent → relation)', () 
     write(ConfigTarget.Defaults, {
       $schema_version: 1,
       config: { auxiliaryModel: 'deepseek-v4-flash', debounceMs: 3000 },
-      session_renew: { enabled: false, after_hours: 24, effort: 'low' },
+      session_renew: { enabled: false, after_hours: 24, model: 'claude-haiku-4-5-20251001', effort: 'low' },
     }, {});
 
     write(ConfigTarget.Agent, {
@@ -237,6 +237,7 @@ describe('resolveEffective (v3 覆盖链: defaults → agent → relation)', () 
     expect(resolveEffective({ self: AID, peerKey: PEER }).session_renew).toEqual({
       enabled: true,
       after_hours: 72,
+      model: 'claude-haiku-4-5-20251001',
       effort: 'low',
       fallback_action: 'continue',
     });
@@ -325,6 +326,7 @@ describe('config field policy', () => {
     'proactive.pre_tool_1stmsgchk',
     'session_renew.enabled',
     'session_renew.after_hours',
+    'session_renew.model',
     'session_renew.effort',
     'session_renew.fallback_action',
     'render.private',
@@ -377,6 +379,11 @@ describe('config field policy', () => {
     expect(parseConfigFieldValue('session_renew.enabled', 'true')).toEqual({ ok: true, value: true });
     expect(parseConfigFieldValue('session_renew.after_hours', '24')).toEqual({ ok: true, value: 24 });
     expect(parseConfigFieldValue('session_renew.after_hours', '0').ok).toBe(false);
+    expect(parseConfigFieldValue('session_renew.model', 'claude-haiku-4-5-20251001')).toEqual({
+      ok: true,
+      value: 'claude-haiku-4-5-20251001',
+    });
+    expect(parseConfigFieldValue('session_renew.model', ' ').ok).toBe(false);
     expect(parseConfigFieldValue('session_renew.fallback_action', 'continue')).toEqual({ ok: true, value: 'continue' });
     expect(parseConfigFieldValue('session_renew.fallback_action', 'ask').ok).toBe(false);
   });

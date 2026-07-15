@@ -1,6 +1,6 @@
 import path from 'path';
 import fs from 'fs';
-import { createHash } from 'crypto';
+import { createHash, randomUUID } from 'crypto';
 import type { EventBus } from './event-bus.js';
 import type {
   ApprovalRoute,
@@ -15,6 +15,11 @@ import { renderActionAsText } from './interaction-router.js';
 import { buildEnvelope, sendInteractionPayload } from './message/message-utils.js';
 import { logger } from '../utils/logger.js';
 import { summarizeToolInput } from '../utils/tool-summary.js';
+import {
+  containsHClassReference,
+  hClassGrantIncludesProtectedPath,
+  isHClassPath,
+} from './protected-paths.js';
 
 // 工具摘要/Edit diff 预览已迁至 utils/tool-summary.ts；此处再导出以保持既有引用路径兼容。
 export { summarizeToolInput };
@@ -48,7 +53,11 @@ const DANGEROUS_PATTERNS: Array<{
   pattern: RegExp;
   reason: string;
 }> = [
-  { kind: 'rm-rf', pattern: /\brm\s+-\w*r\w*f/, reason: '递归删除文件/目录，操作不可逆' },
+  {
+    kind: 'rm-rf',
+    pattern: /\brm\b(?=[^;&|\r\n]*\s(?:-[A-Za-z]*r[A-Za-z]*|--recursive)(?:\s|=|$))(?=[^;&|\r\n]*\s(?:-[A-Za-z]*f[A-Za-z]*|--force)(?:\s|=|$))[^;&|\r\n]*/,
+    reason: '递归删除文件/目录，操作不可逆',
+  },
   { kind: 'sudo', pattern: /\bsudo\b/, reason: '以超级用户权限执行命令' },
   { kind: 'chmod-777', pattern: /\bchmod\s+777/, reason: '设置文件为完全开放权限（安全风险）' },
   { kind: 'device-redirect', pattern: />\s*\/dev\/(?!null\b)/, reason: '写入设备文件（可能影响系统）' },
@@ -85,15 +94,8 @@ export function checkReadonly(
 
   if (toolName === 'Write' || toolName === 'Edit' || toolName === 'NotebookEdit') {
     const filePath = (input.file_path || input.notebook_path) as string | undefined;
-    const tmpDir = path.resolve(projectPath, '.evolclaw', 'tmp');
-    const resolved = filePath ? path.resolve(projectPath, filePath) : '';
-    const relative = resolved ? path.relative(tmpDir, resolved) : '..';
-    const insideTmp = relative === '' || (!!relative && !relative.startsWith('..') && !path.isAbsolute(relative));
-    if (!insideTmp) {
-      logger.warn(`[ReadonlyCheck] 🔒 File write blocked: tool=${toolName} path=${filePath} session=${context?.sessionId} channel=${context?.channel} peer=${context?.peerId} role=${context?.role}`);
-      return { behavior: 'deny', message: '🔒 只读模式：禁止修改项目文件。如需生成文件请写入 .evolclaw/tmp/ 目录' };
-    }
-    return { behavior: 'allow' };
+    logger.warn(`[ReadonlyCheck] 🔒 File write blocked: tool=${toolName} path=${filePath} project=${projectPath} session=${context?.sessionId} channel=${context?.channel} peer=${context?.peerId} role=${context?.role}`);
+    return { behavior: 'deny', message: '🔒 只读模式：禁止写入或修改文件' };
   }
 
   if (toolName === 'Bash') {
@@ -109,67 +111,250 @@ export function checkReadonly(
 
 /**
  * H 类文件保护（用于 PreToolUse hook）
- * H 类文件只有人能改，agent 不可直接写入
+ * H 类文件只能由受控的人类/daemon 路径处理，agent 不可直接访问
  */
-const H_CLASS_PATTERNS = [
-  /[/\\]evolclaw\.json$/,                                    // 进程级配置
-  /[/\\]agents[/\\]defaults\.json$/,                         // 全局默认配置
-  /[/\\]agents[/\\][^/\\]+[/\\]config\.json$/,               // agent 配置
-  /[/\\]agents[/\\][^/\\]+[/\\]relations[/\\][^/\\]+[/\\]config\.json$/,  // relation 配置
-  /[/\\]backups[/\\]config[/\\]/,                            // 快照目录
-  /[/\\]\.snapshots[/\\]/,                                   // 快照目录（备用）
-  /[/\\]CA[/\\]/,                                            // 证书根目录
-  /[/\\]aids[/\\][^/\\]+[/\\](cert|keys)[/\\]/,              // 证书和密钥
-  /[/\\]\.device_id$/,                                       // 设备标识
-  /[/\\]\.env$/,                                             // 环境变量配置
-  /[/\\]\.seed\./,                                           // seed 文件
-  /[/\\]\.migrated-/,                                        // 迁移标记
-  /\.json_$/,                                                // 备份文件（_ 后缀）
-  /\.json\.migrated$/,                                       // 迁移归档
-  /[/\\]defaults_\d+\.json$/,                                // defaults 历史备份
-];
+function collectStringValues(value: unknown, output: string[]): void {
+  if (typeof value === 'string') {
+    output.push(value);
+    return;
+  }
+  if (Array.isArray(value)) {
+    for (const entry of value) collectStringValues(entry, output);
+    return;
+  }
+  if (!value || typeof value !== 'object') return;
+  for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+    output.push(key);
+    collectStringValues(entry, output);
+  }
+}
+
+function collectPermissionPathSpec(
+  value: unknown,
+  output: string[],
+  projectRootSubpaths?: string[],
+): void {
+  if (typeof value === 'string') {
+    output.push(value);
+    return;
+  }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return;
+  const record = value as Record<string, unknown>;
+  if (typeof record.path === 'string') output.push(record.path);
+  if (typeof record.pattern === 'string') output.push(record.pattern);
+  if (record.type === 'special' && record.value && typeof record.value === 'object') {
+    const special = record.value as Record<string, unknown>;
+    const kind = special.kind;
+    if (kind === 'project_roots') {
+      const subpath = typeof special.subpath === 'string' && special.subpath ? special.subpath : '.';
+      if (projectRootSubpaths) projectRootSubpaths.push(subpath);
+      else output.push(subpath);
+    } else if (kind === 'unknown' && typeof special.path === 'string' && special.path) {
+      const unknownPath = special.path;
+      const subpath = typeof special.subpath === 'string' && special.subpath ? special.subpath : undefined;
+      output.push(subpath
+        ? (path.isAbsolute(subpath) ? subpath : path.join(unknownPath, subpath))
+        : unknownPath);
+    }
+  }
+}
+
+function collectFilesystemGrantPaths(
+  value: unknown,
+  output: string[],
+  projectRootSubpaths?: string[],
+): void {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return;
+  const profile = value as Record<string, unknown>;
+  const fileSystem = profile.fileSystem ?? profile.filesystem;
+  if (!fileSystem || typeof fileSystem !== 'object' || Array.isArray(fileSystem)) return;
+  const fsProfile = fileSystem as Record<string, unknown>;
+
+  for (const key of ['read', 'write']) {
+    const paths = fsProfile[key];
+    if (Array.isArray(paths)) {
+      for (const candidate of paths) collectPermissionPathSpec(candidate, output, projectRootSubpaths);
+    }
+  }
+
+  if (Array.isArray(fsProfile.entries)) {
+    for (const entry of fsProfile.entries) {
+      if (!entry || typeof entry !== 'object' || Array.isArray(entry)) continue;
+      const record = entry as Record<string, unknown>;
+      if (record.access === 'deny') continue;
+      collectPermissionPathSpec(record.path, output, projectRootSubpaths);
+    }
+  }
+
+  // Named-profile shaped overlays use path keys with read/write/deny values.
+  for (const [candidate, access] of Object.entries(fsProfile)) {
+    if (access === 'read' || access === 'write') {
+      if (candidate === ':root') output.push(path.parse(process.cwd()).root);
+      else if (candidate === ':workspace_roots') output.push('.');
+      else if (![':minimal', ':tmpdir', ':slash_tmp'].includes(candidate)) output.push(candidate);
+    }
+    if (!access || typeof access !== 'object' || Array.isArray(access)) continue;
+    for (const [subpath, nestedAccess] of Object.entries(access as Record<string, unknown>)) {
+      if (nestedAccess !== 'read' && nestedAccess !== 'write') continue;
+      if (candidate === ':root') output.push(path.resolve(path.parse(process.cwd()).root, subpath));
+      else if (candidate === ':workspace_roots') output.push(subpath === '.' ? '.' : subpath);
+      else if (![':minimal', ':tmpdir', ':slash_tmp'].includes(candidate)) output.push(path.join(candidate, subpath));
+    }
+  }
+}
+
+function collectExplicitFileChangePaths(record: Record<string, unknown>, output: string[]): boolean {
+  const explicitPathKeys = ['path', 'filePath', 'file_path', 'movePath', 'move_path', 'destinationPath', 'targetPath'];
+  const hasExplicitPath = explicitPathKeys.some(key => typeof record[key] === 'string');
+  for (const key of explicitPathKeys) {
+    if (typeof record[key] === 'string' && record[key]) output.push(record[key] as string);
+  }
+  if (record.kind && typeof record.kind === 'object') {
+    collectExplicitFileChangePaths(record.kind as Record<string, unknown>, output);
+  }
+  return hasExplicitPath;
+}
+
+function collectFileChangePaths(value: unknown, output: string[]): void {
+  if (Array.isArray(value)) {
+    for (const entry of value) {
+      if (entry && typeof entry === 'object' && !Array.isArray(entry)) {
+        collectExplicitFileChangePaths(entry as Record<string, unknown>, output);
+      }
+    }
+    return;
+  }
+  if (!value || typeof value !== 'object') return;
+
+  const record = value as Record<string, unknown>;
+  const hasExplicitPath = collectExplicitFileChangePaths(record, output);
+
+  // Claude-style inputs are maps keyed by path; Codex v2 uses an array of
+  // records with an explicit path field. Only treat keys as paths for the map
+  // shape so diff text and metadata never become path candidates.
+  if (!hasExplicitPath) {
+    for (const [filePath, change] of Object.entries(record)) {
+      if (filePath !== 'kind' && filePath !== 'type') output.push(filePath);
+      if (change && typeof change === 'object' && !Array.isArray(change)) {
+        collectExplicitFileChangePaths(change as Record<string, unknown>, output);
+      }
+    }
+  }
+}
+
+function requestsFilesystemRoot(value: unknown): boolean {
+  if (Array.isArray(value)) return value.some(requestsFilesystemRoot);
+  if (!value || typeof value !== 'object') return false;
+  const record = value as Record<string, unknown>;
+  if (record.access !== 'deny') {
+    const pathSpec = record.path;
+    if (pathSpec && typeof pathSpec === 'object' && !Array.isArray(pathSpec)) {
+      const pathRecord = pathSpec as Record<string, unknown>;
+      const special = pathRecord.type === 'special' ? pathRecord.value : undefined;
+      if (special && typeof special === 'object' && !Array.isArray(special)) {
+        if ((special as Record<string, unknown>).kind === 'root') return true;
+      }
+    }
+  }
+  return Object.values(record).some(requestsFilesystemRoot);
+}
 
 export function checkHClassWrite(
   toolName: string,
   input: Record<string, unknown>,
-  context?: { sessionId?: string; channel?: string; peerId?: string; role?: string }
+  context?: {
+    sessionId?: string;
+    channel?: string;
+    peerId?: string;
+    role?: string;
+    projectPath?: string;
+    workspacePath?: string;
+    root?: string;
+  }
 ): { behavior: 'allow' } | { behavior: 'deny'; message: string } {
   const paths: string[] = [];
-  if (['Write', 'Edit', 'NotebookEdit'].includes(toolName)) {
-    const filePath = input.file_path ?? input.notebook_path ?? input.path;
+  const grantPaths: string[] = [];
+  const projectRootGrantSubpaths: string[] = [];
+  if (['Read', 'Write', 'Edit', 'NotebookEdit', 'Glob', 'Grep'].includes(toolName)) {
+    const filePath = input.file_path ?? input.notebook_path ?? input.path ?? input.pattern;
     if (typeof filePath === 'string' && filePath) paths.push(filePath);
-  } else if (toolName === 'FileChange') {
+  } else if (toolName === 'FileChange' || toolName === 'PermissionGrant') {
     const grantRoot = input.grantRoot;
-    if (typeof grantRoot === 'string' && grantRoot) paths.push(grantRoot);
+    if (typeof grantRoot === 'string' && grantRoot) grantPaths.push(grantRoot);
     const fileChanges = input.fileChanges;
-    if (fileChanges && typeof fileChanges === 'object' && !Array.isArray(fileChanges)) {
-      paths.push(...Object.keys(fileChanges as Record<string, unknown>));
-    }
+    collectFileChangePaths(fileChanges, paths);
+    collectFilesystemGrantPaths(input.permissions, grantPaths, projectRootGrantSubpaths);
   } else if (toolName === 'Bash') {
     const command = typeof input.command === 'string' ? input.command.replace(/\\/g, '/') : '';
-    if (!command) return { behavior: 'allow' };
-    for (const pattern of H_CLASS_PATTERNS) {
-      if (pattern.test(command)) {
-        logger.warn(
-          `[H-Class Protection] 🔒 Protected path referenced by shell command: tool=${toolName} ` +
-          `session=${context?.sessionId} channel=${context?.channel} peer=${context?.peerId} role=${context?.role}`
-        );
-        return {
-          behavior: 'deny',
-          message: '🔒 Shell 命令涉及受保护的 H 类配置/证书/快照路径，agent 不可直接操作',
-        };
-      }
+    if (containsHClassReference(command)) {
+      logger.warn(
+        `[H-Class Protection] 🔒 Protected path referenced by shell command: tool=${toolName} ` +
+        `session=${context?.sessionId} channel=${context?.channel} peer=${context?.peerId} role=${context?.role}`
+      );
+      return {
+        behavior: 'deny',
+        message: '🔒 Shell 命令涉及受保护的 H 类配置/证书/快照路径，agent 不可直接操作',
+      };
     }
-    return { behavior: 'allow' };
+    collectFilesystemGrantPaths(input.additionalPermissions, grantPaths, projectRootGrantSubpaths);
+    collectFilesystemGrantPaths(input.permissions, grantPaths, projectRootGrantSubpaths);
   } else {
-    return { behavior: 'allow' };
+    collectStringValues(input, paths);
   }
 
-  if (paths.length === 0) return { behavior: 'allow' };
+  const pathOptions = { cwd: context?.projectPath, root: context?.root };
+  if (requestsFilesystemRoot(input.permissions) || requestsFilesystemRoot(input.additionalPermissions)) {
+    logger.warn(
+      `[H-Class Protection] 🔒 Permission grant covers filesystem root: tool=${toolName} ` +
+      `session=${context?.sessionId} channel=${context?.channel} peer=${context?.peerId} role=${context?.role}`
+    );
+    return {
+      behavior: 'deny',
+      message: '🔒 请求的文件系统根权限包含受保护的 H 类路径，已拒绝授权',
+    };
+  }
+  for (const grantPath of grantPaths) {
+    if (!grantPath) continue;
+    if (containsHClassReference(grantPath) || hClassGrantIncludesProtectedPath(grantPath, pathOptions)) {
+      logger.warn(
+        `[H-Class Protection] 🔒 Permission grant covers protected paths: tool=${toolName} path=${grantPath} ` +
+        `session=${context?.sessionId} channel=${context?.channel} peer=${context?.peerId} role=${context?.role}`
+      );
+      return {
+        behavior: 'deny',
+        message: '🔒 请求的文件系统权限范围包含受保护的 H 类路径，已拒绝授权',
+      };
+    }
+  }
+  const permissionWorkspace = context?.workspacePath ?? context?.projectPath;
+  for (const subpath of projectRootGrantSubpaths) {
+    // Codex `project_roots` is relative to the thread workspace, not to the
+    // command/permission-request cwd. Keep the two coordinate systems apart.
+    if (!permissionWorkspace) {
+      return {
+        behavior: 'deny',
+        message: '🔒 无法确定 project_roots 权限的 thread workspace，已拒绝授权',
+      };
+    }
+    const candidate = path.isAbsolute(subpath)
+      ? subpath
+      : path.resolve(permissionWorkspace, subpath);
+    if (containsHClassReference(subpath) || hClassGrantIncludesProtectedPath(candidate, { root: context?.root })) {
+      logger.warn(
+        `[H-Class Protection] 🔒 project_roots grant covers protected paths: tool=${toolName} path=${subpath} ` +
+        `workspace=${permissionWorkspace} session=${context?.sessionId} channel=${context?.channel} ` +
+        `peer=${context?.peerId} role=${context?.role}`
+      );
+      return {
+        behavior: 'deny',
+        message: '🔒 请求的 project_roots 权限范围包含受保护的 H 类路径，已拒绝授权',
+      };
+    }
+  }
 
   for (const filePath of paths) {
     const normalized = filePath.replace(/\\/g, '/');
-    const matched = H_CLASS_PATTERNS.some(pattern => pattern.test(normalized));
+    const matched = containsHClassReference(normalized) || isHClassPath(filePath, pathOptions);
     if (matched) {
       const fileBasename = path.basename(filePath);
       logger.warn(
@@ -353,7 +538,8 @@ export async function requestDangerousCommandPermission(
   toolName: string,
   input: Record<string, unknown>,
   sendPrompt: ((text: string) => Promise<void>) | undefined,
-  context?: PermissionRequestContext
+  context?: PermissionRequestContext,
+  grantScope = 'default',
 ): Promise<{ matched: false } | { matched: true; decision: PermissionDecision }> {
   const dangerCheck = checkDangerousCommand(toolName, input);
   if (!dangerCheck.isDangerous) {
@@ -372,7 +558,8 @@ export async function requestDangerousCommandPermission(
     sendPrompt,
     context,
     `⚠️ ${dangerCheck.command}`,
-    dangerCheck.reason
+    dangerCheck.reason,
+    grantScope,
   );
 
   return { matched: true, decision };
@@ -382,8 +569,11 @@ interface PendingPermission {
   sessionId: string;
   toolName: string;
   inputFingerprint: string;
+  grantScope: string;
+  approverId: string;
   resolve: (decision: PermissionDecision) => void;
   interactionRouter?: InteractionRouter;
+  timeout?: NodeJS.Timeout;
 }
 
 interface PendingCrossSessionPermission extends PendingPermission {
@@ -400,6 +590,7 @@ interface TemporaryPermissionGrant {
 }
 
 const SESSION_GRANT_TTL_MS = 30 * 60 * 1000;
+const LOCAL_APPROVAL_TTL_MS = 20 * 60 * 1000;
 const APPROVAL_DETAIL_LIMIT = 800;
 
 function stablePermissionInput(value: unknown): string {
@@ -460,7 +651,8 @@ export function planApprovalRoute(
   if (!challenge.grantable) {
     return { kind: 'unavailable', reason: 'challenge_not_grantable' };
   }
-  const requesterId = context?.userId || context?.channelId || '';
+  const requesterId = context?.userId || '';
+  if (!requesterId) return { kind: 'unavailable', reason: 'no_requester_approver' };
   if (challenge.approverPolicy === 'requester') {
     return { kind: 'local', approverId: requesterId };
   }
@@ -478,7 +670,7 @@ export function planApprovalRoute(
   if (!approverId) {
     return { kind: 'unavailable', reason: 'no_aun_owner_available' };
   }
-  if (!routing?.ownerAdapter?.capabilities?.interaction) {
+  if (!routing?.ownerAdapter) {
     return { kind: 'unavailable', reason: 'owner_approval_channel_unavailable' };
   }
   return { kind: 'handoff', approverId, channel: 'aun', adapter: routing.ownerAdapter };
@@ -499,8 +691,8 @@ export class PermissionGateway {
     this.temporaryGrants.clear();
   }
 
-  private temporaryGrantKey(sessionId: string, toolName: string, inputFingerprint: string): string {
-    return `${sessionId}\u0000${toolName}\u0000${inputFingerprint}`;
+  private temporaryGrantKey(sessionId: string, toolName: string, inputFingerprint: string, grantScope: string): string {
+    return `${sessionId}\u0000${grantScope}\u0000${toolName}\u0000${inputFingerprint}`;
   }
 
   private pruneTemporaryGrants(now: number): void {
@@ -509,20 +701,24 @@ export class PermissionGateway {
     }
   }
 
-  hasTemporaryGrant(sessionId: string, toolName: string, toolInput: Record<string, unknown>): boolean {
-    const now = Date.now();
-    this.pruneTemporaryGrants(now);
-    const key = this.temporaryGrantKey(sessionId, toolName, permissionInputFingerprint(toolInput));
-    const grant = this.temporaryGrants.get(key);
-    if (!grant) return false;
-    return true;
+  hasTemporaryGrant(sessionId: string, toolName: string, toolInput: Record<string, unknown>, grantScope = 'default'): boolean {
+    return !!this.getTemporaryGrant(sessionId, toolName, toolInput, grantScope);
   }
 
-  private addTemporaryGrant(pending: Pick<PendingPermission, 'sessionId' | 'toolName' | 'inputFingerprint'>): number {
+  private getTemporaryGrant(sessionId: string, toolName: string, toolInput: Record<string, unknown>, grantScope = 'default'): TemporaryPermissionGrant | undefined {
+    const now = Date.now();
+    this.pruneTemporaryGrants(now);
+    const key = this.temporaryGrantKey(sessionId, toolName, permissionInputFingerprint(toolInput), grantScope);
+    return this.temporaryGrants.get(key);
+  }
+
+  private addTemporaryGrant(
+    pending: Pick<PendingPermission, 'sessionId' | 'toolName' | 'inputFingerprint' | 'grantScope'>,
+  ): number {
     const now = Date.now();
     this.pruneTemporaryGrants(now);
     const expiresAt = now + SESSION_GRANT_TTL_MS;
-    const key = this.temporaryGrantKey(pending.sessionId, pending.toolName, pending.inputFingerprint);
+    const key = this.temporaryGrantKey(pending.sessionId, pending.toolName, pending.inputFingerprint, pending.grantScope);
     this.temporaryGrants.set(key, { expiresAt });
     return expiresAt;
   }
@@ -538,12 +734,14 @@ export class PermissionGateway {
     requestId: string,
     action: string,
     _values?: Record<string, unknown>,
-    _operatorId?: string,
+    operatorId?: string,
   ): boolean {
     const pending = this.crossSessionPending.get(requestId);
     if (!pending || pending.sessionId !== sessionId) return false;
+    if (operatorId !== pending.approverId) return false;
 
     if (pending.timeout) clearTimeout(pending.timeout);
+    pending.interactionRouter?.cancel(requestId);
     this.crossSessionPending.delete(requestId);
 
     const sessionGrant = action === 'approve_session_30m';
@@ -592,6 +790,7 @@ export class PermissionGateway {
     route: Extract<ApprovalRoute, { kind: 'handoff' }>,
     sendPrompt: (text: string) => Promise<void>,
     context: PermissionRequestContext,
+    grantScope: string,
   ): Promise<PermissionDecision> {
     const approval = context.approvalRouting;
     const interactionRouter = context.interactionRouter;
@@ -657,8 +856,42 @@ export class PermissionGateway {
       sessionId,
       initiatorId: route.approverId || undefined,
       expiresAt,
-      fallback: { command: 'auth' },
+      fallback: {
+        command: 'perm',
+        buttonArgMap: {
+          approve_once: `${requestId} allow`,
+          approve_session_30m: `${requestId} always`,
+          deny: `${requestId} deny`,
+        },
+      },
     };
+
+    // Register before delivery. Some adapters can surface a user response as
+    // soon as send() completes; registering afterwards creates a narrow race
+    // where a valid approval is visible to the user but dropped by the router.
+    const decisionPromise = new Promise<PermissionDecision>((resolve) => {
+      const pending: PendingCrossSessionPermission = {
+        sessionId,
+        requestId,
+        toolName,
+        displaySummary,
+        reason,
+        resolve,
+        inputFingerprint: permissionInputFingerprint(toolInput),
+        grantScope,
+        approverId: route.approverId,
+        interactionRouter,
+      };
+      this.crossSessionPending.set(requestId, pending);
+      interactionRouter.register(requestId, sessionId, (action, values, operatorId) => {
+        this.resolveCrossSessionPermission(sessionId, requestId, action, values, operatorId);
+      }, {
+        initiatorId: route.approverId,
+        timeoutMs: ttlMs,
+        onTimeout: () => this.expireCrossSessionPermission(sessionId, requestId, 'expired'),
+        fallbackCommand: 'perm',
+      });
+    });
 
     if (context.flushPending) {
       try {
@@ -685,42 +918,50 @@ export class PermissionGateway {
       replyContext: ownerReplyContext,
     });
 
-    const sent = await sendInteractionPayload(
-      route.adapter,
-      envelope,
-      interaction,
-      `临时授权申请\n${body}\n请在 AUN 卡片中选择批准或拒绝。`,
-      ownerReplyContext,
-    );
+    let sent = false;
+    try {
+      sent = !!await sendInteractionPayload(
+        route.adapter,
+        envelope,
+        interaction,
+        renderActionAsText(interaction),
+        ownerReplyContext,
+      );
+    } catch (error) {
+      logger.warn(`[PermissionGateway] Owner approval delivery failed: session=${sessionId} tool=${toolName} error=${error instanceof Error ? error.message : String(error)}`);
+    }
     if (!sent) {
-      await sendPrompt('当前会话权限不足，向 owner 发送授权申请失败。');
-      return 'deny';
+      this.expireCrossSessionPermission(sessionId, requestId, 'failed');
+      try {
+        await sendPrompt('当前会话权限不足，向 owner 发送授权申请失败。');
+      } catch (error) {
+        logger.debug(`[PermissionGateway] cross-session delivery failure notice failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+      return decisionPromise;
     }
 
-    return new Promise((resolve) => {
-      const pending: PendingCrossSessionPermission = {
-        sessionId,
-        requestId,
-        toolName,
-        displaySummary,
-        reason,
-        resolve,
-        inputFingerprint: permissionInputFingerprint(toolInput),
-        interactionRouter,
-      };
-      this.crossSessionPending.set(requestId, pending);
-      interactionRouter.register(requestId, sessionId, (action, values, operatorId) => {
-        this.resolveCrossSessionPermission(sessionId, requestId, action, values, operatorId);
-      }, {
-        initiatorId: route.approverId,
-        timeoutMs: ttlMs,
-        onTimeout: () => this.expireCrossSessionPermission(sessionId, requestId, 'expired'),
-        fallbackCommand: 'auth',
-      });
-      sendPrompt('当前会话权限不足，已向 owner 发送临时授权申请，等待审批。').catch(error => {
-        logger.debug(`[PermissionGateway] cross-session notify origin failed: ${error instanceof Error ? error.message : String(error)}`);
-      });
+    sendPrompt('当前会话权限不足，已向 owner 发送临时授权申请，等待审批。').catch(error => {
+      logger.debug(`[PermissionGateway] cross-session notify origin failed: ${error instanceof Error ? error.message : String(error)}`);
     });
+    return decisionPromise;
+  }
+
+  private failPendingPermission(sessionId: string, requestId: string, reason: string): boolean {
+    const pending = this.pending.get(requestId);
+    if (!pending || pending.sessionId !== sessionId) return false;
+    if (pending.timeout) clearTimeout(pending.timeout);
+    pending.interactionRouter?.cancel(requestId);
+    this.pending.delete(requestId);
+    pending.resolve('deny');
+    this.eventBus?.publish({
+      type: 'permission:resolved',
+      sessionId,
+      requestId,
+      toolName: pending.toolName,
+      reason,
+      approved: false,
+    });
+    return true;
   }
 
   /**
@@ -733,13 +974,19 @@ export class PermissionGateway {
     sendPrompt: (text: string) => Promise<void>,
     context?: PermissionRequestContext,
     summary?: string,
-    reason?: string
+    reason?: string,
+    grantScope = 'default',
   ): Promise<PermissionDecision> {
-    if (this.hasTemporaryGrant(sessionId, toolName, toolInput)) {
+    if (!context?.userId) {
+      await sendPrompt('当前操作需要授权，但无法验证申请人身份。');
+      return 'deny';
+    }
+    const temporaryGrant = this.getTemporaryGrant(sessionId, toolName, toolInput, grantScope);
+    if (temporaryGrant) {
       return 'allow';
     }
 
-    const requestId = `perm-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const requestId = `perm-${randomUUID()}`;
     const displaySummary = summary || summarizeToolInput(toolName, toolInput);
     const reasonLine = reason ? `\n原因：${reason}` : '';
     const challenge: AuthorizationChallenge = {
@@ -776,6 +1023,7 @@ export class PermissionGateway {
         route,
         sendPrompt,
         context!,
+        grantScope,
       );
     }
 
@@ -796,8 +1044,42 @@ export class PermissionGateway {
       channelId: context?.channelId || '',
       sessionId,
       initiatorId: route.approverId,
-      fallback: { command: 'perm' },
+      expiresAt: Date.now() + LOCAL_APPROVAL_TTL_MS,
+      fallback: {
+        command: 'perm',
+        buttonArgMap: {
+          allow: `${requestId} allow`,
+          always: `${requestId} always`,
+          deny: `${requestId} deny`,
+        },
+      },
     };
+
+    // Register before delivery so an immediate card/text response cannot beat
+    // the pending approval handler. The UUID keeps this pre-delivery slot from
+    // being practically guessable.
+    const decisionPromise = new Promise<PermissionDecision>((resolve) => {
+      const pending: PendingPermission = {
+        sessionId,
+        toolName,
+        inputFingerprint: permissionInputFingerprint(toolInput),
+        grantScope,
+        approverId: route.approverId,
+        resolve,
+        interactionRouter: context?.interactionRouter,
+      };
+      pending.timeout = setTimeout(() => {
+        this.failPendingPermission(sessionId, requestId, 'expired');
+      }, LOCAL_APPROVAL_TTL_MS);
+      pending.timeout.unref?.();
+      this.pending.set(requestId, pending);
+
+      if (context?.interactionRouter) {
+        context.interactionRouter.register(requestId, sessionId, (action, _values, operatorId) => {
+          this.resolvePermission(sessionId, requestId, action as PermissionDecision, operatorId);
+        }, { initiatorId: route.approverId || undefined, fallbackCommand: 'perm' });
+      }
+    });
 
     // 尝试富交互（走统一 adapter.send 入口）
     let interactionSent = false;
@@ -818,7 +1100,7 @@ export class PermissionGateway {
           chatmode: context.chatmode,
           replyContext: context.replyContext,
         });
-        const fallbackText = `🔐 权限请求 - ${toolName}\n${displaySummary}${reasonLine}\n回复 /perm allow 允许本次 / /perm always 同操作授权 30 分钟 / /perm deny 拒绝`;
+        const fallbackText = `🔐 权限请求 - ${toolName}\n${displaySummary}${reasonLine}\n回复 /perm ${requestId} allow 允许本次 / /perm ${requestId} always 同操作授权 30 分钟 / /perm ${requestId} deny 拒绝`;
         const result = await sendInteractionPayload(
           context.adapter,
           envelope,
@@ -834,46 +1116,76 @@ export class PermissionGateway {
 
     // fallback 到文本
     if (!interactionSent) {
-      await sendPrompt(renderActionAsText(interaction));
+      try {
+        await sendPrompt(renderActionAsText(interaction));
+      } catch (error) {
+        logger.warn(`[PermissionGateway] Approval delivery failed: session=${sessionId} tool=${toolName} error=${error instanceof Error ? error.message : String(error)}`);
+        this.failPendingPermission(sessionId, requestId, 'delivery_failed');
+      }
     }
 
-    return new Promise((resolve) => {
-      this.pending.set(requestId, {
-        sessionId,
-        toolName,
-        inputFingerprint: permissionInputFingerprint(toolInput),
-        resolve,
-        interactionRouter: context?.interactionRouter,
-      });
-
-      // 注册到 InteractionRouter（卡片和文本降级都注册，统一路由）
-      if (context?.interactionRouter) {
-        context.interactionRouter.register(requestId, sessionId, (action) => {
-          this.resolvePermission(sessionId, requestId, action as PermissionDecision);
-        }, { initiatorId: route.approverId || undefined, fallbackCommand: 'perm' });
-      }
-    });
+    return decisionPromise;
   }
 
-  resolvePermission(sessionId: string, requestId: string, decision: PermissionDecision): boolean {
+  resolvePermission(sessionId: string, requestId: string, decision: string, operatorId?: string): boolean {
     const pending = this.pending.get(requestId);
     if (!pending || pending.sessionId !== sessionId) return false;
+    if (operatorId !== pending.approverId) return false;
+
+    const normalizedDecision: PermissionDecision = decision === 'allow' || decision === 'always'
+      ? decision
+      : 'deny';
 
     // Legacy "always" now means this exact operation in this session for 30 minutes.
-    if (decision === 'always') {
+    // The backend receives a one-shot allow. Future identical operations must
+    // return through this gateway so the exact fingerprint and TTL are checked.
+    if (pending.timeout) clearTimeout(pending.timeout);
+    pending.interactionRouter?.cancel(requestId);
+    pending.resolve(normalizedDecision === 'deny' ? 'deny' : 'allow');
+    this.pending.delete(requestId);
+    if (normalizedDecision === 'always') {
       this.addTemporaryGrant(pending);
     }
-
-    pending.resolve(decision);
-    this.pending.delete(requestId);
-    this.eventBus?.publish({ type: 'permission:resolved', sessionId, requestId, approved: decision !== 'deny' });
+    this.eventBus?.publish({ type: 'permission:resolved', sessionId, requestId, approved: normalizedDecision !== 'deny' });
     return true;
+  }
+
+  /**
+   * Resolve an explicitly named request from any channel/session. The request
+   * remains bound to its authenticated approver, so knowing a UUID alone is
+   * never sufficient to approve it.
+   */
+  resolvePermissionByRequestId(
+    requestId: string,
+    decision: PermissionDecision,
+    operatorId?: string,
+  ): boolean {
+    const local = this.pending.get(requestId);
+    if (local) {
+      return this.resolvePermission(local.sessionId, requestId, decision, operatorId);
+    }
+
+    const crossSession = this.crossSessionPending.get(requestId);
+    if (!crossSession) return false;
+    const action = decision === 'always'
+      ? 'approve_session_30m'
+      : decision === 'allow'
+        ? 'approve_once'
+        : 'deny';
+    return this.resolveCrossSessionPermission(
+      crossSession.sessionId,
+      requestId,
+      action,
+      undefined,
+      operatorId,
+    );
   }
 
   /** 中断时取消指定会话的所有 pending 权限请求 */
   cancelAll(sessionId: string, reason = 'cancelled'): void {
     for (const [requestId, pending] of this.pending.entries()) {
       if (pending.sessionId === sessionId) {
+        if (pending.timeout) clearTimeout(pending.timeout);
         pending.interactionRouter?.cancel(requestId);
         pending.resolve('deny');
         this.pending.delete(requestId);

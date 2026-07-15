@@ -22,7 +22,7 @@ tzOffset: {{tzOffset}} # 当前 UTC 偏移（DST 已计入）
 os: {{osInfo}} # 当前操作系统及版本
 {{/}}
 {{?permissionMode}}
-permissionMode: {{permissionMode}} # auto / bypass / request / edit / plan / noask / readonly
+permissionMode: {{permissionMode}} # readonly / auto / request / bypass
 {{/}}
 {{?threadId}}
 threadId: {{threadId}} # 同一会话内的子话题 ID（多话题路由时）

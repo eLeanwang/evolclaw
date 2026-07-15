@@ -1,10 +1,9 @@
-import crypto from 'crypto';
 import { resolveEffective } from '../../config/config-manager.js';
 import { formatPeerKey } from '../relation/peer-identity.js';
 import { logger } from '../../utils/logger.js';
 import { isTransientProtocolMessage, messageLogPath, type MessageLogEntry } from '../message/message-log.js';
 import { readAllJsonlLines } from './session-fs-store.js';
-import type { AgentEvent, AgentRunnerFull } from '../../agents/runner-types.js';
+import type { TextInferenceProvider } from '../inference/text-inference.js';
 import type { Session, SessionRenewConfig } from '../../types.js';
 import type { SessionManager } from './session-manager.js';
 
@@ -40,8 +39,8 @@ interface SessionRenewModelResult {
   reasonCode?: string;
 }
 
-interface RunnerProvider {
-  getAgent(channel?: string, baseagent?: string, selfAid?: string): AgentRunnerFull;
+interface TextInferenceProviderResolver {
+  getTextInferenceProvider(channel?: string, baseagent?: string, selfAid?: string): TextInferenceProvider | undefined;
 }
 
 interface RecentDecision {
@@ -57,11 +56,6 @@ export interface SessionRenewServiceOptions {
   resolveConfig?: (request: SessionRenewRequest) => SessionRenewConfig | undefined;
 }
 
-interface SessionRenewJudgeTarget {
-  baseagent: 'claude' | 'codex';
-  model: string;
-}
-
 const DEFAULT_AFTER_HOURS = 24;
 const DEFAULT_EFFORT = 'low';
 const DEFAULT_FALLBACK: SessionRenewDecision = 'continue';
@@ -71,10 +65,7 @@ const MAX_MESSAGE_CHARS = 2_000;
 const MODEL_TIMEOUT_MS = 10_000;
 const RECENT_DECISION_TTL_MS = 30_000;
 const NEW_CONFIDENCE_THRESHOLD = 0.85;
-const JUDGE_TARGETS: Readonly<Record<string, SessionRenewJudgeTarget>> = {
-  claude: { baseagent: 'claude', model: 'haiku' },
-  codex: { baseagent: 'codex', model: 'gpt-5.6-luna' },
-};
+const JUDGE_BASEAGENT = 'claude';
 
 const EXPLICIT_NEW_RE = /^(?:新话题|换个话题|重新开始|新开会话|新会话)[：:，,；;。！!\n]/;
 const EXPLICIT_CONTINUE_RE = /^(?:继续上次|延续上次|继续|接着)[：:，,；;。！!\n]/;
@@ -133,7 +124,7 @@ export class SessionRenewService {
 
   constructor(
     private sessionManager: SessionManager,
-    private runnerProvider: RunnerProvider,
+    private inferenceProviderResolver: TextInferenceProviderResolver,
     options: SessionRenewServiceOptions = {},
   ) {
     this.now = options.now ?? (() => Date.now());
@@ -207,26 +198,16 @@ export class SessionRenewService {
       decision = 'continue';
       source = 'reply';
     } else {
-      const judgeTarget = this.resolveJudgeTarget(request.session.baseagent);
-      if (!judgeTarget) {
-        logger.info(
-          `[SessionRenew] model judge skipped: unsupported baseagent=${request.session.baseagent || '<none>'} session=${request.session.id} idleHours=${(idleMs / 3_600_000).toFixed(2)}`,
-        );
-        return { session: request.session, renewed: false };
-      }
-
-      let runner: AgentRunnerFull;
       try {
-        runner = this.runnerProvider.getAgent(request.channelName, judgeTarget.baseagent, request.selfAid);
-      } catch (error) {
-        logger.warn(
-          `[SessionRenew] model judge skipped: baseagent runner unavailable baseagent=${judgeTarget.baseagent} session=${request.session.id}: ${error instanceof Error ? error.message : String(error)}`,
+        const model = config.model?.trim();
+        if (!model) throw new Error('session_renew.model is required when model judging is enabled');
+        const provider = this.inferenceProviderResolver.getTextInferenceProvider(
+          request.channelName,
+          JUDGE_BASEAGENT,
+          request.selfAid,
         );
-        return { session: request.session, renewed: false };
-      }
-
-      try {
-        const judged = await this.judgeWithModel(request, config, entries, idleMs, judgeTarget, runner);
+        if (!provider) throw new Error(`text inference provider unavailable: ${JUDGE_BASEAGENT}`);
+        const judged = await this.judgeWithModel(request, config, entries, idleMs, model, provider);
         decision = judged.decision === 'new' && judged.confidence < NEW_CONFIDENCE_THRESHOLD
           ? 'continue'
           : judged.decision;
@@ -236,7 +217,7 @@ export class SessionRenewService {
         source = 'fallback';
         logger.warn(`[SessionRenew] judge failed, using fallback=${decision}: ${error instanceof Error ? error.message : String(error)}`);
       }
-      return await this.finishDecision(routeKey, request, decision, source, idleMs, judgeTarget);
+      return await this.finishDecision(routeKey, request, decision, source, idleMs, config.model?.trim());
     }
 
     return await this.finishDecision(routeKey, request, decision, source, idleMs);
@@ -248,7 +229,7 @@ export class SessionRenewService {
     decision: SessionRenewDecision,
     source: SessionRenewDecisionSource,
     idleMs: number,
-    judgeTarget?: SessionRenewJudgeTarget,
+    judgeModel?: string,
   ): Promise<SessionRenewResult> {
     const selected = decision === 'new'
       ? await this.sessionManager.createRenewedSession(request.session)
@@ -264,7 +245,7 @@ export class SessionRenewService {
     });
 
     logger.info(
-      `[SessionRenew] session=${request.session.id} selected=${selected.id} decision=${decision} source=${source} idleHours=${(idleMs / 3_600_000).toFixed(2)} baseagent=${judgeTarget?.baseagent || 'none'} model=${judgeTarget?.model || 'none'}`,
+      `[SessionRenew] session=${request.session.id} selected=${selected.id} decision=${decision} source=${source} idleHours=${(idleMs / 3_600_000).toFixed(2)} baseagent=${judgeModel ? JUDGE_BASEAGENT : 'none'} model=${judgeModel || 'none'}`,
     );
     return { session: selected, renewed: decision === 'new', decision, source };
   }
@@ -283,10 +264,6 @@ export class SessionRenewService {
     }, { cache: true }).session_renew;
   }
 
-  private resolveJudgeTarget(baseagent: string): SessionRenewJudgeTarget | undefined {
-    return JUDGE_TARGETS[baseagent.trim().toLowerCase()];
-  }
-
   private readConversationEntries(session: Session): MessageLogEntry[] {
     const entries = readAllJsonlLines<MessageLogEntry>(messageLogPath(this.sessionManager.getChatDir(session)));
     return entries
@@ -299,10 +276,9 @@ export class SessionRenewService {
     config: SessionRenewConfig,
     entries: MessageLogEntry[],
     idleMs: number,
-    judgeTarget: SessionRenewJudgeTarget,
-    runner: AgentRunnerFull,
+    model: string,
+    provider: TextInferenceProvider,
   ): Promise<SessionRenewModelResult> {
-    const internalSessionId = `renew_judge_${crypto.randomUUID()}`;
     const context = selectSessionRenewContext(entries).map(entry => ({
       dir: entry.dir,
       content: entry.content.slice(0, MAX_MESSAGE_CHARS),
@@ -324,53 +300,30 @@ export class SessionRenewService {
       'Return exactly one JSON object: {"decision":"continue|new","confidence":0..1,"reason_code":"short_code"}.',
     ].join('\n');
 
+    const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
-    let text = '';
     try {
-      const operation = async (): Promise<SessionRenewModelResult> => {
-        const stream = await runner.runQuery(
-          internalSessionId,
-          prompt,
-          request.session.projectPath,
-          undefined,
-          undefined,
-          systemPrompt,
-          undefined,
-          {
-            model: judgeTarget.model,
-            effort: config.effort || DEFAULT_EFFORT,
-            permissionMode: 'noask',
-            disableTools: true,
-            persistSession: false,
-          },
-          { EVOLCLAW_INTERNAL_PURPOSE: 'session-renew-judge' },
-        );
-
-        for await (const event of stream) {
-          if (event.type === 'text') text += event.text;
-          if (event.type === 'tool_use') {
-            void runner.interrupt(internalSessionId).catch(() => {});
-            throw new Error(`judge attempted tool use: ${event.name}`);
-          }
-          if (event.type === 'error') throw new Error(event.error);
-          if (event.type === 'complete') {
-            if (event.isError) throw new Error(event.errors?.join('; ') || event.result || 'judge failed');
-            if (event.result) text = event.result;
-          }
-        }
-        return parseModelResult(text);
-      };
-
+      const operation = (async () => {
+        if (!provider.listModels) throw new Error('Claude text inference provider does not expose a model list');
+        const models = await provider.listModels(controller.signal);
+        if (!models.includes(model)) throw new Error(`configured session renew model is unavailable: ${model}`);
+        return await provider.completeText({
+          model,
+          effort: config.effort || DEFAULT_EFFORT,
+          system: systemPrompt,
+          input: prompt,
+          signal: controller.signal,
+        });
+      })();
       const timeout = new Promise<never>((_resolve, reject) => {
         timer = setTimeout(() => {
-          void runner.interrupt(internalSessionId).catch(() => {});
+          controller.abort();
           reject(new Error(`judge timed out after ${MODEL_TIMEOUT_MS}ms`));
         }, MODEL_TIMEOUT_MS);
       });
-      return await Promise.race([operation(), timeout]);
+      return parseModelResult(await Promise.race([operation, timeout]));
     } finally {
       if (timer) clearTimeout(timer);
-      await runner.closeSession(internalSessionId).catch(() => {});
     }
   }
 

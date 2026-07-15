@@ -197,8 +197,8 @@ export interface SessionMetadata {
   resumeAt?: string;  // /rewind chat 标记的回退点（assistant message uuid）
 }
 
-/** Default permission mode applied when no role/relation policy overrides it. */
-export const DEFAULT_PERMISSION_MODE = 'auto';
+/** Fail-closed runner fallback when no role/relation policy reaches the call. */
+export const DEFAULT_PERMISSION_MODE = 'readonly';
 
 export interface ReplyContext {
   sessionId?: string;
@@ -869,6 +869,8 @@ export interface SessionRenewConfig {
   enabled?: boolean;
   /** 当前会话最后一条有效对话距今超过该时长才触发。 */
   after_hours?: number;
+  /** Claude Models API 返回的精确模型 ID；启用模型判定时必须配置。 */
+  model?: string;
   /** 判定调用推理强度，默认 low。 */
   effort?: string;
   /** 判定调用失败或输出非法时的降级动作。 */

@@ -44,6 +44,8 @@ function makeRunner() {
     }),
   };
   (runner as any).getAppServerClient = () => appServer;
+  (runner as any).threadProjectPaths.set('thread-1', '/repo');
+  (runner as any).threadExternalToolFingerprints.set('thread-1', 'test-external-config');
   return { runner, appServer, emitNotification };
 }
 
@@ -125,6 +127,7 @@ describe('CodexRunner Claude alignment capabilities', () => {
 
   it('advertises compact and fork support', () => {
     const { runner } = makeRunner();
+    expect(runner.getMode()).toBe('readonly');
     expect(runner.capabilities.compact).toBe(true);
     expect(runner.capabilities.fork).toBe(true);
     expect(runner.capabilities.askUserQuestion).toBe(true);
@@ -146,13 +149,153 @@ describe('CodexRunner Claude alignment capabilities', () => {
     expect(runner.capabilities.askUserQuestion).toBe(false);
   });
 
-  it('parses and enforces the minimum Codex CLI version for requestUserInput', () => {
-    expect(MIN_CODEX_CLI_VERSION).toBe('0.117.0');
+  it('parses and enforces the minimum Codex CLI version for the audited permission protocol', () => {
+    expect(MIN_CODEX_CLI_VERSION).toBe('0.144.1');
     expect(parseCodexCliVersion('codex-cli 0.137.0')).toBe('0.137.0');
-    expect(parseCodexCliVersion('WARNING: noisy\ncodex-cli 0.117.0')).toBe('0.117.0');
-    expect(isCodexCliVersionSupported('0.116.9')).toBe(false);
-    expect(isCodexCliVersionSupported('0.117.0')).toBe(true);
-    expect(isCodexCliVersionSupported('0.137.0')).toBe(true);
+    expect(parseCodexCliVersion('WARNING: noisy\ncodex-cli 0.144.1')).toBe('0.144.1');
+    expect(isCodexCliVersionSupported('0.144.0')).toBe(false);
+    expect(isCodexCliVersionSupported('0.144.1')).toBe(true);
+    expect(isCodexCliVersionSupported('0.145.0')).toBe(true);
+  });
+
+  it('keeps lossy Codex permission profile names bound to the original session id', () => {
+    const { runner } = makeRunner();
+    const profileName = (sessionId: string) => (runner as any).permissionProfileName(sessionId) as string;
+
+    expect(profileName('safe-session_1')).toBe('__evolclaw_safe-session_1_hclass_v1');
+    expect(profileName('a/b')).not.toBe(profileName('a?b'));
+    expect(profileName('a/b')).not.toBe(profileName('a_b'));
+
+    const sharedPrefix = 'x'.repeat(80);
+    expect(profileName(`${sharedPrefix}-one`)).not.toBe(profileName(`${sharedPrefix}-two`));
+    expect(profileName('a/b')).toMatch(/^__evolclaw_[A-Za-z0-9_-]+_hclass_v1$/);
+  });
+
+  it('forces Codex lifecycle hooks off after all capability config merges', () => {
+    const { runner } = makeRunner();
+    const config = (runner as any).mergeThreadConfig(
+      { features: { hooks: true, multi_agent: true } },
+      (runner as any).buildLifecycleLockdownConfig(),
+    );
+
+    expect(config.features).toEqual({ hooks: false, multi_agent: true });
+  });
+
+  it('forces remote MCP/apps through prompts and disables local MCP process transports', () => {
+    const { runner } = makeRunner();
+    const config = (runner as any).buildExternalToolApprovalConfig({
+      mcp_servers: {
+        remote: {
+          url: 'https://mcp.example.test',
+          environment_id: 'local',
+          tool_timeout_sec: null,
+          default_tools_approval_mode: 'approve',
+          tools: { mutate: { approval_mode: 'approve' } },
+        },
+        local: {
+          command: 'node',
+          args: ['server.js'],
+          env_vars: ['TOKEN'],
+          environment_id: 'local',
+          tool_timeout_sec: null,
+          enabled: true,
+        },
+      },
+      apps: {
+        drive: {
+          approvals_reviewer: 'auto_review',
+          default_tools_approval_mode: 'approve',
+          tools: { delete: { approval_mode: 'approve' } },
+        },
+      },
+      plugins: {
+        formatter: {
+          mcp_servers: { helper: { default_tools_approval_mode: 'approve' } },
+        },
+      },
+    }, {}, {}, 'request');
+
+    expect(config).toMatchObject({
+      mcp_servers: {
+        remote: {
+          url: 'https://mcp.example.test',
+          default_tools_approval_mode: 'prompt',
+          tools: { mutate: { approval_mode: 'prompt' } },
+        },
+        local: { command: 'node', args: ['server.js'], env_vars: ['TOKEN'], enabled: false },
+      },
+      apps: {
+        _default: { approvals_reviewer: 'user', default_tools_approval_mode: 'prompt' },
+        drive: {
+          approvals_reviewer: 'user',
+          default_tools_approval_mode: 'prompt',
+          tools: { delete: { approval_mode: 'prompt' } },
+        },
+      },
+      plugins: {
+        formatter: {
+          mcp_servers: {
+            helper: { enabled: false },
+          },
+        },
+      },
+    });
+    expect((config as any).mcp_servers.remote).not.toHaveProperty('environment_id');
+    expect((config as any).mcp_servers.remote).not.toHaveProperty('tool_timeout_sec');
+    expect((config as any).mcp_servers.local).not.toHaveProperty('environment_id');
+    expect((config as any).mcp_servers.local).not.toHaveProperty('tool_timeout_sec');
+  });
+
+  it.each(['readonly', 'auto'])('disables remote MCP and apps at lifecycle level in %s mode', (mode) => {
+    const { runner } = makeRunner();
+    const config = (runner as any).buildExternalToolApprovalConfig({
+      mcp_servers: { remote: { url: 'https://mcp.example.test', enabled: true } },
+      apps: { drive: { enabled: true } },
+    }, {}, {}, mode);
+
+    expect(config).toMatchObject({
+      mcp_servers: { remote: { url: 'https://mcp.example.test', enabled: false } },
+      apps: {
+        _default: { enabled: false, approvals_reviewer: 'user', default_tools_approval_mode: 'prompt' },
+        drive: { enabled: false, approvals_reviewer: 'user', default_tools_approval_mode: 'prompt' },
+      },
+    });
+  });
+
+  it('discovers installed plugin MCP servers and disables them before thread start', async () => {
+    const { runner } = makeRunner();
+    const appServer = {
+      configRead: vi.fn().mockResolvedValue({
+        config: {
+          mcp_servers: {
+            local: { command: 'node', args: ['server.js'], enabled: true },
+          },
+        },
+      }),
+      pluginInstalled: vi.fn().mockResolvedValue({
+        marketplaces: [{
+          name: 'tools',
+          path: '/marketplace.json',
+          plugins: [{ id: 'formatter@tools', name: 'formatter', installed: true, enabled: true }],
+        }],
+      }),
+      pluginRead: vi.fn().mockResolvedValue({ plugin: { mcpServers: ['helper'] } }),
+    };
+
+    await expect((runner as any).resolveExternalToolApprovalConfig(appServer, '/repo', {}, 'request'))
+      .resolves.toMatchObject({
+        mcp_servers: {
+          local: { command: 'node', args: ['server.js'], enabled: false },
+        },
+        plugins: {
+          'formatter@tools': { mcp_servers: { helper: { enabled: false } } },
+        },
+      });
+    expect(appServer.pluginInstalled).toHaveBeenCalledWith('/repo');
+    expect(appServer.pluginRead).toHaveBeenCalledWith('formatter', {
+      name: 'tools',
+      path: '/marketplace.json',
+    });
   });
 
   it('uses app-server for model listing with fallback-capable ids', async () => {
@@ -163,6 +306,7 @@ describe('CodexRunner Claude alignment capabilities', () => {
 
   it('uses app-server for compact, fork, title, and metadata sync', async () => {
     const { runner, appServer } = makeRunner();
+    runner.setMode('bypass');
     const onCompactStart = vi.fn();
     runner.setCompactStartCallback(onCompactStart);
 
@@ -173,7 +317,18 @@ describe('CodexRunner Claude alignment capabilities', () => {
 
     expect(onCompactStart).toHaveBeenCalledWith('sess-1');
     expect(appServer.threadCompactStart).toHaveBeenCalledWith('thread-1');
-    expect(appServer.threadFork).toHaveBeenCalledWith('thread-1', '/repo', 'fork name');
+    expect(appServer.threadFork).toHaveBeenCalledWith('thread-1', '/repo', 'fork name', expect.objectContaining({
+      approvalPolicy: 'untrusted',
+      approvalsReviewer: 'user',
+      permissions: '__evolclaw_thread-1_hclass_v1',
+      config: expect.objectContaining({
+        features: { hooks: false },
+        default_permissions: '__evolclaw_thread-1_hclass_v1',
+        permissions: expect.objectContaining({
+          '__evolclaw_thread-1_hclass_v1': expect.objectContaining({ extends: ':workspace' }),
+        }),
+      }),
+    }));
     expect(appServer.threadSetName).toHaveBeenCalledWith('thread-1', 'new name');
     expect(appServer.threadMetadataUpdate).toHaveBeenCalledWith('thread-1', { branch: 'main' });
   });
@@ -229,9 +384,18 @@ describe('CodexRunner Claude alignment capabilities', () => {
     expect(appServer.threadResume).toHaveBeenCalledWith('thread-1', '/repo', expect.objectContaining({
       model: 'gpt-5.4',
       effort: 'high',
-      approvalPolicy: 'never',
-      sandbox: 'danger-full-access',
+      approvalPolicy: 'untrusted',
+      approvalsReviewer: 'user',
+      permissions: '__evolclaw_sess-1_hclass_v1',
+      config: expect.objectContaining({
+        features: { hooks: false },
+        default_permissions: '__evolclaw_sess-1_hclass_v1',
+        permissions: expect.objectContaining({
+          '__evolclaw_sess-1_hclass_v1': expect.objectContaining({ extends: ':read-only' }),
+        }),
+      }),
     }));
+    expect(appServer.threadResume.mock.calls[0][2]).not.toHaveProperty('sandbox');
     expect(appServer.threadCompactStart).toHaveBeenCalledTimes(2);
   });
 
@@ -269,7 +433,7 @@ describe('CodexRunner Claude alignment capabilities', () => {
     expect((runner as any).activeTurns.has('sess-1')).toBe(false);
   });
 
-  it('keeps Codex auto as local-guarded app-server approvalPolicy=never', async () => {
+  it('keeps Codex auto approval callbacks reachable with a named workspace profile', async () => {
     const runner = new CodexRunner({ agents: { codex: { apiKey: 'test-key', model: 'gpt-5.4' } } } as any, { onSessionIdUpdate: vi.fn() } as any);
     const appServer = {
       threadStart: vi.fn().mockResolvedValue({ thread: { id: 'thread-1' } }),
@@ -283,8 +447,24 @@ describe('CodexRunner Claude alignment capabilities', () => {
     const stream = await runner.runQuery('sess-1', 'hello', '/repo');
     for await (const event of stream) events.push(event);
 
-    expect(appServer.threadStart).toHaveBeenCalledWith('/repo', expect.objectContaining({ approvalPolicy: 'never' }));
-    expect(appServer.turnStart).toHaveBeenCalledWith('thread-1', expect.anything(), expect.objectContaining({ approvalPolicy: 'never' }));
+    expect(appServer.threadStart).toHaveBeenCalledWith('/repo', expect.objectContaining({
+      approvalPolicy: 'untrusted',
+      approvalsReviewer: 'user',
+      permissions: '__evolclaw_sess-1_hclass_v1',
+      config: expect.objectContaining({
+        features: { hooks: false },
+        default_permissions: '__evolclaw_sess-1_hclass_v1',
+        permissions: expect.objectContaining({
+          '__evolclaw_sess-1_hclass_v1': expect.objectContaining({ extends: ':workspace' }),
+        }),
+      }),
+    }));
+    expect(appServer.turnStart).toHaveBeenCalledWith('thread-1', expect.anything(), expect.objectContaining({
+      approvalPolicy: 'untrusted',
+      permissions: '__evolclaw_sess-1_hclass_v1',
+    }));
+    expect(appServer.threadStart.mock.calls[0][1]).not.toHaveProperty('sandbox');
+    expect(appServer.turnStart.mock.calls[0][2]).not.toHaveProperty('sandbox');
     expect(events).toEqual(expect.arrayContaining([
       expect.objectContaining({ type: 'complete', subtype: 'success' }),
     ]));
@@ -306,14 +486,14 @@ describe('CodexRunner Claude alignment capabilities', () => {
     }
 
     expect(appServer.threadStart).toHaveBeenCalledWith('/repo', expect.objectContaining({
-      config: {
+      config: expect.objectContaining({
         shell_environment_policy: {
           set: {
             EVOLCLAW_SESSION_ID: 'sess-env-1',
             EVOLCLAW_HOME: expect.any(String),
           },
         },
-      },
+      }),
     }));
 
     const resumedStream = await runner.runQuery('sess-env-2', 'hello again', '/repo', 'thread-existing');
@@ -322,18 +502,18 @@ describe('CodexRunner Claude alignment capabilities', () => {
     }
 
     expect(appServer.threadResume).toHaveBeenCalledWith('thread-existing', '/repo', expect.objectContaining({
-      config: {
+      config: expect.objectContaining({
         shell_environment_policy: {
           set: {
             EVOLCLAW_SESSION_ID: 'sess-env-2',
             EVOLCLAW_HOME: expect.any(String),
           },
         },
-      },
+      }),
     }));
   });
 
-  it('passes configured approvalsReviewer to Codex app-server thread options', async () => {
+  it('forces Codex approvalsReviewer=user so auto_review cannot bypass EvolClaw', async () => {
     const runner = new CodexRunner({
       agents: {
         codex: {
@@ -356,12 +536,12 @@ describe('CodexRunner Claude alignment capabilities', () => {
     }
 
     expect(appServer.threadStart).toHaveBeenCalledWith('/repo', expect.objectContaining({
-      approvalsReviewer: 'auto_review',
+      approvalsReviewer: 'user',
     }));
   });
 
-  it('uses read-only app-server sandbox for Codex request/noask/readonly modes', async () => {
-    for (const mode of ['request', 'noask', 'readonly']) {
+  it('uses named Codex profiles for request and readonly modes', async () => {
+    for (const mode of ['request', 'readonly']) {
       const runner = new CodexRunner({ agents: { codex: { apiKey: 'test-key', model: 'gpt-5.4' } } } as any, { onSessionIdUpdate: vi.fn() } as any);
       const appServer = {
         threadStart: vi.fn().mockResolvedValue({ thread: { id: `thread-${mode}` } }),
@@ -376,8 +556,25 @@ describe('CodexRunner Claude alignment capabilities', () => {
         // drain stream
       }
 
-      expect(appServer.threadStart).toHaveBeenCalledWith('/repo', expect.objectContaining({ sandbox: 'read-only' }));
-      expect(appServer.turnStart).toHaveBeenCalledWith(`thread-${mode}`, expect.anything(), expect.objectContaining({ sandbox: 'read-only' }));
+      const profile = `__evolclaw_sess-${mode}_hclass_v1`;
+      const expectedParent = mode === 'request' ? ':workspace' : ':read-only';
+      const expectedApproval = 'untrusted';
+      expect(appServer.threadStart).toHaveBeenCalledWith('/repo', expect.objectContaining({
+        approvalPolicy: expectedApproval,
+        permissions: profile,
+        config: expect.objectContaining({
+          default_permissions: profile,
+          permissions: expect.objectContaining({
+            [profile]: expect.objectContaining({ extends: expectedParent }),
+          }),
+        }),
+      }));
+      expect(appServer.turnStart).toHaveBeenCalledWith(`thread-${mode}`, expect.anything(), expect.objectContaining({
+        approvalPolicy: expectedApproval,
+        permissions: profile,
+      }));
+      expect(appServer.threadStart.mock.calls[0][1]).not.toHaveProperty('sandbox');
+      expect(appServer.turnStart.mock.calls[0][2]).not.toHaveProperty('sandbox');
     }
   });
 });
@@ -550,10 +747,227 @@ describe('CodexRunner app-server approval bridge', () => {
     expect(result).toEqual({ decision: 'accept' });
   });
 
-  it('maps PermissionGateway always decisions to app-server acceptForSession', async () => {
+  it('auto-approves concrete file changes inside the workspace in auto mode', async () => {
+    const { runner } = makeRunner();
+    runner.setMode('auto');
+
+    const result = await (runner as any).handleAppServerRequest({
+      id: 'req-file-auto',
+      method: 'item/fileChange/requestApproval',
+      params: {
+        threadId: 'thread-1',
+        turnId: 'turn-1',
+        itemId: 'file-1',
+        fileChanges: [{ path: 'src/index.ts', kind: { type: 'update' }, diff: 'diff' }],
+      },
+    });
+
+    expect(result).toEqual({ decision: 'accept' });
+  });
+
+  it('denies out-of-workspace file-change expansion in auto mode', async () => {
+    const { runner } = makeRunner();
+    runner.setMode('auto');
+
+    const result = await (runner as any).handleAppServerRequest({
+      id: 'req-file-auto-outside',
+      method: 'item/fileChange/requestApproval',
+      params: {
+        threadId: 'thread-1',
+        turnId: 'turn-1',
+        itemId: 'file-outside',
+        fileChanges: [{ path: '../outside.ts', kind: { type: 'update' }, diff: 'diff' }],
+      },
+    });
+
+    expect(result).toEqual({ decision: 'decline' });
+  });
+
+  it('uses the tracked thread workspace instead of an untrusted approval cwd', async () => {
+    const { runner } = makeRunner();
+    runner.setMode('auto');
+    (runner as any).threadProjectPaths.set('thread-1', '/repo');
+
+    const result = await (runner as any).handleAppServerRequest({
+      id: 'req-file-cwd-confusion',
+      method: 'item/fileChange/requestApproval',
+      params: {
+        threadId: 'thread-1',
+        turnId: 'turn-1',
+        itemId: 'file-cwd-confusion',
+        cwd: '/outside',
+        fileChanges: [{ path: '/outside/escaped.ts', kind: { type: 'update' }, diff: 'diff' }],
+      },
+    });
+
+    expect(result).toEqual({ decision: 'decline' });
+  });
+
+  it('fails closed when an approval references an untracked thread and forged projectPath', async () => {
+    const { runner } = makeRunner();
+    runner.setMode('auto');
+    (runner as any).threadProjectPaths.delete('thread-1');
+
+    await expect((runner as any).handleAppServerRequest({
+      id: 'req-file-unknown-thread',
+      method: 'item/fileChange/requestApproval',
+      params: {
+        threadId: 'thread-1',
+        projectPath: '/forged-workspace',
+        fileChanges: [{ path: '/forged-workspace/escaped.ts', kind: { type: 'create' }, diff: 'diff' }],
+      },
+    })).resolves.toEqual({ decision: 'decline' });
+  });
+
+  it('denies a file change that escapes the workspace through a symlink', async () => {
+    const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-workspace-'));
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-outside-'));
+    try {
+      fs.symlinkSync(outside, path.join(workspace, 'linked-outside'));
+      const { runner } = makeRunner();
+      runner.setMode('auto');
+      (runner as any).threadProjectPaths.set('thread-1', workspace);
+
+      await expect((runner as any).handleAppServerRequest({
+        id: 'req-file-symlink-escape',
+        method: 'item/fileChange/requestApproval',
+        params: {
+          threadId: 'thread-1',
+          turnId: 'turn-1',
+          itemId: 'file-symlink-escape',
+          fileChanges: [{ path: 'linked-outside/escaped.ts', kind: { type: 'create' }, diff: 'diff' }],
+        },
+      })).resolves.toEqual({ decision: 'decline' });
+    } finally {
+      fs.rmSync(workspace, { recursive: true, force: true });
+      fs.rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  it('denies managed-network expansion in auto mode and preserves its target for bypass approval', async () => {
+    const { runner } = makeRunner();
+    const networkApprovalContext = { host: 'registry.npmjs.org:443', protocol: 'https' };
+
+    runner.setMode('auto');
+    await expect((runner as any).handleAppServerRequest({
+      id: 'req-network-auto',
+      method: 'item/commandExecution/requestApproval',
+      params: { threadId: 'thread-1', command: '', networkApprovalContext },
+    })).resolves.toEqual({ decision: 'decline' });
+
+    const gateway = { requestPermission: vi.fn().mockResolvedValue('allow') };
+    runner.setMode('bypass');
+    runner.setSendPrompt(vi.fn());
+    runner.setPermissionGateway(gateway as any);
+    await expect((runner as any).handleAppServerRequest({
+      id: 'req-network-bypass',
+      method: 'item/commandExecution/requestApproval',
+      params: { threadId: 'thread-1', command: '', networkApprovalContext, reason: 'download package' },
+    })).resolves.toEqual({ decision: 'accept' });
+
+    expect(gateway.requestPermission).toHaveBeenCalledWith(
+      'thread-1',
+      'Bash',
+      expect.objectContaining({ networkApprovalContext }),
+      expect.any(Function),
+      undefined,
+      '允许网络访问：https://registry.npmjs.org:443',
+      'download package',
+      'codex:__evolclaw_thread-1_hclass_v1:bypass',
+    );
+  });
+
+  it('uses the preceding fileChange item for H-class checks when approval params omit changes', async () => {
+    const { runner } = makeRunner();
+    const gateway = { requestPermission: vi.fn().mockResolvedValue('allow') };
+    const projectPath = process.env.EVOLCLAW_HOME!;
+    runner.setMode('request');
+    runner.setSendPrompt(vi.fn());
+    runner.setPermissionGateway(gateway as any);
+    (runner as any).threadProjectPaths.set('thread-1', projectPath);
+    (runner as any).trackApprovalItemNotification({
+      method: 'item/started',
+      params: {
+        threadId: 'thread-1',
+        turnId: 'turn-1',
+        item: {
+          id: 'file-1',
+          type: 'fileChange',
+          changes: [{ path: 'agents/demo/config.json', kind: { type: 'update' }, diff: 'redacted' }],
+        },
+      },
+    });
+
+    await expect((runner as any).handleAppServerRequest({
+      id: 'req-file-hclass',
+      method: 'item/fileChange/requestApproval',
+      params: { threadId: 'thread-1', turnId: 'turn-1', itemId: 'file-1', reason: 'apply patch' },
+    })).resolves.toEqual({ decision: 'decline' });
+    expect(gateway.requestPermission).not.toHaveBeenCalled();
+  });
+
+  it('routes bypass file-change expansion through the Gateway with the cached target', async () => {
+    const { runner } = makeRunner();
+    const gateway = { requestPermission: vi.fn().mockResolvedValue('allow') };
+    runner.setMode('bypass');
+    runner.setSendPrompt(vi.fn());
+    runner.setPermissionGateway(gateway as any);
+    (runner as any).trackApprovalItemNotification({
+      method: 'item/started',
+      params: {
+        threadId: 'thread-1',
+        turnId: 'turn-1',
+        item: {
+          id: 'file-1',
+          type: 'fileChange',
+          changes: [{ path: '../outside.ts', kind: { type: 'update' }, diff: 'diff' }],
+        },
+      },
+    });
+
+    await expect((runner as any).handleAppServerRequest({
+      id: 'req-file-bypass',
+      method: 'item/fileChange/requestApproval',
+      params: { threadId: 'thread-1', turnId: 'turn-1', itemId: 'file-1', reason: 'outside sandbox' },
+    })).resolves.toEqual({ decision: 'accept' });
+
+    expect(gateway.requestPermission).toHaveBeenCalledWith(
+      'thread-1',
+      'FileChange',
+      expect.objectContaining({
+        fileChanges: [expect.objectContaining({ path: '../outside.ts' })],
+      }),
+      expect.any(Function),
+      undefined,
+      'update ../outside.ts',
+      'outside sandbox',
+      'codex:__evolclaw_thread-1_hclass_v1:bypass',
+    );
+  });
+
+  it('fails closed when an approval callback is missing its command or file target', async () => {
+    const { runner } = makeRunner();
+    const gateway = { requestPermission: vi.fn().mockResolvedValue('allow') };
+    runner.setMode('request');
+    runner.setSendPrompt(vi.fn());
+    runner.setPermissionGateway(gateway as any);
+
+    await expect((runner as any).handleAppServerRequest({
+      id: 'req-empty-command',
+      method: 'item/commandExecution/requestApproval',
+      params: { threadId: 'thread-1', turnId: 'turn-1', itemId: 'cmd-missing' },
+    })).resolves.toEqual({ decision: 'decline' });
+    await expect((runner as any).handleAppServerRequest({
+      id: 'req-empty-file',
+      method: 'item/fileChange/requestApproval',
+      params: { threadId: 'thread-1', turnId: 'turn-1', itemId: 'file-missing' },
+    })).resolves.toEqual({ decision: 'decline' });
+    expect(gateway.requestPermission).not.toHaveBeenCalled();
+  });
+
+  it('maps the 30-minute EvolClaw grant to a one-shot Codex accept', async () => {
     const { runner } = makeRunner();
     const gateway = {
-      isAlwaysAllowed: vi.fn().mockReturnValue(false),
       requestPermission: vi.fn().mockResolvedValue('always'),
     };
     runner.setMode('request');
@@ -568,7 +982,7 @@ describe('CodexRunner app-server approval bridge', () => {
       params: { threadId: 'thread-1', command: 'npm test', reason: 'needs shell' },
     });
 
-    expect(result).toEqual({ decision: 'acceptForSession' });
+    expect(result).toEqual({ decision: 'accept' });
     expect(gateway.requestPermission).toHaveBeenCalledWith(
       'sess-1',
       'Bash',
@@ -577,14 +991,15 @@ describe('CodexRunner app-server approval bridge', () => {
       expect.objectContaining({ channelId: 'chat1' }),
       'npm test',
       'needs shell',
+      'codex:__evolclaw_sess-1_hclass_v1:request',
     );
   });
 
-  it('uses PermissionGateway always allow without prompting again', async () => {
+  it('does not consult a broad tool-wide allow cache', async () => {
     const { runner } = makeRunner();
     const gateway = {
       isAlwaysAllowed: vi.fn().mockReturnValue(true),
-      requestPermission: vi.fn(),
+      requestPermission: vi.fn().mockResolvedValue('allow'),
     };
     runner.setMode('request');
     runner.setSendPrompt(vi.fn());
@@ -596,12 +1011,12 @@ describe('CodexRunner app-server approval bridge', () => {
       params: { threadId: 'thread-1', command: 'npm test' },
     });
 
-    expect(result).toEqual({ decision: 'acceptForSession' });
-    expect(gateway.isAlwaysAllowed).toHaveBeenCalledWith('Bash');
-    expect(gateway.requestPermission).not.toHaveBeenCalled();
+    expect(result).toEqual({ decision: 'accept' });
+    expect(gateway.isAlwaysAllowed).not.toHaveBeenCalled();
+    expect(gateway.requestPermission).toHaveBeenCalledTimes(1);
   });
 
-  it('maps noask mode to app-server decline', async () => {
+  it('maps the legacy noask value to readonly app-server behavior', async () => {
     const { runner } = makeRunner();
     runner.setMode('noask');
 
@@ -616,7 +1031,14 @@ describe('CodexRunner app-server approval bridge', () => {
 
   it('allows EvolClaw ctl send/file commands even in restrictive modes', async () => {
     const { runner } = makeRunner();
-    runner.setMode('noask');
+    runner.setPermissionContext('thread-1', {
+      userId: 'owner-1',
+      channel: 'control#local',
+      channelId: 'owner-1',
+      role: 'owner',
+      selfAid: 'agent.agentid.pub',
+    } as any);
+    runner.setMode('readonly');
 
     await expect((runner as any).handleAppServerRequest({
       id: 'req-1',
@@ -634,7 +1056,7 @@ describe('CodexRunner app-server approval bridge', () => {
 
   it('does not whitelist chained ctl commands', async () => {
     const { runner } = makeRunner();
-    runner.setMode('noask');
+    runner.setMode('readonly');
 
     const result = await (runner as any).handleAppServerRequest({
       id: 'req-1',
@@ -658,7 +1080,263 @@ describe('CodexRunner app-server approval bridge', () => {
     expect(result).toEqual({ decision: 'decline' });
   });
 
-  it('allows Codex file changes in readonly mode inside .evolclaw/tmp', async () => {
+  it('blocks H-class paths in Bash and FileChange approval requests', async () => {
+    const { runner } = makeRunner();
+    runner.setMode('auto');
+
+    await expect((runner as any).handleAppServerRequest({
+      id: 'req-h-bash',
+      method: 'item/commandExecution/requestApproval',
+      params: { threadId: 'thread-1', command: 'printf value > agents/demo/config.json' },
+    })).resolves.toEqual({ decision: 'decline' });
+
+    await expect((runner as any).handleAppServerRequest({
+      id: 'req-h-file',
+      method: 'item/fileChange/requestApproval',
+      params: { threadId: 'thread-1', fileChanges: { 'agents/demo/config.json': { kind: 'update' } } },
+    })).resolves.toEqual({ decision: 'decline' });
+  });
+
+  it('auto-denies permission profile escalation', async () => {
+    const { runner } = makeRunner();
+    runner.setMode('auto');
+    const permissions = { network: { enabled: true } };
+
+    await expect((runner as any).handleAppServerRequest({
+      id: 'req-permissions',
+      method: 'item/permissions/requestApproval',
+      params: { threadId: 'thread-1', cwd: '/repo', permissions, reason: 'download dependency' },
+    })).rejects.toThrow('Permission request denied');
+  });
+
+  it('auto-denies additional command permissions instead of treating them as ordinary Bash', async () => {
+    const { runner } = makeRunner();
+    runner.setMode('auto');
+
+    await expect((runner as any).handleAppServerRequest({
+      id: 'req-command-network-auto',
+      method: 'item/commandExecution/requestApproval',
+      params: {
+        threadId: 'thread-1',
+        command: 'npm install',
+        additionalPermissions: { network: { enabled: true } },
+      },
+    })).resolves.toEqual({ decision: 'decline' });
+  });
+
+  it('routes bypass command permission expansion through PermissionGateway', async () => {
+    const { runner } = makeRunner();
+    const gateway = { requestPermission: vi.fn().mockResolvedValue('allow') };
+    runner.setMode('bypass');
+    runner.setSendPrompt(vi.fn());
+    runner.setPermissionGateway(gateway as any);
+
+    await expect((runner as any).handleAppServerRequest({
+      id: 'req-command-network-bypass',
+      method: 'item/commandExecution/requestApproval',
+      params: {
+        threadId: 'thread-1',
+        command: 'npm install',
+        reason: 'registry access',
+        additionalPermissions: { network: { enabled: true } },
+      },
+    })).resolves.toEqual({ decision: 'accept' });
+    expect(gateway.requestPermission).toHaveBeenCalledWith(
+      'thread-1',
+      'Bash',
+      expect.objectContaining({
+        command: 'npm install',
+        additionalPermissions: { network: { enabled: true } },
+      }),
+      expect.any(Function),
+      undefined,
+      'npm install',
+      'registry access',
+      'codex:__evolclaw_thread-1_hclass_v1:bypass',
+    );
+  });
+
+  it('denies H-class additional command permissions before prompting', async () => {
+    const { runner } = makeRunner();
+    const gateway = { requestPermission: vi.fn().mockResolvedValue('allow') };
+    runner.setMode('request');
+    runner.setSendPrompt(vi.fn());
+    runner.setPermissionGateway(gateway as any);
+
+    await expect((runner as any).handleAppServerRequest({
+      id: 'req-command-hclass',
+      method: 'item/commandExecution/requestApproval',
+      params: {
+        threadId: 'thread-1',
+        cwd: '/home/evolclaw',
+        command: 'cat report.txt',
+        additionalPermissions: { fileSystem: { read: ['/home/evolclaw/.env'] } },
+      },
+    })).resolves.toEqual({ decision: 'decline' });
+    expect(gateway.requestPermission).not.toHaveBeenCalled();
+  });
+
+  it('resolves relative permission grants from the protocol cwd, not the workspace', async () => {
+    const { runner } = makeRunner();
+    const gateway = { requestPermission: vi.fn().mockResolvedValue('allow') };
+    const root = process.env.EVOLCLAW_HOME!;
+    const grantCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-grant-cwd-'));
+    const protectedFile = path.join(root, '.env');
+    const linkedSecret = path.join(grantCwd, 'linked-secret');
+    fs.writeFileSync(protectedFile, 'SECRET=value\n');
+    fs.symlinkSync(protectedFile, linkedSecret);
+    try {
+      runner.setMode('request');
+      runner.setSendPrompt(vi.fn());
+      runner.setPermissionGateway(gateway as any);
+      (runner as any).threadProjectPaths.set('thread-1', '/repo');
+
+      await expect((runner as any).handleAppServerRequest({
+        id: 'req-relative-grant-hclass',
+        method: 'item/permissions/requestApproval',
+        params: {
+          threadId: 'thread-1',
+          turnId: 'turn-1',
+          itemId: 'grant-relative',
+          cwd: grantCwd,
+          permissions: { fileSystem: { read: ['linked-secret'] } },
+          reason: 'read linked file',
+        },
+      })).rejects.toThrow('Permission request denied');
+      expect(gateway.requestPermission).not.toHaveBeenCalled();
+    } finally {
+      fs.rmSync(grantCwd, { recursive: true, force: true });
+    }
+  });
+
+  it('resolves special project_roots grants from the thread workspace, not protocol cwd', async () => {
+    const { runner } = makeRunner();
+    const gateway = { requestPermission: vi.fn().mockResolvedValue('allow') };
+    const root = process.env.EVOLCLAW_HOME!;
+    const externalCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-project-roots-cwd-'));
+    try {
+      runner.setMode('request');
+      runner.setSendPrompt(vi.fn());
+      runner.setPermissionGateway(gateway as any);
+      (runner as any).threadProjectPaths.set('thread-1', root);
+
+      await expect((runner as any).handleAppServerRequest({
+        id: 'req-project-roots-hclass',
+        method: 'item/permissions/requestApproval',
+        params: {
+          threadId: 'thread-1',
+          turnId: 'turn-1',
+          itemId: 'grant-project-roots',
+          cwd: externalCwd,
+          permissions: {
+            fileSystem: {
+              entries: [{
+                access: 'read',
+                path: { type: 'special', value: { kind: 'project_roots', subpath: '.' } },
+              }],
+            },
+          },
+          reason: 'read project root',
+        },
+      })).rejects.toThrow('Permission request denied');
+      expect(gateway.requestPermission).not.toHaveBeenCalled();
+    } finally {
+      fs.rmSync(externalCwd, { recursive: true, force: true });
+    }
+  });
+
+  it('returns an approved permission profile only for the current turn with strict review', async () => {
+    const { runner } = makeRunner();
+    const permissions = { network: { enabled: true } };
+    const gateway = { requestPermission: vi.fn().mockResolvedValue('allow') };
+    runner.setMode('request');
+    runner.setSendPrompt(vi.fn());
+    runner.setPermissionGateway(gateway as any);
+
+    await expect((runner as any).handleAppServerRequest({
+      id: 'req-permissions-request',
+      method: 'item/permissions/requestApproval',
+      params: { threadId: 'thread-1', cwd: '/repo', permissions, reason: 'download dependency' },
+    })).resolves.toEqual({ permissions, scope: 'turn', strictAutoReview: true });
+    expect(gateway.requestPermission).toHaveBeenCalledWith(
+      'thread-1',
+      'PermissionGrant',
+      expect.objectContaining({ permissions }),
+      expect.any(Function),
+      undefined,
+      'download dependency',
+      'download dependency',
+      'codex:__evolclaw_thread-1_hclass_v1:request',
+    );
+  });
+
+  it('uses the session-bound approval prompt instead of the shared runner callback', async () => {
+    const { runner } = makeRunner();
+    const sharedPrompt = vi.fn();
+    const sessionPrompt = vi.fn();
+    const gateway = { requestPermission: vi.fn().mockResolvedValue('deny') };
+    runner.setMode('request');
+    runner.setSendPrompt(sharedPrompt);
+    runner.setPermissionGateway(gateway as any);
+    runner.setPermissionContext('thread-1', {
+      userId: 'owner.agentid.pub',
+      sendPrompt: sessionPrompt,
+    } as any);
+
+    await expect((runner as any).handleAppServerRequest({
+      id: 'req-session-prompt',
+      method: 'item/commandExecution/requestApproval',
+      params: { threadId: 'thread-1', command: 'npm test' },
+    })).resolves.toEqual({ decision: 'decline' });
+
+    expect(gateway.requestPermission.mock.calls[0][3]).toBe(sessionPrompt);
+    expect(gateway.requestPermission.mock.calls[0][3]).not.toBe(sharedPrompt);
+  });
+
+  it('preserves legacy command argv boundaries in the approval fingerprint input', async () => {
+    const { runner } = makeRunner();
+    const gateway = { requestPermission: vi.fn().mockResolvedValue('allow') };
+    runner.setMode('request');
+    runner.setSendPrompt(vi.fn());
+    runner.setPermissionGateway(gateway as any);
+
+    await expect((runner as any).handleAppServerRequest({
+      id: 'req-legacy-argv',
+      method: 'execCommandApproval',
+      params: {
+        conversationId: 'thread-1',
+        command: ['printf', 'a b'],
+        cwd: '/repo',
+      },
+    })).resolves.toEqual({ decision: 'approved' });
+
+    expect(gateway.requestPermission).toHaveBeenCalledWith(
+      'thread-1',
+      'Bash',
+      expect.objectContaining({
+        command: 'printf a b',
+        commandArgv: ['printf', 'a b'],
+      }),
+      expect.any(Function),
+      undefined,
+      'printf a b',
+      undefined,
+      'codex:__evolclaw_thread-1_hclass_v1:request',
+    );
+  });
+
+  it('fails request mode closed when PermissionGateway is unavailable', async () => {
+    const { runner } = makeRunner();
+    runner.setMode('request');
+
+    await expect((runner as any).handleAppServerRequest({
+      id: 'req-no-gateway',
+      method: 'item/commandExecution/requestApproval',
+      params: { threadId: 'thread-1', command: 'npm test' },
+    })).resolves.toEqual({ decision: 'decline' });
+  });
+
+  it('blocks Codex file changes in readonly mode even inside .evolclaw/tmp', async () => {
     const { runner } = makeRunner();
     runner.setMode('readonly');
 
@@ -672,7 +1350,7 @@ describe('CodexRunner app-server approval bridge', () => {
       },
     });
 
-    expect(result).toEqual({ decision: 'accept' });
+    expect(result).toEqual({ decision: 'decline' });
   });
 
   it('blocks Codex file changes in readonly mode outside .evolclaw/tmp', async () => {
@@ -690,6 +1368,184 @@ describe('CodexRunner app-server approval bridge', () => {
     });
 
     expect(result).toEqual({ decision: 'decline' });
+  });
+
+  it('routes tracked MCP approval through the Gateway with exact arguments and accepts once', async () => {
+    const { runner } = makeRunner();
+    const gateway = { requestPermission: vi.fn().mockResolvedValue('always') };
+    runner.setMode('request');
+    runner.setSendPrompt(vi.fn());
+    runner.setPermissionGateway(gateway as any);
+    (runner as any).trackApprovalItemNotification({
+      method: 'item/started',
+      params: {
+        threadId: 'thread-1',
+        turnId: 'turn-1',
+        item: {
+          id: 'mcp-1',
+          type: 'mcpToolCall',
+          server: 'payments',
+          tool: 'charge',
+          arguments: { cents: 100, account: 'acct-1' },
+          pluginId: 'payments@tools',
+          mcpAppResourceUri: 'ui://payments/charge',
+          appContext: { tenant: 'tenant-1' },
+        },
+      },
+    });
+
+    await expect((runner as any).handleAppServerRequest({
+      id: 'req-mcp',
+      method: 'item/tool/requestUserInput',
+      params: {
+        threadId: 'thread-1',
+        turnId: 'turn-1',
+        itemId: 'mcp-1',
+        questions: [{
+          id: 'approval',
+          question: 'Allow this app action?',
+          options: [
+            { label: 'Accept for session', description: 'Remember' },
+            { label: 'Accept once', description: 'One call' },
+            { label: 'Decline', description: 'Block' },
+          ],
+        }],
+      },
+    })).resolves.toEqual({ answers: { approval: { answers: ['Accept once'] } } });
+
+    expect(gateway.requestPermission).toHaveBeenCalledWith(
+      'thread-1',
+      'MCP:payments/charge',
+      {
+        server: 'payments',
+        tool: 'charge',
+        arguments: { cents: 100, account: 'acct-1' },
+        pluginId: 'payments@tools',
+        mcpAppResourceUri: 'ui://payments/charge',
+        appContext: { tenant: 'tenant-1' },
+      },
+      expect.any(Function),
+      undefined,
+      'MCP payments/charge',
+      'Allow this app action?',
+      'codex:__evolclaw_thread-1_hclass_v1:request:external:test-external-config',
+    );
+  });
+
+  it.each(['readonly', 'auto'])('declines tracked MCP approval without Gateway in %s mode', async (mode) => {
+    const { runner } = makeRunner();
+    const gateway = { requestPermission: vi.fn().mockResolvedValue('allow') };
+    runner.setMode(mode);
+    runner.setSendPrompt(vi.fn());
+    runner.setPermissionGateway(gateway as any);
+    (runner as any).trackApprovalItemNotification({
+      method: 'item/started',
+      params: {
+        threadId: 'thread-1',
+        turnId: 'turn-1',
+        item: { id: 'mcp-1', type: 'mcpToolCall', server: 'payments', tool: 'charge', arguments: { cents: 100 } },
+      },
+    });
+
+    await expect((runner as any).handleAppServerRequest({
+      id: `req-mcp-${mode}`,
+      method: 'item/tool/requestUserInput',
+      params: {
+        threadId: 'thread-1', turnId: 'turn-1', itemId: 'mcp-1',
+        questions: [{ id: 'approval', options: [{ label: 'Accept' }, { label: 'Decline' }] }],
+      },
+    })).resolves.toEqual({ answers: { approval: { answers: ['Decline'] } } });
+    expect(gateway.requestPermission).not.toHaveBeenCalled();
+  });
+
+  it('declines an approval-shaped requestUserInput when mcpToolCall metadata is missing', async () => {
+    const { runner } = makeRunner();
+    runner.setMode('request');
+    runner.setSendPrompt(vi.fn());
+    runner.setPermissionGateway({ requestPermission: vi.fn().mockResolvedValue('allow') } as any);
+
+    await expect((runner as any).handleAppServerRequest({
+      id: 'req-untracked-mcp',
+      method: 'item/tool/requestUserInput',
+      params: {
+        threadId: 'thread-1', turnId: 'turn-1', itemId: 'missing',
+        questions: [{ id: 'approval', options: [{ label: 'Accept' }, { label: 'Cancel' }] }],
+      },
+    })).resolves.toEqual({ answers: { approval: { answers: ['Cancel'] } } });
+  });
+
+  it('declines tracked MCP approval when request mode has no Gateway', async () => {
+    const { runner } = makeRunner();
+    runner.setMode('request');
+    runner.setSendPrompt(vi.fn());
+    (runner as any).trackApprovalItemNotification({
+      method: 'item/started',
+      params: {
+        threadId: 'thread-1',
+        turnId: 'turn-1',
+        item: { id: 'mcp-1', type: 'mcpToolCall', server: 'payments', tool: 'charge', arguments: { cents: 100 } },
+      },
+    });
+
+    await expect((runner as any).handleAppServerRequest({
+      id: 'req-mcp-no-gateway',
+      method: 'item/tool/requestUserInput',
+      params: {
+        threadId: 'thread-1', turnId: 'turn-1', itemId: 'mcp-1',
+        questions: [{ id: 'approval', options: [{ label: 'Accept' }, { label: 'Decline' }] }],
+      },
+    })).resolves.toEqual({ answers: { approval: { answers: ['Decline'] } } });
+  });
+
+  it('never converts an EvolClaw approval into a persistent Codex grant', async () => {
+    const { runner } = makeRunner();
+    const gateway = { requestPermission: vi.fn().mockResolvedValue('always') };
+    runner.setMode('request');
+    runner.setSendPrompt(vi.fn());
+    runner.setPermissionGateway(gateway as any);
+    (runner as any).trackApprovalItemNotification({
+      method: 'item/started',
+      params: {
+        threadId: 'thread-1',
+        turnId: 'turn-1',
+        item: { id: 'mcp-1', type: 'mcpToolCall', server: 'payments', tool: 'charge', arguments: { cents: 100 } },
+      },
+    });
+
+    await expect((runner as any).handleAppServerRequest({
+      id: 'req-mcp-persistent-only',
+      method: 'item/tool/requestUserInput',
+      params: {
+        threadId: 'thread-1', turnId: 'turn-1', itemId: 'mcp-1',
+        questions: [{ id: 'approval', options: [{ label: 'Accept for session' }, { label: 'Decline' }] }],
+      },
+    })).resolves.toEqual({ answers: { approval: { answers: ['Decline'] } } });
+  });
+
+  it('declines tracked MCP approval when exact arguments are absent', async () => {
+    const { runner } = makeRunner();
+    const gateway = { requestPermission: vi.fn().mockResolvedValue('allow') };
+    runner.setMode('request');
+    runner.setSendPrompt(vi.fn());
+    runner.setPermissionGateway(gateway as any);
+    (runner as any).trackApprovalItemNotification({
+      method: 'item/started',
+      params: {
+        threadId: 'thread-1',
+        turnId: 'turn-1',
+        item: { id: 'mcp-1', type: 'mcpToolCall', server: 'payments', tool: 'charge' },
+      },
+    });
+
+    await expect((runner as any).handleAppServerRequest({
+      id: 'req-mcp-missing-args',
+      method: 'item/tool/requestUserInput',
+      params: {
+        threadId: 'thread-1', turnId: 'turn-1', itemId: 'mcp-1',
+        questions: [{ id: 'approval', options: [{ label: 'Accept' }, { label: 'Decline' }] }],
+      },
+    })).resolves.toEqual({ answers: { approval: { answers: ['Decline'] } } });
+    expect(gateway.requestPermission).not.toHaveBeenCalled();
   });
 
   it('answers requestUserInput with the first option when no interaction context exists', async () => {
@@ -710,6 +1566,22 @@ describe('CodexRunner app-server approval bridge', () => {
     });
 
     expect(result).toEqual({ answers: { q1: { answers: ['Safe'] } } });
+  });
+
+  it('cancels MCP elicitation and rejects unaudited app-server request types', async () => {
+    const { runner } = makeRunner();
+
+    await expect((runner as any).handleAppServerRequest({
+      id: 'req-elicitation',
+      method: 'mcpServer/elicitation/request',
+      params: { threadId: 'thread-1', serverName: 'remote', mode: 'url', url: 'https://example.test' },
+    })).resolves.toEqual({ action: 'cancel', content: null, _meta: null });
+
+    await expect((runner as any).handleAppServerRequest({
+      id: 'req-dynamic',
+      method: 'item/tool/call',
+      params: { threadId: 'thread-1', tool: 'mutate', arguments: {} },
+    })).rejects.toThrow('Unsupported Codex app-server request: item/tool/call');
   });
 
   it('answers requestUserInput through InteractionRouter fallback responses', async () => {

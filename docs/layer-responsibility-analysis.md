@@ -65,10 +65,10 @@
 
 ### 3. Safe Mode（错误累积与安全模式）
 
-**当前实现**：
+**历史实现**：
 - 位置：`message-processor.ts` 的 `checkSafeMode()` 方法
 - 功能：累积错误次数，达到阈值后进入安全模式（禁用工具调用）
-- 依赖：`Session.errorCount`，`AgentRunner.runQuery()` 的 `disableTools` 参数
+- 依赖：`Session.errorCount` 和已删除的 runner 级工具禁用参数
 
 **归属判断**：
 ```
@@ -78,10 +78,7 @@
 耦合度：横跨 Gateway（会话状态）和 Agent Runner（调用参数）
 ```
 
-**结论**：**Gateway 层**
-- 理由：Safe Mode 是会话级别的状态管理，属于 Gateway 的会话编排职责
-- 位置：保持在 `message-processor.ts`，或抽取到 `session-manager.ts`
-- 接口：通过 `SessionManager` 管理 `errorCount`，通过 `AgentRunner` 接口传递 `disableTools`
+**结论**：这段设计已失效。普通 Agent 会话不能通过删除工具实现安全模式；应由公开权限模式和 runner 沙箱限制工具。纯模型判断则使用独立无状态文本推理接口，不进入 `AgentRunner`。
 
 ### 4. Message Events（消息事件处理）
 
@@ -596,4 +593,3 @@ eventBus.on('message:processing:start', async (data) => {
 1. 所有组件归属清晰，无需大规模调整
 2. 唯一需要实现的是权限审批机制（PermissionGateway）
 3. 开始执行消息可选，当前设计已足够
-

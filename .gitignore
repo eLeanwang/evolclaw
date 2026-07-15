@@ -157,7 +157,9 @@ src/experimental/
 !/tests/unit/handoff-v2-store.test.ts
 !/tests/unit/msg-history.test.ts
 !/tests/unit/session-renew.test.ts
+!/tests/unit/text-inference.test.ts
 !/tests/unit/task-runtime-context.test.ts
+!/tests/unit/permission-mode-contract.test.ts
 !/tests/core/
 !/tests/core/command/
 !/tests/core/command/*.test.ts

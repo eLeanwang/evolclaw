@@ -182,13 +182,10 @@ function createMockAgentRunner() {
     setMode: vi.fn(),
     getMode: vi.fn().mockReturnValue('default'),
     listModes: vi.fn().mockReturnValue([
-      { key: 'auto', nameZh: '自动', description: '', available: true },
-      { key: 'bypass', nameZh: '免审批', description: '', available: true },
       { key: 'readonly', nameZh: '只读', description: '', available: true },
-      { key: 'plan', nameZh: '计划', description: '', available: true },
-      { key: 'edit', nameZh: '编辑', description: '', available: true },
+      { key: 'auto', nameZh: '自动', description: '', available: true },
       { key: 'request', nameZh: '请求', description: '', available: true },
-      { key: 'noask', nameZh: '静默', description: '', available: true },
+      { key: 'bypass', nameZh: '免审批', description: '', available: true },
     ]),
     compact: vi.fn().mockResolvedValue(true),
     hasActiveStream: vi.fn().mockReturnValue(false),
@@ -502,10 +499,10 @@ describe('execMenuUpdate', () => {
     it('switches mode (admin)', async () => {
       const sm = createMockSessionManager({ resolveIdentity: vi.fn().mockReturnValue({ role: 'admin' }) });
       const { handler } = createHandler({ sessionManager: sm });
-      const result = await handler.execMenuUpdate('/perm', 'noask', 'aun', 'chat1', 'user1');
-      expect(result).toEqual(relationPermissionResult('noask'));
+      const result = await handler.execMenuUpdate('/perm', 'request', 'aun', 'chat1', 'user1');
+      expect(result).toEqual(relationPermissionResult('request'));
       expect(sm.updateSession).not.toHaveBeenCalled();
-      expect(readRelationPermissionMode()).toBe('noask');
+      expect(readRelationPermissionMode()).toBe('request');
     });
 
     it('handles /perm readonly through the chat command path', async () => {
@@ -1222,7 +1219,9 @@ describe('getMenuItems', () => {
     const commands = flatten(handler.getMenuItems('admin', 'private', 'agent'));
     const perm = commands.find(command => command.cmd === '/perm');
 
-    expect(perm?.next?.items.map((item: any) => item.value)).toEqual(expect.arrayContaining(['auto', 'bypass', 'readonly', 'edit', 'noask']));
+    expect(perm?.next?.items.map((item: any) => item.value)).toEqual([
+      'readonly', 'auto', 'request', 'bypass', 'allow', 'always', 'deny',
+    ]);
     expect(commands.some(command => command.cmd === '/file')).toBe(true);
   });
 

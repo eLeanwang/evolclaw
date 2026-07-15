@@ -2,8 +2,8 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { AgentEvent, AgentRunnerFull } from '../../src/agents/runner-types.js';
 import { EventBus } from '../../src/core/event-bus.js';
+import type { TextInferenceProvider, TextInferenceRequest } from '../../src/core/inference/text-inference.js';
 import { MessageBridge } from '../../src/core/message/message-bridge.js';
 import { buildInboundEntry, buildOutboundEntry, messageLogPath } from '../../src/core/message/message-log.js';
 import {
@@ -19,6 +19,7 @@ import type { SessionRenewConfig } from '../../src/types.js';
 const SELF_AID = 'self.agentid.pub';
 const PEER_AID = 'peer.agentid.pub';
 const NOW = Date.UTC(2026, 6, 13, 12, 0, 0);
+const JUDGE_MODEL = 'claude-haiku-4-5-20251001';
 const roots: string[] = [];
 
 afterEach(() => {
@@ -119,48 +120,64 @@ describe('SessionRenewService', () => {
     expect(highResult.decision).toBe('new');
     expect(highResult.session.id).not.toBe(high.session.id);
     expect(high.modelCalls()).toBe(1);
+    expect(high.modelListCalls()).toBe(1);
     expect(high.requestedBaseagents()).toEqual(['claude']);
-    expect(high.lastRunArgs()?.[3]).toBeUndefined();
-    expect(high.lastRunArgs()?.[7]).toMatchObject({
-      model: 'haiku',
+    expect(high.lastRequest()).toMatchObject({
+      model: JUDGE_MODEL,
       effort: 'low',
-      permissionMode: 'noask',
-      disableTools: true,
-      persistSession: false,
+      system: expect.stringContaining('session continuity classifier'),
+      input: expect.any(String),
+      signal: expect.any(AbortSignal),
     });
-    expect(high.lastRunArgs()?.[8]).toEqual({ EVOLCLAW_INTERNAL_PURPOSE: 'session-renew-judge' });
+    expect(JSON.parse(high.lastRequest()?.input || '{}')).toMatchObject({
+      new_message: '帮我规划一次旅行',
+      chat_type: 'private',
+    });
   });
 
-  it('uses the candidate session baseagent to select the judge runner and model', async () => {
-    const codex = await createFixture({ baseagent: 'codex' });
+  it('uses the configured Claude model regardless of the candidate session baseagent', async () => {
+    const codex = await createFixture({
+      baseagent: 'codex',
+      config: { model: 'claude-sonnet-4-6' },
+      availableModels: ['claude-sonnet-4-6'],
+    });
     const result = await codex.service.resolve(codex.request('帮我规划一次旅行'));
 
     expect(result.source).toBe('model');
-    expect(codex.requestedBaseagents()).toEqual(['codex']);
-    expect(codex.lastRunArgs()?.[7]).toMatchObject({
-      model: 'gpt-5.6-luna',
+    expect(codex.requestedBaseagents()).toEqual(['claude']);
+    expect(codex.lastRequest()).toMatchObject({
+      model: 'claude-sonnet-4-6',
       effort: 'low',
-      disableTools: true,
-      persistSession: false,
     });
   });
 
-  it('skips only the model branch for unsupported or unavailable baseagents', async () => {
-    const unsupported = await createFixture({ baseagent: 'gemini', config: { fallback_action: 'new' } });
-    const result = await unsupported.service.resolve(unsupported.request('帮我规划一次旅行'));
-
-    expect(result.decision).toBeUndefined();
-    expect(result.session.id).toBe(unsupported.session.id);
-    expect(unsupported.modelCalls()).toBe(0);
-    expect(unsupported.requestedBaseagents()).toEqual([]);
-
-    const unavailable = await createFixture({ baseagent: 'codex', unavailableBaseagents: ['codex'], config: { fallback_action: 'new' } });
+  it('uses fallback when the Claude provider or configured model is unavailable', async () => {
+    const unavailable = await createFixture({ baseagent: 'codex', unavailableBaseagents: ['claude'], config: { fallback_action: 'new' } });
     const unavailableResult = await unavailable.service.resolve(unavailable.request('帮我规划一次旅行'));
-    expect(unavailableResult.decision).toBeUndefined();
-    expect(unavailableResult.session.id).toBe(unavailable.session.id);
+    expect(unavailableResult.decision).toBe('new');
+    expect(unavailableResult.source).toBe('fallback');
+    expect(unavailableResult.session.id).not.toBe(unavailable.session.id);
     expect(unavailable.modelCalls()).toBe(0);
+    expect(unavailable.requestedBaseagents()).toEqual(['claude']);
 
-    const explicit = await createFixture({ baseagent: 'gemini' });
+    const missingModel = await createFixture({ config: { model: undefined, fallback_action: 'new' } });
+    const missingModelResult = await missingModel.service.resolve(missingModel.request('帮我规划一次旅行'));
+    expect(missingModelResult.decision).toBe('new');
+    expect(missingModelResult.source).toBe('fallback');
+    expect(missingModel.modelListCalls()).toBe(0);
+    expect(missingModel.requestedBaseagents()).toEqual([]);
+
+    const unavailableModel = await createFixture({
+      availableModels: ['claude-sonnet-4-6'],
+      config: { model: JUDGE_MODEL, fallback_action: 'new' },
+    });
+    const unavailableModelResult = await unavailableModel.service.resolve(unavailableModel.request('帮我规划一次旅行'));
+    expect(unavailableModelResult.decision).toBe('new');
+    expect(unavailableModelResult.source).toBe('fallback');
+    expect(unavailableModel.modelListCalls()).toBe(1);
+    expect(unavailableModel.modelCalls()).toBe(0);
+
+    const explicit = await createFixture({ baseagent: 'gemini', config: { model: undefined } });
     const explicitResult = await explicit.service.resolve(explicit.request('新话题：帮我规划一次旅行'));
     expect(explicitResult.decision).toBe('new');
     expect(explicitResult.source).toBe('explicit');
@@ -315,6 +332,7 @@ async function createFixture(options: {
   config?: Partial<SessionRenewConfig>;
   baseagent?: string;
   unavailableBaseagents?: string[];
+  availableModels?: string[];
 } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'session-renew-'));
   roots.push(root);
@@ -360,45 +378,38 @@ async function createFixture(options: {
   }
 
   let calls = 0;
-  let lastRunArgs: unknown[] | undefined;
+  let listCalls = 0;
+  let lastRequest: TextInferenceRequest | undefined;
   const requestedBaseagents: Array<string | undefined> = [];
-  const runner = {
-    name: 'fake',
-    runQuery: async (...args: unknown[]) => {
+  const provider: TextInferenceProvider = {
+    baseagent: 'claude',
+    listModels: async () => {
+      listCalls++;
+      return options.availableModels ?? [JUDGE_MODEL];
+    },
+    completeText: async request => {
       calls++;
-      lastRunArgs = args;
+      lastRequest = request;
       const result = options.modelResult ?? modelDecision('continue', 0.95);
       const delay = options.modelDelayMs ?? 0;
-      return (async function* (): AsyncGenerator<AgentEvent> {
-        if (delay) await new Promise(resolve => setTimeout(resolve, delay));
-        yield { type: 'complete', result };
-      })();
+      if (delay) await new Promise(resolve => setTimeout(resolve, delay));
+      return result;
     },
-    interrupt: async () => {},
-    registerStream: () => {},
-    cleanupStream: () => {},
-    hasActiveStream: () => false,
-    updateSessionId: () => {},
-    closeSession: async () => {},
-    clearSession: async () => true,
-    compactSession: async () => true,
-    setSendPrompt: () => {},
-    setMode: () => {},
-    getMode: () => 'plan',
-  } as unknown as AgentRunnerFull;
+  };
 
   const config: SessionRenewConfig = {
     enabled: options.enabled ?? true,
     after_hours: 24,
+    model: JUDGE_MODEL,
     fallback_action: 'continue',
     ...options.config,
   };
-  const service = new SessionRenewService(manager, { getAgent: (_channel, baseagent) => {
+  const service = new SessionRenewService(manager, { getTextInferenceProvider: (_channel, baseagent) => {
     requestedBaseagents.push(baseagent);
     if (baseagent && options.unavailableBaseagents?.includes(baseagent)) {
-      throw new Error(`runner unavailable: ${baseagent}`);
+      return undefined;
     }
-    return runner;
+    return provider;
   } }, {
     now: () => NOW,
     resolveConfig: () => config,
@@ -409,8 +420,9 @@ async function createFixture(options: {
     session,
     service,
     modelCalls: () => calls,
+    modelListCalls: () => listCalls,
     requestedBaseagents: () => requestedBaseagents,
-    lastRunArgs: () => lastRunArgs,
+    lastRequest: () => lastRequest,
     request: (content: string, replyToMessageId?: string, isNewSession?: boolean) => ({
       session,
       channelName: 'main',
