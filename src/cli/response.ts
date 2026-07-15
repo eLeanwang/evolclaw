@@ -17,10 +17,36 @@ import {
   readField, writeField, determineFieldScope, normalizePeer, ModelScopeError,
   type ScopeSelector,
 } from '../core/model/field-scope.js';
-import { BUILTIN_MODE_META, findBuiltinMeta } from '../response-system/builtin-meta.js';
-import type { ResponseModesConfig } from '../types.js';
+import { readFieldWithSource, resolveAgentConfig, ConfigTarget } from '../config/config-manager.js';
+import { ResponseModeRegistry } from '../response-system/registry.js';
+import { registerBuiltinModes } from '../response-system/modes/index.js';
+import type { ResponseMode } from '../response-system/types.js';
+import type { ResponseModeParams } from '../types.js';
 
-const FIELD = 'response_modes';
+const RESPONSE_MODE_FIELD = 'responseMode';
+const RESPONSE_MODE_PARAMS_FIELD = 'responseModeParams';
+
+/**
+ * CLI 侧的响应模式清单 = 真实注册表（registerBuiltinModes 纯函数、无 daemon 依赖）。
+ * 保证 ec response list/info/set 看到的与运行时实际注册的一致。
+ */
+function buildRegistry(): ResponseModeRegistry {
+  const reg = new ResponseModeRegistry();
+  registerBuiltinModes(reg);
+  return reg;
+}
+
+/** 从模式实例提取展示用元数据（供 list/info 输出）。 */
+function modeMeta(m: ResponseMode) {
+  return {
+    id: m.id,
+    displayName: m.displayName,
+    description: m.description,
+    applicableScenes: m.applicableScenes,
+    type: m.type,
+    configSchema: m.configSchema,
+  };
+}
 
 function emit(formatJson: boolean, payload: any, textFn: () => string): void {
   if (formatJson) {
@@ -56,12 +82,12 @@ function parseSelector(args: string[], formatJson: boolean): ScopeSelector {
 
 /**
  * 写操作的作用域解析：要求至少 agent 级（--self）。
- * response_modes 是行为参数，不落 defaults（与 model 命令一致，全局作用域已退场）。
+ * responseMode 是行为参数，不落 defaults（与 model 命令一致，全局作用域已退场）。
  */
 function parseWriteSelector(args: string[], formatJson: boolean): ScopeSelector {
   const sel = parseSelector(args, formatJson);
   if (!sel.self) {
-    fail(formatJson, 'SELF_REQUIRED', 'response_modes 从 agent 级起：写操作必须提供 --self（全局默认不承载行为参数）');
+    fail(formatJson, 'SELF_REQUIRED', 'responseMode 从 agent 级起：写操作必须提供 --self（全局默认不承载行为参数）');
   }
   return sel;
 }
@@ -77,32 +103,54 @@ function safeWrite(formatJson: boolean, fn: () => void): void {
   }
 }
 
-/** 读取指定作用域生效的 response_modes 配置 */
-function readConfig(sel: ScopeSelector): ResponseModesConfig | undefined {
-  const scope = determineFieldScope(sel);
-  return readField<ResponseModesConfig>(scope, sel, FIELD);
+/**
+ * 解析**生效**的 responseMode（标量，合并链 relation > agent > defaults）。
+ *
+ * 与运行时 ResponseModeResolver、`ec config get responseMode` 同源：都走合并链，而不是
+ * 只读当前作用域的单个文件。返回命中的值 + 来源层（未命中任何层返回空对象）。
+ */
+function resolveResponseMode(sel: ScopeSelector): { mode?: string; source?: ConfigTarget } {
+  const hit = readFieldWithSource(RESPONSE_MODE_FIELD, sel, { cache: true });
+  return hit ? { mode: hit.value as string, source: hit.source.target } : {};
+}
+
+/**
+ * 解析**生效**的 responseModeParams（字典，按模式 id 分桶 dict 合并链）。
+ * 复用 ConfigManager 的合并（唯一合并点），与运行时一致。
+ */
+function resolveResponseModeParams(sel: ScopeSelector): ResponseModeParams | undefined {
+  const merged = resolveAgentConfig(sel, { cache: true });
+  return merged.responseModeParams as ResponseModeParams | undefined;
+}
+
+/** 中文展示用的来源标签 */
+function sourceLabel(target: ConfigTarget): string {
+  switch (target) {
+    case ConfigTarget.Relation: return '关系级';
+    case ConfigTarget.Agent: return 'agent 级';
+    case ConfigTarget.Defaults: return '全局默认';
+    default: return String(target);
+  }
 }
 
 const HELP = `用法: evolclaw response <command> [options]
 
 Commands:
   list                列出所有响应模式（内置 + 元数据）
-  current             显示当前作用域生效的默认模式 + 配置
+  current             显示当前作用域生效的模式 + 参数
   info <mode-id>      查看单个模式详情（场景/配置参数）
-  set <mode-id>       设置默认模式（--scene 指定 private/group）
-  reset               清除指定作用域的 response_modes 设置
-  config [<mode-id>]  查看模式配置参数
+  set <mode-id>       设置响应模式
+  reset               清除指定作用域的 responseMode 设置
+  config <mode-id>    查看指定模式的配置参数
   config set <k> <v>  修改模式配置参数（--mode 指定模式）
 
-作用域（由参数决定，越具体越优先：关系 > agent > 全局）:
-  (无参数)                       全局默认  → defaults.json
+作用域（由参数决定，越具体越优先：关系 > agent）:
   --self <aid>                   agent级   → config.json
   --self <aid> --peer <X>        关系级    → relations/<peerKey>/config.json
 
 Options:
   --self <aid>        本端 AID
   --peer <X>          对端：channelType#channelId 或裸 aid（裸 aid 视为 aun#<aid>）
-  --scene <s>         场景：private | group（set 专用，默认 private）
   --mode <id>         模式 id（config set 专用）
   --format json       输出 JSON
   --help, -h          各子命令均支持
@@ -111,26 +159,26 @@ Options:
   evolclaw response list
   evolclaw response current --self bot.agentid.pub
   evolclaw response info dual-session
-  evolclaw response set dual-session --self bot.agentid.pub --scene group
+  evolclaw response set single-session --self bot.agentid.pub
   evolclaw response set workflow --self bot.agentid.pub --peer aun#team.group.com
   evolclaw response config dual-session --self bot.agentid.pub
-  evolclaw response config set relevance_threshold 0.8 --mode dual-session --self bot.agentid.pub
+  evolclaw response config set debounceMs 5000 --mode dual-session --self bot.agentid.pub
   evolclaw response reset --self bot.agentid.pub --peer alice.agentid.pub`;
 
 // ── list ────────────────────────────────────────────────────────────────
 
 function cmdList(args: string[], formatJson: boolean): void {
   if (wantsHelp(args)) { console.log(HELP); return; }
-  const scene = getArgValue(args, '--scene') as 'private' | 'group' | undefined;
-  const modes = scene
-    ? BUILTIN_MODE_META.filter(m => m.applicableScenes.includes(scene))
-    : BUILTIN_MODE_META;
+  const reg = buildRegistry();
+  const preferred = reg.getPreferredId();
+  const modes = reg.list().map(modeMeta);
 
-  emit(formatJson, { ok: true, modes }, () => {
-    const lines = ['内置响应模式:'];
+  emit(formatJson, { ok: true, modes, preferred }, () => {
+    const lines = ['已注册响应模式:'];
     for (const m of modes) {
       const scenes = m.applicableScenes.join(', ');
-      lines.push(`  ${m.id.padEnd(20)} ${m.displayName.padEnd(14)} [${scenes}]`);
+      const star = m.id === preferred ? ' ★首选' : '';
+      lines.push(`  ${m.id.padEnd(20)} ${m.displayName.padEnd(14)} [${scenes}]${star}`);
       lines.push(`  ${' '.repeat(20)} ${m.description}`);
     }
     return lines.join('\n');
@@ -142,17 +190,34 @@ function cmdList(args: string[], formatJson: boolean): void {
 function cmdCurrent(args: string[], formatJson: boolean): void {
   if (wantsHelp(args)) { console.log(HELP); return; }
   const sel = parseSelector(args, formatJson);
-  const cfg = readConfig(sel);
   const scope = determineFieldScope(sel);
 
-  emit(formatJson, { ok: true, scope, config: cfg ?? null }, () => {
-    if (!cfg) return `当前作用域(${scope})未设置 response_modes，使用系统兜底（private→interactive, group→proactive）`;
+  // 生效值走合并链（relation > agent > defaults），与运行时 resolver / `ec config get` 一致。
+  // 无任何层设值时，回落注册表首选——这才是运行时真正生效的模式。
+  const { mode: configuredMode, source } = resolveResponseMode(sel);
+  const preferred = buildRegistry().getPreferredId();
+  const effectiveMode = configuredMode ?? preferred;
+  const params = resolveResponseModeParams(sel);
+
+  emit(formatJson, {
+    ok: true,
+    scope,
+    responseMode: effectiveMode ?? null,
+    source: configuredMode ? 'config' : 'preferred',
+    sourceTarget: source ?? null,
+    responseModeParams: params ?? null,
+  }, () => {
     const lines = [`响应模式配置（作用域: ${scope}）:`];
-    if (cfg.default_private) lines.push(`  单聊默认: ${cfg.default_private}`);
-    if (cfg.default_group) lines.push(`  群聊默认: ${cfg.default_group}`);
-    if (cfg.overrides && Object.keys(cfg.overrides).length) {
-      lines.push('  覆盖:');
-      for (const [k, v] of Object.entries(cfg.overrides)) lines.push(`    ${k} → ${v.mode}`);
+    if (configuredMode) {
+      lines.push(`  当前模式: ${configuredMode}（来源: ${source ? sourceLabel(source) : '配置'}）`);
+    } else {
+      lines.push(`  当前模式: ${effectiveMode ?? '(无)'}（来源: 注册表首选，各层均未设置）`);
+    }
+    if (params && Object.keys(params).length) {
+      lines.push('  模式参数:');
+      for (const [modeId, cfg] of Object.entries(params)) {
+        lines.push(`    ${modeId}: ${JSON.stringify(cfg)}`);
+      }
     }
     return lines.join('\n');
   });
@@ -164,8 +229,9 @@ function cmdInfo(args: string[], formatJson: boolean): void {
   if (wantsHelp(args)) { console.log(HELP); return; }
   const id = args.find(a => !a.startsWith('--') && a !== 'info');
   if (!id) fail(formatJson, 'MISSING_ID', 'info 需要模式 id');
-  const meta = findBuiltinMeta(id!);
-  if (!meta) fail(formatJson, 'UNKNOWN_MODE', `未知模式: ${id}`);
+  const mode = buildRegistry().get(id!);
+  if (!mode) fail(formatJson, 'UNKNOWN_MODE', `未知模式: ${id}`);
+  const meta = modeMeta(mode!);
 
   emit(formatJson, { ok: true, mode: meta }, () => {
     const lines = [
@@ -193,28 +259,15 @@ function cmdSet(args: string[], formatJson: boolean): void {
   if (wantsHelp(args)) { console.log(HELP); return; }
   const id = args.find(a => !a.startsWith('--') && a !== 'set');
   if (!id) fail(formatJson, 'MISSING_ID', 'set 需要模式 id');
-  const meta = findBuiltinMeta(id!);
-  if (!meta) fail(formatJson, 'UNKNOWN_MODE', `未知模式: ${id}`);
-
-  const scene = (getArgValue(args, '--scene') as 'private' | 'group') ?? 'private';
-  if (scene !== 'private' && scene !== 'group') {
-    fail(formatJson, 'INVALID_SCENE', `--scene 必须是 private 或 group，得到: ${scene}`);
-  }
-  if (!meta!.applicableScenes.includes(scene)) {
-    fail(formatJson, 'SCENE_MISMATCH', `模式 ${id} 不适用于 ${scene} 场景（适用: ${meta!.applicableScenes.join(', ')}）`);
-  }
+  if (!buildRegistry().has(id!)) fail(formatJson, 'UNKNOWN_MODE', `未知模式: ${id}`);
 
   const sel = parseWriteSelector(args, formatJson);
   const scope = determineFieldScope(sel);
-  const cfg = (readField<ResponseModesConfig>(scope, sel, FIELD) || {}) as ResponseModesConfig;
 
-  if (scene === 'private') cfg.default_private = id!;
-  else cfg.default_group = id!;
+  safeWrite(formatJson, () => writeField(scope, sel, RESPONSE_MODE_FIELD, id));
 
-  safeWrite(formatJson, () => writeField(scope, sel, FIELD, cfg));
-
-  emit(formatJson, { ok: true, scope, scene, mode: id }, () =>
-    `✓ 已设置 ${scene} 默认响应模式为 ${id}（作用域: ${scope}）`);
+  emit(formatJson, { ok: true, scope, mode: id }, () =>
+    `✓ 已设置响应模式为 ${id}（作用域: ${scope}）`);
 }
 
 // ── reset ───────────────────────────────────────────────────────────────
@@ -223,8 +276,14 @@ function cmdReset(args: string[], formatJson: boolean): void {
   if (wantsHelp(args)) { console.log(HELP); return; }
   const sel = parseWriteSelector(args, formatJson);
   const scope = determineFieldScope(sel);
-  safeWrite(formatJson, () => writeField(scope, sel, FIELD, undefined));
-  emit(formatJson, { ok: true, scope }, () => `✓ 已清除作用域(${scope})的 response_modes 设置`);
+
+  safeWrite(formatJson, () => {
+    writeField(scope, sel, RESPONSE_MODE_FIELD, undefined);
+    writeField(scope, sel, RESPONSE_MODE_PARAMS_FIELD, undefined);
+  });
+
+  emit(formatJson, { ok: true, scope }, () =>
+    `✓ 已清除响应模式配置（作用域: ${scope}）`);
 }
 
 // ── config ──────────────────────────────────────────────────────────────
@@ -237,18 +296,17 @@ function cmdConfig(args: string[], formatJson: boolean): void {
     return cmdConfigSet(args, formatJson);
   }
 
-  // config [<mode-id>]：查看模式配置
+  // config [<mode-id>]：查看**生效**模式配置（合并链，与运行时一致）
   const modeId = args.find(a => !a.startsWith('--') && a !== 'config');
   const sel = parseSelector(args, formatJson);
-  const cfg = readConfig(sel);
-  const configs = cfg?.configs ?? {};
+  const params = resolveResponseModeParams(sel) ?? {};
 
   if (modeId) {
-    emit(formatJson, { ok: true, mode: modeId, config: configs[modeId] ?? {} }, () =>
-      `${modeId} 配置: ${JSON.stringify(configs[modeId] ?? {}, null, 2)}`);
+    emit(formatJson, { ok: true, mode: modeId, config: params[modeId] ?? {} }, () =>
+      `${modeId} 配置: ${JSON.stringify(params[modeId] ?? {}, null, 2)}`);
   } else {
-    emit(formatJson, { ok: true, configs }, () =>
-      `所有模式配置: ${JSON.stringify(configs, null, 2)}`);
+    emit(formatJson, { ok: true, responseModeParams: params }, () =>
+      `所有模式配置: ${JSON.stringify(params, null, 2)}`);
   }
 }
 
@@ -260,7 +318,7 @@ function cmdConfigSet(args: string[], formatJson: boolean): void {
 
   if (!modeId) fail(formatJson, 'MISSING_MODE', 'config set 需要 --mode <id>');
   if (!key || rawValue === undefined) fail(formatJson, 'MISSING_KV', 'config set 需要 <key> <value>');
-  if (!findBuiltinMeta(modeId!)) fail(formatJson, 'UNKNOWN_MODE', `未知模式: ${modeId}`);
+  if (!buildRegistry().has(modeId!)) fail(formatJson, 'UNKNOWN_MODE', `未知模式: ${modeId}`);
 
   // 值解析：尝试 JSON（数字/布尔/数组），失败则当字符串
   let value: any = rawValue;
@@ -268,12 +326,13 @@ function cmdConfigSet(args: string[], formatJson: boolean): void {
 
   const sel = parseWriteSelector(args, formatJson);
   const scope = determineFieldScope(sel);
-  const cfg = (readField<ResponseModesConfig>(scope, sel, FIELD) || {}) as ResponseModesConfig;
-  if (!cfg.configs) cfg.configs = {};
-  if (!cfg.configs[modeId!]) cfg.configs[modeId!] = {};
-  cfg.configs[modeId!][key!] = value;
+  // 写路径是 read-modify-write：只读**目标层自身**的桶，绝不能读合并链——否则会把
+  // 继承来的父层参数一并写进本层文件，污染覆盖关系。
+  const params = (readField<ResponseModeParams>(scope, sel, RESPONSE_MODE_PARAMS_FIELD) || {}) as ResponseModeParams;
+  if (!params[modeId!]) params[modeId!] = {};
+  params[modeId!][key!] = value;
 
-  safeWrite(formatJson, () => writeField(scope, sel, FIELD, cfg));
+  safeWrite(formatJson, () => writeField(scope, sel, RESPONSE_MODE_PARAMS_FIELD, params));
 
   emit(formatJson, { ok: true, scope, mode: modeId, key, value }, () =>
     `✓ 已设置 ${modeId}.${key} = ${JSON.stringify(value)}（作用域: ${scope}）`);

@@ -116,6 +116,9 @@ export function agentVenuesDir(aid: string): string {
 export function agentSessionsDir(aid: string): string {
   return path.join(agentDir(aid), 'sessions');
 }
+export function agentLogsDir(aid: string): string {
+  return path.join(agentDir(aid), 'logs');
+}
 export function agentDataDir(aid: string): string {
   return path.join(agentDir(aid), 'data');
 }

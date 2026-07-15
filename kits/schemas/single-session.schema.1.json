@@ -1,0 +1,31 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "single-session.schema.1.json",
+  "title": "SingleSessionParams (responseModeParams['single-session'])",
+  "x-logical-name": "single-session",
+  "x-scope": "mode",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "pre_tool_1stmsgchk": {
+      "type": "boolean",
+      "enum": [true, false],
+      "default": true,
+      "description": "proactive 首工具表态检查（仅 chatmode=proactive 生效）：首个工具调用前必须先向对端表态，否则拦截。",
+      "x-enumDescriptions": {
+        "true": "启用：首工具前必须先发送消息或文件",
+        "false": "禁用：允许直接调用工具"
+      }
+    },
+    "tool_use_reminder": {
+      "type": "boolean",
+      "enum": [true, false],
+      "default": true,
+      "description": "proactive 工具汇报提醒（仅 chatmode=proactive 生效）：启用队列未读提醒 + 每 10 次工具调用的汇报提醒。",
+      "x-enumDescriptions": {
+        "true": "启用：自动汇报工具使用情况",
+        "false": "禁用：静默执行工具"
+      }
+    }
+  }
+}

@@ -26,6 +26,7 @@ import type { AidStatsCollector } from '../utils/stats.js';
 import { loadAgent, saveAgent } from '../config-store.js';
 import { activeBaseagent } from '../core/model/config-scope.js';
 import { resolveEffective } from '../config/config-manager.js';
+import { mentionModeToDispatch } from '../config/mention-mode.js';
 import { getProcessStartTime } from '../utils/process-introspect.js';
 import * as outbox from '../aun/outbox.js';
 import { guessMime, formatSize } from '../utils/media-cache.js';
@@ -88,6 +89,31 @@ export interface AUNConfig {
   agentName?: string;     // self-agent 的 AID（用于 status 表格识别归属）
   channelName?: string;   // channel 实例名（用于日志/状态聚合）
   pureIdentity?: boolean;  // 纯身份模式：跳过 evolagent onboarding（welcome / agent.md 上传 / 自身 agent.md 拉取 / group 监听）
+}
+
+export function buildAunFilePayload(params: {
+  filename: string;
+  size: number;
+  contentType: string;
+  attachment: Record<string, unknown>;
+  context?: ReplyContext;
+}): Record<string, unknown> {
+  const correlationId = params.context?.metadata?.correlationId;
+  const payload: Record<string, unknown> = {
+    type: correlationId ? 'result.file' : 'file',
+    text: `📎 ${params.filename} (${formatSize(params.size)})`,
+    attachments: [params.attachment],
+  };
+  if (params.context?.threadId) payload.thread_id = params.context.threadId;
+  if (params.context?.replyToMessageId) payload.ref_message_id = params.context.replyToMessageId;
+  if (params.context?.metadata?.taskId) payload.task_id = params.context.metadata.taskId;
+  if (params.context?.metadata?.chatmode) payload.chatmode = params.context.metadata.chatmode;
+  if (correlationId) {
+    payload.correlation_id = correlationId;
+    payload.name = params.filename;
+    payload.content_type = params.contentType;
+  }
+  return payload;
 }
 
 /** AUNChannel.dispatchMessage 投递给 bridge 的统一入站载荷（含网络邻近性 proximity）。 */
@@ -3556,17 +3582,13 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
         sha256,
         content_type: contentType,
       };
-      const filePayload: Record<string, any> = {
-        type: 'file',
-        text: `📎 ${filename} (${formatSize(stat.size)})`,
-        attachments: [attachment],
-      };
-      if (context?.threadId) filePayload.thread_id = context.threadId;
-      if (context?.replyToMessageId) filePayload.ref_message_id = context.replyToMessageId;
-      if (context?.metadata?.taskId) filePayload.task_id = context.metadata.taskId;
-      if (context?.metadata?.chatmode) filePayload.chatmode = context.metadata.chatmode;
-      // file-link-cache: 回带点击请求的 correlationId，客户端用它把异步到达的文件消息对回这次 fetch 点击
-      if (context?.metadata?.correlationId) filePayload.correlation_id = context.metadata.correlationId;
+      const filePayload: Record<string, any> = buildAunFilePayload({
+        filename,
+        size: stat.size,
+        contentType,
+        attachment,
+        context,
+      });
       const isGroup = this.isGroupId(channelId);
       const fileTargetAid = channelId;
 
@@ -4291,11 +4313,13 @@ export class AUNChannelPlugin implements ChannelPlugin {
 
         if (typeof channel.setDispatchModeResolver === 'function') {
           channel.setDispatchModeResolver(async (channelId: string) => {
-            const mode = resolveEffective({
+            // 配置层用 mentionMode（mention-only/disabled），翻译成 AUN 协议
+            // dispatch_mode（mention/broadcast）；未设值返回 undefined，回退服务端下发值。
+            const mentionMode = resolveEffective({
               self: aid,
               peerKey: formatPeerKey('aun', channelId),
-            }, { cache: true }).dispatch;
-            return mode === 'mention' || mode === 'broadcast' ? mode : undefined;
+            }, { cache: true }).mentionMode;
+            return mentionModeToDispatch(mentionMode);
           });
         }
       },

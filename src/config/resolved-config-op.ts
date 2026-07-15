@@ -10,7 +10,7 @@ import { ConfigError, routeFieldPath, type FieldRoute } from './config-manager.j
 
 export type ConfigFieldSubcommand = 'get' | 'set' | 'unset';
 export type ConfigScopedSubcommand = 'show' | 'effective' | 'fields' | 'validate' | 'init';
-export type ConfigGlobalSubcommand = 'list' | 'snapshot' | 'prune' | 'history' | 'diff' | 'restore' | 'current' | 'boots';
+export type ConfigGlobalSubcommand = 'list' | 'snapshot' | 'prune' | 'history' | 'diff' | 'restore' | 'current' | 'boots' | 'schema';
 export type ConfigSubcommand = ConfigFieldSubcommand | ConfigScopedSubcommand | ConfigGlobalSubcommand;
 
 export type ConfigOperationId =
@@ -33,7 +33,8 @@ export type ConfigManagementOperationId =
   | 'config.diff'
   | 'config.restore'
   | 'config.current'
-  | 'config.boots';
+  | 'config.boots'
+  | 'config.schema';
 
 export interface ResolvedConfigOp {
   kind: 'field';
@@ -76,7 +77,7 @@ export interface ResolvedGlobalConfigCommand {
   commandScope: 'process';
   operationId: Extract<ConfigManagementOperationId,
     'config.list' | 'config.snapshot' | 'config.prune' | 'config.history' | 'config.diff'
-    | 'config.restore' | 'config.current' | 'config.boots'>;
+    | 'config.restore' | 'config.current' | 'config.boots' | 'config.schema'>;
   dangerous: true;
   self?: never;
   peerKey?: never;
@@ -89,6 +90,9 @@ export interface ResolvedGlobalConfigCommand {
   versions?: [string, string];
   version?: string;
   count?: number;
+  schemaName?: string;
+  schemaVersion?: number;
+  schemaList?: boolean;
 }
 
 export type ResolvedConfigCommand = ResolvedConfigOp | ResolvedScopedConfigCommand | ResolvedGlobalConfigCommand;
@@ -119,7 +123,7 @@ const FIELD_OPTIONS: Record<string, 'boolean' | 'value'> = {
 };
 
 const SCOPED_SUBCOMMANDS = new Set<ConfigScopedSubcommand>(['show', 'effective', 'fields', 'validate', 'init']);
-const GLOBAL_SUBCOMMANDS = new Set<ConfigGlobalSubcommand>(['list', 'snapshot', 'prune', 'history', 'diff', 'restore', 'current', 'boots']);
+const GLOBAL_SUBCOMMANDS = new Set<ConfigGlobalSubcommand>(['list', 'snapshot', 'prune', 'history', 'diff', 'restore', 'current', 'boots', 'schema']);
 
 export function resolveConfigCommand(
   inputArgv: string[],
@@ -142,7 +146,7 @@ export function resolveConfigCommand(
   }
 
   if (subcommand === 'get' || subcommand === 'set' || subcommand === 'unset') {
-    const field = resolveFieldCommand(argv, subcommand);
+    const field = resolveFieldCommand(argv, subcommand, options);
     return field.ok ? { ok: true, command: field.op } : field;
   }
   if (SCOPED_SUBCOMMANDS.has(subcommand as ConfigScopedSubcommand)) {
@@ -180,20 +184,29 @@ export function isResolvedConfigMutation(command: ResolvedConfigCommand): boolea
   return command.subcommand === 'snapshot' || command.subcommand === 'prune' || command.subcommand === 'restore';
 }
 
-function resolveFieldCommand(argv: string[], subcommand: ConfigFieldSubcommand): ResolveConfigOperationResult {
+const FIELD_USAGE: Record<ConfigFieldSubcommand, string> = {
+  get: 'config get <field> [selector]',
+  set: 'config set <field> <value> [selector]',
+  unset: 'config unset <field> [selector]',
+};
+
+function resolveFieldCommand(
+  argv: string[],
+  subcommand: ConfigFieldSubcommand,
+  options: ResolveConfigOperationOptions = {},
+): ResolveConfigOperationResult {
   const businessCount = subcommand === 'set' ? 2 : 1;
-  const business = parseLeadingPositionals(argv.slice(2), businessCount, `config ${subcommand}`);
+  const business = parseLeadingPositionals(argv.slice(2), businessCount, FIELD_USAGE[subcommand]);
   if (!business.ok) return business;
   const parsedOptions = parseOptions(business.rest, FIELD_OPTIONS);
   if (!parsedOptions.ok) return parsedOptions;
   const formatCheck = validateOutputFormat(parsedOptions.values.format);
   if (!formatCheck.ok) return formatCheck;
 
-  const selector = parseConfigSelector(business.rest, { requireSelector: subcommand !== 'get' });
+  // 先按"不强制 selector"解析，拿到用于路由的 scope；selector 是否缺失的判定推迟到字段校验之后，
+  // 这样非法字段会先于 SELECTOR_REQUIRED 暴露真正的 UNKNOWN_FIELD，而不是被通用的"缺 selector"掩盖。
+  const selector = parseConfigSelector(business.rest, { requireSelector: false });
   if (!selector.ok) return { ok: false, code: selector.code, reason: selector.reason };
-  if (subcommand === 'unset' && selector.scope === 'process') {
-    return { ok: false, code: 'UNSET_PROCESS_REJECT', reason: 'evolclaw.json has no lower config layer to fall back to' };
-  }
 
   const field = business.values[0].trim();
   if (!field) return { ok: false, code: 'MISSING_ARG', reason: `config ${subcommand} requires a field` };
@@ -219,6 +232,27 @@ function resolveFieldCommand(argv: string[], subcommand: ConfigFieldSubcommand):
     route = routeFieldPath(field, selector.scope);
   } catch (error) {
     if (routeRequired) return configErrorResult(error);
+  }
+
+  // 字段已校验通过，再补齐"写操作必须显式 selector"的约束（get 不要求）。
+  const selectorMissing = selector.scope === 'agent' && !selector.self;
+  if (subcommand !== 'get' && selectorMissing) {
+    return {
+      ok: false,
+      code: 'SELECTOR_REQUIRED',
+      reason: `config ${subcommand} ${field} needs a target: --self <aid> [--peer <peerKey>] | --default | --process`,
+    };
+  }
+  // get 在独立 CLI 模式（无 defaultRelation）也要求显式 selector，避免"不知道读谁的"。
+  if (subcommand === 'get' && selectorMissing && !options.defaultRelation?.self) {
+    return {
+      ok: false,
+      code: 'SELECTOR_REQUIRED',
+      reason: `config get ${field} needs a target: --self <aid> [--peer <peerKey>] | --default | --process`,
+    };
+  }
+  if (subcommand === 'unset' && selector.scope === 'process') {
+    return { ok: false, code: 'UNSET_PROCESS_REJECT', reason: 'evolclaw.json has no lower config layer to fall back to' };
   }
 
   const rawValue = subcommand === 'set' ? business.values[1] : undefined;
@@ -304,6 +338,7 @@ function resolveGlobalCommand(
     restore: { min: 1, max: 1, options: { '--format': 'value' } },
     current: { min: 0, max: 0, options: { '--format': 'value' } },
     boots: { min: 0, max: 0, options: { '-n': 'value', '--num': 'value', '--format': 'value' }, aliases: [['-n', '--num']] },
+    schema: { min: 0, max: 2, options: { '--list': 'boolean', '--format': 'value' } },
   };
   const parsed = parseStructuredArgs(argv.slice(2), specs[subcommand]);
   if (!parsed.ok) return parsed;
@@ -341,6 +376,20 @@ function resolveGlobalCommand(
     const count = parsePositiveInteger(parsed.values.n ?? parsed.values.num, '-n/--num');
     if (!count.ok) return count;
     command.count = count.value ?? 10;
+  } else if (subcommand === 'schema') {
+    command.schemaList = parsed.flags.has('list');
+    if (parsed.positionals[0]) command.schemaName = parsed.positionals[0];
+    if (parsed.positionals[1] !== undefined) {
+      if (command.schemaList) {
+        return { ok: false, code: 'INVALID_CONFIG_COMMAND', reason: 'config schema --list does not take a version argument' };
+      }
+      const version = parseNonNegativeInteger(parsed.positionals[1], 'version');
+      if (!version.ok) return version;
+      command.schemaVersion = version.value;
+    }
+    if (!command.schemaName && (command.schemaList || command.schemaVersion !== undefined)) {
+      return { ok: false, code: 'MISSING_ARG', reason: 'config schema requires a schema name' };
+    }
   }
   command.canonicalArgv = buildGlobalCanonicalArgv(command);
   return { ok: true, command };
@@ -359,19 +408,20 @@ function hasExplicitConfigSelector(argv: string[]): boolean {
 function parseLeadingPositionals(
   argv: string[],
   count: number,
-  command: string,
+  usage: string,
 ): { ok: true; values: string[]; rest: string[] } | { ok: false; code: string; reason: string } {
   const values = argv.slice(0, count);
   if (values.length !== count || values.some(value => !value || value.startsWith('-'))) {
+    const noun = count === 1 ? '<field>' : '<field> <value>';
     return {
       ok: false,
       code: 'MISSING_ARG',
-      reason: `${command} requires exactly ${count} positional argument${count === 1 ? '' : 's'}`,
+      reason: `Missing ${noun}. Usage: ${usage}`,
     };
   }
   const rest = argv.slice(count);
   if (rest[0] && !rest[0].startsWith('-')) {
-    return { ok: false, code: 'INVALID_CONFIG_COMMAND', reason: `Unexpected positional argument for ${command}: ${rest[0]}` };
+    return { ok: false, code: 'INVALID_CONFIG_COMMAND', reason: `Unexpected argument "${rest[0]}". Usage: ${usage}` };
   }
   return { ok: true, values, rest };
 }
@@ -534,6 +584,11 @@ function buildGlobalCanonicalArgv(command: ResolvedGlobalConfigCommand): string[
     if (command.yes) argv.push('--yes');
   }
   if (command.subcommand === 'boots' && command.count !== undefined) argv.push('-n', String(command.count));
+  if (command.subcommand === 'schema') {
+    if (command.schemaName) argv.push(command.schemaName);
+    if (command.schemaVersion !== undefined) argv.push(String(command.schemaVersion));
+    if (command.schemaList) argv.push('--list');
+  }
   if (command.format) argv.push('--format', command.format);
   return argv;
 }

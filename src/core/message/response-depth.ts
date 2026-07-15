@@ -7,7 +7,7 @@ export interface ResolveResponseDepthInput {
   content?: string;
   selfAid?: string;
   mentionAids?: string[];
-  dispatch?: string;
+  mentionMode?: string;
   topicRounds?: number;
   lastTopicHash?: string;
 }
@@ -43,7 +43,7 @@ export function resolveResponseDepth(input: ResolveResponseDepthInput): ResolveR
     return { depth: 'standard', topicHash, topicRounds, isMentioned };
   }
 
-  if (input.dispatch === 'broadcast' && isShortNonQuestion(content)) {
+  if (input.mentionMode === 'disabled' && isShortNonQuestion(content)) {
     return { depth: 'lightweight', topicHash, topicRounds, isMentioned };
   }
 

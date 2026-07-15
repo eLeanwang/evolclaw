@@ -1,3 +1,20 @@
+## v3.6.4 (2026-07-13)
+
+### Security Fixes
+
+- **Menu 控制协议关联拒绝** — `menu.*` 在业务 handler 前完成字段校验和全局访问鉴权；拒绝统一返回保留原 `id/name` 的 `menu.response.error`，缺失 ID 静默丢弃，控制请求不再触发 owner 自动绑定或聊天错误。
+- **CLI 执行加固** — Menu CLI 仅执行已识别且获准的命令意图，严格限制 argv，旧 `args.command` 仅作无 shell 的安全兼容；移除完整 argv/stdout/stderr 日志，统一超时和基础设施错误码。
+
+### Improvements
+
+- **控制请求幂等** — 按 transport、scope、sender 和 request ID 提供 30 秒去重窗口；并发重复只执行一次，不同 payload 复用同 ID 返回 `CONFLICT`。
+- **文件关联结果** — file fetch 返回 `{ accepted: true }`，AUN 文件控制结果使用 `result.file`、`correlation_id`、文件名、MIME 和附件元数据，P2P/group 保持原作用域。
+- **协议响应归一化** — 成功与失败响应由统一 helper 构造，稳定映射 `INVALID_ARGUMENT`、`NOT_SUPPORTED`、`EXECUTION_TIMEOUT`、`INTERNAL_ERROR` 等错误码，并在类型层保证 `data/error` 互斥。
+
+### Testing
+
+- 补充全局拒绝零副作用、malformed、未知方法、异常归一化、重复/冲突、group 隔离、CLI allowlist/参数和文件双响应契约测试。
+
 ## v3.6.0 (2026-06-26)
 
 ### New Features

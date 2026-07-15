@@ -345,7 +345,7 @@ export interface Message {
   threadId?: string;  // 默认 ''
   topicName?: string;  // 话题会话创建时的显示名
   chatType?: 'private' | 'group';  // 由 Channel 层填充
-  peerId: string;  // 发送者 ID
+  peerId: string;  // 私聊：对端 ID；群聊：当前消息发送者 AID
   peerName?: string;  // 发送者名称
   peerType?: string;  // 对端类型 (human/ai/unknown)，由支持 agent.md 的渠道填充
   /** 对端网络邻近性（SDK 0.4.9 起明文/密文消息均可携带，具体字段以网关下发为准）*/
@@ -416,7 +416,7 @@ export interface InboundMessage {
   threadId?: string;  // 默认 ''
   topicName?: string;  // 话题会话创建时的显示名
   chatType: 'private' | 'group';  // 由 Channel 层填充
-  peerId: string;  // 发送者 ID
+  peerId: string;  // 私聊：对端 ID；群聊：当前消息发送者 AID
   peerName?: string;  // 发送者名称
   peerType?: string;  // 对端类型 (human/ai/unknown)，由支持 agent.md 的渠道填充
   sameDevice?: boolean;
@@ -633,10 +633,6 @@ export interface AgentInfo {
   lastActivity?: number;
   activeSessions?: number;
   error?: string;
-  /** 单聊场景下的响应模式 ID（如 'interactive'） */
-  responseModePrivate?: string;
-  /** 群聊场景下的响应模式 ID（如 'proactive'） */
-  responseModeGroup?: string;
 }
 
 /**
@@ -659,7 +655,7 @@ export interface EvolAgentHandle {
   setBaseagentModel(value: string | undefined, baseagentName?: string): void;
   setBaseagentEffort(value: string | undefined, baseagentName?: string): void;
   setChatmodePrivate(value: 'interactive' | 'proactive' | undefined): void;
-  setDispatch(value: 'mention' | 'broadcast' | undefined): void;
+  setMentionMode(value: MentionMode | undefined): void;
   getObservable(): boolean;
   setObservable(value: boolean): void;
   channelInstanceNames(): string[];
@@ -783,7 +779,7 @@ export interface ModelsBlock {
 /**
  * 角色级配置覆盖块——内嵌在 AgentConfig.roles[role] 下。
  * 只承载真正"按角色派生值"的字段：model/effort（baseagents）+ permissionMode。
- * 其余字段（show_activities/chatmode/dispatch）与角色无关，不在此。
+ * 其余字段（show_activities/chatmode/mentionMode）与角色无关，不在此。
  */
 export interface RoleOverride {
   baseagents?: BaseagentsBlock;
@@ -814,25 +810,18 @@ export interface ChatmodeBlock {
   nothuman?: 'interactive' | 'proactive';
 }
 
+/** @ 处理策略（顶层通用参数） */
+export type MentionMode = 'disabled' | 'mention-only';
+
 /**
- * 响应模式配置块（响应系统插件化）。
+ * 响应模式特有参数字典（按模式 id 分桶）。
  *
- * 解析优先级（高→低）：overrides[peerKey] > default_private/default_group > 系统兜底。
- * 接入点：src/response-system/resolver.ts。
+ * 结构：{ [modeId]: { ...模式特有参数 } }
+ * 例如：{ "dual-session": { debounceMs: 3000 }, "single-session": {} }
  *
- * 注：当前与 chatmode/dispatch 并存（过渡期）。Phase 6 真实模式接管后，
- * chatmode/dispatch 将被删除（D4），届时 interactive/proactive 成为内置响应模式。
+ * 读取时：从 responseModeParams[当前responseMode] 取出当前模式的参数注入 modeConfig。
  */
-export interface ResponseModesConfig {
-  /** 单聊默认模式 id（如 'interactive'） */
-  default_private?: string;
-  /** 群聊默认模式 id（如 'proactive'） */
-  default_group?: string;
-  /** 各模式的配置参数（modeId → 该模式的配置对象） */
-  configs?: Record<string, any>;
-  /** 按对端/群覆盖（peerKey → 指定模式 + 该对端专属配置） */
-  overrides?: Record<string, { mode: string; config?: any }>;
-}
+export type ResponseModeParams = Record<string, any>;
 
 export interface ResponseModeConfig {
   chatMode?: 'interactive' | 'proactive';
@@ -861,13 +850,6 @@ export interface ProcessDebugBlock extends DebugBlock {
 }
 
 export type ShowActivitiesMode = 'all' | 'text' | 'none';
-
-export interface ProactiveBehaviorBlock {
-  /** proactive 下首个工具调用是否必须先通过 send/file 表态。 */
-  pre_tool_1stmsgchk?: boolean;
-  /** proactive 下是否启用队列未读提醒和 10 次工具汇报提醒。 */
-  tool_use_reminder?: boolean;
-}
 
 export interface SessionRenewConfig {
   /** 超时后是否启用会话连续性判定。缺省或 false 均为关闭。 */
@@ -1024,19 +1006,17 @@ export interface AgentConfig {
   baseagents?: BaseagentsBlock;
   // 对话模式
   chatmode?: ChatmodeBlock;
-  // 响应模式（响应系统插件化；过渡期与 chatmode/dispatch 并存）
-  response_modes?: ResponseModesConfig;
+  // 响应模式通用参数（顶层，所有模式共用；与 responseModeParams 内特有参数分离）
+  mentionMode?: MentionMode;
+  model?: string;
+  // 响应模式（响应系统插件化；Phase 6 后 chatmode/mentionMode 将被删除）
   responseMode?: string;
-  config?: ResponseModeConfig;
+  responseModeParams?: ResponseModeParams;
   // 消息合并/节流
   flush_delay?: number;
   debounce?: number;
-  // 群聊分发
-  dispatch?: 'mention' | 'broadcast';
   // 可见性
   show_activities?: ShowActivitiesMode;
-  // proactive 模式细粒度策略
-  proactive?: ProactiveBehaviorBlock;
   // 超时后的会话续接判定
   session_renew?: SessionRenewConfig;
   // 渲染
@@ -1063,14 +1043,13 @@ export interface RelationConfig {
   active_baseagent?: string;
   baseagents?: BaseagentsBlock;
   chatmode?: ChatmodeBlock;
-  response_modes?: ResponseModesConfig;
+  mentionMode?: MentionMode;
+  model?: string;
   responseMode?: string;
-  config?: ResponseModeConfig;
+  responseModeParams?: ResponseModeParams;
   flush_delay?: number;
   debounce?: number;
-  dispatch?: 'mention' | 'broadcast';
   show_activities?: ShowActivitiesMode;
-  proactive?: ProactiveBehaviorBlock;
   session_renew?: SessionRenewConfig;
   render?: { private?: string; group?: string; inject?: string };
   sessionManifests?: Record<string, string>;
@@ -1108,19 +1087,17 @@ export interface EffectiveAgentConfig {
   baseagents?: BaseagentsBlock;
   // 对话模式
   chatmode?: ChatmodeBlock;
-  // 响应模式（响应系统插件化；过渡期与 chatmode/dispatch 并存）
-  response_modes?: ResponseModesConfig;
+  // 响应模式通用参数（顶层，所有模式共用；与 responseModeParams 内特有参数分离）
+  mentionMode?: MentionMode;
+  model?: string;
+  // 响应模式（响应系统插件化；Phase 6 后 chatmode/mentionMode 将被删除）
   responseMode?: string;
-  config?: ResponseModeConfig;
+  responseModeParams?: ResponseModeParams;
   // 消息合并/节流
   flush_delay?: number;
   debounce?: number;
-  // 群聊分发
-  dispatch?: 'mention' | 'broadcast';
   // 可见性
   show_activities?: ShowActivitiesMode;
-  // proactive 模式细粒度策略
-  proactive?: ProactiveBehaviorBlock;
   session_renew?: SessionRenewConfig;
   // 渲染
   render?: { private?: string; group?: string; inject?: string };
@@ -1287,13 +1264,27 @@ export interface MenuActionRequest {
   cmd?: string;
 }
 
-export interface MenuResponse {
-  type: 'menu.response';
-  id: string;
-  name?: string;         // 回显 name（menu.list 无 name）
-  data?: any;            // 成功（与 error 互斥）
-  error?: { code: string; message: string };  // 失败（与 data 互斥）
+export interface MenuResponseError {
+  code: string;
+  message: string;
+  data?: unknown;
 }
+
+export type MenuResponse =
+  | {
+      type: 'menu.response';
+      id: string;
+      name?: string;
+      data: unknown;
+      error?: never;
+    }
+  | {
+      type: 'menu.response';
+      id: string;
+      name?: string;
+      data?: never;
+      error: MenuResponseError;
+    };
 
 // ── Command Authorization Types ──
 
@@ -1348,6 +1339,12 @@ export interface CommandAuthorizationContext {
 
   isDaemonOwner?: boolean;
   fromControlChannel?: boolean;
+  /**
+   * An authenticated menu CLI request may intentionally select a relation
+   * other than the transport relation. The permission layer only honors this
+   * for the agent owner identity and still requires the current self AID.
+   */
+  allowExplicitRelationTarget?: boolean;
   source: CommandSource;
 }
 

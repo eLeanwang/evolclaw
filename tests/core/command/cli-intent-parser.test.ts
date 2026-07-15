@@ -1,9 +1,34 @@
 import { describe, it, expect } from 'vitest';
-import { normalizeCliArgv, parseCliIntent, rawCliIntent, withDefaultRelationContext } from '../../../src/core/command/cli-intent-parser.js';
+import { normalizeCliArgv, parseCliIntent, parseLegacyCliCommand, rawCliIntent, validateCliArgv, withDefaultRelationContext } from '../../../src/core/command/cli-intent-parser.js';
 import { parseConfigSelector } from '../../../src/cli/config-selector.js';
 import { resolveConfigCommand, resolveConfigOperation } from '../../../src/config/resolved-config-op.js';
 
 describe('CLI Intent Parser', () => {
+  describe('Menu CLI argv validation', () => {
+    it('accepts bounded string argv', () => {
+      expect(validateCliArgv(['stats', '--format', 'json'])).toEqual({ ok: true, argv: ['stats', '--format', 'json'] });
+    });
+
+    it('rejects non-string, oversized and NUL argv', () => {
+      expect(validateCliArgv(['stats', 1] as any).ok).toBe(false);
+      expect(validateCliArgv(Array.from({ length: 65 }, () => 'x')).ok).toBe(false);
+      expect(validateCliArgv(['stats', 'bad\0value']).ok).toBe(false);
+    });
+
+    it('parses legacy command quoting without invoking a shell', () => {
+      expect(parseLegacyCliCommand('stats --session "session one" --format json')).toEqual({
+        ok: true,
+        argv: ['stats', '--session', 'session one', '--format', 'json'],
+      });
+    });
+
+    it('rejects shell operators in legacy command', () => {
+      expect(parseLegacyCliCommand('stats | whoami').ok).toBe(false);
+      expect(parseLegacyCliCommand('stats && whoami').ok).toBe(false);
+      expect(parseLegacyCliCommand('stats $(whoami)').ok).toBe(false);
+    });
+  });
+
   describe('Model commands', () => {
     it('should parse model list', () => {
       const result = parseCliIntent(['model', 'list', '--self', 'agent1', '--peer', 'user1']);

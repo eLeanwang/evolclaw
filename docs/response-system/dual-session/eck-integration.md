@@ -368,11 +368,10 @@ cat $EVOLCLAW_HOME/data/eck-debug/fragments/dual-session-main-prompt.md
 // $AGENT_DIR/config.json
 {
   "responseMode": "dual-session",
-  "config": {
-    "chatMode": "proactive",
-    "mentionMode": "disabled",
-    "debounceMs": 3000,
-    "auxiliaryModel": "deepseek-v4-flash"
+  "chatmode": { "group": "proactive" },
+  "mentionMode": "disabled",
+  "responseModeParams": {
+    "dual-session": { "debounceMs": 3000, "auxiliaryModel": "deepseek-v4-flash" }
   }
 }
 ```

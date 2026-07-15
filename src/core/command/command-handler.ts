@@ -937,22 +937,6 @@ export class CommandHandler {
     const { spawn } = await import('child_process');
     const cliEntry = path.join(getPackageRoot(), 'dist', 'cli', 'index.js');
     const startedAt = Date.now();
-    const logPath = path.join(resolvePaths().root, 'logs', 'menu-cli-exec.log');
-
-    // 确保日志目录存在
-    try {
-      const logDir = path.dirname(logPath);
-      if (!fs.existsSync(logDir)) fs.mkdirSync(logDir, { recursive: true });
-    } catch {}
-
-    const logEntry = (msg: string) => {
-      try {
-        const ts = new Date().toISOString();
-        fs.appendFileSync(logPath, `[${ts}] ${msg}\n`, 'utf-8');
-      } catch {}
-    };
-
-    logEntry(`CALL: argv=${JSON.stringify(argv)} cwd=${process.cwd()}`);
 
     return await new Promise((resolve) => {
       let stdout = '';
@@ -967,8 +951,6 @@ export class CommandHandler {
         env: { ...process.env, EVOLCLAW_HOME: resolvePaths().root },
         windowsHide: true,
       });
-
-      logEntry(`SPAWN: pid=${child.pid} at=${startedAt}`);
 
       const append = (buf: Buffer, sink: 'out' | 'err') => {
         if (truncated) return;
@@ -987,28 +969,25 @@ export class CommandHandler {
       };
       child.stdout?.on('data', (b: Buffer) => {
         append(b, 'out');
-        logEntry(`STDOUT: chunk_size=${b.length} total_chunks=${stdoutChunks} elapsed=${Date.now() - startedAt}ms`);
       });
       child.stderr?.on('data', (b: Buffer) => {
         append(b, 'err');
-        logEntry(`STDERR: chunk_size=${b.length} total_chunks=${stderrChunks} elapsed=${Date.now() - startedAt}ms`);
       });
 
       const timer = setTimeout(() => {
         if (settled) return;
         settled = true;
         try { child.kill('SIGKILL'); } catch {}
-        logEntry(`TIMEOUT: after=${CLI_EXEC_TIMEOUT_MS}ms stdout_size=${stdout.length} stderr_size=${stderr.length}`);
-        logger.warn(`[CommandHandler] cli exec timeout: ${argv.join(' ')}`);
-        resolve({ error: `执行超时（${CLI_EXEC_TIMEOUT_MS / 1000}s）：${argv[0]}`, code: 'TIMEOUT' });
+        logger.warn(`[CommandHandler] cli exec timeout: command=${argv[0] || '<none>'} durationMs=${CLI_EXEC_TIMEOUT_MS}`);
+        resolve({ error: `CLI execution exceeded ${CLI_EXEC_TIMEOUT_MS / 1000}s`, code: 'EXECUTION_TIMEOUT' });
       }, CLI_EXEC_TIMEOUT_MS);
 
       child.on('error', (e: any) => {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
-        logEntry(`ERROR: ${e?.message || String(e)} elapsed=${Date.now() - startedAt}ms`);
-        resolve({ error: e?.message || String(e), code: 'INTERNAL' });
+        logger.warn(`[CommandHandler] cli exec unavailable: command=${argv[0] || '<none>'} code=${e?.code || 'unknown'}`);
+        resolve({ error: 'CLI execution infrastructure is unavailable', code: 'TEMPORARILY_UNAVAILABLE' });
       });
 
       child.on('close', (exitCode: number | null) => {
@@ -1016,7 +995,6 @@ export class CommandHandler {
         settled = true;
         clearTimeout(timer);
         const elapsed = Date.now() - startedAt;
-        logEntry(`CLOSE: exitCode=${exitCode} elapsed=${elapsed}ms stdout_size=${stdout.length} stderr_size=${stderr.length} truncated=${truncated}`);
         resolve({ data: {
           exitCode: exitCode ?? -1,
           stdout, stderr, truncated,
@@ -1757,7 +1735,7 @@ export class CommandHandler {
     '/model', '/setmodel', '/effort', '/perm', '/agent', '/baseagent',
     '/compact', '/file', '/send', '/restart', '/aid', '/rpc', '/storage',
     '/rename', '/name', '/trigger',
-    '/chatmode', '/dispatch', '/activity',
+    '/chatmode', '/mentionmode', '/activity',
     '/queue',
   ];
 

@@ -16,7 +16,7 @@ import { logger } from '../../utils/logger.js';
 import { getErrorMessage, classifyError, ErrorType, ERROR_PREFIX, isInfraError, prefixErrorType, isRetryableError, isContextTooLongText } from '../../utils/error-utils.js';
 import { EventBus } from '../event-bus.js';
 import { isEvolclawSendCommandForSession, summarizeToolInput } from '../permission.js';
-import type { Message, Session, ChannelAdapter, ChannelOptions, ChannelPolicy, CommandHandler as CommandHandlerFn, ReplyContext, AgentContext, EvolAgentHandle, EvolAgentRegistryHandle, GlobalSettings, OutboundEnvelope, OutboundPayload, InteractionRequest, InteractionKind, ActionInteraction, CommandCard, ProactiveBehaviorBlock, ShowActivitiesMode } from '../../types.js';
+import type { Message, Session, ChannelAdapter, ChannelOptions, ChannelPolicy, CommandHandler as CommandHandlerFn, ReplyContext, AgentContext, EvolAgentHandle, EvolAgentRegistryHandle, GlobalSettings, OutboundEnvelope, OutboundPayload, InteractionRequest, InteractionKind, ActionInteraction, CommandCard, ShowActivitiesMode } from '../../types.js';
 import { getPackageRoot, resolveRoot, resolvePaths } from '../../paths.js';
 import { renderKitSections, type KitRenderContext } from '../../eck/kit-renderer.js';
 import { renderMessageBody, type RenderMessageResult } from '../../eck/message-renderer.js';
@@ -39,6 +39,7 @@ import { AGENT_DELEGATION_TOKEN_ENV, type AgentDelegationRegistry } from '../aut
 export { buildEnvelope, sendInteractionPayload } from './message-utils.js';
 import { resolveEffectiveModel, resolvePermissionMode } from '../model/config-scope.js';
 import { resolveEffective } from '../../config/config-manager.js';
+import { dispatchToMentionMode } from '../../config/mention-mode.js';
 import { checkRoleAccess, getFirstStaticAgentOwner, resolvePeerRoleDetail, roleToSessionIdentity } from '../../config/peer-role-resolver.js';
 import { insertUsageEvent, insertContextBreakdown, insertModelCalls } from '../../stats/writer.js';
 import { normalizeUsage } from '../../stats/normalizer.js';
@@ -50,6 +51,7 @@ import { ResponseModeCoordinator, type ResolvedInbound } from '../../response-sy
 import { ResponseModeRegistry } from '../../response-system/registry.js';
 import { registerBuiltinModes } from '../../response-system/modes/index.js';
 import type { ProcessContext, ToolUseContext, CompleteContext, AfterProcessContext, RunConfig } from '../../response-system/types.js';
+import { shouldAutoFillSessionTitle } from '../session/session-title.js';
 
 function isShowActivitiesMode(value: unknown): value is ShowActivitiesMode {
   return value === 'all' || value === 'text' || value === 'none';
@@ -199,13 +201,6 @@ function streamHitContextLimit(result: StreamRunResult): boolean {
     isContextTooLongText(result.lastReplyText) ||
     isContextTooLongText(result.errors?.join(' ') || '') ||
     isContextTooLongText(result.fullText);
-}
-
-function resolveProactiveBehavior(block?: ProactiveBehaviorBlock): Required<ProactiveBehaviorBlock> {
-  return {
-    pre_tool_1stmsgchk: block?.pre_tool_1stmsgchk ?? true,
-    tool_use_reminder: block?.tool_use_reminder ?? true,
-  };
 }
 
 const SHELL_CONTROL_RE = /[;&|`]|[$][(]|\r|\n/;
@@ -1092,22 +1087,25 @@ export class ResponseEngine implements IMessageProcessor {
     })();
 
     // ─── 响应模式解析（插件化机制中枢）───
-    // trigger override 绝对优先；否则由 Coordinator 解析（response_modes > chatmode 配置兜底）。
+    // trigger override 绝对优先；否则由 Coordinator 解析（responseMode 标量 > 注册表首选）。
     const peerType = message.peerType ?? (session.metadata as any)?.peerType;
     const systemOrServicePeer = isSystemOrServicePeer(peerType);
     const triggerChatModeOverride = systemOrServicePeer ? undefined : message.triggerMeta?.chatModeOverride;
+    // chatmode 是顶层字典（agent 级与关系级同名，已由 ConfigManager 逐键合并）。
+    // 实际生效值由对端类型选键（private/nothuman/group），出厂默认走 schema。
     const chatModeFallback = resolveChatModeForPeer({
       chatType,
       peerType,
       configured: effectiveAgentConfig?.chatmode,
     });
+    // mentionMode：顶层通用参数（先读出备用，投递/入队策略后续接入）
+    const mentionMode = effectiveAgentConfig?.mentionMode ?? 'disabled';
     const resolvedMode = triggerChatModeOverride || systemOrServicePeer
       ? null  // trigger 强制覆盖或 system/service 强制 interactive 时，不走插件解析
       : this.responseCoordinator.resolveMode(
-          chatType as 'private' | 'group',
-          peerKey,
-          effectiveAgentConfig?.response_modes,
+          effectiveAgentConfig?.responseMode,       // 标量：关系级>agent级>注册表首选
           chatModeFallback,
+          effectiveAgentConfig?.responseModeParams, // 按模式分桶的参数字典
           {
             session,
             agentConfig: effectiveAgentConfig as any,
@@ -1129,16 +1127,18 @@ export class ResponseEngine implements IMessageProcessor {
         );
 
     if (resolvedMode) {
-      logger.info('[ResponseSystem] selected mode=' + resolvedMode.mode.id + ' source=' + resolvedMode.source + ' chatType=' + chatType + ' peerKey=' + (peerKey ?? 'none') + ' fallback=' + chatModeFallback);
+      logger.info('[ResponseSystem] selected mode=' + resolvedMode.mode.id + ' source=' + resolvedMode.source + ' chatType=' + chatType + ' peerKey=' + (peerKey ?? 'none') + ' chatMode=' + chatModeFallback);
     } else {
-      logger.info('[ResponseSystem] selected mode=override/fallback source=trigger-or-resolve-failed chatType=' + chatType + ' peerKey=' + (peerKey ?? 'none') + ' fallback=' + chatModeFallback);
+      logger.info('[ResponseSystem] selected mode=override/fallback source=trigger-or-resolve-failed chatType=' + chatType + ' peerKey=' + (peerKey ?? 'none') + ' chatMode=' + chatModeFallback);
     }
 
-    // 最终 chatMode：system/service 运行时约束 > trigger override > 插件解析结果 > fallback
+    // 最终 chatMode（怎么投递，与「选哪个模式」正交）：
+    //   system/service 运行时硬约束 > trigger override > 配置层级解析（chatModeFallback）。
+    // 注：mode.id 不再参与——单会话合并后 mode.id 恒为 single-session，
+    //     chatMode 由 resolveChatModeForPeer 按配置层级解析（步骤 1/4）。
     const effectiveChatMode = systemOrServicePeer
       ? 'interactive'
       : triggerChatModeOverride
-      ?? resolvedMode?.mode.id
       ?? chatModeFallback;
     const chatmode = effectiveChatMode;
     const isProactive = effectiveChatMode === 'proactive';
@@ -1637,9 +1637,11 @@ export class ResponseEngine implements IMessageProcessor {
             chatType: session.chatType || null,
             channel: currentChannelType || null,
             venueUid: undefined,
-            // 群分发模式 / 客户端类型 / 权限模式
-            // 优先 agent/relation behavior 配置，fallback 到服务器 dispatch_mode 缓存。
-            dispatch: (effectiveAgentConfig?.dispatch ?? session.metadata?.dispatchMode ?? message.dispatchMode) || undefined,
+            // 群 @ 处理模式 / 客户端类型 / 权限模式
+            // 优先 agent/relation mentionMode 配置，fallback 到服务器 dispatch_mode 缓存（协议词汇需翻译）。
+            mentionMode: effectiveAgentConfig?.mentionMode
+              ?? dispatchToMentionMode(session.metadata?.dispatchMode ?? message.dispatchMode)
+              ?? undefined,
             clientType: message.clientType || undefined,
             permissionMode: effectivePermissionMode,
             capabilities: capParts.length > 0 ? capParts.join('、') : undefined,
@@ -1659,8 +1661,10 @@ export class ResponseEngine implements IMessageProcessor {
             // Stage 3: sessionKey 持久化字段
             sessionKey: session.sessionKey,
             chatMode: isProactive ? 'proactive' : 'interactive',
-            proactivePreTool1stMsgChk: proactive?.preTool1stMsgChk ?? true,
-            proactiveToolUseReminder: proactive?.toolUseReminder ?? true,
+            // proactive 为 null（interactive 模式，这些开关不适用）时如实为 false——
+            // 默认值不在此硬编码，出厂默认由模式 schema 声明、经 buildState 落入 proactive.*。
+            proactivePreTool1stMsgChk: proactive?.preTool1stMsgChk ?? false,
+            proactiveToolUseReminder: proactive?.toolUseReminder ?? false,
             proactiveFirstSendRequired: proactive?.firstSendRequired ?? false,
             proactiveToolReportRequired: proactive?.toolReportRequired ?? false,
             proactiveToolReportInterval: proactive?.toolReportInterval ?? 10,
@@ -3031,7 +3035,7 @@ export class ResponseEngine implements IMessageProcessor {
           logger.info(`[ResponseEngine] ${isAbort ? 'task interrupted' : 'complete event'}: isError=${event.isError} terminalReason=${event.terminalReason ?? 'none'} subtype=${event.subtype ?? 'none'} hasReceivedText=${hasReceivedText}`);
 
           // 自动回填会话名称
-          if (event.sessionTitle && session.name === '默认会话') {
+          if (event.sessionTitle && shouldAutoFillSessionTitle(session.name, session.threadId)) {
             await this.sessionManager.renameSession(session.id, event.sessionTitle);
             logger.info(`[ResponseEngine] Auto-filled session name: ${event.sessionTitle}`);
           }
@@ -3106,7 +3110,7 @@ export class ResponseEngine implements IMessageProcessor {
       }
 
       // 自动回填会话名称
-      if (event.sessionTitle && session.name === '默认会话') {
+      if (event.sessionTitle && shouldAutoFillSessionTitle(session.name, session.threadId)) {
         await this.sessionManager.renameSession(session.id, event.sessionTitle);
         logger.info(`[ResponseEngine] Auto-filled session name: ${event.sessionTitle}`);
       }

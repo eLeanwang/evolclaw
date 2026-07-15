@@ -77,7 +77,7 @@ describe('Role Configuration', () => {
     it('keeps permission mode locked and leaves other fields unconfigured', () => {
       expect(getFieldPermission('owner', 'permissionMode')?.allowOverride).toBe(false);
       expect(getFieldPermission('visitor', 'chatmode')).toBeNull();
-      expect(getFieldPermission('member', 'dispatch')).toBeNull();
+      expect(getFieldPermission('member', 'mentionMode')).toBeNull();
     });
   });
 

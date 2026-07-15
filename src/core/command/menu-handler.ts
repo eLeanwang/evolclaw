@@ -36,13 +36,15 @@ import {
   resolveCapabilityContext,
   updateCapabilityPolicy,
 } from '../capability/capability-manager.js';
-import { normalizeCliArgv, parseCliIntent, rawCliIntent, withDefaultRelationContext } from './cli-intent-parser.js';
+import { normalizeCliArgv, parseCliIntent, parseLegacyCliCommand, validateCliArgv, withDefaultRelationContext } from './cli-intent-parser.js';
 import { authorizeCommand, authorizeResolvedConfigCommand } from './command-permission.js';
 import { auditCommandAuthorization, hashArgv } from './command-audit.js';
 import type { CommandAuthorizationContext, CommandIntent, CommandScope } from '../../types.js';
 import { chatmodeFieldForPeer } from '../message/peer-mode.js';
 import { normalizePermissionMode as normalizePermissionModeContract, PUBLIC_PERMISSION_MODES } from '../permission-mode.js';
 import { getFieldPermission } from '../../config/roles.js';
+import { dispatchToMentionMode } from '../../config/mention-mode.js';
+import { menuFailure, menuSuccess, normalizeMenuError, validateMenuRequest } from '../message/menu-control-protocol.js';
 
 /**
  * 获取 baseagent CLI 的版本号（claude/gemini/codex）。
@@ -433,8 +435,8 @@ function menuStringArg(args: Record<string, any> | undefined, key: string): stri
 type MenuChatmodeScope = 'agent' | 'relation';
 type MenuChatmodeField = 'private' | 'group' | 'nothuman';
 type MenuChatmodeValue = 'interactive' | 'proactive';
-type MenuDispatchScope = 'agent' | 'relation';
-type MenuDispatchValue = 'mention' | 'broadcast';
+type MenuMentionModeScope = 'agent' | 'relation';
+type MenuMentionModeValue = 'disabled' | 'mention-only';
 type MenuPermissionScope = 'agent' | 'relation';
 type MenuPermissionValue = typeof PERMISSION_MODE_KEYS[number];
 type MenuModelScope = 'agent' | 'relation';
@@ -461,10 +463,10 @@ interface MenuChatmodeTarget {
   fieldPath: `chatmode.${MenuChatmodeField}`;
 }
 
-interface MenuDispatchTarget {
-  scope: MenuDispatchScope;
+interface MenuMentionModeTarget {
+  scope: MenuMentionModeScope;
   sel: Selector;
-  fieldPath: 'dispatch';
+  fieldPath: 'mentionMode';
 }
 
 interface MenuPermissionTarget {
@@ -608,13 +610,13 @@ function writeMenuChatmode(target: MenuChatmodeTarget, value: MenuChatmodeValue)
   cfgWrite(route.target, cur, writeSel);
 }
 
-function menuDispatchScope(args?: Record<string, any>): MenuDispatchScope | { error: string; code: string } {
+function menuMentionModeScope(args?: Record<string, any>): MenuMentionModeScope | { error: string; code: string } {
   const raw = menuStringArg(args, 'scope') ?? 'relation';
   if (raw === 'agent' || raw === 'relation') return raw;
   return { error: `无效 scope: ${raw}，可选: agent / relation`, code: 'INVALID_SCOPE' };
 }
 
-function resolveMenuDispatchTarget(this: any, params: {
+function resolveMenuMentionModeTarget(this: any, params: {
   args?: Record<string, any>;
   session?: Session | null;
   channel: string;
@@ -623,8 +625,8 @@ function resolveMenuDispatchTarget(this: any, params: {
   role?: string;
   explicitChatType?: MenuChatType;
   fromControlChannel?: boolean;
-}): MenuDispatchTarget | { error: string; code: string } {
-  const scope = menuDispatchScope(params.args);
+}): MenuMentionModeTarget | { error: string; code: string } {
+  const scope = menuMentionModeScope(params.args);
   if (typeof scope !== 'string') return scope;
 
   const explicitSelf = menuStringArg(params.args, 'self')
@@ -635,11 +637,11 @@ function resolveMenuDispatchTarget(this: any, params: {
   const self = explicitSelf ?? currentSelf;
   if (!self) return { error: '缺少 self/aid 参数', code: 'MISSING_AID' };
   if (!params.fromControlChannel && explicitSelf && currentSelf && explicitSelf !== currentSelf) {
-    return { error: '只能设置当前 agent 的 dispatch', code: 'FORBIDDEN' };
+    return { error: '只能设置当前 agent 的 mentionMode', code: 'FORBIDDEN' };
   }
 
   const sel: Selector = { self, role: params.role };
-  if (scope === 'agent') return { scope, sel, fieldPath: 'dispatch' };
+  if (scope === 'agent') return { scope, sel, fieldPath: 'mentionMode' };
 
   const explicitPeer = menuStringArg(params.args, 'peer') ?? menuStringArg(params.args, 'peerKey');
   let peerKey: string | undefined;
@@ -657,28 +659,28 @@ function resolveMenuDispatchTarget(this: any, params: {
   }
   if (!peerKey) return { error: 'relation scope 需要 peer/peerKey，或可推导的当前对端', code: 'MISSING_PEER' };
 
-  return { scope, sel: { ...sel, peerKey }, fieldPath: 'dispatch' };
+  return { scope, sel: { ...sel, peerKey }, fieldPath: 'mentionMode' };
 }
 
-function readMenuDispatch(
-  target: MenuDispatchTarget,
-  fallback: MenuDispatchValue | null = null,
+function readMenuMentionMode(
+  target: MenuMentionModeTarget,
+  fallback: MenuMentionModeValue | null = null,
   fallbackSource: MenuSource | null = null,
-): MenuResolvedValue<MenuDispatchValue | null> {
+): MenuResolvedValue<MenuMentionModeValue | null> {
   try {
-    const mode = resolveEffective(target.sel, { cache: true }).dispatch;
-    if (mode === 'mention' || mode === 'broadcast') {
-      return { value: mode, source: menuConfigSource(target.fieldPath, target.sel) };
+    const resolved = resolveEffectiveFieldWithSource<MenuMentionModeValue>(target.fieldPath, target.sel, { cache: true });
+    if (resolved.value === 'disabled' || resolved.value === 'mention-only') {
+      return { value: resolved.value, source: toMenuSource(resolved.source) };
     }
   } catch {}
   return { value: fallback, source: fallback === null ? null : fallbackSource };
 }
 
-function writeMenuDispatch(target: MenuDispatchTarget, value: MenuDispatchValue | null): void {
+function writeMenuMentionMode(target: MenuMentionModeTarget, value: MenuMentionModeValue | null): void {
   const route = routeFieldPath(target.fieldPath, target.scope);
   const cur = (cfgRead<Record<string, any>>(route.target, target.sel) as Record<string, any>) || {};
-  if (value === null) delete cur.dispatch;
-  else cur.dispatch = value;
+  if (value === null) delete cur.mentionMode;
+  else cur.mentionMode = value;
   cfgWrite(route.target, cur, target.sel);
 }
 
@@ -999,7 +1001,7 @@ function buildMenuIntent(
     if (cmdBase === '/model') return intent('model.current', modelScope);
     if (cmdBase === '/effort') return intent('model.current', modelScope);
     if (cmdBase === '/chatmode') return intent('chatmode.current', args?.scope === 'agent' ? 'agent' : 'relation');
-    if (cmdBase === '/dispatch') return intent('dispatch.current', args?.scope === 'agent' ? 'agent' : 'relation');
+    if (cmdBase === '/mentionmode') return intent('mentionmode.current', args?.scope === 'agent' ? 'agent' : 'relation');
     if (cmdBase === '/gateway') return intent('gateway.read', 'process');
     if (cmdBase === '/config') return intent('config.read', 'process');
     if (cmdBase === '/system') return intent('system.status', 'process');
@@ -1012,7 +1014,7 @@ function buildMenuIntent(
     if (cmdBase === '/model') return intent('model.use', modelScope, { model: value });
     if (cmdBase === '/effort') return intent('model.effort', modelScope, { effort: value });
     if (cmdBase === '/chatmode') return intent('chatmode.update', args?.scope === 'agent' ? 'agent' : 'relation', { value });
-    if (cmdBase === '/dispatch') return intent('dispatch.update', args?.scope === 'agent' ? 'agent' : 'relation', { value });
+    if (cmdBase === '/mentionmode') return intent('mentionmode.update', args?.scope === 'agent' ? 'agent' : 'relation', { value });
     if (cmdBase === '/gateway') return intent('gateway.write', 'process');
     if (cmdBase === '/config') return intent('config.write', 'process');
   }
@@ -1084,6 +1086,7 @@ function buildMenuAuthContext(
     role: params.identity.role,
     isDaemonOwner,
     fromControlChannel: params.fromControlChannel,
+    allowExplicitRelationTarget: params.source === 'menu.cli',
     source: params.source,
   };
 }
@@ -1178,13 +1181,13 @@ async function authorizeMenuIntent(
 
 
 function ecwebErr(id: string, name: string | undefined, code: string, message: string): import('../../types.js').MenuResponse {
-  return { type: 'menu.response', id, ...(name ? { name } : {}), error: { code, message } };
+  return menuFailure({ id, ...(name ? { name } : {}) }, normalizeMenuError({ code, message }));
 }
 
 function ecwebResp(id: string, name: string | undefined, result: { data: any } | { error: string; code?: string }): import('../../types.js').MenuResponse {
   return 'error' in result
-    ? { type: 'menu.response', id, ...(name ? { name } : {}), error: { code: result.code ?? 'EXEC_FAILED', message: result.error } }
-    : { type: 'menu.response', id, ...(name ? { name } : {}), data: result.data };
+    ? menuFailure({ id, ...(name ? { name } : {}) }, normalizeMenuError(result))
+    : menuSuccess({ id, ...(name ? { name } : {}) }, result.data);
 }
 
 function resolveExternalMenuAgentChannel(
@@ -1295,9 +1298,9 @@ export function getMenuItems(this: any, role: string, chatType: string = 'privat
           { value: 'interactive', label: '交互模式', desc: '仅在收到消息时响应' },
           { value: 'proactive', label: '主动模式', desc: 'Agent 可主动推进任务' },
         ] } },
-        { cmd: '/dispatch', label: '切换分发模式', desc: '控制群聊消息过滤（仅@提及或广播响应）', next: { type: 'select', items: [
-          { value: 'mention', label: '@ 提及', desc: '仅在被 @ 提及时响应' },
-          { value: 'broadcast', label: '广播', desc: '响应群内所有消息' },
+        { cmd: '/mentionmode', label: '切换 @ 处理模式', desc: '控制群聊消息过滤（仅@提及或全部响应）', next: { type: 'select', items: [
+          { value: 'mention-only', label: '@ 提及', desc: '仅在被 @ 提及时响应' },
+          { value: 'disabled', label: '全部响应', desc: '响应群内所有消息' },
         ] } },
         { cmd: '/capability', label: '能力开关管理', desc: '查看并管理 Skills / MCP / Plugins' },
       ]
@@ -1607,8 +1610,8 @@ export async function getSubMenuItems(this: any, cmd: string, channel: string, c
     ];
   }
 
-  if (cmd === '/dispatch') {
-    const target = resolveMenuDispatchTarget.call(this, {
+  if (cmd === '/mentionmode') {
+    const target = resolveMenuMentionModeTarget.call(this, {
       args,
       session,
       channel,
@@ -1619,13 +1622,11 @@ export async function getSubMenuItems(this: any, cmd: string, channel: string, c
       fromControlChannel,
     });
     if ('error' in target) throw { code: target.code, message: target.error };
-    const fallback = session?.metadata?.dispatchMode === 'mention' || session?.metadata?.dispatchMode === 'broadcast'
-      ? session.metadata.dispatchMode
-      : null;
-    const currentMode = readMenuDispatch(target, fallback, fallback === null ? null : 'session').value;
+    const fallback = dispatchToMentionMode(session?.metadata?.dispatchMode) ?? null;
+    const currentMode = readMenuMentionMode(target, fallback, fallback === null ? null : 'session').value;
     return [
-      { value: 'mention', label: '@提及时响应', selected: currentMode === 'mention' },
-      { value: 'broadcast', label: '所有消息响应', selected: currentMode === 'broadcast' },
+      { value: 'mention-only', label: '@提及时响应', selected: currentMode === 'mention-only' },
+      { value: 'disabled', label: '所有消息响应', selected: currentMode === 'disabled' },
     ];
   }
 
@@ -1960,12 +1961,12 @@ export async function execMenuQuery(this: any,
     };
   }
 
-  if (cmdBase === '/dispatch') {
+  if (cmdBase === '/mentionmode') {
     const chatType = session?.chatType ?? explicitChatType ?? 'private';
     if (chatType !== 'group') {
-      return { error: 'dispatch 仅在群聊会话中有效', code: 'NOT_APPLICABLE' };
+      return { error: 'mentionMode 仅在群聊会话中有效', code: 'NOT_APPLICABLE' };
     }
-    const target = resolveMenuDispatchTarget.call(this, {
+    const target = resolveMenuMentionModeTarget.call(this, {
       args,
       session,
       channel,
@@ -1976,19 +1977,9 @@ export async function execMenuQuery(this: any,
       fromControlChannel,
     });
     if ('error' in target) return target;
-    const sessionFallback = session?.metadata?.dispatchMode === 'mention' || session?.metadata?.dispatchMode === 'broadcast'
-      ? session.metadata.dispatchMode
-      : null;
-    const agentFallback = evolagent?.config?.dispatch === 'mention' || evolagent?.config?.dispatch === 'broadcast'
-      ? evolagent.config.dispatch
-      : null;
-    const fallback = sessionFallback ?? agentFallback;
-    const fallbackSource: MenuSource | null = sessionFallback !== null
-      ? 'session'
-      : agentFallback !== null
-        ? menuConfigSource(target.fieldPath, { self: target.sel.self }) ?? 'agent'
-        : null;
-    const current = readMenuDispatch(target, fallback, fallbackSource);
+    // session metadata 是 AUN 协议词汇，翻译成 mentionMode 词汇；evolagent.config 已是 mentionMode 字段
+    const fallback = dispatchToMentionMode(session?.metadata?.dispatchMode) ?? null;
+    const current = readMenuMentionMode(target, fallback, fallback === null ? null : 'session');
     return {
       data: {
         mode: current.value,
@@ -2376,15 +2367,15 @@ export async function execMenuUpdate(this: any,
     };
   }
 
-  if (cmdBase === '/dispatch') {
-    if (arg !== 'mention' && arg !== 'broadcast' && arg !== 'clear') {
+  if (cmdBase === '/mentionmode') {
+    if (arg !== 'mention-only' && arg !== 'disabled' && arg !== 'clear') {
       return { error: `无效模式: ${arg}`, code: 'INVALID_VALUE' };
     }
     const chatType = session?.chatType;
     if (!session || chatType !== 'group') {
-      return { error: 'dispatch 仅在群聊会话中有效', code: 'NOT_APPLICABLE' };
+      return { error: 'mentionMode 仅在群聊会话中有效', code: 'NOT_APPLICABLE' };
     }
-    const target = resolveMenuDispatchTarget.call(this, {
+    const target = resolveMenuMentionModeTarget.call(this, {
       args,
       session,
       channel,
@@ -2395,7 +2386,7 @@ export async function execMenuUpdate(this: any,
     });
     if ('error' in target) return target;
     try {
-      writeMenuDispatch(target, arg === 'clear' ? null : arg);
+      writeMenuMentionMode(target, arg === 'clear' ? null : arg);
     } catch (e: any) {
       return { error: e?.message || String(e), code: e?.code || 'CONFIG_WRITE_FAILED' };
     }
@@ -2920,10 +2911,13 @@ export async function execMenuAction(this: any,
   if (cmdBase === '/cli') {
     if (action !== 'exec') return { error: `不支持的 cli action: ${action}`, code: 'NOT_SUPPORTED' };
 
-    let argv = Array.isArray(args?.argv) ? args.argv.map((x: any) => String(x))
-               : typeof args?.command === 'string' ? [args.command]
-               : null;
-    if (!argv || argv.length === 0) return { error: '缺少 argv 或 command', code: 'MISSING_VALUE' };
+    const argvValidation = Array.isArray(args?.argv)
+      ? validateCliArgv(args.argv)
+      : typeof args?.command === 'string'
+        ? parseLegacyCliCommand(args.command)
+        : { ok: false as const, reason: 'CLI exec requires args.argv' };
+    if (!argvValidation.ok) return { error: argvValidation.reason, code: 'INVALID_ARGUMENT' };
+    let argv = argvValidation.argv;
 
     argv = normalizeCliArgv(argv);
 
@@ -2940,11 +2934,18 @@ export async function execMenuAction(this: any,
     }
 
     // 解析 CLI intent
-    const parseResult = Array.isArray(args?.argv)
-      ? parseCliIntent(argv, 'menu.cli', { defaultRelation: { self: cliSelfAid, peer: cliPeerKey } })
-      : { kind: 'raw' as const, intent: rawCliIntent(argv, 'menu.cli'), reason: 'command string is always treated as raw CLI' };
+    const parseResult = parseCliIntent(argv, 'menu.cli', { defaultRelation: { self: cliSelfAid, peer: cliPeerKey } });
     if (parseResult.kind === 'invalid') {
       return { error: parseResult.reason, code: parseResult.code };
+    }
+    if (parseResult.kind === 'raw') {
+      await auditCommandAuthorization({
+        ts: Date.now(), source: 'menu.cli', operation: parseResult.intent.operation,
+        scope: parseResult.intent.scope, dangerous: true, actorId: userId,
+        channel, channelId, role: identity.role, decision: 'deny', code: 'NOT_ALLOWED',
+        reason: 'Unrecognized CLI command', taskId: requestId, argvHash: hashArgv(argv),
+      });
+      return { error: 'CLI command is not allowed', code: 'NOT_ALLOWED' };
     }
     if (parseResult.kind === 'recognized' && parseResult.resolvedConfigCommand) {
       argv = parseResult.resolvedConfigCommand.canonicalArgv;
@@ -2978,6 +2979,7 @@ export async function execMenuAction(this: any,
           role: authCtx.role,
           isDaemonOwner: authCtx.isDaemonOwner,
           fromControlChannel: authCtx.fromControlChannel,
+          allowExplicitRelationTarget: authCtx.allowExplicitRelationTarget,
           source: authCtx.source,
         })
       : authorizeMenuContext(authCtx);
@@ -3004,30 +3006,18 @@ export async function execMenuAction(this: any,
       return { error: decision.reason, code: decision.code };
     }
 
-    // 审计 dangerous 操作
-    if (decision.dangerous) {
-      await auditCommandAuthorization({
-        ts: Date.now(),
-        source: 'menu.cli',
-        operation: parseResult.intent.operation,
-        scope: parseResult.intent.scope,
-        dangerous: true,
-        actorId: userId,
-        selfAid,
-        peerKey,
-        channel,
-        channelId,
-        role: identity.role,
-        isDaemonOwner,
-        fromControlChannel: fromControlChannel ?? false,
-        decision: 'allow',
-        matchedRule: decision.matchedRule,
-        argvHash: hashArgv(argv),
-      });
-    }
-
-    // 执行
-    return await this.execCliPassthrough(argv);
+    const execution = await this.execCliPassthrough(argv);
+    const executionData = 'data' in execution ? execution.data : undefined;
+    await auditCommandAuthorization({
+      ts: Date.now(), source: 'menu.cli', operation: parseResult.intent.operation,
+      scope: parseResult.intent.scope, dangerous: parseResult.intent.dangerous ?? false,
+      actorId: userId, selfAid, peerKey, channel, channelId, role: identity.role,
+      isDaemonOwner, fromControlChannel: fromControlChannel ?? false,
+      decision: 'allow', matchedRule: decision.matchedRule, taskId: requestId,
+      argvHash: hashArgv(argv), durationMs: executionData?.durationMs,
+      exitCode: executionData?.exitCode,
+    });
+    return execution;
   }
 
   // ── name=file action=list/fetch：目录浏览 / 拉取文件 ──
@@ -3072,7 +3062,7 @@ export async function execMenuAction(this: any,
         buildEnvelope({ channel: adapter.channelName, channelId, replyContext: replyCtx }),
         { kind: 'result.file', filePath: realPath, correlationId: requestId },
       );
-      return { data: { action: 'fetch', success: true, size: stat.size } };
+      return { data: { accepted: true } };
     } catch (e: any) {
       return { error: `文件发送失败: ${e?.message ?? e}`, code: 'EXEC_FAILED' };
     }
@@ -3085,6 +3075,8 @@ export async function execMenuAction(this: any,
 export async function execMenuForEcweb(this: any, payload: any): Promise<import('../../types.js').MenuResponse> {
   const id = payload?.id ?? '';
   const name = payload?.name;
+  const validationError = validateMenuRequest(payload ?? {});
+  if (validationError) return menuFailure({ id, ...(name ? { name } : {}) }, validationError);
 
   if (name === 'cli' || payload?.cmd === '/cli') {
     return { type: 'menu.response', id, name, error: { code: 'NOT_SUPPORTED', message: 'cli 不在 ECWeb 控制范围' } };
@@ -3113,7 +3105,7 @@ export async function execMenuForEcweb(this: any, payload: any): Promise<import(
   const nameMap: Record<string, string> = {
     pwd: '/pwd', session: '/session', baseagent: '/baseagent', model: '/model',
     topic: '/topic',
-    effort: '/effort', chatmode: '/chatmode', dispatch: '/dispatch',
+    effort: '/effort', chatmode: '/chatmode', mentionmode: '/mentionmode',
     permission: '/perm', activity: '/activity', system: '/system',
     observable: '/observable',
     agent: '/agent', trigger: '/trigger', file: '/file', gateway: '/gateway',
@@ -3124,7 +3116,7 @@ export async function execMenuForEcweb(this: any, payload: any): Promise<import(
   try {
     switch (payload?.type) {
       case 'menu.list':
-        return { type: 'menu.response', id, data: this.getMenuItems('owner', 'private', 'control') };
+        return menuSuccess({ id }, this.getMenuItems('owner', 'private', 'control'));
 
       case 'menu.query': {
         if (!cmd) return ecwebErr(id, name, 'MISSING_CMD', '缺少 name/cmd');
@@ -3135,7 +3127,7 @@ export async function execMenuForEcweb(this: any, payload: any): Promise<import(
       case 'menu.options': {
         if (!cmd) return ecwebErr(id, name, 'MISSING_CMD', '缺少 name/cmd');
         const data = await this.getSubMenuItems(cmd, agentChannelKey, agentChannelKey, userId, payload.args, ownerIdentity, undefined, true) ?? [];
-        return { type: 'menu.response', id, name, data };
+        return menuSuccess({ id, ...(name ? { name } : {}) }, data);
       }
 
       case 'menu.update': {
@@ -3153,7 +3145,7 @@ export async function execMenuForEcweb(this: any, payload: any): Promise<import(
       }
 
       default:
-        return ecwebErr(id, name, 'NOT_SUPPORTED', `未知类型: ${payload?.type}`);
+        return ecwebErr(id, name, 'METHOD_NOT_FOUND', `未知类型: ${payload?.type}`);
     }
   } catch (e: any) {
     return ecwebErr(id, name, 'INTERNAL', e?.message ?? String(e));
@@ -3166,10 +3158,12 @@ export async function execMenuForEcweb(this: any, payload: any): Promise<import(
 export async function execMenuForControl(this: any, payload: any, peerId: string): Promise<import('../../types.js').MenuResponse> {
   const id = payload?.id ?? '';
   const name = payload?.name;
+  const validationError = validateMenuRequest(payload ?? {});
+  if (validationError) return menuFailure({ id, ...(name ? { name } : {}) }, validationError);
 
   const owners = loadEvolclawConfig().owners ?? [];
   if (!isProcessLevelOwner(peerId, owners)) {
-    return { type: 'menu.response', id, ...(name ? { name } : {}), error: { code: 'FORBIDDEN', message: '控制 channel 操作需要 owner 权限' } };
+    return menuFailure({ id, ...(name ? { name } : {}) }, { code: 'ROLE_ACCESS_DENIED', message: '控制 channel 操作需要 owner 权限' });
   }
 
   if (name === 'cli' || payload?.cmd === '/cli') {
@@ -3182,7 +3176,7 @@ export async function execMenuForControl(this: any, payload: any, peerId: string
   const nameMap: Record<string, string> = {
     pwd: '/pwd', session: '/session', baseagent: '/baseagent', model: '/model',
     topic: '/topic',
-    effort: '/effort', chatmode: '/chatmode', dispatch: '/dispatch',
+    effort: '/effort', chatmode: '/chatmode', mentionmode: '/mentionmode',
     permission: '/perm', activity: '/activity', system: '/system',
     observable: '/observable',
     agent: '/agent', trigger: '/trigger', file: '/file', gateway: '/gateway',
@@ -3200,7 +3194,7 @@ export async function execMenuForControl(this: any, payload: any, peerId: string
   try {
     switch (payload?.type) {
       case 'menu.list':
-        return { type: 'menu.response', id, data: this.getMenuItems('owner', 'private', 'control') };
+        return menuSuccess({ id }, this.getMenuItems('owner', 'private', 'control'));
 
       case 'menu.query': {
         if (!cmd) return ecwebErr(id, name, 'MISSING_CMD', '缺少 name/cmd');
@@ -3211,7 +3205,7 @@ export async function execMenuForControl(this: any, payload: any, peerId: string
       case 'menu.options': {
         if (!cmd) return ecwebErr(id, name, 'MISSING_CMD', '缺少 name/cmd');
         const data = await this.getSubMenuItems(cmd, targetChannel, targetChannel, peerId, payload.args, ownerIdentity, undefined, true) ?? [];
-        return { type: 'menu.response', id, name, data };
+        return menuSuccess({ id, ...(name ? { name } : {}) }, data);
       }
 
       case 'menu.update': {
@@ -3229,7 +3223,7 @@ export async function execMenuForControl(this: any, payload: any, peerId: string
       }
 
       default:
-        return ecwebErr(id, name, 'NOT_SUPPORTED', `未知类型: ${payload?.type}`);
+        return ecwebErr(id, name, 'METHOD_NOT_FOUND', `未知类型: ${payload?.type}`);
     }
   } catch (e: any) {
     return ecwebErr(id, name, 'INTERNAL', e?.message ?? String(e));

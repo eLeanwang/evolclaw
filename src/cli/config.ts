@@ -1,4 +1,4 @@
-import { isHelpFlag, getArgValue } from './help.js';
+import { isHelpFlag, wantsHelp, getArgValue } from './help.js';
 import { ConfigTarget, initConfigManager } from '../config/config-manager.js';
 import { resolveConfigCommand } from '../config/resolved-config-op.js';
 import { executeResolvedConfigCommand, type ConfigExecutionResult } from '../config/config-operation-service.js';
@@ -17,12 +17,6 @@ function fail(formatJson: boolean, code: string, message: string): never {
   process.exit(1);
 }
 
-function formatPermission(permission: string): string {
-  if (permission === 'H') return 'human-only';
-  if (permission === 'HA') return 'configurable';
-  return permission;
-}
-
 function isAgentEnv(): boolean {
   return !!process.env.EVOLCLAW_SESSION_ID;
 }
@@ -38,10 +32,16 @@ function renderConfigExecution(result: ConfigExecutionResult, formatJson: boolea
         value: result.value,
         scope: result.scope,
         ...(result.source ? { source: result.source } : {}),
+        ...(result.schemaDefault ? { schemaDefault: true } : {}),
+        ...(result.note ? { note: result.note } : {}),
       };
       return emit(formatJson, payload, () => {
-        if (!result.source) return `${result.field} = ${JSON.stringify(result.value)} (${result.scope})`;
-        return `${result.field} = ${JSON.stringify(result.value)} [source: ${result.source.target}]`;
+        const head = result.schemaDefault
+          ? `${result.field} = ${JSON.stringify(result.value)} [source: schema default]`
+          : !result.source
+            ? `${result.field} = ${JSON.stringify(result.value)} (${result.scope})`
+            : `${result.field} = ${JSON.stringify(result.value)} [source: ${result.source.target}]`;
+        return result.note ? `${head}\n  ↳ ${result.note}` : head;
       });
     }
     case 'set':
@@ -50,7 +50,6 @@ function renderConfigExecution(result: ConfigExecutionResult, formatJson: boolea
         field: result.field,
         value: result.value,
         scope: result.scope,
-        permission: formatPermission(result.permission),
         file: result.file,
       }, () => `Set ${result.field} = ${JSON.stringify(result.value)} [${result.scope}]`);
     case 'unset':
@@ -64,13 +63,9 @@ function renderConfigExecution(result: ConfigExecutionResult, formatJson: boolea
       return emit(formatJson, { ok: true, scope: result.scope, configs: result.configs }, () => JSON.stringify(result.configs, null, 2));
     case 'effective':
       return emit(formatJson, { ok: true, scope: result.scope, effective: result.effective }, () => JSON.stringify(result.effective, null, 2));
-    case 'fields': {
-      const fields = formatJson
-        ? result.fields.map(field => ({ ...field, permission: formatPermission(field.permission) }))
-        : result.fields;
-      return emit(formatJson, { ok: true, scope: result.scope, fields }, () =>
-        result.fields.map(field => `${field.field} ${formatPermission(field.permission)} merge=${field.merge}`).join('\n'));
-    }
+    case 'fields':
+      return emit(formatJson, { ok: true, scope: result.scope, fields: result.fields }, () =>
+        result.fields.map(field => `${field.field} merge=${field.merge}`).join('\n'));
     case 'validate':
       return emit(formatJson, { ok: result.valid, results: result.results }, () =>
         result.results.map(item => `${item.ok ? 'OK' : 'ERROR'} ${item.target}${item.error ? ` ${item.error}` : ''}`).join('\n'));
@@ -108,6 +103,24 @@ function renderConfigExecution(result: ConfigExecutionResult, formatJson: boolea
     case 'boots':
       return emit(formatJson, { ok: true, boots: result.boots }, () =>
         result.boots.map(boot => `${boot.bootedAt} ${boot.startMethod}`).join('\n'));
+    case 'schema': {
+      if (result.mode === 'overview') {
+        const pad = Math.max(0, ...result.schemas.map(s => s.name.length));
+        return emit(formatJson, { ok: true, schemas: result.schemas }, () =>
+          result.schemas.map(s => `${s.name.padEnd(pad)}  v${s.current}`).join('\n'));
+      }
+      if (result.mode === 'versions') {
+        return emit(formatJson, { ok: true, name: result.name, current: result.current, versions: result.versions }, () =>
+          result.versions.map(v => {
+            const marker = v.current ? '*' : ' ';
+            const meta = [v.date, v.description].filter(Boolean).join('  ');
+            return `${marker} v${v.version}${meta ? `  ${meta}` : ''}${v.current ? '  (current)' : ''}`;
+          }).join('\n'));
+      }
+      return emit(formatJson,
+        { ok: true, name: result.name, version: result.version, current: result.current, content: result.content },
+        () => JSON.stringify(result.content, null, 2));
+    }
   }
 }
 
@@ -149,6 +162,9 @@ Scoped commands:
 
 Global commands:
   list | snapshot | prune | history | diff | restore | current | boots
+  schema                        overview of all schemas
+  schema <name> [<version>]     view a schema definition
+  schema <name> --list          list a schema's versions
 
 Selectors:
   --self <aid> [--peer <peerKey>] | --default | --process
@@ -159,7 +175,7 @@ Output:
 export async function cmdConfig(args: string[]): Promise<void> {
   const subcommand = args[0];
   const formatJson = getArgValue(args, '--format') === 'json';
-  if (!subcommand || isHelpFlag(subcommand)) {
+  if (!subcommand || isHelpFlag(subcommand) || wantsHelp(args)) {
     console.log(HELP);
     return;
   }

@@ -47,6 +47,7 @@ ec config <subcommand> [args] [--format json]
 | `ec config list` | 列出所有配置文件及存在状态 | — | 人/agent |
 | `ec config validate` | 按 schema 校验配置文件 | 可选 | 人/agent |
 | `ec config init` | 按 schema 生成骨架文件 | 必需 | 仅人 |
+| `ec config schema [<name>] [<version>] [--list]` | 查看 schema 定义本身（字段/类型/版本） | — | 人/agent |
 
 ### 快照命令
 
@@ -204,6 +205,44 @@ ec config diff v100 v103
 #   baseagents.claude.model: sonnet → opus
 ```
 
+### schema - 查看 schema 定义
+
+查看随包分发的配置 schema **定义本身**（`kits/schemas/*.schema.*.json`）——不是读写配置值，而是查「某作用域有哪些字段、类型/枚举/默认、schema 有几个版本」。纯只读，数据源为 `schema-registry`（读 `_meta.json` + 扫描 schema 文件），人和 agent 均可。
+
+```bash
+# 概览：列出全部逻辑 schema 及各自当前版本
+ec config schema
+
+# 列出某 schema 磁盘上所有版本（* 标当前，附日期/说明）
+ec config schema agent-config --list
+
+# 查看某 schema 的完整定义（缺省版本号 = 当前版本）
+ec config schema agent-config
+ec config schema agent-config 2
+```
+
+逻辑 schema 名：`evolclaw` / `defaults` / `agent-config` / `relation-config` / `contact-book`。
+
+三种输出模式（由参数决定）：
+
+| 调用形式 | mode | 输出 |
+|----------|------|------|
+| `config schema` | overview | 全部 schema + 各自当前版本号 |
+| `config schema <name> --list` | versions | 该 schema 所有磁盘版本，`*` 标当前，附 date/description |
+| `config schema <name> [version]` | content | 指定版本（缺省=当前）的完整 schema JSON |
+
+**参数约定与报错**：
+
+| 情形 | 错误码 |
+|------|--------|
+| `--list` 与 version 参数同时给出 | `INVALID_CONFIG_COMMAND` |
+| `--list` 或指定 version 却未带 `<name>` | `MISSING_ARG` |
+| version 非非负整数 | `INVALID_CONFIG_VALUE` |
+| 未知 schema 名 | `UNKNOWN_SCHEMA`（错误信息列出已知名） |
+| 版本不存在 | `SCHEMA_VERSION_NOT_FOUND`（错误信息列出可用版本） |
+
+**典型用途**：写配置前用 `ec config fields` 看某层可设字段的取值，或用 `ec config schema <name>` 看该层 schema 的完整字段约束与 `x-merge` 合并语义；排查「字段为何被拒/怎么合并」时先定位 schema 版本。
+
 ---
 
 ## 五、与现有命令的关系
@@ -236,7 +275,7 @@ ec config set chatmode.private proactive --self bot1
 在 agent 托管环境（带 `EVOLCLAW_CTL_TOKEN`）下：
 
 **允许**：
-- 所有读操作（get/show/effective/fields/list/history/diff/current/boots/validate）
+- 所有读操作（get/show/effective/fields/schema/list/history/diff/current/boots/validate）
 - 写入任意参数（待权限体系实现后可能限制）
 
 **禁止**：

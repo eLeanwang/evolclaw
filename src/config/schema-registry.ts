@@ -22,7 +22,11 @@ export type LogicalSchemaName =
   | 'defaults'
   | 'agent-config'
   | 'relation-config'
-  | 'contact-book';
+  | 'contact-book'
+  // 响应模式桶 schema：不绑 config.json 文件（不进 TARGET_SCHEMA），
+  // 只描述 responseModeParams[modeId] 桶的形状——供 config schema 子命令展示、
+  // 桶专项校验、schemaDefaults 提取默认。每个已实现的响应模式一份。
+  | 'single-session';
 
 export type MergeKind = 'scalar' | 'list' | 'dict';
 
@@ -38,7 +42,6 @@ export interface FieldSpec {
 export interface SchemaEntry {
   logicalName: LogicalSchemaName;
   version: number;
-  permission: 'H' | 'HA';
   scope: string;
   raw: any;
   validate: ValidateFunction;
@@ -73,6 +76,59 @@ export function currentVersion(name: LogicalSchemaName): number {
   const v = meta.schemas[name]?.currentVersion;
   if (typeof v !== 'number') throw new Error(`[schema] no currentVersion for "${name}" in _meta.json`);
   return v;
+}
+
+/** 全部逻辑 schema 名（来自 _meta.json，键序）。 */
+export function listSchemaNames(): LogicalSchemaName[] {
+  return Object.keys(loadMeta().schemas) as LogicalSchemaName[];
+}
+
+/** 是否为已知逻辑 schema 名。 */
+export function isSchemaName(name: string): name is LogicalSchemaName {
+  return Object.prototype.hasOwnProperty.call(loadMeta().schemas, name);
+}
+
+/**
+ * 顶层字段的 schema 声明默认值（`default` 关键字），无则 undefined。
+ * 仅覆盖顶层标量字段——嵌套路径的默认值不在此解析。
+ * 用于 `ec config get` 在各存储层都无值时回落展示出厂默认。
+ */
+export function fieldSchemaDefault(name: LogicalSchemaName, fieldPath: string): unknown {
+  if (fieldPath.includes('.')) return undefined;
+  const spec = loadSchema(name).fields.get(fieldPath);
+  return spec && 'default' in spec ? spec.default : undefined;
+}
+
+/** 某版本的 history 元信息（date/description），无则 undefined。 */
+export function schemaHistoryEntry(
+  name: LogicalSchemaName,
+  version: number,
+): { date: string; description: string } | undefined {
+  const entry = loadMeta().history.find(h => h.schema === name && h.version === version);
+  return entry ? { date: entry.date, description: entry.description } : undefined;
+}
+
+/** 扫描 kits/schemas/ 得到某 schema 磁盘上存在的版本号（升序）。 */
+export function listSchemaVersions(name: LogicalSchemaName): number[] {
+  const prefix = `${name}.schema.`;
+  const suffix = '.json';
+  const versions: number[] = [];
+  for (const file of fs.readdirSync(kitsSchemasDir())) {
+    if (!file.startsWith(prefix) || !file.endsWith(suffix)) continue;
+    const middle = file.slice(prefix.length, file.length - suffix.length);
+    if (!/^\d+$/.test(middle)) continue;
+    versions.push(Number(middle));
+  }
+  return versions.sort((a, b) => a - b);
+}
+
+/** 读指定版本的原始 schema（解析为对象，用于内容展示，不做 ajv 编译）。 */
+export function readRawSchema(name: LogicalSchemaName, version: number): unknown {
+  const file = schemaFilePath(name, version);
+  if (!fs.existsSync(file)) {
+    throw new Error(`[schema] no schema file for "${name}" v${version}`);
+  }
+  return JSON.parse(fs.readFileSync(file, 'utf-8'));
 }
 
 const _cache = new Map<string, SchemaEntry>();
@@ -118,7 +174,6 @@ export function loadSchema(name: LogicalSchemaName, version?: number): SchemaEnt
   const entry: SchemaEntry = {
     logicalName: name,
     version: ver,
-    permission: (raw['x-permission'] as 'H' | 'HA') || 'H',
     scope: raw['x-scope'] || name,
     raw,
     validate: ajv().compile(raw),

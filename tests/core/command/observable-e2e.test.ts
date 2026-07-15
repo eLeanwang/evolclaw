@@ -157,7 +157,8 @@ function lastPayload(send: ReturnType<typeof vi.fn>): OutboundPayload {
 function lastMenuResponse(send: ReturnType<typeof vi.fn>): any {
   const payload = lastPayload(send);
   expect(payload.kind).toBe('custom');
-  return JSON.parse((payload as any).payload);
+  const response = (payload as any).payload;
+  return typeof response === 'string' ? JSON.parse(response) : response;
 }
 
 beforeEach(() => {
@@ -240,7 +241,7 @@ describe('observable end-to-end', () => {
     const missingAgent = await handler.execMenuForEcweb({
       type: 'menu.query', id: 'web-missing', name: 'observable',
     });
-    expect(missingAgent.error?.code).toBe('MISSING_AID');
+    expect(missingAgent.error?.code).toBe('INVALID_ARGUMENT');
 
     const unknownAgent = await handler.execMenuForControl({
       type: 'menu.query', id: 'ctl-missing', name: 'observable', agent: 'missing.agentid.pub',
@@ -250,7 +251,7 @@ describe('observable end-to-end', () => {
     const intruder = await handler.execMenuForControl({
       type: 'menu.query', id: 'ctl-forbidden', name: 'observable', agent: AGENT_AID,
     }, INTRUDER_AID);
-    expect(intruder.error?.code).toBe('FORBIDDEN');
+    expect(intruder.error?.code).toBe('ROLE_ACCESS_DENIED');
 
     const adminQuery = await handler.execMenuQuery(
       '/observable', channelKey, ADMIN_AID, ADMIN_AID,

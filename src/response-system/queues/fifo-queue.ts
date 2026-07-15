@@ -25,6 +25,10 @@ export class FIFOQueue implements MessageQueueInterface {
     return this.queue[0];
   }
 
+  peekSync(): InboundMessage | undefined {
+    return this.queue[0];
+  }
+
   size(): number {
     return this.queue.length;
   }

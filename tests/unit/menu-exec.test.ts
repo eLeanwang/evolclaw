@@ -8,6 +8,7 @@ import { _resetRoot, agentRelationConfig } from '../../src/paths.js';
 import { formatPeerKey } from '../../src/core/relation/peer-identity.js';
 import { _resetSchemaCache } from '../../src/config/schema-registry.js';
 import { AgentDelegationRegistry } from '../../src/core/auth/agent-delegation.js';
+import { buildAunFilePayload } from '../../src/channels/aun.js';
 
 const TEST_AID = 'test.agentid.pub';
 let tmpRoot: string;
@@ -71,7 +72,7 @@ beforeEach(() => {
     active_baseagent: 'claude',
     baseagents: { claude: { model: 'sonnet' } },
     chatmode: { private: 'interactive', group: 'proactive' },
-    dispatch: 'mention',
+    mentionMode: 'mention-only',
     permissionMode: 'auto',
     show_activities: 'all',
   }));
@@ -421,10 +422,10 @@ describe('execMenuQuery', () => {
     });
   });
 
-  describe('/dispatch', () => {
+  describe('/mentionmode', () => {
     it('returns NOT_APPLICABLE for private chat', async () => {
       const { handler } = createHandler();
-      const result = await handler.execMenuQuery('/dispatch', 'aun', 'chat1', 'user1') as any;
+      const result = await handler.execMenuQuery('/mentionmode', 'aun', 'chat1', 'user1') as any;
       expect(result.code).toBe('NOT_APPLICABLE');
     });
 
@@ -437,12 +438,12 @@ describe('execMenuQuery', () => {
         }),
       });
       const { handler } = createHandler({ sessionManager: sm });
-      const result = await handler.execMenuQuery('/dispatch', 'aun', 'chat1', 'user1');
-      expect(result).toEqual({ data: { mode: 'mention', source: 'agent', scope: 'relation', field: 'dispatch', self: TEST_AID, peerKey: formatPeerKey('aun', 'chat1') } });
+      const result = await handler.execMenuQuery('/mentionmode', 'aun', 'chat1', 'user1');
+      expect(result).toEqual({ data: { mode: 'mention-only', source: 'agent', scope: 'relation', field: 'mentionMode', self: TEST_AID, peerKey: formatPeerKey('aun', 'chat1') } });
     });
 
-    it('reports the session scope when dispatch only comes from session metadata', async () => {
-      writeTestAgentConfig({ dispatch: undefined });
+    it('reports the session source when mentionMode only comes from session metadata', async () => {
+      writeTestAgentConfig({ mentionMode: undefined });
       const sm = createMockSessionManager({
         getActiveSession: vi.fn().mockResolvedValue({
           id: 'sess-1', chatType: 'group', sessionMode: 'interactive',
@@ -452,9 +453,9 @@ describe('execMenuQuery', () => {
       });
       const { handler } = createHandler({ sessionManager: sm });
 
-      const result = await handler.execMenuQuery('/dispatch', 'aun', 'chat1', 'user1') as any;
+      const result = await handler.execMenuQuery('/mentionmode', 'aun', 'chat1', 'user1') as any;
 
-      expect(result.data).toMatchObject({ mode: 'broadcast', source: 'session' });
+      expect(result.data).toMatchObject({ mode: 'disabled', source: 'session' });
     });
   });
 
@@ -854,7 +855,7 @@ describe('execMenuUpdate', () => {
     });
   });
 
-  describe('/dispatch', () => {
+  describe('/mentionmode', () => {
     it('switches mode in group session', async () => {
       const sm = createMockSessionManager({
         getActiveSession: vi.fn().mockResolvedValue({
@@ -864,18 +865,18 @@ describe('execMenuUpdate', () => {
         }),
       });
       const { handler } = createHandler({ sessionManager: sm });
-      const result = await handler.execMenuUpdate('/dispatch', 'broadcast', 'aun', 'chat1', 'user1');
-      expect(result).toEqual({ data: { mode: 'broadcast', scope: 'relation', field: 'dispatch', self: TEST_AID, peerKey: formatPeerKey('aun', 'chat1') } });
-      expect(readRelationConfig('chat1').dispatch).toBe('broadcast');
+      const result = await handler.execMenuUpdate('/mentionmode', 'disabled', 'aun', 'chat1', 'user1');
+      expect(result).toEqual({ data: { mode: 'disabled', scope: 'relation', field: 'mentionMode', self: TEST_AID, peerKey: formatPeerKey('aun', 'chat1') } });
+      expect(readRelationConfig('chat1').mentionMode).toBe('disabled');
     });
 
     it('rejects in private chat', async () => {
       const { handler } = createHandler();
-      const result = await handler.execMenuUpdate('/dispatch', 'broadcast', 'aun', 'chat1', 'user1') as any;
+      const result = await handler.execMenuUpdate('/mentionmode', 'disabled', 'aun', 'chat1', 'user1') as any;
       expect(result.code).toBe('NOT_APPLICABLE');
     });
 
-    it('clear removes agent dispatch override', async () => {
+    it('clear removes agent mentionMode override', async () => {
       const sm = createMockSessionManager({
         getActiveSession: vi.fn().mockResolvedValue({
           id: 'sess-1', chatType: 'group', sessionMode: 'interactive',
@@ -884,12 +885,12 @@ describe('execMenuUpdate', () => {
         }),
       });
       const { handler } = createHandler({ sessionManager: sm });
-      const result = await handler.execMenuUpdate('/dispatch', 'clear', 'aun', 'chat1', 'user1');
-      expect(result).toEqual({ data: { mode: null, scope: 'relation', field: 'dispatch', self: TEST_AID, peerKey: formatPeerKey('aun', 'chat1') } });
-      expect(readRelationConfig('chat1').dispatch).toBeUndefined();
+      const result = await handler.execMenuUpdate('/mentionmode', 'clear', 'aun', 'chat1', 'user1');
+      expect(result).toEqual({ data: { mode: null, scope: 'relation', field: 'mentionMode', self: TEST_AID, peerKey: formatPeerKey('aun', 'chat1') } });
+      expect(readRelationConfig('chat1').mentionMode).toBeUndefined();
     });
 
-    it('rejects /dispatch update through the chat command path for visitor', async () => {
+    it('rejects /mentionmode update through the chat command path for visitor', async () => {
       const sm = createMockSessionManager({
         getActiveSession: vi.fn().mockResolvedValue({
           id: 'sess-1', chatType: 'group', sessionMode: 'interactive',
@@ -900,9 +901,9 @@ describe('execMenuUpdate', () => {
         resolveIdentity: vi.fn().mockReturnValue({ role: 'visitor' }),
       });
       const { handler } = createHandler({ sessionManager: sm });
-      const result = await handler.handle('/dispatch broadcast', 'aun', 'chat1', undefined, 'user1') as any;
+      const result = await handler.handle('/mentionmode disabled', 'aun', 'chat1', undefined, 'user1') as any;
       expect(result.kind).toBe('command.error');
-      expect(readTestAgentConfig().dispatch).toBe('mention');
+      expect(readTestAgentConfig().mentionMode).toBe('mention-only');
     });
   });
 
@@ -1560,6 +1561,45 @@ describe('/cli config authorization', () => {
     ]);
   });
 
+  it('rejects unknown raw CLI before spawn', async () => {
+    const { handler } = createHandler();
+    const passthrough = installPassthroughSpy(handler);
+
+    const result = await handler.execMenuAction(
+      '/cli', 'exec', { argv: ['totally-unknown', '--token', 'secret'] },
+      'aun', 'chat1', 'user1', { role: 'owner', mode: 'interactive' },
+    ) as any;
+
+    expect(result.code).toBe('NOT_ALLOWED');
+    expect(passthrough).not.toHaveBeenCalled();
+  });
+
+  it('supports the deprecated command string through safe tokenization', async () => {
+    const { handler } = createHandler();
+    const passthrough = installPassthroughSpy(handler);
+
+    const result = await handler.execMenuAction(
+      '/cli', 'exec', { command: 'status --format "json"' },
+      'aun', 'chat1', 'user1', { role: 'owner', mode: 'interactive' },
+    );
+
+    expect(result).toEqual({ data: { ok: true } });
+    expect(passthrough).toHaveBeenCalledWith(['status', '--format', 'json']);
+  });
+
+  it('rejects malformed argv before spawn', async () => {
+    const { handler } = createHandler();
+    const passthrough = installPassthroughSpy(handler);
+
+    const result = await handler.execMenuAction(
+      '/cli', 'exec', { argv: ['status', 123] },
+      'aun', 'chat1', 'user1', { role: 'owner', mode: 'interactive' },
+    ) as any;
+
+    expect(result.code).toBe('INVALID_ARGUMENT');
+    expect(passthrough).not.toHaveBeenCalled();
+  });
+
   it('does not spawn for denied fields or sensitive reads', async () => {
     ownersMock.value = [];
     const sm = createMockSessionManager({
@@ -1637,6 +1677,122 @@ describe('/cli config authorization', () => {
       'config', 'set', 'chatmode.group', 'proactive',
       '--self', TEST_AID, '--peer', formatPeerKey('aun', 'group1'),
     ]);
+  });
+
+  it('lets an authenticated owner target a group relation from the App p2p control relation', async () => {
+    ownersMock.value = [];
+    const { handler } = createHandler();
+    const passthrough = installPassthroughSpy(handler);
+    const groupPeer = formatPeerKey('aun', 'group.example/42');
+
+    const result = await handler.execMenuAction(
+      '/cli', 'exec',
+      { argv: [
+        'config', 'set', 'chatmode.group', 'proactive',
+        '--self', TEST_AID, '--peer', groupPeer,
+      ] },
+      'aun', 'owner.agentid.pub', 'owner.agentid.pub',
+      { role: 'owner', mode: 'interactive' },
+    );
+
+    expect(result).toEqual({ data: { ok: true } });
+    expect(passthrough).toHaveBeenCalledWith([
+      'config', 'set', 'chatmode.group', 'proactive',
+      '--self', TEST_AID, '--peer', groupPeer,
+    ]);
+  });
+
+  it('lets an authenticated owner target a peer AID relation from the App p2p control relation', async () => {
+    ownersMock.value = [];
+    const { handler } = createHandler();
+    const passthrough = installPassthroughSpy(handler);
+    const targetPeer = formatPeerKey('aun', 'peer.agentid.pub');
+
+    const result = await handler.execMenuAction(
+      '/cli', 'exec',
+      { argv: [
+        'config', 'set', 'chatmode.private', 'proactive',
+        '--self', TEST_AID, '--peer', targetPeer,
+      ] },
+      'aun', 'owner.agentid.pub', 'owner.agentid.pub',
+      { role: 'owner', mode: 'interactive' },
+    );
+
+    expect(result).toEqual({ data: { ok: true } });
+    expect(passthrough).toHaveBeenCalledWith([
+      'config', 'set', 'chatmode.private', 'proactive',
+      '--self', TEST_AID, '--peer', targetPeer,
+    ]);
+  });
+});
+
+describe('/file fetch control response', () => {
+  it('builds result.file with snake_case correlation', () => {
+    const attachment = {
+      owner_aid: TEST_AID,
+      object_key: 'shared/id/result.json',
+      filename: 'result.json',
+      size_bytes: 12,
+      sha256: 'hash',
+      content_type: 'application/json',
+    };
+
+    expect(buildAunFilePayload({
+      filename: 'result.json', size: 12, contentType: 'application/json', attachment,
+      context: { metadata: { correlationId: 'file-fetch-1' } },
+    })).toEqual({
+      type: 'result.file', text: expect.any(String), correlation_id: 'file-fetch-1',
+      name: 'result.json', content_type: 'application/json', attachments: [attachment],
+    });
+
+    expect(buildAunFilePayload({
+      filename: 'result.json', size: 12, contentType: 'application/json', attachment,
+    })).not.toHaveProperty('correlation_id');
+  });
+
+  it('sends one correlated file payload and returns accepted', async () => {
+    const projectPath = path.join(tmpRoot, 'project');
+    fs.mkdirSync(projectPath, { recursive: true });
+    const filePath = path.join(projectPath, 'result.json');
+    fs.writeFileSync(filePath, '{"ok":true}');
+    const session = {
+      ...createMockSessionManager().getActiveSessionSync(),
+      projectPath,
+    };
+    const sm = createMockSessionManager({
+      getActiveSession: vi.fn().mockResolvedValue(session),
+      getActiveSessionSync: vi.fn().mockReturnValue(session),
+    });
+    const { handler } = createHandler({ sessionManager: sm });
+    const send = vi.fn().mockResolvedValue(undefined);
+    handler.registerAdapter({
+      channelName: 'aun', channelKey: 'aun', capabilities: { file: true }, send,
+    } as any);
+
+    const result = await handler.execMenuAction(
+      '/file', 'fetch', { path: 'result.json' }, 'aun', 'chat1', 'user1',
+      { role: 'owner', mode: 'interactive' }, 'private', 'file-fetch-1',
+    );
+
+    expect(result).toEqual({ data: { accepted: true } });
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(send.mock.calls[0][1]).toEqual({
+      kind: 'result.file', filePath: fs.realpathSync(filePath), correlationId: 'file-fetch-1',
+    });
+  });
+
+  it('denies file fetch before touching the filesystem', async () => {
+    const { handler } = createHandler();
+    const existsSpy = vi.spyOn(fs, 'existsSync');
+
+    const result = await handler.execMenuAction(
+      '/file', 'fetch', { path: 'secret.txt' }, 'aun', 'chat1', 'user1',
+      { role: 'visitor', mode: 'interactive' }, 'private', 'file-denied-1',
+    ) as any;
+
+    expect(result.code).toMatch(/NO_PERMISSION|NOT_ALLOWED/);
+    expect(existsSpy.mock.calls.some(([checkedPath]) => String(checkedPath).endsWith('secret.txt'))).toBe(false);
+    existsSpy.mockRestore();
   });
 });
 
@@ -1986,8 +2142,8 @@ describe('getSubMenuItems — selected field', () => {
     expect(interactive?.selected).toBe(false);
   });
 
-  it('/dispatch marks current mode as selected', async () => {
-    writeTestAgentConfig({ dispatch: 'broadcast' });
+  it('/mentionmode marks current mode as selected', async () => {
+    writeTestAgentConfig({ mentionMode: 'disabled' });
     const sm = createMockSessionManager({
       getActiveSession: vi.fn().mockResolvedValue({
         id: 'sess-1', agentId: 'claude', chatType: 'group', sessionMode: 'interactive',
@@ -1996,11 +2152,11 @@ describe('getSubMenuItems — selected field', () => {
       }),
     });
     const { handler } = createHandler({ sessionManager: sm });
-    const items = await handler.getSubMenuItems('/dispatch', 'aun', 'chat1');
-    const broadcast = items?.find(i => i.value === 'broadcast');
-    const mention = items?.find(i => i.value === 'mention');
-    expect(broadcast?.selected).toBe(true);
-    expect(mention?.selected).toBe(false);
+    const items = await handler.getSubMenuItems('/mentionmode', 'aun', 'chat1');
+    const disabled = items?.find(i => i.value === 'disabled');
+    const mentionOnly = items?.find(i => i.value === 'mention-only');
+    expect(disabled?.selected).toBe(true);
+    expect(mentionOnly?.selected).toBe(false);
   });
 
   it('/perm marks current mode as selected', async () => {

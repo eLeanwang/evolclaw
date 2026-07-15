@@ -15,6 +15,7 @@ import { cmdAgent } from './agent-command.js';
 import { cmdCtl } from './ctl-command.js';
 import { cmdQueue } from './queue-command.js';
 import { cmdStart, cmdStop, cmdRestart, cmdStatus, cmdLogs, cmdWatchCommand, cmdDev, cmdMv, cmdDiagnose } from './daemon-commands.js';
+import { logCliCommand } from './command-log.js';
 
 // Suppress Node.js ExperimentalWarning (e.g. SQLite) from cluttering CLI output
 process.removeAllListeners('warning');
@@ -22,6 +23,7 @@ process.on('warning', (w) => { if (w.name === 'ExperimentalWarning') return; pro
 
 export async function main(args: string[]) {
   const cmd = args[0] || 'start';
+  logCliCommand(cmd, args);
 
   if (cmd === '--version' || cmd === '-v' || cmd === '-V') {
     const pkg = JSON.parse(fs.readFileSync(path.join(getPackageRoot(), 'package.json'), 'utf-8'));

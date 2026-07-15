@@ -365,13 +365,13 @@ resolveUserRole() 才会使用 relation.role。
 - relation 的 `permissionMode`。
 - relation 的 `baseagents`。
 
-但当前代码已经有明确的 H/HA 分层：
+但当前代码已经有明确的覆盖链/行为链分层：
 
 ```text
-H 链：
+覆盖链：
 defaults.json -> agent/config.json -> relation/config.json
 
-HA 行为链：
+行为链：
 agent/behavior.json -> behavior.roles[role] -> relation/behavior.json
 ```
 
@@ -615,7 +615,7 @@ docs/config/ROLE-PERMISSION-CURRENT.md
 应包含：
 
 - 角色分配优先级。
-- H 链和 HA 链区别。
+- 覆盖链和行为链区别。
 - `config.json` 与 `behavior.json` 的字段归属。
 - `relation.role` 的真实语义。
 - `defaultRole` 的真实语义。

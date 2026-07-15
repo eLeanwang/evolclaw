@@ -33,46 +33,36 @@
 #### 新配置
 
 ```json
-// 统一为 single-session + chatMode 参数
+// 统一为 single-session；chatMode 降为顶层 chatmode 场景表（按对端类型解析）
 {
   "responseMode": "single-session",
-  "config": {
-    "chatMode": "interactive"  // 或 "proactive"
-  }
+  "chatmode": { "private": "interactive", "group": "proactive" }
 }
 ```
+
+> 旧的 `interactive` / `proactive` 作为**模式 id** 已废弃：它们是投递方式（chatMode），
+> 不是模式。迁移后模式统一为 `single-session`，投递方式由顶层 `chatmode` 字典按对端
+> 类型（private/nothuman/group）自动解析——通常无需显式配置。
 
 #### 自动迁移
 
 代码层会自动识别旧配置并迁移：
 
 ```typescript
-function migrateConfig(oldConfig: any): ResponseModeConfig {
-  if (oldConfig.responseMode === 'interactive') {
-    return {
-      responseMode: 'single-session',
-      config: {
-        chatMode: 'interactive',
-      },
-    };
+function migrateConfig(oldConfig: any): AgentConfig {
+  // 旧模式 id interactive/proactive → single-session；
+  // 原语义作为 chatmode 出厂默认表兜底（human 私聊 interactive、agent/群聊 proactive）
+  if (oldConfig.responseMode === 'interactive' || oldConfig.responseMode === 'proactive') {
+    return { responseMode: 'single-session' };  // chatmode 走 schema 出厂默认表
   }
-  
-  if (oldConfig.responseMode === 'proactive') {
-    return {
-      responseMode: 'single-session',
-      config: {
-        chatMode: 'proactive',
-      },
-    };
-  }
-  
   return oldConfig;
 }
 ```
 
 #### 行为变化
 
-无行为变化，完全兼容。
+无行为变化：chatmode 出厂默认表（human 私聊 interactive、agent/群聊 proactive）
+与旧的 interactive/proactive 语义一致。
 
 ---
 
@@ -95,39 +85,41 @@ function migrateConfig(oldConfig: any): ResponseModeConfig {
 ```json
 {
   "responseMode": "dual-session",
-  "config": {
-    "chatMode": "proactive",          // 新增：必须指定
-    "mentionMode": "disabled",         // 新增：可选
-    "debounceMs": 3000,
-    "auxiliaryModel": "deepseek-v4-flash"
+  "mentionMode": "disabled",              // 顶层通用参数（可选）
+  "responseModeParams": {
+    "dual-session": {                     // 特有参数进分桶
+      "debounceMs": 3000,
+      "auxiliaryModel": "deepseek-v4-flash"
+    }
   }
 }
 ```
+
+> chatMode 不再显式配置：由顶层 `chatmode` 场景表按对端类型自动解析。
+> 旧 `config` 块的特有参数（debounceMs 等）搬进 `responseModeParams["dual-session"]` 桶。
 
 #### 自动迁移
 
 代码层会自动识别旧配置并迁移：
 
 ```typescript
-function migrateConfig(oldConfig: any): ResponseModeConfig {
+function migrateConfig(oldConfig: any): AgentConfig {
   if (oldConfig.responseMode === 'dual-session-lite') {
+    const { chatMode, mentionMode, model, ...specific } = oldConfig.config ?? {};
     return {
       responseMode: 'dual-session',
-      config: {
-        chatMode: 'proactive',  // 默认 proactive
-        mentionMode: 'disabled',  // 默认 disabled
-        ...oldConfig.config,
-      },
+      ...(mentionMode ? { mentionMode } : {}),   // 通用参数提顶层
+      ...(model ? { model } : {}),
+      responseModeParams: { 'dual-session': specific },  // 特有参数进分桶
     };
   }
-  
   return oldConfig;
 }
 ```
 
 #### 行为变化
 
-**无行为变化**，但建议显式指定 `chatMode` 和 `mentionMode`。
+**无行为变化**。chatMode 由顶层 chatmode 出厂默认表解析（群聊 proactive）。
 
 ---
 
@@ -145,10 +137,11 @@ function migrateConfig(oldConfig: any): ResponseModeConfig {
 
 | 旧参数位置 | 新参数位置 | 说明 |
 |-----------|-----------|------|
-| `responseMode: 'interactive'` | `config.chatMode: 'interactive'` | 降为参数 |
-| `responseMode: 'proactive'` | `config.chatMode: 'proactive'` | 降为参数 |
-| 无 | `config.mentionMode` | 新增通用参数 |
-| 无 | `config.model` | 新增通用参数 |
+| `responseMode: 'interactive'` | 顶层 `chatmode` 场景表（出厂默认解析） | 降为参数，模式变 single-session |
+| `responseMode: 'proactive'` | 顶层 `chatmode` 场景表（出厂默认解析） | 同上 |
+| `response_modes` 块（default_*/configs/overrides） | 标量 `responseMode` + `responseModeParams` 分桶 | 块废除 |
+| 旧 `config.{debounceMs,...}` 特有参数 | `responseModeParams[modeId].{...}` | 移入分桶 |
+| 无 | 顶层 `mentionMode` / `model` | 通用参数在顶层 |
 
 ---
 
@@ -170,12 +163,9 @@ cp $RELATIONS_DIR/*/config.json $RELATIONS_DIR/*/config.json.backup
 
 ```bash
 # 更新 agent 配置
-# 将 "responseMode": "interactive" 改为：
+# 将 "responseMode": "interactive" 改为（chatmode 走出厂默认，通常无需配）：
 {
-  "responseMode": "single-session",
-  "config": {
-    "chatMode": "interactive"
-  }
+  "responseMode": "single-session"
 }
 ```
 
@@ -186,10 +176,9 @@ cp $RELATIONS_DIR/*/config.json $RELATIONS_DIR/*/config.json.backup
 # 将 "responseMode": "dual-session-lite" 改为：
 {
   "responseMode": "dual-session",
-  "config": {
-    "chatMode": "proactive",
-    "mentionMode": "disabled",
-    // ... 其他配置保持不变
+  "mentionMode": "disabled",
+  "responseModeParams": {
+    "dual-session": { /* debounceMs 等特有参数搬到这里 */ }
   }
 }
 ```
@@ -264,10 +253,7 @@ cat $EVOLCLAW_HOME/data/eck-debug/vars.json
 ```json
 {
   "responseMode": "dual-session",
-  "config": {
-    "chatMode": "proactive",
-    "mentionMode": "mention-only"  // 新功能：只处理 @ 消息
-  }
+  "mentionMode": "mention-only"  // 新功能：只处理 @ 消息（顶层通用参数）
 }
 ```
 
@@ -275,16 +261,14 @@ cat $EVOLCLAW_HOME/data/eck-debug/vars.json
 
 ### 6.2 统一的参数体系
 
-所有响应模式都支持通用参数：
+所有响应模式都支持通用参数（全部在顶层）：
 
 ```json
 {
-  "responseMode": "single-session",  // 或 dual-session
-  "config": {
-    "chatMode": "proactive",      // 通用参数
-    "mentionMode": "disabled",    // 通用参数
-    "model": "claude-opus"        // 通用参数
-  }
+  "responseMode": "single-session",              // 或 dual-session
+  "chatmode": { "private": "interactive", "group": "proactive" },  // 通用（字典）
+  "mentionMode": "disabled",                     // 通用（标量）
+  "model": "claude-opus"                         // 通用（标量）
 }
 ```
 
@@ -303,13 +287,10 @@ A: 是的，因为参数从隐式变为显式。但这提高了可读性和灵�
 }
 ```
 
-**新配置**（显式但清晰）：
+**新配置**（chatmode 按对端类型自动解析，通常无需显式配）：
 ```json
 {
-  "responseMode": "single-session",
-  "config": {
-    "chatMode": "proactive"
-  }
+  "responseMode": "single-session"
 }
 ```
 
@@ -369,7 +350,7 @@ cat $EVOLCLAW_HOME/data/eck-debug/context.txt
 
 - [ ] 更新 agent 级配置（`$AGENT_DIR/config.json`）
 - [ ] 更新关系级配置（`$RELATIONS_DIR/*/config.json`）
-- [ ] 更新环境级配置（`$VENUES_DIR/*/config.json`）
+- [ ] 更新环境级配置（预留，存储路径待环境层定型）
 
 ### 迁移后
 

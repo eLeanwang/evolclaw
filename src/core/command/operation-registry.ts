@@ -14,6 +14,7 @@ const CONFIG_MANAGEMENT_OPERATIONS: OperationMeta[] = ([
   ['config.restore', 'Restore a config snapshot', ['process']],
   ['config.current', 'Read the selected config snapshot', ['process']],
   ['config.boots', 'Read config boot history', ['process']],
+  ['config.schema', 'Read a config schema definition', ['process']],
 ] as Array<[string, string, CommandScope[]]>).map(([id, description, defaultScopes]) => ({
   id,
   category: 'dangerous',
@@ -130,19 +131,19 @@ const OPERATIONS: OperationMeta[] = [
     sources: ['slash', 'menu'],
   },
   {
-    id: 'dispatch.current',
+    id: 'mentionmode.current',
     category: 'read',
     dangerous: false,
     defaultScopes: ['relation', 'agent'],
-    description: 'Read group dispatch mode',
+    description: 'Read group mention mode',
     sources: ['slash', 'menu'],
   },
   {
-    id: 'dispatch.update',
+    id: 'mentionmode.update',
     category: 'write-own',
     dangerous: false,
     defaultScopes: ['relation', 'agent'],
-    description: 'Update group dispatch mode',
+    description: 'Update group mention mode',
     sources: ['slash', 'menu'],
   },
 

@@ -17,9 +17,14 @@
 interface Message {
   id: string;                      // 消息唯一 ID
   channel: string;                 // 渠道（aun/feishu/wechat等）
-  peerId: string;                  // 发送者 ID
+  channelId: string;               // 路由键。私聊=对端 ID；群聊=群 ID（groupId）
+  chatType: 'private' | 'group';   // 场景类型，由 Channel 层填充
+  groupId?: string;                // 仅群聊：群 ID（= channelId）
+  peerId: string;                  // 私聊：对端 ID；群聊：当前消息发送者 AID
   peerName: string;                // 发送者名称
+  peerType?: string;               // 对端类型（human/ai/unknown），由支持 agent.md 的渠道填充
   peerRole: 'owner' | 'admin' | 'guest' | 'anonymous';  // 发送者角色（权限判断依据，必填）
+  threadId?: string;               // 话题维度，默认 ''
   content: string;                 // 消息内容
   timestamp: number;               // 时间戳（毫秒）
   
@@ -42,6 +47,12 @@ interface Attachment {
 > 权限判断（主队列按角色分组、PreToolUse Hook 判断 owner/guest 权限）依赖它，因此**必填**。
 > 兜底：无 token 或 token 残缺时按 `anonymous` 处理。全系统统一用平级字段 `message.peerRole`
 > （不用 `message.role`，也不用嵌套的 `message.from.role`）。
+
+> **身份字段分工（群聊场景）**：`peerId` 是**发送者**（当前发言人 AID），`channelId`/`groupId`
+> 是**对端本身**（群 ID）。私聊时二者同为对端 ID。持久化路径、关系配置、会话路由一律以
+> **`channelId`（群=groupId）** 为键 → 全群共用一套目录与关系配置；`peerId` 仅用于消息信封渲染、
+> 活跃发言人判定、以及在群关系配置中查该成员的角色（对应 `peer-role-resolver.ts` 的
+> `conversationId` = 群、`actorId` = 发送者）。
 
 ---
 
@@ -337,10 +348,14 @@ interface AgentConfig {
 #### 存储位置（话题级、主/辅分文件）
 
 ```
-$AGENT_DIR/relations/<channel>#<urlEncode(peerId)>/_threads/<threadId>/_queues/
+$AGENT_DIR/relations/<channel>#<urlEncode(channelId)>/_threads/<threadId>/_queues/
 ├── main-queue.json          # 主队列（批次）
 └── auxiliary-queue.json     # 辅助队列（消息 + 反馈标记项）
 ```
+
+> 目录键是 **`channelId`**（私聊=对端 ID；群聊=群 ID），**不是** `peerId`（发送者）——
+> 群里所有发言人共用同一套队列目录（见上文「身份字段分工」）。与 `formatPeerKey(channelType,
+> channelId)`（`peer-identity.ts`）一致。
 
 - **话题级隔离**：`_threads/<threadId>/` 是话题级数据的根，每个话题一套独立队列
   （与现有 queueKey `selfAID::channel#channelId#threadId::projectPath` 的话题维度对应；

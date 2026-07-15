@@ -6,6 +6,7 @@ export async function auditCommandAuthorization(
   event: CommandAuthorizationAuditEvent
 ): Promise<void> {
   const shouldAudit =
+    event.source === 'menu.cli' ||
     event.decision === 'deny' ||
     (event.decision === 'allow' && event.dangerous) ||
     (event.source === 'agent-tool' && event.operation.startsWith('config.')) ||
@@ -25,11 +26,11 @@ function buildAuditRecord(event: CommandAuthorizationAuditEvent): AuditRecord {
     operation: event.operation,
     scope: event.scope,
     dangerous: event.dangerous,
-    actorId: event.actorId,
-    selfAid: event.selfAid,
-    peerKey: event.peerKey,
+    actorId: redactIdentifier(event.actorId),
+    selfAid: redactIdentifier(event.selfAid),
+    peerKey: redactIdentifier(event.peerKey),
     channel: event.channel,
-    channelId: event.channelId,
+    channelId: redactIdentifier(event.channelId),
     role: event.role,
     isDaemonOwner: event.isDaemonOwner,
     fromControlChannel: event.fromControlChannel,
@@ -44,6 +45,11 @@ function buildAuditRecord(event: CommandAuthorizationAuditEvent): AuditRecord {
     durationMs: event.durationMs,
     exitCode: event.exitCode,
   };
+}
+
+function redactIdentifier(value?: string): string | undefined {
+  if (!value) return undefined;
+  return crypto.createHash('sha256').update(value).digest('hex').slice(0, 12);
 }
 
 function logAuditEvent(record: AuditRecord): void {

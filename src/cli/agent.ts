@@ -171,17 +171,16 @@ function buildBaseagentsBlock(chosen: Baseagent): Record<string, any> {
 }
 
 const DEFAULT_CHATMODE = { private: 'interactive', group: 'proactive', nothuman: 'proactive' } as const;
-const DEFAULT_DISPATCH = 'mention' as const;
 
 /**
  * 写入新 agent 的初始配置（所有字段统一在 config.json）。
+ * mentionMode 不写初始值，继承 schema 出厂默认（disabled）。
  */
 function saveInitialBehavior(aid: string, baseagent: Baseagent): void {
   const behavior: Partial<AgentConfig> = {
     active_baseagent: baseagent,
     baseagents: buildBaseagentsBlock(baseagent),
     chatmode: { ...DEFAULT_CHATMODE },
-    dispatch: DEFAULT_DISPATCH,
   };
   const sel = { self: aid };
   const existingBehavior = cfgRead(ConfigTarget.Agent, sel) || {};

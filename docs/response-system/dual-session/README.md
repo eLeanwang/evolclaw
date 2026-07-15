@@ -86,17 +86,22 @@
 
 ## 四、配置示例
 
+> 通用参数（chatmode / mentionMode / model）在**顶层**；模式特有参数放
+> `responseModeParams["dual-session"]` 桶。详见 [config-reference.md](../config-reference.md)。
+
 ### 4.1 标准配置（群聊）
 
 ```json
 {
   "responseMode": "dual-session",
-  "config": {
-    "chatMode": "proactive",
-    "mentionMode": "disabled",
-    "debounceMs": 3000,
-    "maxWaitMs": 15000,
-    "auxiliaryModel": "deepseek-v4-flash"
+  "chatmode": { "group": "proactive" },
+  "mentionMode": "disabled",
+  "responseModeParams": {
+    "dual-session": {
+      "debounceMs": 3000,
+      "maxWaitMs": 15000,
+      "auxiliaryModel": "deepseek-v4-flash"
+    }
   }
 }
 ```
@@ -106,10 +111,7 @@
 ```json
 {
   "responseMode": "dual-session",
-  "config": {
-    "chatMode": "proactive",
-    "mentionMode": "mention-only"
-  }
+  "mentionMode": "mention-only"
 }
 ```
 
@@ -118,10 +120,9 @@
 ```json
 {
   "responseMode": "dual-session",
-  "config": {
-    "chatMode": "proactive",
-    "mentionMode": "disabled",
-    "maxQueueSize": 15
+  "mentionMode": "disabled",
+  "responseModeParams": {
+    "dual-session": { "maxQueueSize": 15 }
   }
 }
 ```
@@ -161,14 +162,11 @@
 
 ### 1. 启用双会话模式
 
-在 agent 配置中设置：
+在 agent 配置中设置（chatmode 按对端类型自动解析，通常无需显式配）：
 
 ```json
 {
-  "responseMode": "dual-session",
-  "config": {
-    "chatMode": "proactive"
-  }
+  "responseMode": "dual-session"
 }
 ```
 

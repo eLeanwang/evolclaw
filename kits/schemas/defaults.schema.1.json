@@ -2,9 +2,8 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "defaults.schema.1.json",
   "title": "DefaultsConfig (agents/defaults.json)",
-  "description": "全局默认配置。H 链最低层。",
+  "description": "全局默认配置。覆盖链最低层。",
   "x-logical-name": "defaults",
-  "x-permission": "H",
   "x-scope": "defaults",
   "type": "object",
   "additionalProperties": false,
@@ -57,7 +56,7 @@
       "description": "全局调试配置",
       "x-merge": "dict",
       "properties": {
-        "logLevel": { "type": "string", "enum": ["DEBUG", "INFO", "WARN", "ERROR"] },
+        "logLevel": { "type": "string", "enum": ["DEBUG", "INFO", "WARN", "ERROR"], "description": "日志级别", "x-enumDescriptions": { "DEBUG": "调试：最详细", "INFO": "信息：常规运行日志", "WARN": "警告：仅警告及以上", "ERROR": "错误：仅错误" } },
         "flusherDiag": { "type": "boolean" },
         "aunTrace": { "type": "boolean" },
         "aunSdkLog": { "type": "boolean" },
@@ -72,10 +71,10 @@
       "x-merge": "dict",
       "additionalProperties": false,
       "properties": {
-        "enabled": { "type": "boolean", "default": false },
-        "after_hours": { "type": "number", "exclusiveMinimum": 0, "default": 24 },
-        "effort": { "type": "string", "enum": ["low", "medium", "high", "xhigh", "max"], "default": "low" },
-        "fallback_action": { "type": "string", "enum": ["continue", "new"], "default": "continue" }
+        "enabled": { "type": "boolean", "default": false, "description": "是否启用超时后的会话连续性判定" },
+        "after_hours": { "type": "number", "exclusiveMinimum": 0, "default": 24, "description": "距最后一条有效对话超过该小时数才触发判定" },
+        "effort": { "type": "string", "enum": ["low", "medium", "high", "xhigh", "max"], "default": "low", "description": "续接判定的推理强度", "x-enumDescriptions": { "low": "低", "medium": "中", "high": "高", "xhigh": "很高", "max": "最高" } },
+        "fallback_action": { "type": "string", "enum": ["continue", "new"], "default": "continue", "description": "无法判定时的兜底动作", "x-enumDescriptions": { "continue": "继续沿用当前会话", "new": "开启新会话" } }
       }
     }
   }

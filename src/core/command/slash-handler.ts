@@ -29,6 +29,7 @@ import { filterModelsForRole, validateModelSelectionForRole } from '../model/mod
 import { displaySessionTitle } from '../session/session-title.js';
 import { chatmodeFieldForPeer } from '../message/peer-mode.js';
 import { normalizePermissionMode as normalizePermissionModeContract, PUBLIC_PERMISSION_MODES } from '../permission-mode.js';
+import { dispatchToMentionMode } from '../../config/mention-mode.js';
 import {
   guardIdleCommand,
   guardKnownCommand,
@@ -45,7 +46,7 @@ const PERMISSION_MODE_USAGE = PERMISSION_MODE_KEYS.join('|');
 
 type SlashChatmodeField = 'private' | 'group' | 'nothuman';
 type SlashChatmodeValue = 'interactive' | 'proactive';
-type SlashDispatchValue = 'mention' | 'broadcast';
+type SlashMentionModeValue = 'disabled' | 'mention-only';
 
 interface SlashChatmodeTarget {
   sel: Selector;
@@ -53,9 +54,9 @@ interface SlashChatmodeTarget {
   fieldPath: `chatmode.${SlashChatmodeField}`;
 }
 
-interface SlashDispatchTarget {
+interface SlashMentionModeTarget {
   sel: Selector;
-  fieldPath: 'dispatch';
+  fieldPath: 'mentionMode';
 }
 
 function defaultSlashChatmode(field: SlashChatmodeField): SlashChatmodeValue {
@@ -122,34 +123,34 @@ function writeSlashChatmode(target: SlashChatmodeTarget, value: SlashChatmodeVal
   cfgWrite(route.target, cur, writeSel);
 }
 
-function resolveSlashDispatchTarget(this: any, params: {
+function resolveSlashMentionModeTarget(this: any, params: {
   session?: Session | null;
   channel: string;
   selfAID?: string;
   role?: string;
-}): SlashDispatchTarget | { error: string; code: string } {
+}): SlashMentionModeTarget | { error: string; code: string } {
   const self = params.selfAID
     ?? params.session?.selfAID
     ?? this.getOwningAgent?.(params.channel)?.aid
     ?? this.resolveSelfAID?.(params.channel);
-  if (!self) return { error: '找不到当前 agent，无法读写 dispatch', code: 'MISSING_AID' };
-  return { sel: { self, role: params.role }, fieldPath: 'dispatch' };
+  if (!self) return { error: '找不到当前 agent，无法读写 mentionMode', code: 'MISSING_AID' };
+  return { sel: { self, role: params.role }, fieldPath: 'mentionMode' };
 }
 
-function readSlashDispatch(target: SlashDispatchTarget, fallback: SlashDispatchValue | null = null): SlashDispatchValue | null {
+function readSlashMentionMode(target: SlashMentionModeTarget, fallback: SlashMentionModeValue | null = null): SlashMentionModeValue | null {
   try {
-    const mode = resolveEffective(target.sel, { cache: true }).dispatch;
-    return mode === 'mention' || mode === 'broadcast' ? mode : fallback;
+    const mode = resolveEffective(target.sel, { cache: true }).mentionMode;
+    return mode === 'disabled' || mode === 'mention-only' ? mode : fallback;
   } catch {
     return fallback;
   }
 }
 
-function writeSlashDispatch(target: SlashDispatchTarget, value: SlashDispatchValue | null): void {
+function writeSlashMentionMode(target: SlashMentionModeTarget, value: SlashMentionModeValue | null): void {
   const route = routeFieldPath(target.fieldPath, 'agent');
   const cur = (cfgRead<Record<string, any>>(route.target, target.sel) as Record<string, any>) || {};
-  if (value === null) delete cur.dispatch;
-  else cur.dispatch = value;
+  if (value === null) delete cur.mentionMode;
+  else cur.mentionMode = value;
   cfgWrite(route.target, cur, target.sel);
 }
 
@@ -630,7 +631,7 @@ export async function handleSlashCommand(this: any,
       '💬 聊天设置：',
       '  /activity [all|text|none] - 查看/控制中间输出显示模式',
       '  /chatmode [interactive|proactive] - 查看/切换会话模式（被动响应或主动推进）',
-      '  /dispatch [mention|broadcast] - 查看/切换群聊分发模式（仅@响应或广播响应，仅群聊）',
+      '  /mentionmode [mention-only|disabled] - 查看/切换群聊 @ 处理模式（仅@响应或全部响应，仅群聊）',
       '',
       '🔐 权限管理：',
       '  /perm - 查看当前权限模式',
@@ -719,7 +720,7 @@ export async function handleSlashCommand(this: any,
     // 聊天设置
     if (isAdmin) {
       cmds.push({ command: '/chatmode', args: '[interactive|proactive]', description: '查看/切换会话模式（被动响应或主动推进）', category: '聊天设置', roles: ['admin', 'owner'] });
-      cmds.push({ command: '/dispatch', args: '[mention|broadcast]', description: '查看/切换群聊分发模式（仅@响应或广播响应）', category: '聊天设置', roles: ['admin', 'owner'] });
+      cmds.push({ command: '/mentionmode', args: '[mention-only|disabled]', description: '查看/切换群聊 @ 处理模式（仅@响应或全部响应）', category: '聊天设置', roles: ['admin', 'owner'] });
     }
 
     // 交互
@@ -1949,60 +1950,59 @@ export async function handleSlashCommand(this: any,
     return { kind: 'command.result' as const, text: `✅ 会话模式已切换: ${arg}` };
   }
 
-  // /dispatch 命令：查看/切换群聊分发模式（mention | broadcast）
+  // /mentionmode 命令：查看/切换群聊 @ 处理模式（mention-only | disabled）
   // 仅群聊可用；群聊中设置需管理员权限
-  if (normalizedContent === '/dispatch' || normalizedContent.startsWith('/dispatch ')) {
-    const dispatchSession = await getExistingSessionForCommand();
-    if (!dispatchSession) return { kind: 'command.error' as const, text: '❌ 当前没有活跃会话' };
+  if (normalizedContent === '/mentionmode' || normalizedContent.startsWith('/mentionmode ')) {
+    const mentionSession = await getExistingSessionForCommand();
+    if (!mentionSession) return { kind: 'command.error' as const, text: '❌ 当前没有活跃会话' };
 
-    const dispatchChatType = dispatchSession.chatType || activeChatType;
-    if (dispatchChatType !== 'group') {
-      return { kind: 'command.error' as const, text: '❌ /dispatch 仅在群聊中可用' };
+    const mentionChatType = mentionSession.chatType || activeChatType;
+    if (mentionChatType !== 'group') {
+      return { kind: 'command.error' as const, text: '❌ /mentionmode 仅在群聊中可用' };
     }
 
-    const arg = normalizedContent.slice(9).trim();
-    const dispatchTarget = resolveSlashDispatchTarget.call(this, {
-      session: dispatchSession,
+    const arg = normalizedContent.slice('/mentionmode'.length).trim();
+    const mentionTarget = resolveSlashMentionModeTarget.call(this, {
+      session: mentionSession,
       channel,
       selfAID,
-      role: dispatchSession.identity?.role || identity.role,
+      role: mentionSession.identity?.role || identity.role,
     });
-    if ('error' in dispatchTarget) {
-      return { kind: 'command.error' as const, text: `❌ ${dispatchTarget.error}` };
+    if ('error' in mentionTarget) {
+      return { kind: 'command.error' as const, text: `❌ ${mentionTarget.error}` };
     }
-    const dispatchFallback = dispatchSession.metadata?.dispatchMode === 'mention' || dispatchSession.metadata?.dispatchMode === 'broadcast'
-      ? dispatchSession.metadata.dispatchMode
-      : null;
-    const currentMode = readSlashDispatch(dispatchTarget, dispatchFallback);
+    // session.metadata.dispatchMode 是 AUN 协议词汇（mention/broadcast），翻译成 mentionMode 词汇兜底
+    const mentionFallback = dispatchToMentionMode(mentionSession.metadata?.dispatchMode) ?? null;
+    const currentMode = readSlashMentionMode(mentionTarget, mentionFallback);
 
     if (!arg) {
       const displayMode = currentMode ?? '未设置（跟随群设置）';
       // 尝试发送 CommandCard 卡片
       if (isAdmin) {
         const modes = [
-          { key: 'mention', name: '提及模式', desc: '仅当被 @ 提及（含 @all）时响应群消息' },
-          { key: 'broadcast', name: '广播模式', desc: '群内所有消息都触发响应' },
+          { key: 'mention-only', name: '提及模式', desc: '仅当被 @ 提及（含 @all）时响应群消息' },
+          { key: 'disabled', name: '全响应模式', desc: '群内所有消息都触发响应' },
         ];
         const interaction: InteractionRequest = {
           type: 'interaction',
-          id: `dispatch-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`,
+          id: `mentionmode-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`,
           channelId,
-          sessionId: dispatchSession.id,
+          sessionId: mentionSession.id,
           initiatorId: userId,
           kind: {
             kind: 'command-card',
-            title: '📡 分发模式',
+            title: '📡 @ 处理模式',
             body: modes.map(m => `${m.key === currentMode ? '✓' : '•'} **${m.key}** (${m.name}) - ${m.desc}`).join('\n'),
             buttons: modes.map(m => ({
               label: m.key === currentMode ? `✓ ${m.key}` : m.key,
-              command: `/dispatch ${m.key}`,
+              command: `/mentionmode ${m.key}`,
               style: (m.key === currentMode ? 'primary' : 'default') as 'primary' | 'default',
               disabled: m.key === currentMode,
             })),
           },
         };
 
-        const replyCtx = this.getReplyContext(dispatchSession);
+        const replyCtx = this.getReplyContext(mentionSession);
         const cardResult = await this.sendCommandCard({ channel, channelId, interaction, replyCtx, canWrite: isAdmin });
         if (cardResult === null) return null;
         // 卡片降级：fall through 到下方文本输出
@@ -2010,35 +2010,35 @@ export async function handleSlashCommand(this: any,
 
       // 降级：文本
       if (isAdmin) {
-        return { kind: 'command.result' as const, text: `分发模式: ${displayMode}  用法: /dispatch <mention|broadcast|clear>` };
+        return { kind: 'command.result' as const, text: `@ 处理模式: ${displayMode}  用法: /mentionmode <mention-only|disabled|clear>` };
       }
-      return { kind: 'command.result' as const, text: `分发模式: ${displayMode}` };
+      return { kind: 'command.result' as const, text: `@ 处理模式: ${displayMode}` };
     }
 
-    if (arg !== 'mention' && arg !== 'broadcast' && arg !== 'clear') {
-      return { kind: 'command.error' as const, text: `❌ 无效模式: ${arg}\n可选: mention / broadcast / clear\n用法: /dispatch <模式>` };
+    if (arg !== 'mention-only' && arg !== 'disabled' && arg !== 'clear') {
+      return { kind: 'command.error' as const, text: `❌ 无效模式: ${arg}\n可选: mention-only / disabled / clear\n用法: /mentionmode <模式>` };
     }
 
-    const dispatchAuthDenied = await authorizeSlashIntent({
+    const mentionAuthDenied = await authorizeSlashIntent({
       intent: {
-        operation: 'dispatch.update',
+        operation: 'mentionmode.update',
         scope: 'agent',
         source: 'slash',
-        args: { value: arg, self: dispatchTarget.sel.self },
+        args: { value: arg, self: mentionTarget.sel.self },
       },
       identity,
-      session: dispatchSession,
+      session: mentionSession,
       explicitChatType: 'group',
       channel,
       channelId,
       userId,
-      selfAid: dispatchTarget.sel.self,
+      selfAid: mentionTarget.sel.self,
       isDaemonOwner,
     });
-    if (dispatchAuthDenied) return dispatchAuthDenied;
+    if (mentionAuthDenied) return mentionAuthDenied;
 
     if (arg === 'clear') {
-      writeSlashDispatch(dispatchTarget, null);
+      writeSlashMentionMode(mentionTarget, null);
       if (this.shouldSuppressCardTriggerResult(source, channel)) return null;
       return { kind: 'command.result' as const, text: '✅ 已清除本地覆盖，将跟随群设置' };
     }
@@ -2047,9 +2047,9 @@ export async function handleSlashCommand(this: any,
       return { kind: 'command.result' as const, text: `当前已是 ${arg}` };
     }
 
-    writeSlashDispatch(dispatchTarget, arg);
+    writeSlashMentionMode(mentionTarget, arg);
     if (this.shouldSuppressCardTriggerResult(source, channel)) return null;
-    return { kind: 'command.result' as const, text: `✅ 分发模式已切换: ${currentMode ?? '未设置'} → ${arg}` };
+    return { kind: 'command.result' as const, text: `✅ @ 处理模式已切换: ${currentMode ?? '未设置'} → ${arg}` };
   }
 
   // /stop 命令：中断当前任务
@@ -2182,20 +2182,19 @@ export async function handleSlashCommand(this: any,
     const chatMode = getEffectiveChatmode(session);
     const sessionRole = session.identity?.role || identity.role || 'none';
     const sessionRoleLine = `角色身份: ${sessionRole}`;
-    const dispatchTarget = resolveSlashDispatchTarget.call(this, {
+    const mentionModeTarget = resolveSlashMentionModeTarget.call(this, {
       session,
       channel,
       selfAID,
       role: sessionRole,
     });
-    const dispatchFallback = session.metadata?.dispatchMode === 'mention' || session.metadata?.dispatchMode === 'broadcast'
-      ? session.metadata.dispatchMode
-      : null;
-    const dispatchMode = 'error' in dispatchTarget
-      ? (dispatchFallback ?? '未设置（跟随群设置）')
-      : (readSlashDispatch(dispatchTarget, dispatchFallback) ?? '未设置（跟随群设置）');
+    // session.metadata.dispatchMode 是 AUN 协议词汇，翻译成 mentionMode 词汇兜底
+    const mentionModeFallback = dispatchToMentionMode(session.metadata?.dispatchMode) ?? null;
+    const mentionMode = 'error' in mentionModeTarget
+      ? (mentionModeFallback ?? '未设置（跟随群设置）')
+      : (readSlashMentionMode(mentionModeTarget, mentionModeFallback) ?? '未设置（跟随群设置）');
     const chatModeLine = `会话模式: ${chatMode}`;
-    const dispatchModeLine = session.chatType === 'group' ? `分发模式: ${dispatchMode}` : null;
+    const dispatchModeLine = session.chatType === 'group' ? `@ 处理模式: ${mentionMode}` : null;
     if (isAdmin) {
       const gitInfo = await getGitWorkingDirInfo(session.projectPath);
       lines.push(

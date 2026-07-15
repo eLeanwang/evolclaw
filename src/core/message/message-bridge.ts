@@ -1,4 +1,4 @@
-import { randomBytes } from 'crypto';
+import { createHash, randomBytes } from 'crypto';
 import { logger } from '../../utils/logger.js';
 import { StreamDebouncer } from './stream-debouncer.js';
 import { appendMessageLog, appendMessageLogStrict, buildInboundEntry, isTransientProtocolMessage } from './message-log.js';
@@ -9,6 +9,18 @@ import { resolvePaths } from '../../paths.js';
 import { resolvePeerRoleDetail, type ResolvedPeerRole } from '../../config/peer-role-resolver.js';
 import { handlePendingDingtalkContactBindMessage } from '../../channels/dingtalk.js';
 import { authorizeAccess, buildAuthSubject } from '../auth/auth-gateway.js';
+import {
+  MenuDiagnosticLimiter,
+  MenuRequestDeduper,
+  hasValidMenuId,
+  menuFailure,
+  menuPayloadFingerprint,
+  menuSuccess,
+  normalizeMenuError,
+  parseMenuControl,
+  validateMenuRequest,
+  type ParsedMenuControl,
+} from './menu-control-protocol.js';
 import type { SessionManager } from '../session/session-manager.js';
 import { SessionRenewService } from '../session/session-renew.js';
 import type { IMessageProcessor } from './message-processor-interface.js';
@@ -20,6 +32,7 @@ import type { HandoffRuntime } from '../handoff/runtime.js';
 import type { Message, InboundMessage, ChannelAdapter, ReplyContext, EvolAgentRegistryHandle, OutboundPayload, MenuListRequest, MenuQueryRequest, MenuOptionsRequest, MenuUpdateRequest, MenuActionRequest, MenuResponse, SessionIdentity } from '../../types.js';
 import { createRootCausation, deriveCausation, normalizeCausation } from '../causation/context.js';
 import { recordCausationSpan } from '../causation/audit.js';
+import type { AuthSubject } from '../auth/auth-gateway.js';
 
 /**
  * MessageBridge — Channel 与 Core 之间的消息桥梁
@@ -33,6 +46,8 @@ export class MessageBridge {
   private defaultDebounce: number;
   private agentRegistry?: EvolAgentRegistryHandle;
   private bootstrapService?: BootstrapService;
+  private readonly menuDeduper = new MenuRequestDeduper<MenuResponse>();
+  private readonly menuDiagnostics = new MenuDiagnosticLimiter();
   private handoffRuntime?: HandoffRuntime;
   private sessionRenewService: SessionRenewService;
 
@@ -129,22 +144,38 @@ export class MessageBridge {
         const actorId = msg.peerId;
         const conversationId = chatType === 'group' ? (msg.groupId || msg.channelId) : msg.peerId;
         const selfAid = msg.selfAID || owningAgent?.aid || parsedChannelKey?.selfAID;
+        const menuControl = parseMenuControl(content);
+        if (menuControl.isMenu) {
+          this.logMenuInbound(channelName, msg, menuControl);
+          if (!hasValidMenuId(menuControl)) {
+            this.logMenuDiagnostic('missing-id', channelName, msg, menuControl);
+            return;
+          }
+          const validationError = validateMenuRequest(menuControl.request);
+          if (validationError) {
+            const header = { id: menuControl.id, ...(menuControl.name?.trim() ? { name: menuControl.name } : {}) };
+            await this.sendMenuResponse(adapter, channelName, msg, menuFailure(header, validationError));
+            return;
+          }
+        }
         const resolvedChannelType = msg.channelType || parsedChannelKey?.type || effectiveChannelType;
 
-        const contactBind = handlePendingDingtalkContactBindMessage({
-          selfAid,
-          channelName: channelKey,
-          channelType: resolvedChannelType,
-          chatType,
-          actorId,
-          content,
-        });
-        if (contactBind.handled) {
-          logger.info(`[MessageBridge] DingTalk contact bind handled: channel=${channelKey} actor=${actorId ?? '<none>'} status=${contactBind.status}`);
-          if (contactBind.reply) {
-            await sendReply(msg.channelId, contactBind.reply, msg.replyContext);
+        if (!menuControl.isMenu) {
+          const contactBind = handlePendingDingtalkContactBindMessage({
+            selfAid,
+            channelName: channelKey,
+            channelType: resolvedChannelType,
+            chatType,
+            actorId,
+            content,
+          });
+          if (contactBind.handled) {
+            logger.info(`[MessageBridge] DingTalk contact bind handled: channel=${channelKey} actor=${actorId ?? '<none>'} status=${contactBind.status}`);
+            if (contactBind.reply) {
+              await sendReply(msg.channelId, contactBind.reply, msg.replyContext);
+            }
+            return;
           }
-          return;
         }
 
         const roleDetail = this.resolveInboundRole({
@@ -168,22 +199,26 @@ export class MessageBridge {
           roleDetail,
           fromControlChannel: msg.isControlChannel ?? false,
         });
-        const accessDecision = authorizeAccess(authSubject);
         const identity = authSubject.identity;
 
-        // 渠道入站日志
+        if (menuControl.isMenu) {
+          await this.handleMenuControl(menuControl, channelName, effectiveChannelType, msg, adapter, authSubject);
+          return;
+        }
+
+        // 普通消息保留原始日志；控制 payload 使用脱敏元数据日志。
         logger.channelIn({ channel: channelName, channelId: msg.channelId, peerId: msg.peerId, peerName: msg.peerName, chatType: msg.chatType, msgId: msg.messageId, threadId: msg.threadId, content, images: msg.images?.length ?? 0, mentions: msg.mentions, replyContext: msg.replyContext });
 
+        const accessDecision = authorizeAccess(authSubject);
         if (!accessDecision.allow) {
           logger.warn(`[MessageBridge] Access denied before command routing: channel=${channelName} channelId=${msg.channelId} actor=${actorId ?? '<none>'} role=${identity.role} reason=${accessDecision.reason}`);
           await this.sendAccessDenied(adapter, channelName, msg, sendReply);
           return;
         }
 
-        // 0. 自定义消息快速路径（menu.query 等）
-        if (await this.handleCustomPayload(content, channelName, msg, sendReply, adapter, identity)) return;
-        // 仅阻止协议遥测进入 session / model / messages.jsonl；协议本身已在
+        // 0. 仅阻止协议遥测进入 session / model / messages.jsonl；协议本身已在
         // channel/main/events/AUN/handoff 专用链路中处理和记录。
+        // 注：menu.* 自定义消息已由上方 handleMenuControl 快速路径处理。
         if (isTransientProtocolMessage({
           msgType: msg.msgType ?? 'custom',
           payloadType: msg.payloadType,
@@ -471,7 +506,7 @@ export class MessageBridge {
     model: '/model',
     effort: '/effort',
     chatmode: '/chatmode',
-    dispatch: '/dispatch',
+    mentionmode: '/mentionmode',
     permission: '/perm',
     activity: '/activity',
     observable: '/observable',
@@ -511,174 +546,180 @@ export class MessageBridge {
   private resolveCmd(name: string, cmd?: string): string {
     if (cmd) return cmd;
     const mapped = MessageBridge.MENU_NAME_MAP[name];
-    if (!mapped) throw { code: 'UNKNOWN_NAME', message: `未知操作: ${name}` };
+    if (!mapped) throw { code: 'NOT_SUPPORTED', message: `Unsupported menu name: ${name}` };
     return mapped;
   }
 
-  /** 自定义消息快速路径：拦截 menu.* 协议 */
-  private async handleCustomPayload(
-    content: string, channel: string, msg: InboundMessage,
-    sendReply: (channelId: string, text: string, replyContext?: ReplyContext) => Promise<void>,
+  private async handleMenuControl(
+    parsed: Extract<ParsedMenuControl, { isMenu: true }>,
+    channel: string,
+    channelType: string,
+    msg: InboundMessage,
     adapter: ChannelAdapter | undefined,
-    identity: SessionIdentity
-  ): Promise<boolean> {
-    let parsed: any;
-    try { parsed = JSON.parse(content); } catch { return false; }
-    if (!parsed || typeof parsed !== 'object' || !parsed.type) return false;
-
-    switch (parsed.type) {
-      case 'menu.list':
-        await this.handleMenuList(parsed, channel, msg, adapter, sendReply, identity);
-        return true;
-      case 'menu.query':
-        await this.handleMenuQuery(parsed, channel, msg, adapter, sendReply, identity);
-        return true;
-      case 'menu.options':
-        await this.handleMenuOptions(parsed, channel, msg, adapter, sendReply, identity);
-        return true;
-      case 'menu.update':
-        await this.handleMenuUpdate(parsed, channel, msg, adapter, sendReply, identity);
-        return true;
-      case 'menu.action':
-        await this.handleMenuAction(parsed, channel, msg, adapter, sendReply, identity);
-        return true;
-      default:
-        return false;
+    authSubject: AuthSubject,
+  ): Promise<void> {
+    if (!hasValidMenuId(parsed)) return;
+    const header = { id: parsed.id, ...(parsed.name?.trim() ? { name: parsed.name } : {}) };
+    const access = authorizeAccess(authSubject);
+    if (!access.allow) {
+      this.logMenuDiagnostic('access-denied', channel, msg, parsed, access.code);
+      await this.sendMenuResponse(adapter, channel, msg, menuFailure(header, {
+        code: 'ROLE_ACCESS_DENIED',
+        message: access.reason,
+      }));
+      return;
     }
+
+    const scope = msg.chatType === 'group' ? (msg.groupId || msg.channelId) : msg.peerId;
+    const dedupKey = [msg.selfAID || channel, channelType, msg.chatType || 'private', scope, msg.peerId, parsed.id].join('\u001f');
+    const deduped = await this.menuDeduper.execute(
+      dedupKey,
+      menuPayloadFingerprint(parsed.raw),
+      () => this.dispatchMenuRequest(parsed.request, header, channel, msg, authSubject.identity),
+    );
+    if ('conflict' in deduped) {
+      this.logMenuDiagnostic('request-conflict', channel, msg, parsed, 'CONFLICT');
+      await this.sendMenuResponse(adapter, channel, msg, menuFailure(header, {
+        code: 'CONFLICT',
+        message: 'Request ID was already used with a different payload',
+      }));
+      return;
+    }
+    if (deduped.replayed) this.logMenuDiagnostic('request-replay', channel, msg, parsed);
+    await this.sendMenuResponse(adapter, channel, msg, deduped.value);
   }
 
-  private async handleMenuList(
-    req: MenuListRequest, channel: string, msg: InboundMessage,
-    adapter: ChannelAdapter | undefined,
-    sendReply: (channelId: string, text: string, replyContext?: ReplyContext) => Promise<void>,
-    identity: SessionIdentity
-  ): Promise<void> {
-    const { id } = req;
+  private async dispatchMenuRequest(
+    request: Record<string, unknown>,
+    header: { id: string; name?: string },
+    channel: string,
+    msg: InboundMessage,
+    identity: SessionIdentity,
+  ): Promise<MenuResponse> {
     try {
-      const data = this.cmdHandler.getMenuItems(identity.role, msg.chatType || 'private', msg.isControlChannel ? 'control' : 'agent');
-      await this.sendMenuResponse(adapter, channel, msg.channelId,
-        { type: 'menu.response', id, data }, sendReply);
-    } catch (err: any) {
-      await this.sendMenuResponse(adapter, channel, msg.channelId, {
-        type: 'menu.response', id,
-        error: { code: err?.code || 'INTERNAL', message: err?.message || String(err) }
-      }, sendReply);
-    }
-  }
-
-  private async handleMenuQuery(
-    req: MenuQueryRequest, channel: string, msg: InboundMessage,
-    adapter: ChannelAdapter | undefined,
-    sendReply: (channelId: string, text: string, replyContext?: ReplyContext) => Promise<void>,
-    identity: SessionIdentity
-  ): Promise<void> {
-    const { id, name, cmd } = req;
-    try {
-      const resolvedCmd = this.resolveCmd(name, cmd);
-      const result = await this.cmdHandler.execMenuQuery(resolvedCmd, channel, msg.channelId, msg.peerId, (req as any).args, msg.chatType, msg.isControlChannel ?? false, identity);
-      if ('error' in result) throw { code: result.code || 'EXEC_FAILED', message: result.error };
-      await this.sendMenuResponse(adapter, channel, msg.channelId,
-        { type: 'menu.response', id, name, data: result.data }, sendReply);
-    } catch (err: any) {
-      await this.sendMenuResponse(adapter, channel, msg.channelId, {
-        type: 'menu.response', id, name,
-        error: { code: err?.code || 'INTERNAL', message: err?.message || String(err) }
-      }, sendReply);
-    }
-  }
-
-  private async handleMenuOptions(
-    req: MenuOptionsRequest, channel: string, msg: InboundMessage,
-    adapter: ChannelAdapter | undefined,
-    sendReply: (channelId: string, text: string, replyContext?: ReplyContext) => Promise<void>,
-    identity: SessionIdentity
-  ): Promise<void> {
-    const { id, name, cmd } = req;
-    try {
-      const resolvedCmd = this.resolveCmd(name, cmd);
-      const data = await this.cmdHandler.getSubMenuItems(resolvedCmd, channel, msg.channelId, msg.peerId, (req as any).args, identity, msg.chatType, msg.isControlChannel ?? false) ?? [];
-      await this.sendMenuResponse(adapter, channel, msg.channelId,
-        { type: 'menu.response', id, name, data }, sendReply);
-    } catch (err: any) {
-      await this.sendMenuResponse(adapter, channel, msg.channelId, {
-        type: 'menu.response', id, name,
-        error: { code: err?.code || 'INTERNAL', message: err?.message || String(err) }
-      }, sendReply);
-    }
-  }
-
-  private async handleMenuUpdate(
-    req: MenuUpdateRequest, channel: string, msg: InboundMessage,
-    adapter: ChannelAdapter | undefined,
-    sendReply: (channelId: string, text: string, replyContext?: ReplyContext) => Promise<void>,
-    identity: SessionIdentity
-  ): Promise<void> {
-    const { id, name, cmd, value, args } = req;
-    try {
-      if (!value) throw { code: 'MISSING_VALUE', message: '缺少 value 参数' };
-      const resolvedCmd = this.resolveCmd(name, cmd);
-      const result = await this.cmdHandler.execMenuUpdate(resolvedCmd, value, channel, msg.channelId, msg.peerId, identity, msg.isControlChannel ?? false, args);
-      if ('error' in result) throw { code: result.code || 'EXEC_FAILED', message: result.error };
-      await this.sendMenuResponse(adapter, channel, msg.channelId,
-        { type: 'menu.response', id, name, data: result.data }, sendReply);
-    } catch (err: any) {
-      await this.sendMenuResponse(adapter, channel, msg.channelId, {
-        type: 'menu.response', id, name,
-        error: { code: err?.code || 'INTERNAL', message: err?.message || String(err) }
-      }, sendReply);
-    }
-  }
-
-  private async handleMenuAction(
-    req: MenuActionRequest, channel: string, msg: InboundMessage,
-    adapter: ChannelAdapter | undefined,
-    sendReply: (channelId: string, text: string, replyContext?: ReplyContext) => Promise<void>,
-    identity: SessionIdentity
-  ): Promise<void> {
-    const { id, name, cmd, action, args } = req;
-    try {
-      if (!action) throw { code: 'MISSING_VALUE', message: '缺少 action 参数' };
-      const resolvedCmd = this.resolveCmd(name, cmd);
-      const result = await this.cmdHandler.execMenuAction(resolvedCmd, action, args, channel, msg.channelId, msg.peerId, identity, msg.chatType, id, msg.isControlChannel ?? false);
-      if ('error' in result) throw { code: result.code || 'EXEC_FAILED', message: result.error };
-      await this.sendMenuResponse(adapter, channel, msg.channelId,
-        { type: 'menu.response', id, name, data: result.data }, sendReply);
-    } catch (err: any) {
-      await this.sendMenuResponse(adapter, channel, msg.channelId, {
-        type: 'menu.response', id, name,
-        error: { code: err?.code || 'INTERNAL', message: err?.message || String(err) }
-      }, sendReply);
+      const name = header.name ?? '';
+      const cmd = typeof request.cmd === 'string' ? request.cmd : undefined;
+      const args = request.args as Record<string, any> | undefined;
+      switch (request.type) {
+        case 'menu.list':
+          return menuSuccess(header, this.cmdHandler.getMenuItems(
+            identity.role,
+            msg.chatType || 'private',
+            msg.isControlChannel ? 'control' : 'agent',
+          ));
+        case 'menu.query': {
+          const result = await this.cmdHandler.execMenuQuery(
+            this.resolveCmd(name, cmd), channel, msg.channelId, msg.peerId, args,
+            msg.chatType, msg.isControlChannel ?? false, identity,
+          );
+          if ('error' in result) throw result;
+          return menuSuccess(header, result.data);
+        }
+        case 'menu.options': {
+          const data = await this.cmdHandler.getSubMenuItems(
+            this.resolveCmd(name, cmd), channel, msg.channelId, msg.peerId, args,
+            identity, msg.chatType, msg.isControlChannel ?? false,
+          ) ?? [];
+          return menuSuccess(header, data);
+        }
+        case 'menu.update': {
+          const result = await this.cmdHandler.execMenuUpdate(
+            this.resolveCmd(name, cmd), request.value as string, channel, msg.channelId,
+            msg.peerId, identity, msg.isControlChannel ?? false, args,
+          );
+          if ('error' in result) throw result;
+          return menuSuccess(header, result.data);
+        }
+        case 'menu.action': {
+          const result = await this.cmdHandler.execMenuAction(
+            this.resolveCmd(name, cmd), request.action as string, args, channel,
+            msg.channelId, msg.peerId, identity, msg.chatType, header.id,
+            msg.isControlChannel ?? false,
+          );
+          if ('error' in result) throw result;
+          return menuSuccess(header, result.data);
+        }
+        default:
+          return menuFailure(header, {
+            code: 'METHOD_NOT_FOUND',
+            message: `Unknown menu request type: ${String(request.type)}`,
+          });
+      }
+    } catch (error) {
+      return menuFailure(header, normalizeMenuError(error));
     }
   }
 
   private async sendMenuResponse(
-    adapter: ChannelAdapter | undefined, channel: string, channelId: string,
-    response: MenuResponse,
-    sendReply: (channelId: string, text: string) => Promise<void>
-  ): Promise<void> {
-    await this.sendCustomResponse(adapter, channel, channelId, JSON.stringify(response), sendReply);
-  }
-
-  /** menu.query 响应：优先走 adapter.send(custom)，降级 sendReply */
-  private async sendCustomResponse(
     adapter: ChannelAdapter | undefined,
     channel: string,
-    channelId: string,
-    response: string,
-    sendReply: (channelId: string, text: string) => Promise<void>,
+    msg: InboundMessage,
+    response: MenuResponse,
   ): Promise<void> {
-    if (adapter?.send) {
-      const agentName = this.agentRegistry?.resolveByChannel(channel)?.name ?? '<unknown>';
-      const envelope = buildEnvelope({
-        taskId: `menu-${randomBytes(4).toString('hex')}`,
-        channel,
-        channelId,
-        agentName,
-      });
-      await adapter.send(envelope, { kind: 'custom', channelType: channel, payload: response });
-    } else {
-      await sendReply(channelId, response);
+    if (!adapter?.send) {
+      this.logMenuDiagnostic('transport-unavailable', channel, msg, {
+        isMenu: true,
+        raw: '',
+        request: {},
+        type: 'menu.response',
+        id: response.id,
+        name: response.name,
+      }, 'TEMPORARILY_UNAVAILABLE');
+      return;
     }
+    const agentName = this.agentRegistry?.resolveByChannel(channel)?.name ?? '<unknown>';
+    const envelope = buildEnvelope({
+      taskId: `menu-${randomBytes(4).toString('hex')}`,
+      channel,
+      channelId: msg.channelId,
+      agentName,
+      replyContext: msg.replyContext,
+    });
+    await adapter.send(envelope, { kind: 'custom', channelType: channel, payload: response });
+  }
+
+  private logMenuInbound(
+    channel: string,
+    msg: InboundMessage,
+    parsed: Extract<ParsedMenuControl, { isMenu: true }>,
+  ): void {
+    logger.channelIn({
+      channel,
+      channelId: this.shortHash(msg.channelId),
+      peerId: this.shortHash(msg.peerId),
+      chatType: msg.chatType,
+      msgId: msg.messageId,
+      control: {
+        id: parsed.id,
+        type: parsed.type,
+        name: parsed.name,
+        action: parsed.action,
+      },
+    });
+  }
+
+  private logMenuDiagnostic(
+    category: string,
+    channel: string,
+    msg: InboundMessage,
+    parsed: Extract<ParsedMenuControl, { isMenu: true }>,
+    code?: string,
+  ): void {
+    const scope = msg.chatType === 'group' ? (msg.groupId || msg.channelId) : msg.peerId;
+    const key = `${category}:${channel}:${this.shortHash(scope)}`;
+    const decision = this.menuDiagnostics.check(key);
+    if (!decision.log) return;
+    logger.warn(
+      `[MenuControl] category=${category} request=${parsed.id || '<missing>'}`
+      + ` type=${parsed.type} name=${parsed.name || '<none>'} action=${parsed.action || '<none>'}`
+      + ` transport=${channel} scope=${this.shortHash(scope)} sender=${this.shortHash(msg.peerId)}`
+      + `${code ? ` code=${code}` : ''}${decision.suppressed ? ` suppressed=${decision.suppressed}` : ''}`,
+    );
+  }
+
+  private shortHash(value?: string): string {
+    if (!value) return 'none';
+    return createHash('sha256').update(value).digest('hex').slice(0, 12);
   }
 
   private async sendAccessDenied(

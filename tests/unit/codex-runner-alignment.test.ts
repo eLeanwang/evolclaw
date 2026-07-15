@@ -995,7 +995,7 @@ describe('CodexRunner app-server approval bridge', () => {
     );
   });
 
-  it('does not consult a broad tool-wide allow cache', async () => {
+  it('keeps request grants scoped and does not consult a broad tool-wide allow cache', async () => {
     const { runner } = makeRunner();
     const gateway = {
       isAlwaysAllowed: vi.fn().mockReturnValue(true),
@@ -1014,6 +1014,16 @@ describe('CodexRunner app-server approval bridge', () => {
     expect(result).toEqual({ decision: 'accept' });
     expect(gateway.isAlwaysAllowed).not.toHaveBeenCalled();
     expect(gateway.requestPermission).toHaveBeenCalledTimes(1);
+    expect(gateway.requestPermission).toHaveBeenCalledWith(
+      'thread-1',
+      'Bash',
+      expect.objectContaining({ command: 'npm test' }),
+      expect.any(Function),
+      undefined,
+      'npm test',
+      undefined,
+      'codex:__evolclaw_thread-1_hclass_v1:request',
+    );
   });
 
   it('maps the legacy noask value to readonly app-server behavior', async () => {

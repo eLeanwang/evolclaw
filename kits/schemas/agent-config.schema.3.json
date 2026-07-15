@@ -3,7 +3,6 @@
   "$id": "agent-config.schema.3.json",
   "title": "AgentConfig (agents/{aid}/config.json)",
   "x-logical-name": "agent-config",
-  "x-permission": "H",
   "x-scope": "agent",
   "type": "object",
   "additionalProperties": true,
@@ -12,7 +11,7 @@
     "$schema_version": { "type": "number", "default": 3, "x-merge": "scalar" },
     "aid": { "type": "string", "x-merge": "scalar" },
     "enabled": { "type": "boolean", "x-merge": "scalar" },
-    "lifecycle": { "type": "string", "enum": ["created", "bootstrapping", "active"], "x-merge": "scalar" },
+    "lifecycle": { "type": "string", "enum": ["created", "bootstrapping", "active"], "x-merge": "scalar", "description": "agent 生命周期状态", "x-enumDescriptions": { "created": "已创建，尚未进入引导流程", "bootstrapping": "引导中（初始化配置/身份）", "active": "已激活，正常运行" } },
     "initialized": { "type": "boolean", "x-merge": "scalar" },
     "owners": {
       "type": "array",
@@ -35,24 +34,24 @@
     "capabilities": { "type": "object", "x-merge": "dict" },
     "debug": { "type": "object", "x-merge": "dict" },
     "observable": { "type": "boolean", "x-merge": "scalar" },
-    "chatmode": { "type": "object", "x-merge": "dict" },
-    "response_modes": { "type": "object", "x-merge": "dict" },
-    "responseMode": { "type": "string", "x-merge": "scalar" },
-    "config": { "type": "object", "x-merge": "dict" },
+    "chatmode": { "type": "object", "x-merge": "dict", "default": { "private": "interactive", "group": "proactive", "nothuman": "proactive" }, "properties": { "private": { "enum": ["interactive", "proactive"], "description": "人类私聊场景的投递方式", "x-enumDescriptions": { "interactive": "同步交互：输出即回复", "proactive": "主动推送：CLI 回复 + 思考投影" } }, "group": { "enum": ["interactive", "proactive"], "description": "群聊场景的投递方式", "x-enumDescriptions": { "interactive": "同步交互：输出即回复", "proactive": "主动推送：CLI 回复 + 思考投影" } }, "nothuman": { "enum": ["interactive", "proactive"], "description": "非人类（agent）私聊场景的投递方式", "x-enumDescriptions": { "interactive": "同步交互：输出即回复", "proactive": "主动推送：CLI 回复 + 思考投影" } } }, "additionalProperties": false, "description": "chatmode 场景默认表；出厂默认值即此 default（agent 级改默认，关系级按键覆盖）。键封闭 private/group/nothuman，值枚举 interactive/proactive" },
+    "mentionMode": { "type": "string", "enum": ["disabled", "mention-only"], "default": "disabled", "x-merge": "scalar", "description": "@ 处理策略（顶层通用参数）", "x-enumDescriptions": { "disabled": "处理所有消息", "mention-only": "只处理被 @ 的消息，未 @ 作引用上下文" } },
+    "model": { "type": "string", "x-merge": "scalar", "description": "主会话模型（顶层通用参数）；无默认值，缺省时由响应模式/全局默认决定" },
+    "responseMode": { "type": "string", "x-merge": "scalar", "description": "响应模式 id（标量）；候选清单/默认值来自注册表，非 schema。关系级>agent级>注册表首选" },
+    "responseModeParams": { "type": "object", "x-merge": "dict", "description": "响应模式特有参数字典，按模式 id 分桶：{ [modeId]: {...} }" },
     "flush_delay": { "type": "number", "x-merge": "scalar" },
     "debounce": { "type": "number", "x-merge": "scalar" },
-    "dispatch": { "type": "string", "enum": ["mention", "broadcast"], "x-merge": "scalar" },
-    "show_activities": { "type": "string", "enum": ["all", "text", "none"], "x-merge": "scalar" },
-    "proactive": { "type": "object", "x-merge": "dict" },
+    "show_activities": { "type": "string", "enum": ["all", "text", "none"], "x-merge": "scalar", "description": "中间输出展示范围（仅对 interactive 私聊有意义）", "x-enumDescriptions": { "all": "文本 + activity", "text": "仅文本", "none": "全部静默" } },
     "session_renew": {
       "type": "object",
       "x-merge": "dict",
       "additionalProperties": false,
+      "description": "会话超时后的续接判定",
       "properties": {
-        "enabled": { "type": "boolean", "default": false },
-        "after_hours": { "type": "number", "exclusiveMinimum": 0, "default": 24 },
-        "effort": { "type": "string", "enum": ["low", "medium", "high", "xhigh", "max"], "default": "low" },
-        "fallback_action": { "type": "string", "enum": ["continue", "new"], "default": "continue" }
+        "enabled": { "type": "boolean", "default": false, "description": "是否启用超时后的会话连续性判定" },
+        "after_hours": { "type": "number", "exclusiveMinimum": 0, "default": 24, "description": "距最后一条有效对话超过该小时数才触发判定" },
+        "effort": { "type": "string", "enum": ["low", "medium", "high", "xhigh", "max"], "default": "low", "description": "续接判定的推理强度", "x-enumDescriptions": { "low": "低", "medium": "中", "high": "高", "xhigh": "很高", "max": "最高" } },
+        "fallback_action": { "type": "string", "enum": ["continue", "new"], "default": "continue", "description": "无法判定时的兜底动作", "x-enumDescriptions": { "continue": "继续沿用当前会话", "new": "开启新会话" } }
       }
     },
     "group_venue_sync": { "type": "object", "x-merge": "dict" },
@@ -62,7 +61,17 @@
     "permissionMode": {
       "type": "string",
       "enum": ["auto", "bypass", "readonly", "request", "edit", "plan", "noask"],
-      "x-merge": "scalar"
+      "x-merge": "scalar",
+      "description": "工具调用的审批策略",
+      "x-enumDescriptions": {
+        "auto": "自动模式：根据风险等级自动决定是否审批",
+        "bypass": "免审批模式：普通操作自动放行，危险操作仍需确认",
+        "readonly": "只读模式：允许读取和临时目录写入，拒绝项目文件修改",
+        "request": "请求模式：所有操作均需审批",
+        "edit": "编辑模式：允许文件编辑，其他操作需审批",
+        "plan": "计划模式：仅允许只读操作，写操作需审批",
+        "noask": "静默模式：不弹出审批，自动拒绝未授权操作"
+      }
     },
     "roles": {
       "type": "object",
@@ -96,11 +105,11 @@
                 "additionalProperties": false,
                 "properties": {
                   "enabled": { "type": "boolean" },
-                  "resetMode": { "type": "string", "enum": ["never", "daily", "weekly", "monthly"] },
-                  "currency": { "type": "string", "enum": ["CNY", "USD"] },
-                  "limitAmount": { "type": ["number", "null"], "minimum": 0 },
-                  "costBasis": { "type": "string", "enum": ["gateway", "official"] },
-                  "scope": { "type": "string", "enum": ["subject", "role"] }
+                  "resetMode": { "type": "string", "enum": ["never", "daily", "weekly", "monthly"], "description": "用量额度的重置周期", "x-enumDescriptions": { "never": "从不重置", "daily": "每日重置", "weekly": "每周重置", "monthly": "每月重置" } },
+                  "currency": { "type": "string", "enum": ["CNY", "USD"], "description": "额度计价货币", "x-enumDescriptions": { "CNY": "人民币", "USD": "美元" } },
+                  "limitAmount": { "type": ["number", "null"], "minimum": 0, "description": "额度上限金额；null 表示不限" },
+                  "costBasis": { "type": "string", "enum": ["gateway", "official"], "description": "计费口径", "x-enumDescriptions": { "gateway": "按网关计费价", "official": "按官方定价" } },
+                  "scope": { "type": "string", "enum": ["subject", "role"], "description": "额度统计范围", "x-enumDescriptions": { "subject": "按主体（对端）统计", "role": "按角色统计" } }
                 }
               }
             }
