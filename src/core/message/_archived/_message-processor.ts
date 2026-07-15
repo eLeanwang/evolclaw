@@ -966,13 +966,15 @@ export class MessageProcessor {
       const capturedReplyContext = taskReplyContext();
 
       // 设置权限审批的消息发送回调（指向当前渠道）
-      agent.setSendPrompt(async (text: string) => {
+      const permissionPrompt = async (text: string) => {
         if (isSilentTrigger) return;
         await adapter.send({ ...envelope, replyContext: capturedReplyContext }, { kind: 'result.text', text, isFinal: true });
-      });
+      };
+      agent.setSendPrompt(permissionPrompt);
 
       // 设置权限审批的交互上下文（支持交互卡片）
       agent.setPermissionContext?.(session.id, {
+        sendPrompt: permissionPrompt,
         adapter,
         channelId: capturedChannelId,
         replyContext: capturedReplyContext,
@@ -1070,7 +1072,7 @@ export class MessageProcessor {
           effectivePermissionMode = resolvePermissionMode({ self: selfAid || undefined, peerKey, role: peerRole });
         } catch (e) {
           logger.warn(`[MessageProcessor] resolvePermissionMode failed, using fallback: ${e instanceof Error ? e.message : String(e)}`);
-          effectivePermissionMode = 'auto';
+          effectivePermissionMode = 'readonly';
         }
 
         // 按 关系级 > agent级 > 全局 解析本次调用的模型/强度，作为 per-call 入参传入 runQuery。

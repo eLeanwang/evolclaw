@@ -14,6 +14,9 @@ import type {
   HandoffStatusResponse,
   HandoffTraceResponse,
 } from './types.js';
+import { createRootCausation, deriveCausation, normalizeCausation } from '../causation/context.js';
+import { recordCausationSpan } from '../causation/audit.js';
+import type { CausationContext } from '../causation/types.js';
 
 export interface CreateOutboundHandoffInput {
   selfAid: string;
@@ -24,6 +27,7 @@ export interface CreateOutboundHandoffInput {
   encrypt: boolean;
   thread?: string;
   explicitReturnPolicy?: 'required' | 'none';
+  causation?: CausationContext;
 }
 
 export interface CreateOutboundHandoffResult {
@@ -78,6 +82,7 @@ export class HandoffRuntime {
       }
       return { crossSession: false, targetSession: target };
     }
+    const handoffCausation = deriveCausation(normalizeCausation(input.causation) ?? createRootCausation());
     const handoff = this.store.create({
       selfAid: input.selfAid,
       originSessionId: origin.id,
@@ -85,6 +90,11 @@ export class HandoffRuntime {
       targetSessionId: target.id,
       payload: input.payload,
       encrypt: input.encrypt,
+      causation: handoffCausation,
+    });
+    recordCausationSpan(handoffCausation, 'handoff.request', {
+      status: 'started',
+      refs: { handoffId: handoff.handoff_id, sessionId: origin.id, messageId: input.originMessageId },
     });
     this.dispatcher.notify(input.selfAid, target.id);
     return { crossSession: true, handoff, targetSession: target };
@@ -128,8 +138,16 @@ export class HandoffRuntime {
     handoffId?: string;
     currentTaskHandoffIds?: string[];
     content: string;
+    causation?: CausationContext;
   }): Promise<HandoffReturnResponse> {
-    const response = this.store.returnHandoff(input);
+    const returnCausation = deriveCausation(normalizeCausation(input.causation) ?? createRootCausation());
+    const response = this.store.returnHandoff({ ...input, returnCausation });
+    if (response.ok && !response.idempotent) {
+      recordCausationSpan(returnCausation, 'handoff.response', {
+        status: 'completed',
+        refs: { handoffId: response.handoff_id, sessionId: input.currentSessionId },
+      });
+    }
     if (response.ok && !response.idempotent) void this.enqueueOrigin(input.selfAid, response.handoff_id);
     return response;
   }
@@ -158,6 +176,11 @@ export class HandoffRuntime {
       messageId,
       timestamp: Date.now(),
       source: 'handoff',
+      causation: instance.return_causation
+        ? deriveCausation(instance.return_causation)
+        : instance.causation
+          ? deriveCausation(instance.causation)
+          : undefined,
       handoffDelivery: { direction: 'origin', handoffId },
     };
     try {
@@ -188,6 +211,7 @@ export class HandoffRuntime {
       peerType: message.peerType,
       content: message.content,
       timestamp: message.timestamp,
+      causation: message.causation,
       handoff: {
         kind: delivery.direction === 'target' ? 'request_to_target' : 'response_to_origin',
         handoffId: instance.handoff_id,

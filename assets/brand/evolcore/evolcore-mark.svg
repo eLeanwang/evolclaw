@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-labelledby="title desc">
+  <title id="title">Evolcore symbol</title>
+  <desc id="desc">Three signal paths converge into a core inside an open circular form.</desc>
+  <g fill="none" stroke="#091512" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M91 34.5A39 39 0 1 0 91 93.5" stroke-width="11"/>
+    <path d="M105 35.5 73 56.5M111 64H74M105 92.5 73 71.5" stroke-width="9"/>
+  </g>
+  <circle cx="66" cy="64" r="10" fill="#42E8B4"/>
+  <circle cx="66" cy="64" r="3.5" fill="#091512"/>
+</svg>

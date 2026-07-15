@@ -1,5 +1,6 @@
 import type { ChannelAdapter, ReplyContext, InteractionRequest, Message, ApprovalRoutingContext } from '../types.js';
 import type { InteractionRouter } from '../core/interaction-router.js';
+import type { CausationContext } from '../core/causation/types.js';
 
 export const BASEAGENT_RUNNER_UNAVAILABLE = 'BASEAGENT_RUNNER_UNAVAILABLE';
 
@@ -44,6 +45,7 @@ export interface PermissionContext {
   peerKey?: string;
   /** Facts required to resolve the approver and choose local vs handoff delivery. */
   approvalRouting?: ApprovalRoutingContext;
+  causation?: CausationContext;
   /** proactive 模式行为策略钩子：PreToolUse 阶段调用，返回 block 则拒绝工具调用 */
   policyHook?: (toolName: string, toolInput: Record<string, unknown>) => { block: boolean; reason?: string } | undefined;
   /** 发送交互卡片前刷新当前 renderer 队列，避免卡片早于事件消息到达 */

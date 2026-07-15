@@ -1,3 +1,5 @@
+import type { CausationContext } from './core/causation/types.js';
+
 // ── Channel config types ──
 // Single-object form: `name` is optional (defaults to channel type name).
 // Array form: `name` is required to distinguish instances.
@@ -300,6 +302,7 @@ export interface SubMessage {
   /** 本条入站消息是否端到端加密（仅 aun 渠道有意义；非 aun 渠道恒 undefined）。逐条保留以支持群聊批量逐条渲染加密标注。 */
   encrypted?: boolean;
   content: string;
+  causation?: CausationContext;
   timestamp?: number;
   images?: Array<{ data: string; mimeType: string }>;
   /** 本条被 @ 的全部 AID（含 self；@all 时含字面 "all"）。仅供消息信封渲染，与过滤/回复用的 mentions 独立。 */
@@ -381,6 +384,7 @@ export interface Message {
   dispatchMode?: string;            // 群聊分发模式，由渠道适配器从服务器信封解析后注入（mention|broadcast）
   timestamp?: number;
   source?: 'user' | 'card-trigger' | 'trigger' | 'owner-inject' | 'handoff';
+  causation?: CausationContext;
   handoffDelivery?: {
     direction: 'target' | 'origin';
     handoffId: string;
@@ -422,6 +426,7 @@ export interface InboundMessage {
   encrypted?: boolean;
   content: string;
   messageId?: string;
+  causation?: CausationContext;
   images?: Array<{ data: string; mimeType: string }>;
   mentions?: Array<{ userId: string; name?: string; key?: string }>;
   /** 本条被 @ 的全部 AID（含 self；@all 时含字面 "all"）。仅供消息信封渲染。 */
@@ -1177,6 +1182,7 @@ export interface OutboundEnvelope {
   agentName: string;
   chatmode: 'interactive' | 'proactive';
   replyContext?: ReplyContext;
+  causation?: CausationContext;
   timestamp: number;
 }
 
@@ -1244,6 +1250,7 @@ export interface MenuQueryRequest {
   type: 'menu.query';
   id: string;
   name: string;          // 通用操作标识（如 'pwd' / 'baseagent' / 'session'）
+  agent?: string;        // ECWeb/Control 外层目标 Agent 路由（AID）
   cmd?: string;          // 逃生口：直接指定内部命令
   args?: Record<string, any>;
 }
@@ -1252,6 +1259,7 @@ export interface MenuOptionsRequest {
   type: 'menu.options';
   id: string;
   name: string;
+  agent?: string;
   cmd?: string;
   args?: Record<string, any>;
 }
@@ -1260,6 +1268,7 @@ export interface MenuUpdateRequest {
   type: 'menu.update';
   id: string;
   name: string;
+  agent?: string;
   value: string;         // 目标值
   cmd?: string;
   // 结构化附加参数。menu 配置项默认使用 args.scope='agent'；
@@ -1271,6 +1280,7 @@ export interface MenuActionRequest {
   type: 'menu.action';
   id: string;
   name: string;          // 动词所属 name（如 'session' / 'system'）
+  agent?: string;
   action: string;        // 'stop' / 'restart' / 'new' / 'rename' / 'delete' / ...
   // cli/exec 透传约定：args 为 { argv?: string[]; command?: string }
   //   argv    优先，已是数组免分词（推荐，无注入面）

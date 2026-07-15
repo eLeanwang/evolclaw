@@ -130,13 +130,10 @@ function parseLimitDurationFlag(flags: Map<string, string | true>, name: string,
 }
 
 const PERMISSION_MODES = new Set<TriggerPermissionMode>([
-  'auto',
-  'bypass',
   'readonly',
-  'plan',
-  'edit',
+  'auto',
   'request',
-  'noask',
+  'bypass',
 ]);
 
 const TRIGGER_EFFORTS = new Set<TriggerEffort>(['low', 'medium', 'high', 'xhigh', 'max']);
@@ -146,7 +143,7 @@ function parsePermissionModeFlag(flags: Map<string, string | true>): { ok: true;
   const raw = flags.get('permission');
   if (!raw || raw === true) return { ok: false, error: '--permission 不能为空' };
   if (!PERMISSION_MODES.has(raw as TriggerPermissionMode)) {
-    return { ok: false, error: '--permission 只接受 auto、bypass、readonly、plan、edit、request 或 noask' };
+    return { ok: false, error: '--permission 只接受 readonly、auto、request 或 bypass' };
   }
   return { ok: true, value: raw as TriggerPermissionMode };
 }

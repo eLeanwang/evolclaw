@@ -700,17 +700,17 @@ export class CommandHandler {
     if (!pendingId) return { matched: false };
 
     const initiatorId = this.interactionRouter.getInitiator(pendingId);
-    if (initiatorId && userId && initiatorId !== userId) {
+    if (initiatorId && initiatorId !== userId) {
       return { matched: true, result: '⚠️ 仅卡片发起者可应答' };
     }
 
-    this.interactionRouter.handle({
+    const handled = this.interactionRouter.handle({
       type: 'interaction.response',
       id: pendingId,
       action: args,
       operatorId: userId,
     });
-    return { matched: true, result: '✓ 已回答' };
+    return { matched: true, result: handled ? '✓ 已回答' : '⚠️ 无法验证应答者身份' };
   }
 
   setProcessor(processor: IMessageProcessor): void {
@@ -1894,7 +1894,7 @@ export class CommandHandler {
     });
     if (!decision.allow) return { ok: false, code: decision.code, error: decision.reason };
 
-    const result = executeResolvedConfigCommand(resolved.command);
+    const result = executeResolvedConfigCommand(resolved.command, { role: subject.role });
     return result.ok
       ? { ok: true, result }
       : { ok: false, code: result.code, error: result.error };

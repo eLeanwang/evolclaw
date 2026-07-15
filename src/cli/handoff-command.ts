@@ -11,6 +11,7 @@ import type {
 } from '../core/handoff/types.js';
 import { HANDOFF_ID_RE } from '../core/handoff/store.js';
 import { isHelpFlag } from './help.js';
+import { AGENT_DELEGATION_TOKEN_ENV } from '../core/auth/agent-delegation.js';
 
 export interface ParsedReturn {
   handoffId?: string;
@@ -184,6 +185,7 @@ Commands:
       sessionId: process.env.EVOLCLAW_SESSION_ID,
       handoffId: parsed.handoffId,
       content: parsed.content,
+      delegationToken: process.env[AGENT_DELEGATION_TOKEN_ENV],
     }, 5000);
     if (!result) {
       console.error('✗ daemon 暂时不可用');

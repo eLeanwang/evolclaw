@@ -4,10 +4,11 @@ import {
   ensureFile,
   listFields,
   read,
-  readFieldWithSource,
+  resolveEffectiveFieldWithSource,
   resolveEffectiveWithSources,
   validateConfigFile,
   write,
+  type EffectiveFieldSource,
   type FieldRoute,
   type Selector,
 } from './config-manager.js';
@@ -41,7 +42,7 @@ export type ConfigExecutionResult =
       field: string;
       value: unknown;
       scope: ResolvedConfigOp['configScope'];
-      source?: { target: ConfigTarget; file: string };
+      source?: { target: EffectiveFieldSource; file?: string };
     }
   | {
       ok: true;
@@ -74,10 +75,17 @@ export type ConfigExecutionResult =
   | { ok: true; subcommand: 'boots'; boots: BootLogEntry[] }
   | { ok: false; code: string; error: string };
 
-export function executeResolvedConfigCommand(command: ResolvedConfigCommand): ConfigExecutionResult {
+export interface ConfigExecutionOptions {
+  role?: string;
+}
+
+export function executeResolvedConfigCommand(
+  command: ResolvedConfigCommand,
+  options: ConfigExecutionOptions = {},
+): ConfigExecutionResult {
   try {
-    if (command.kind === 'field') return executeResolvedConfigOperation(command);
-    if (command.kind === 'scoped') return executeScoped(command);
+    if (command.kind === 'field') return executeResolvedConfigOperation(command, options);
+    if (command.kind === 'scoped') return executeScoped(command, options);
     return executeGlobal(command);
   } catch (error) {
     if (error instanceof ConfigError) return { ok: false, code: error.code, error: error.message };
@@ -85,9 +93,12 @@ export function executeResolvedConfigCommand(command: ResolvedConfigCommand): Co
   }
 }
 
-export function executeResolvedConfigOperation(op: ResolvedConfigOp): ConfigExecutionResult {
+export function executeResolvedConfigOperation(
+  op: ResolvedConfigOp,
+  options: ConfigExecutionOptions = {},
+): ConfigExecutionResult {
   try {
-    if (op.subcommand === 'get') return executeGet(op);
+    if (op.subcommand === 'get') return executeGet(op, options);
     if (op.subcommand === 'set') return executeSet(op);
     return executeUnset(op);
   } catch (error) {
@@ -96,8 +107,8 @@ export function executeResolvedConfigOperation(op: ResolvedConfigOp): ConfigExec
   }
 }
 
-function executeScoped(command: ResolvedScopedConfigCommand): ConfigExecutionResult {
-  const selector = selectorFor(command);
+function executeScoped(command: ResolvedScopedConfigCommand, options: ConfigExecutionOptions): ConfigExecutionResult {
+  const selector = selectorFor(command, options);
   const target = targetForScope(command.configScope);
   if (command.subcommand === 'show') {
     return {
@@ -118,7 +129,7 @@ function executeScoped(command: ResolvedScopedConfigCommand): ConfigExecutionRes
     }
     const effective: Record<string, unknown> = {};
     for (const [key, item] of Object.entries(resolveEffectiveWithSources(selector))) {
-      effective[key] = { value: item.value, source: item.source.target };
+      effective[key] = { value: item.value, source: item.source };
     }
     return { ok: true, subcommand: 'effective', scope: command.configScope, effective };
   }
@@ -201,8 +212,8 @@ function executeGlobal(command: ResolvedGlobalConfigCommand): ConfigExecutionRes
   return { ok: true, subcommand: 'boots', boots: readBootLog(command.count ?? 10) };
 }
 
-function executeGet(op: ResolvedConfigOp): ConfigExecutionResult {
-  const selector = selectorFor(op);
+function executeGet(op: ResolvedConfigOp, options: ConfigExecutionOptions): ConfigExecutionResult {
+  const selector = selectorFor(op, options);
   if (op.configScope === 'process') {
     const config = read<Record<string, unknown>>(ConfigTarget.Process, selector) || {};
     return {
@@ -214,14 +225,19 @@ function executeGet(op: ResolvedConfigOp): ConfigExecutionResult {
     };
   }
 
-  const withSource = readFieldWithSource(op.field, selector);
+  const withSource = resolveEffectiveFieldWithSource(op.field, selector);
   return {
     ok: true,
     subcommand: 'get',
     field: op.field,
     value: withSource?.value ?? null,
     scope: op.configScope,
-    ...(withSource ? { source: { target: withSource.source.target, file: withSource.source.file } } : {}),
+    ...(withSource.source ? {
+      source: {
+        target: withSource.source,
+        ...(withSource.file ? { file: withSource.file } : {}),
+      },
+    } : {}),
   };
 }
 
@@ -276,10 +292,14 @@ function executeUnset(op: ResolvedConfigOp): ConfigExecutionResult {
   return { ok: true, subcommand: 'unset', field: op.field, removed, scope: op.configScope };
 }
 
-function selectorFor(command: Pick<ResolvedConfigCommand, 'self' | 'peerKey'>): Selector {
+function selectorFor(
+  command: Pick<ResolvedConfigCommand, 'self' | 'peerKey'>,
+  options: ConfigExecutionOptions = {},
+): Selector {
   return {
     ...(command.self ? { self: command.self } : {}),
     ...(command.peerKey ? { peerKey: command.peerKey } : {}),
+    ...(options.role ? { role: options.role } : {}),
   };
 }
 

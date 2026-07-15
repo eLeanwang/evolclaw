@@ -27,6 +27,7 @@ import { parsePeerKey } from '../core/relation/peer-identity.js';
 import { resolvePeerRoleDetail } from '../config/peer-role-resolver.js';
 import { authorizeCommand } from '../core/command/command-permission.js';
 import type { CommandIntent, CommandScope } from '../types.js';
+import { AGENT_DELEGATION_TOKEN_ENV } from '../core/auth/agent-delegation.js';
 
 const ALL_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max', 'auto'];
 
@@ -67,7 +68,12 @@ function isManagedSessionEnv(args: readonly string[]): boolean {
 async function runCtlCommand(cmd: string, formatJson: boolean): Promise<string> {
   const sessionId = process.env.EVOLCLAW_SESSION_ID;
   if (!sessionId) fail(formatJson, 'NO_SESSION', 'EVOLCLAW_SESSION_ID 未设置');
-  const result = await ipcQuery(resolvePaths().socket, { type: 'ctl', cmd, sessionId }, 10_000) as any;
+  const result = await ipcQuery(resolvePaths().socket, {
+    type: 'ctl',
+    cmd,
+    sessionId,
+    delegationToken: process.env[AGENT_DELEGATION_TOKEN_ENV],
+  }, 10_000) as any;
   if (!result) fail(formatJson, 'DAEMON_UNAVAILABLE', '无法连接 evolclaw 服务');
   if (!result.ok) fail(formatJson, 'CTL_FAILED', result.error || 'ctl 执行失败');
   return String(result.result || '');

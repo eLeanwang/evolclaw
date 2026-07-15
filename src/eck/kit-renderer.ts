@@ -207,12 +207,12 @@ export function renderKitSections(ctx: KitRenderContext, manifestFile: string = 
 }
 
 export function cleanEckDebug(): void {
+  if (!isEckSnapshotsEnabled()) return;
+
   const dir = eckDebugDir();
   const cutoff = Date.now() - 24 * 60 * 60 * 1000;
-  const snapshotsEnabled = isEckSnapshotsEnabled();
   try {
     for (const f of fs.readdirSync(dir)) {
-      if (!snapshotsEnabled && /^(vars|context|fragments|manifest|msg-render)-/.test(f)) continue;
       const fp = path.join(dir, f);
       try { if (fs.statSync(fp).mtimeMs < cutoff) fs.unlinkSync(fp); } catch { /* skip */ }
     }
@@ -286,22 +286,32 @@ const PARAM_DESCRIPTIONS: Record<string, string> = {
 function writeDebugFiles(ctx: KitRenderContext, output: string, fragmentsOutput: string, diagnostics: SectionDiagnostic[]): void {
   if (!isEckSnapshotsEnabled()) return;
 
-  const now = new Date();
-  const ts = now.toISOString().replace(/[T:.]/g, '-').slice(0, 19);
-  const dir = eckDebugDir();
+  try {
+    const now = new Date();
+    const ts = now.toISOString().replace(/[T:.]/g, '-').slice(0, 19);
+    const dir = eckDebugDir();
+    fs.mkdirSync(dir, { recursive: true });
 
-  const varsData = {
-    timestamp: now.toISOString(),
-    sessionId: ctx.sessionId,
-    params: Object.entries(ctx.vars)
-      .filter(([, v]) => v !== undefined && v !== null)
-      .map(([name, value]) => ({ name, value, description: PARAM_DESCRIPTIONS[name] || '' })),
-  };
+    const write = (file: string, content: string): void => {
+      fs.writeFile(path.join(dir, file), content, (error) => {
+        if (error) logger.debug(`[KitRenderer] debug write failed (${file}): ${error.message}`);
+      });
+    };
+    const varsData = {
+      timestamp: now.toISOString(),
+      sessionId: ctx.sessionId,
+      params: Object.entries(ctx.vars)
+        .filter(([, v]) => v !== undefined && v !== null)
+        .map(([name, value]) => ({ name, value, description: PARAM_DESCRIPTIONS[name] || '' })),
+    };
 
-  fs.writeFile(path.join(dir, `vars-${ts}.json`), JSON.stringify(varsData, null, 2), () => {});
-  if (output) fs.writeFile(path.join(dir, `context-${ts}.md`), output, () => {});
-  if (fragmentsOutput) fs.writeFile(path.join(dir, `fragments-${ts}.md`), fragmentsOutput, () => {});
-  fs.writeFile(path.join(dir, `manifest-${ts}.md`), formatManifestDiagnostics(ctx, diagnostics), () => {});
+    write(`vars-${ts}.json`, JSON.stringify(varsData, null, 2));
+    if (output) write(`context-${ts}.md`, output);
+    if (fragmentsOutput) write(`fragments-${ts}.md`, fragmentsOutput);
+    write(`manifest-${ts}.md`, formatManifestDiagnostics(ctx, diagnostics));
+  } catch (e) {
+    logger.debug(`[KitRenderer] debug write failed: ${e instanceof Error ? e.message : String(e)}`);
+  }
 }
 function formatManifestDiagnostics(ctx: KitRenderContext, diagnostics: SectionDiagnostic[]): string {
   const STATUS_ICON: Record<ResolveStatus, string> = {

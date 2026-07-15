@@ -11,9 +11,6 @@ data/*
 dns_cache.db*
 backups/
 
-# aunproxy（独立仓库，嵌套工作树中）
-aunproxy/
-
 # kits 同步元数据（运行时生成）
 kits/.kits-version
 
@@ -98,10 +95,6 @@ scripts/
 tmp_*.png
 tmp_*.jpg
 
-# Hermes（已归档）
-hermes/
-
-
 # AUN 辅助目录 / 示例 / 演示 / 外部 SDK
 aun-cli/
 # aun/ 已拆分为独立仓库，不在本仓库跟踪
@@ -158,8 +151,11 @@ src/experimental/
 !/tests/unit/msg-history.test.ts
 !/tests/unit/session-renew.test.ts
 !/tests/unit/text-inference.test.ts
+!/tests/unit/causation-context.test.ts
 !/tests/unit/task-runtime-context.test.ts
 !/tests/unit/permission-mode-contract.test.ts
+!/tests/unit/agent-delegation-aun-send.test.ts
+!/tests/unit/aun-daemon-send.test.ts
 !/tests/core/
 !/tests/core/command/
 !/tests/core/command/*.test.ts

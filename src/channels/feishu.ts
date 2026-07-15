@@ -1357,7 +1357,7 @@ export function buildResolvedV2(
 
   const labelMap: Record<string, string> = {
     'allow': '✅ 已允许',
-    'always': '🔓 已设为始终允许',
+    'always': '⏱ 已授权同操作 30 分钟',
     'deny': '❌ 已拒绝',
     'cancel': '取消',
   };

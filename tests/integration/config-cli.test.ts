@@ -183,9 +183,7 @@ describe('integration: ec config CLI', () => {
     const r = await runJson(['effective', '--self', AID]);
     expect(r.ok).toBe(true);
     expect(r.effective.aid).toEqual({ value: AID, source: 'agent' });
-    // v3: 所有字段在顶层（不再有 effective.behavior 子树）
-    expect(r.effective.chatmode.value.private).toBe('proactive');
-    expect(r.effective.chatmode.source).toBe('agent');
+    expect(r.effective['chatmode.private']).toEqual({ value: 'proactive', source: 'agent' });
   });
 
   it('validate is read-only and does not rewrite or touch the config file', async () => {

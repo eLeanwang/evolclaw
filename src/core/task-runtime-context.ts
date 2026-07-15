@@ -1,3 +1,6 @@
+import { normalizeCausation } from './causation/context.js';
+import type { CausationContext } from './causation/types.js';
+
 export const TASK_RUNTIME_CONTEXT_ENV = 'EVOLCLAW_TASK_RUNTIME_CONTEXT';
 
 export interface TaskRuntimeContext {
@@ -13,6 +16,7 @@ export interface TaskRuntimeContext {
   peerRole?: string;
   threadId?: string;
   handoffIds?: string[];
+  causation?: CausationContext;
 }
 
 interface TaskRuntimeContextIpcResponse {
@@ -45,6 +49,7 @@ function normalizeTaskRuntimeContext(value: Record<string, unknown>): TaskRuntim
     peerRole: optionalString(value.peerRole),
     threadId: optionalString(value.threadId),
     handoffIds: handoffIds?.length ? handoffIds : undefined,
+    causation: normalizeCausation(value.causation),
   };
 }
 

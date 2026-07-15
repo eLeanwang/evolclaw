@@ -9,6 +9,7 @@ import type {
 import type { MessageQueue } from '../core/message/message-queue.js';
 import type { SessionManager } from '../core/session/session-manager.js';
 import type { TriggerDefinition, TriggerReply } from '../trigger/types.js';
+import type { CausationContext } from '../core/causation/types.js';
 
 interface PendingConversation {
   resolve: (reply: TriggerReply) => void;
@@ -29,6 +30,7 @@ export interface DaemonConversationContext {
   projectPath: string;
   baseagent: string;
   session: Session;
+  causation: CausationContext;
 }
 
 export interface DaemonChannelOptions {
@@ -90,6 +92,7 @@ export class DaemonChannel implements ChannelAdapter {
       messageId: runId,
       timestamp: Date.now(),
       source: 'trigger',
+      causation: ctx.causation,
       replyContext: { metadata: { triggerRunId: runId } },
       triggerMeta: {
         triggerId: ctx.trigger.id,

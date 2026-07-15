@@ -9,7 +9,7 @@
 import type { Config, InteractionRequest } from '../types.js';
 import type { AgentPlugin, AgentInstance, AgentCallbacks } from '../core/baseagent-loader.js';
 import type { AgentEvent, AgentRunnerFull, AgentRunOverrides, ModelSwitcher, PermissionContext, PermissionModeInfo } from './runner-types.js';
-import { checkBlacklist, checkReadonly, checkDangerousCommand, checkHClassWrite, isEvolclawHandoffReturnCommand, requestDangerousCommandPermission, type PermissionGateway } from '../core/permission.js';
+import { checkBlacklist, checkReadonly, checkDangerousCommand, checkHClassWrite, checkEvolclawFileCommandPath, isEvolclawHandoffReturnCommand, requestDangerousCommandPermission, type PermissionGateway } from '../core/permission.js';
 import { authorizeEcCommand } from '../core/command/ec-command-permission.js';
 import { normalizePermissionMode } from '../core/permission-mode.js';
 import { buildCodexHClassFilesystemRules, isSameOrDescendant, resolveProtectedCandidate } from '../core/protected-paths.js';
@@ -1756,6 +1756,8 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
 
     if (toolName === 'Bash' && !hasPermissionExpansion) {
       const command = typeof blacklist.updatedInput.command === 'string' ? blacklist.updatedInput.command : '';
+      const ecFile = checkEvolclawFileCommandPath(command, operationCwd);
+      if (ecFile.behavior === 'deny') return 'deny';
       if (isEvolclawHandoffReturnCommand(command)) return 'allow';
       const ecDecision = authorizeEcCommand(command, {
         actorId: permissionContext?.userId,

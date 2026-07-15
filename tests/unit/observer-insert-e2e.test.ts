@@ -6,7 +6,7 @@ import {
   appendHintAdd, appendHintRemove, consumeHints,
   hintsToSubMessages, composeHintFallback,
 } from '../../src/core/message/pending-hints.js';
-import { renderMessageBody } from '../../src/agents/message-renderer.js';
+import { renderMessageBody } from '../../src/eck/message-renderer.js';
 import { chatDirPath } from '../../src/core/session/session-fs-store.js';
 import { getPackageRoot } from '../../src/paths.js';
 import type { SubMessage } from '../../src/types.js';

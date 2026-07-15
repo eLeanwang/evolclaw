@@ -24,8 +24,8 @@
       "properties": {
         "eckSnapshots": {
           "type": "boolean",
-          "default": true,
-          "description": "是否写入 ECK 上下文与消息渲染旁路快照"
+          "default": false,
+          "description": "是否写入可能包含敏感上下文的 ECK 旁路调试快照"
         }
       }
     },

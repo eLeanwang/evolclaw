@@ -32,7 +32,7 @@ import {
 } from './schema-registry.js';
 import { mergeLayers, expandVars, buildEnvResolver, type EnvScope } from './merge.js';
 import { normalizeAgentLifecycle } from './lifecycle.js';
-import { mergeWithRoleConstraints } from './role-constraints.js';
+import { getRoleFieldConstraint, getRoleFieldConstraints, mergeWithRoleConstraints } from './role-constraints.js';
 import { getBuiltinRolesConfig, isReservedRoleName } from './builtin-roles.js';
 import type {
   ProcessConfig,
@@ -443,17 +443,26 @@ function ensureSchemaVersion(value: any, version: number): any {
 
 function validateOrThrow(schema: SchemaEntry, value: unknown, target: ConfigTarget): void {
   const ok = schema.validate(value);
-  if (!ok) {
-    const errs = (schema.validate.errors || [])
-      .map(e => {
+  const scopeErrors = validateProcessOnlyFields(target, value);
+  if (!ok || scopeErrors.length > 0) {
+    const errs = [
+      ...scopeErrors,
+      ...(schema.validate.errors || []).map(e => {
         const extra = typeof (e.params as any)?.additionalProperty === 'string'
           ? ` (additionalProperty=${(e.params as any).additionalProperty})`
           : '';
         return `${e.instancePath || '/'} ${e.message}${extra}`;
-      })
-      .join('; ');
+      }),
+    ].join('; ');
     throw new ConfigError('SCHEMA_INVALID', `${target} 閰嶇疆涓嶅悎 schema(${schema.logicalName}.v${schema.version}): ${errs}`);
   }
+}
+
+function validateProcessOnlyFields(target: ConfigTarget, value: unknown): string[] {
+  if (target === ConfigTarget.Process || !value || typeof value !== 'object') return [];
+  const debug = (value as Record<string, unknown>).debug;
+  if (!debug || typeof debug !== 'object' || !Object.prototype.hasOwnProperty.call(debug, 'eckSnapshots')) return [];
+  return ['/debug/eckSnapshots is only allowed in process config'];
 }
 
 /**
@@ -464,13 +473,17 @@ export function validateConfig(target: ConfigTarget, value: unknown): string[] {
   const schema = loadSchema(TARGET_SCHEMA[target]);
   const withVer = ensureSchemaVersion(value as any, schema.version);
   const ok = schema.validate(withVer);
-  if (ok) return [];
-  return (schema.validate.errors || []).map(e => {
-    const extra = typeof (e.params as any)?.additionalProperty === 'string'
-      ? ` (additionalProperty=${(e.params as any).additionalProperty})`
-      : '';
-    return `${e.instancePath || '/'} ${e.message}${extra}`;
-  });
+  const errors = validateProcessOnlyFields(target, withVer);
+  if (ok && errors.length === 0) return [];
+  return [
+    ...errors,
+    ...(schema.validate.errors || []).map(e => {
+      const extra = typeof (e.params as any)?.additionalProperty === 'string'
+        ? ` (additionalProperty=${(e.params as any).additionalProperty})`
+        : '';
+      return `${e.instancePath || '/'} ${e.message}${extra}`;
+    }),
+  ];
 }
 
 export function validateConfigFile(
@@ -629,7 +642,7 @@ export function resolveEffective(sel: Selector, opts: ReadOpts = {}): EffectiveA
 
       // 鎻愬彇琛屼负瀛楁浣滀负 relationConfig
       const behaviorFields: Record<string, any> = {};
-      const behaviorFieldNames = [
+      const behaviorFieldNames = new Set([
         'permissionMode',
         'active_baseagent',
         'baseagents.claude.model',
@@ -643,8 +656,11 @@ export function resolveEffective(sel: Selector, opts: ReadOpts = {}): EffectiveA
         'proactive',
         'session_renew',
         'render',
-        'sessionManifests'
-      ];
+        'sessionManifests',
+        // Custom role policies may target any baseagent (for example codex/gemini),
+        // so they must participate in the same constraint pass as the legacy fields.
+        ...Object.keys(getRoleFieldConstraints(role, sel.self)),
+      ]);
 
       for (const field of behaviorFieldNames) {
         if (field.includes('.')) {
@@ -866,11 +882,20 @@ export interface ValueWithSource<T = any> {
   source: FieldSource;
 }
 
+export type EffectiveFieldSource = 'process' | 'relation' | 'role' | 'agent' | 'defaults';
+
+/** Final effective scalar value plus the layer that actually determined it. */
+export interface EffectiveFieldWithSource<T = any> {
+  value: T | undefined;
+  source: EffectiveFieldSource | null;
+  file?: string;
+}
+
 /**
  * 璇诲彇鍗曚釜瀛楁骞惰繑鍥炴潵婧愪俊鎭€?
  * 娌胯鐩栭摼鏌ユ壘锛岃繑鍥炵涓€涓畾涔夎瀛楁鐨勫眰绾с€?
  */
-export function readFieldWithSource(
+export function readConfiguredFieldWithSource(
   field: string,
   sel: Selector,
   opts: ReadOpts = {}
@@ -915,33 +940,112 @@ export function readFieldWithSource(
   return null;
 }
 
+export interface ResolveEffectiveSourcesOpts extends ReadOpts {
+  fields?: string[];
+}
+
 /**
- * 瑙ｆ瀽 effective 閰嶇疆骞舵爣娉ㄦ瘡瀛楁鏉ユ簮銆?
- * 杩斿洖涓€涓璞★紝姣忎釜瀛楁閮藉甫鏈?value 鍜?source銆?
+ * Resolve effective values and their deciding source through one implementation.
+ * Without fields, all leaf paths are returned as a flat dot-path map.
  */
 export function resolveEffectiveWithSources(
   sel: Selector,
-  opts: ReadOpts = {}
-): Record<string, ValueWithSource> {
-  const effective = resolveEffective(sel, opts);
-  const result: Record<string, ValueWithSource> = {};
+  opts: ResolveEffectiveSourcesOpts = {},
+): Record<string, EffectiveFieldWithSource> {
+  const { fields, ...readOpts } = opts;
+  const effective = resolveEffective(sel, readOpts);
+  const paths = fields ?? listEffectiveLeafPaths(effective);
+  const result: Record<string, EffectiveFieldWithSource> = {};
 
-  // 瀵规瘡涓《灞傚瓧娈垫煡鎵炬潵婧?
-  for (const [key, value] of Object.entries(effective)) {
-    if (value === undefined) continue;
+  for (const field of paths) {
+    const configured = readConfiguredFieldWithSource(field, sel, readOpts);
+    const value = readNestedField(effective, field);
+    let source = configured
+      ? configTargetToEffectiveSource(configured.source.target)
+      : null;
 
-    const withSource = readFieldWithSource(key, sel, opts);
-    if (withSource) {
-      result[key] = withSource;
-    } else {
-      // 濡傛灉鎵句笉鍒版潵婧愶紙鍙兘鏄粯璁ゅ€硷級锛屾爣璁颁负 agent
-      const file = path.relative(resolvePaths().root, targetPath(ConfigTarget.Agent, sel));
-      result[key] = {
-        value,
-        source: { target: ConfigTarget.Agent, file }
-      };
+    if (value !== undefined && sel.self && sel.peerKey && sel.role) {
+      const constraint = getRoleFieldConstraint(sel.role, field, sel.self);
+      if (constraint && (
+        !constraint.allowOverride
+        || !configured
+        || !effectiveFieldValueEqual(value, configured.value)
+      )) {
+        source = 'role';
+      }
     }
+
+    result[field] = {
+      value,
+      source,
+      ...(configured && source !== 'role' ? { file: configured.source.file } : {}),
+    };
   }
 
   return result;
+}
+
+/** Thin single-field view over resolveEffectiveWithSources(). */
+export function resolveEffectiveFieldWithSource<T = any>(
+  field: string,
+  sel: Selector,
+  opts: ReadOpts = {},
+): EffectiveFieldWithSource<T> {
+  return (resolveEffectiveWithSources(sel, { ...opts, fields: [field] })[field]
+    ?? { value: undefined, source: null }) as EffectiveFieldWithSource<T>;
+}
+
+function readNestedField(value: any, field: string): any {
+  let current = value;
+  for (const part of field.split('.')) {
+    if (current == null || typeof current !== 'object') return undefined;
+    current = current[part];
+  }
+  return current;
+}
+
+function effectiveFieldValueEqual(left: unknown, right: unknown): boolean {
+  if (Object.is(left, right)) return true;
+  if (!left || !right || typeof left !== 'object' || typeof right !== 'object') return false;
+  try {
+    return JSON.stringify(left) === JSON.stringify(right);
+  } catch {
+    return false;
+  }
+}
+
+function listEffectiveLeafPaths(value: Record<string, any>): string[] {
+  const paths: string[] = [];
+  const visit = (current: any, prefix: string): void => {
+    if (current === undefined) return;
+    if (!current || typeof current !== 'object' || Array.isArray(current)) {
+      if (prefix) paths.push(prefix);
+      return;
+    }
+    const entries = Object.entries(current).filter(([, child]) => child !== undefined);
+    // Dotted dictionary keys (for example role field permissions) cannot be
+    // represented unambiguously as another dot-path segment.
+    if (prefix && entries.some(([key]) => key.includes('.'))) {
+      paths.push(prefix);
+      return;
+    }
+    if (entries.length === 0) {
+      if (prefix) paths.push(prefix);
+      return;
+    }
+    for (const [key, child] of entries) {
+      if (!prefix && key === 'behavior') continue; // compatibility mirror of top-level behavior fields
+      visit(child, prefix ? `${prefix}.${key}` : key);
+    }
+  };
+  visit(value, '');
+  return paths;
+}
+
+function configTargetToEffectiveSource(target: ConfigTarget): EffectiveFieldSource | null {
+  if (target === ConfigTarget.Process) return 'process';
+  if (target === ConfigTarget.Relation) return 'relation';
+  if (target === ConfigTarget.Agent) return 'agent';
+  if (target === ConfigTarget.Defaults) return 'defaults';
+  return null;
 }

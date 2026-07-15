@@ -1,4 +1,5 @@
 import { EventEmitter } from 'events';
+import type { CausationCarrier } from './causation/types.js';
 
 // ── 系统事件 ──
 export type SystemEvent =
@@ -93,7 +94,7 @@ export type AgentLifecycleEvent =
   | { type: 'agent:error'; aid: string; action?: string; error: string; timestamp?: number }
   | { type: 'agent:baseagent-changed'; aid: string; baseagent: string; previousBaseagent?: string; scope: 'agent'; timestamp?: number };
 export type GatewayEvent =
-  | SystemEvent
+  (SystemEvent
   | ChannelEvent
   | SessionEvent
   | MessageEvent
@@ -103,7 +104,7 @@ export type GatewayEvent =
   | RunnerBusEvent
   | SelfHealEvent
   | TriggerEvent
-  | AgentLifecycleEvent;
+  | AgentLifecycleEvent) & CausationCarrier;
 
 export class EventBus extends EventEmitter {
   publish(event: GatewayEvent): void {

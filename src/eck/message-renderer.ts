@@ -208,6 +208,8 @@ function writeMessageDebug(sessionId: string, items: SubMessage[], body: string)
 
   try {
     const ts = new Date().toISOString().replace(/[T:.]/g, '-').slice(0, 19);
+    const dir = eckDebugDir();
+    fs.mkdirSync(dir, { recursive: true });
     const out = [
       `# Message Render`,
       `- sessionId: ${sessionId}`,
@@ -218,8 +220,10 @@ function writeMessageDebug(sessionId: string, items: SubMessage[], body: string)
       ``,
       body,
     ].join('\n');
-    fs.writeFile(path.join(eckDebugDir(), `msg-render-${ts}.md`), out, () => {});
+    fs.writeFile(path.join(dir, `msg-render-${ts}.md`), out, (error) => {
+      if (error) logger.debug(`[MessageRenderer] debug write failed: ${error.message}`);
+    });
   } catch (e) {
-    logger.debug(`[MessageRenderer] debug write failed: ${e}`);
+    logger.debug(`[MessageRenderer] debug write failed: ${e instanceof Error ? e.message : String(e)}`);
   }
 }

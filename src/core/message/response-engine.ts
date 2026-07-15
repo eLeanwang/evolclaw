@@ -22,6 +22,9 @@ import { renderKitSections, type KitRenderContext } from '../../eck/kit-renderer
 import { renderMessageBody, type RenderMessageResult } from '../../eck/message-renderer.js';
 import { syncGroupRulesContext } from '../../eck/group-rules-sync.js';
 import { consumeHints, hintsToSubMessages, composeHintFallback } from './pending-hints.js';
+import { createRootCausation, deriveCausation, normalizeCausation } from '../causation/context.js';
+import { recordCausationLink, recordCausationSpan } from '../causation/audit.js';
+import type { CausationContext } from '../causation/types.js';
 import type { SubMessage } from '../../types.js';
 import { normalizeBaseagent } from '../../agents/baseagent.js';
 import type { InteractionRouter } from '../interaction-router.js';
@@ -483,11 +486,15 @@ export class ResponseEngine implements IMessageProcessor {
     this.agentDelegationRegistry = registry;
   }
 
-  async returnHandoffResult(params: { sessionId?: string; handoffId?: string; content: string }): Promise<HandoffReturnResponse> {
+  async returnHandoffResult(params: { sessionId?: string; handoffId?: string; content: string; delegationToken?: string }): Promise<HandoffReturnResponse> {
     if (!this.handoffRuntime) {
       return { ok: false, code: 'HANDOFF_NOT_FOUND', error: 'handoff runtime not configured' };
     }
     if (!params.sessionId) return { ok: false, code: 'HANDOFF_ID_REQUIRED', error: 'current session is required' };
+    if (this.agentDelegationRegistry) {
+      const delegation = this.agentDelegationRegistry.validate(params.delegationToken, params.sessionId);
+      if (!delegation.ok) return { ok: false, code: delegation.code, error: delegation.reason };
+    }
     const runtime = this.activeTaskRuntimeContexts.get(params.sessionId);
     const session = await this.sessionManager.getSessionById(params.sessionId);
     const selfAid = runtime?.selfAid || session?.selfAID;
@@ -498,6 +505,7 @@ export class ResponseEngine implements IMessageProcessor {
       handoffId: params.handoffId,
       currentTaskHandoffIds: runtime?.handoffIds,
       content: params.content,
+      causation: runtime?.causation,
     });
   }
 
@@ -782,7 +790,7 @@ export class ResponseEngine implements IMessageProcessor {
     '/new', '/pwd', '/help', '/status', '/restart',
     '/model', '/effort', '/agent', '/slist', '/session', '/rename', '/repair', '/fork',
     '/stop', '/clear', '/compact', '/del', '/perm', '/file', '/check',
-    '/s ', '/name ', '/rewind', '/rw', '/rw ', '/activity', '/chatmode',
+    '/s ', '/name ', '/rewind', '/rw', '/rw ', '/activity', '/observable', '/chatmode',
     '/aid', '/upgrade', '/evolagent',
   ];
 
@@ -1031,12 +1039,29 @@ export class ResponseEngine implements IMessageProcessor {
 
     // 为本次任务处理生成唯一 task_id（客户端生成，格式 task-{10hex}）
     const taskId = `task-${crypto.randomUUID().replace(/-/g, '').slice(0, 10)}`;
+    const inputCausation = normalizeCausation(message.causation) ?? createRootCausation();
+    const taskCausation: CausationContext = deriveCausation(inputCausation);
+    recordCausationSpan(taskCausation, 'task.run', {
+      status: 'started',
+      refs: { taskId, sessionId: session.id, messageId: message.messageId },
+    });
+    for (const item of message.items ?? []) {
+      const linked = normalizeCausation(item.causation);
+      if (!linked || linked.spanId === inputCausation.spanId) continue;
+      recordCausationLink({
+        spanId: taskCausation.spanId,
+        linkedTraceId: linked.traceId,
+        linkedSpanId: linked.spanId,
+        relation: 'batch_input',
+      });
+    }
     const triggerRunId = message.triggerMeta?.runId;
     const withTaskMetadata = (metadata?: Record<string, any>): Record<string, any> => ({
       ...(metadata ?? {}),
       taskId,
       chatmode,
       ...(triggerRunId ? { triggerRunId } : {}),
+      causation: taskCausation,
     });
 
     // ─── 解析 self/peer/config（响应模式解析的输入）───
@@ -1194,6 +1219,7 @@ export class ResponseEngine implements IMessageProcessor {
       agentName: agentNameForStats,
       chatmode: isProactive ? 'proactive' : 'interactive',
       replyContext: taskReplyContext(),
+      causation: taskCausation,
     });
 
     try {
@@ -1268,7 +1294,7 @@ export class ResponseEngine implements IMessageProcessor {
 
       // 记录开始处理
       const taskEncrypt = message.replyContext?.metadata?.encrypted != null ? !!(message.replyContext.metadata.encrypted) : undefined;
-      this.eventBus.publish({ type: 'task:started', sessionId: session.id, agentName: agentNameForStats, encrypt: taskEncrypt, chatmode });
+      this.eventBus.publish({ type: 'task:started', sessionId: session.id, agentName: agentNameForStats, encrypt: taskEncrypt, chatmode, causation: taskCausation });
       this.touchAgentActivity(channelKey);
       adapter.send(envelope, { kind: 'status.started' }).catch(() => {});
 
@@ -1398,6 +1424,7 @@ export class ResponseEngine implements IMessageProcessor {
         chatType: authChatType,
         selfAid: session.selfAID || message.selfAID,
         peerKey: authPeerKey,
+        causation: taskCausation,
         approvalRouting,
         flushPending: async () => {
           await renderer.flush(false);
@@ -1789,6 +1816,7 @@ export class ResponseEngine implements IMessageProcessor {
           peerRole,
           threadId: session.threadId || undefined,
           handoffIds: v2HandoffId && v2HandoffDirection === 'target' ? [v2HandoffId] : undefined,
+          causation: taskCausation,
         };
         this.activeTaskRuntimeContexts.set(session.id, taskRuntimeContext);
         runtimeEnv = buildTaskRuntimeEnv(taskRuntimeContext);
@@ -1855,7 +1883,8 @@ export class ResponseEngine implements IMessageProcessor {
               resetTimer,
               shouldSuppress,
               proactive,
-              resolvedMode ? { mode: resolvedMode.mode, state: modeState } : undefined
+              resolvedMode ? { mode: resolvedMode.mode, state: modeState } : undefined,
+              taskCausation,
             );
             if (streamResult.isError && !streamHitContextLimit(streamResult)) {
               const streamErrorText = getStreamErrorText(streamResult);
@@ -2194,7 +2223,7 @@ export class ResponseEngine implements IMessageProcessor {
         } else {
           if (message.triggerMeta) {
             const triggerRunId = message.triggerMeta.runId ?? message.messageId ?? messageId;
-            this.eventBus.publish({ type: 'trigger:failed', triggerId: message.triggerMeta.triggerId, name: message.triggerMeta.triggerName ?? '', runId: triggerRunId, originTriggerId: message.triggerMeta.triggerId, messageId: messageId, error: errorSummary, targetChannel: message.channel, targetChannelId: message.channelId, fireTime: message.triggerMeta.fireTime ?? 0, phase: 'execute' });
+            this.eventBus.publish({ type: 'trigger:failed', triggerId: message.triggerMeta.triggerId, name: message.triggerMeta.triggerName ?? '', runId: triggerRunId, originTriggerId: message.triggerMeta.triggerId, messageId: messageId, error: errorSummary, targetChannel: message.channel, targetChannelId: message.channelId, fireTime: message.triggerMeta.fireTime ?? 0, phase: 'execute', causation: taskCausation });
           }
 
           this.eventBus.publish({
@@ -2203,8 +2232,10 @@ export class ResponseEngine implements IMessageProcessor {
             error: errorSummary,
             errorType,
             agentName: agentNameForStats,
-            terminalReason: streamResult.terminalReason
+            terminalReason: streamResult.terminalReason,
+            causation: taskCausation,
           });
+          recordCausationSpan(taskCausation, 'task.run', { status: 'failed', refs: { taskId, sessionId: session.id, messageId }, reason: errorType });
 
           // 系统级 subtype 仍累计错误计数，供 /status 诊断使用
           if (isInfraError(rawSubtype, streamResult.terminalReason)) {
@@ -2378,9 +2409,9 @@ export class ResponseEngine implements IMessageProcessor {
         if (message.triggerMeta) {
           const triggerRunId = message.triggerMeta.runId ?? message.messageId ?? messageId;
           if (interruptReason) {
-            this.eventBus.publish({ type: 'trigger:skipped', triggerId: message.triggerMeta.triggerId, name: message.triggerMeta.triggerName ?? '', runId: triggerRunId, originTriggerId: message.triggerMeta.triggerId, reason: 'interrupted', targetChannel: message.channel, targetChannelId: message.channelId, fireTime: message.triggerMeta.fireTime });
+            this.eventBus.publish({ type: 'trigger:skipped', triggerId: message.triggerMeta.triggerId, name: message.triggerMeta.triggerName ?? '', runId: triggerRunId, originTriggerId: message.triggerMeta.triggerId, reason: 'interrupted', targetChannel: message.channel, targetChannelId: message.channelId, fireTime: message.triggerMeta.fireTime, causation: taskCausation });
           } else {
-            this.eventBus.publish({ type: 'trigger:completed', triggerId: message.triggerMeta.triggerId, name: message.triggerMeta.triggerName ?? '', runId: triggerRunId, originTriggerId: message.triggerMeta.triggerId, messageId: messageId, durationMs, targetChannel: message.channel, targetChannelId: message.channelId, fireTime: message.triggerMeta.fireTime ?? 0 });
+            this.eventBus.publish({ type: 'trigger:completed', triggerId: message.triggerMeta.triggerId, name: message.triggerMeta.triggerName ?? '', runId: triggerRunId, originTriggerId: message.triggerMeta.triggerId, messageId: messageId, durationMs, targetChannel: message.channel, targetChannelId: message.channelId, fireTime: message.triggerMeta.fireTime ?? 0, causation: taskCausation });
           }
         }
         await this.sessionManager.recordSuccess(session.id);
@@ -2395,8 +2426,10 @@ export class ResponseEngine implements IMessageProcessor {
           durationMs: Date.now() - startTime,
           agentName: agentNameForStats,
           numTurns: streamResult.numTurns,
-          timestamp: Date.now()
+          timestamp: Date.now(),
+          causation: taskCausation,
         });
+        recordCausationSpan(taskCausation, 'task.run', { status: 'completed', refs: { taskId, sessionId: session.id, messageId } });
 
         // 记录处理完成
         logger.message({
@@ -2478,7 +2511,9 @@ export class ResponseEngine implements IMessageProcessor {
           error: errorMsg,
           errorType,
           agentName: agentNameForStats,
+          causation: taskCausation,
         });
+        recordCausationSpan(taskCausation, 'task.run', { status: 'failed', refs: { taskId, sessionId: session.id, messageId }, reason: errorType });
       }
 
       // 记录处理失败
@@ -2773,7 +2808,8 @@ export class ResponseEngine implements IMessageProcessor {
     shouldSuppress: () => boolean,
     proactive?: ProactiveRuntimeState | null,
     /** [迁移点4/5] 响应模式插件 + 状态，用于调 onToolUse/onComplete 钩子 */
-    modeHooks?: { mode: import('../../response-system/types.js').ResponseMode; state: Map<string, any> }
+    modeHooks?: { mode: import('../../response-system/types.js').ResponseMode; state: Map<string, any> },
+    causation?: CausationContext,
   ): Promise<StreamRunResult> {
     // Per-session agent name for stats bucketing
     const statsChannelKey = session.channel === 'daemon' ? session.channel : (session.metadata?.channelKey || session.channel);
@@ -2847,7 +2883,8 @@ export class ResponseEngine implements IMessageProcessor {
           sessionId: session.id,
           subtype: event.subtype,
           message: event.message,
-          timestamp: Date.now()
+          timestamp: Date.now(),
+          causation,
         });
         continue;
       }
@@ -2904,7 +2941,8 @@ export class ResponseEngine implements IMessageProcessor {
             sessionId: session.id,
             toolName: event.name,
             input: event.input,
-            timestamp: Date.now()
+            timestamp: Date.now(),
+            causation,
           });
           if (!shouldSuppress()) {
             const desc = summarizeToolInput(event.name, event.input || {});
@@ -2951,7 +2989,8 @@ export class ResponseEngine implements IMessageProcessor {
             toolName: event.name,
             isError: event.isError,
             agentName: agentNameForStats,
-            timestamp: Date.now()
+            timestamp: Date.now(),
+            causation,
           });
 
           // 从 tool_use 阶段缓存的描述中回溯
@@ -3115,6 +3154,7 @@ export class ResponseEngine implements IMessageProcessor {
           error: event.errors?.join('; ') || '\u672a\u77e5\u9519\u8bef',
           errorType: bgErrorType,
           agentName: agentNameForStats,
+          causation,
         });
       }
     }

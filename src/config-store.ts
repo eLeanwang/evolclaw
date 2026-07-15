@@ -107,8 +107,24 @@ export function loadEvolclawConfig(): EvolclawConfig {
   return raw ?? {};
 }
 
+let eckSnapshotsConfigCache: { configPath: string; enabled: boolean } | undefined;
+
+/** Parse the process-level snapshot gate once for the current daemon lifecycle. */
+export function initializeEckSnapshotsConfig(config: EvolclawConfig = loadEvolclawConfig()): boolean {
+  const enabled = config.debug?.eckSnapshots === true;
+  eckSnapshotsConfigCache = {
+    configPath: resolvePaths().evolclawJson,
+    enabled,
+  };
+  return enabled;
+}
+
 export function isEckSnapshotsEnabled(): boolean {
-  return loadEvolclawConfig().debug?.eckSnapshots ?? true;
+  const configPath = resolvePaths().evolclawJson;
+  if (!eckSnapshotsConfigCache || eckSnapshotsConfigCache.configPath !== configPath) {
+    return initializeEckSnapshotsConfig();
+  }
+  return eckSnapshotsConfigCache.enabled;
 }
 
 /** 原子写入 {root}/evolclaw.json。调用方负责传完整对象（含要保留的字段）。 */

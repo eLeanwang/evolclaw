@@ -641,6 +641,9 @@ export async function handleSlashCommand(this: any,
       '  /status - 显示会话状态',
       '  /stop - 中断当前任务',
       '  /check - 检查 EvolAgent 实例健康',
+      ...(isOwner ? [
+        '  /observable [true|false] - 查看或切换观察者模式',
+      ] : []),
       ...(isDaemonOwner ? [
         '  /restart - 重启服务',
         '  /reload [aid] - 热重载 Agent 配置',
@@ -698,6 +701,9 @@ export async function handleSlashCommand(this: any,
     cmds.push({ command: '/check', description: '检查 EvolAgent 实例健康', category: '运维', roles: ['visitor', 'member', 'admin', 'owner'] });
     if (isAdmin) {
       cmds.push({ command: '/activity', args: '[all|text|none]', description: '查看/控制中间输出显示模式', category: '聊天设置', roles: ['admin', 'owner'] });
+    }
+    if (isOwner) {
+      cmds.push({ command: '/observable', args: '[true|false]', description: '查看或切换观察者模式', category: '运维', roles: ['owner'] });
     }
     if (isDaemonOwner) {
       cmds.push({ command: '/restart', description: '重启服务', category: '运维', roles: ['daemon-owner'] });
@@ -1715,6 +1721,24 @@ export async function handleSlashCommand(this: any,
       normalizedContent === '/storage' || normalizedContent.startsWith('/storage ')) {
     return { kind: 'command.error' as const, text: '❌ 此命令仅限 ctl 调用，不支持 slash 输入' };
   }
+
+  if (normalizedContent === '/observable' || normalizedContent.startsWith('/observable ')) {
+    if (!isOwner) return { kind: 'command.error' as const, text: '❌ 观察者模式仅限 owner 查看和开关' };
+    const value = normalizedContent.slice('/observable'.length).trim();
+    if (!value) {
+      const result = await this.execMenuQuery('/observable', channel, channelId, userId, undefined, narrowedChatType, false, identity);
+      if ('error' in result) return { kind: 'command.error' as const, text: `❌ ${result.error}` };
+      return { kind: 'command.result' as const, text: `观察者模式: ${result.data.observable ? 'true' : 'false'}  用法: /observable <true|false>` };
+    }
+    if (value !== 'true' && value !== 'false') {
+      return { kind: 'command.error' as const, text: `❌ 无效参数: ${value}\n用法: /observable <true|false>` };
+    }
+    const result = await this.execMenuUpdate('/observable', value, channel, channelId, userId, identity, false);
+    if ('error' in result) return { kind: 'command.error' as const, text: `❌ ${result.error}` };
+    if (this.shouldSuppressCardTriggerResult(source, channel)) return null;
+    return { kind: 'command.result' as const, text: `✅ 观察者模式: ${result.data.observable ? 'true' : 'false'}` };
+  }
+
 
   if (normalizedContent === '/activity' || normalizedContent.startsWith('/activity ')) {
     const activityArg = normalizedContent.slice(9).trim();

@@ -20,6 +20,9 @@ import {
   hClassGrantIncludesProtectedPath,
   isHClassPath,
 } from './protected-paths.js';
+import { createRootCausation, deriveCausation, normalizeCausation } from './causation/context.js';
+import { recordCausationSpan } from './causation/audit.js';
+import type { CausationContext } from './causation/types.js';
 
 // 工具摘要/Edit diff 预览已迁至 utils/tool-summary.ts；此处再导出以保持既有引用路径兼容。
 export { summarizeToolInput };
@@ -467,36 +470,184 @@ export interface EvolclawSendCommand {
   action: 'send' | 'file';
   /** msg/group 的会话目标；ctl send/file 通过当前 ctl session 路由，不携带目标。 */
   targetId?: string;
+  filePath?: string;
 }
 
-const SHELL_CONTROL_RE = /[;&|`]|[$][(]|\r|\n/;
-const TRAILING_FD_DUPLICATION_RE = /(?:\s+\d*>&\d+)+\s*$/;
+interface EvolclawHandoffReturnCommand {
+  filePath?: string;
+}
 
-export function parseEvolclawSendCommand(command: string): EvolclawSendCommand | null {
-  const trimmed = command.trim();
-  if (!trimmed) return null;
+const SHELL_UNQUOTED_META = new Set([
+  ';', '&', '|', '`', '<', '>', '$', '(', ')', '*', '?', '[', ']', '{', '}', '#',
+]);
+const AMBIGUOUS_FILE_PATH_RE = /[\0\r\n$`*?\[\]{}<>|;&]/;
+const EVOLCLAW_SENSITIVE_REFERENCE_RE = /(?:^|[\s"'`;&|()])(?:[^\s"'`;&|()]*[\\/])?(?:ec|evolclaw)\s+(?:msg|group|ctl|handoff)(?:\s|$)/i;
+const EVOLCLAW_CLI_ENTRY_REFERENCE_RE = /(?:^|[\s"'`;&|()])(?:[^\s"'`;&|()]*[\\/])?(?:src|dist)[\\/]cli[\\/]index\.(?:[cm]?js|ts)\s+(?:msg|group|ctl|handoff)(?:\s|$)/i;
+const VARIABLE_COMMAND_REFERENCE_RE = /^\s*(?:["']?\$(?:[A-Za-z_][A-Za-z0-9_]*|\{[^}\r\n]+\})["']?|\$\([^\r\n]*\)|`[^\r\n]*`)\s+(?:msg|group|ctl|handoff)(?:\s|$)/i;
 
-  const parseable = trimmed.replace(TRAILING_FD_DUPLICATION_RE, '').trimEnd();
-  if (!parseable || SHELL_CONTROL_RE.test(parseable)) return null;
+/**
+ * Parse the deliberately small shell subset accepted by the privileged EC
+ * command path. The returned argv must describe one literal invocation: no
+ * expansion, glob, pipeline, command substitution, redirection, or comment.
+ * Anything outside this subset falls back to a hard deny for EC-like commands.
+ */
+function parseLiteralShellArgv(command: string): string[] | null {
+  const input = command.trim();
+  if (!input || /[\0\r\n]/.test(input)) return null;
 
-  const ctlMatch = parseable.match(/^(?:ec|evolclaw)\s+ctl\s+(send|file)(?:\s|$)/);
-  if (ctlMatch) {
-    return { scope: 'ctl', action: ctlMatch[1] as 'send' | 'file' };
+  const argv: string[] = [];
+  let token = '';
+  let tokenStarted = false;
+  let quote: 'single' | 'double' | null = null;
+
+  const finishToken = () => {
+    if (!tokenStarted) return;
+    argv.push(token);
+    token = '';
+    tokenStarted = false;
+  };
+
+  for (let index = 0; index < input.length; index++) {
+    const char = input[index];
+
+    if (quote === 'single') {
+      if (char === "'") quote = null;
+      else token += char;
+      continue;
+    }
+
+    if (quote === 'double') {
+      if (char === '"') {
+        quote = null;
+        continue;
+      }
+      if (char === '$' || char === '`') return null;
+      if (char === '\\') {
+        const next = input[++index];
+        if (next === undefined || next === '\r' || next === '\n') return null;
+        if (next === '$' || next === '`') return null;
+        token += ['"', '\\'].includes(next) ? next : `\\${next}`;
+        continue;
+      }
+      token += char;
+      continue;
+    }
+
+    if (/\s/.test(char)) {
+      finishToken();
+      continue;
+    }
+    if (char === "'") {
+      tokenStarted = true;
+      quote = 'single';
+      continue;
+    }
+    if (char === '"') {
+      tokenStarted = true;
+      quote = 'double';
+      continue;
+    }
+    if (char === '\\') {
+      const next = input[++index];
+      if (next === undefined || next === '\r' || next === '\n') return null;
+      tokenStarted = true;
+      token += next;
+      continue;
+    }
+    if (SHELL_UNQUOTED_META.has(char) || (char === '~' && !tokenStarted)) return null;
+    tokenStarted = true;
+    token += char;
   }
 
-  const sessionMatch = parseable.match(/^(?:ec|evolclaw)\s+(msg|group)\s+(send|file)\s+\S+\s+(\S+)(?:\s|$)/);
-  if (!sessionMatch) return null;
-  return {
-    scope: sessionMatch[1] as 'msg' | 'group',
-    action: sessionMatch[2] as 'send' | 'file',
-    targetId: sessionMatch[3],
-  };
+  if (quote) return null;
+  finishToken();
+  return argv.length > 0 ? argv : null;
+}
+
+function isDeterministicFilePath(value: string | undefined): value is string {
+  return !!value
+    && value === value.trim()
+    && !value.startsWith('--')
+    && !value.startsWith('~')
+    && !AMBIGUOUS_FILE_PATH_RE.test(value);
+}
+
+function findSingleFileOption(argv: string[], startIndex: number): { path?: string; invalid: boolean } {
+  const matches: Array<{ index: number; flag: '--file' | '--text-from-file' }> = [];
+  for (let index = startIndex; index < argv.length; index++) {
+    const value = argv[index];
+    if (value === '--file' || value === '--text-from-file') {
+      matches.push({ index, flag: value });
+    }
+  }
+  if (matches.length === 0) return { invalid: false };
+  if (matches.length !== 1) return { invalid: true };
+  const filePath = argv[matches[0].index + 1];
+  return isDeterministicFilePath(filePath)
+    ? { path: filePath, invalid: false }
+    : { invalid: true };
+}
+
+function isSensitiveEvolclawCommandReference(command: string): boolean {
+  return EVOLCLAW_SENSITIVE_REFERENCE_RE.test(command)
+    || EVOLCLAW_CLI_ENTRY_REFERENCE_RE.test(command)
+    || VARIABLE_COMMAND_REFERENCE_RE.test(command);
+}
+
+export function parseEvolclawSendCommand(command: string): EvolclawSendCommand | null {
+  const argv = parseLiteralShellArgv(command);
+  if (!argv || (argv[0] !== 'ec' && argv[0] !== 'evolclaw')) return null;
+
+  if (argv[1] === 'ctl') {
+    if (argv[2] === 'send') return { scope: 'ctl', action: 'send' };
+    if (argv[2] !== 'file') return null;
+    const operands = argv.slice(3);
+    if (operands.length < 1 || operands.length > 2) return null;
+    const filePath = operands.at(-1);
+    if (!isDeterministicFilePath(filePath)) return null;
+    return { scope: 'ctl', action: 'file', filePath };
+  }
+
+  const scope = argv[1];
+  const subcommand = argv[2];
+  if ((scope !== 'msg' && scope !== 'group') || (subcommand !== 'send' && subcommand !== 'file')) return null;
+  const targetId = argv[4];
+  if (!argv[3] || !targetId || argv[3].startsWith('--') || targetId.startsWith('--')) return null;
+
+  // Keep the historical `msg/group file <from> <target> <path>` spelling,
+  // while classifying the actual CLI spelling `send ... --file <path>` (and
+  // msg `--text-from-file`) under the file operation as well.
+  if (subcommand === 'file') {
+    if (argv.length !== 6 || !isDeterministicFilePath(argv[5])) return null;
+    return { scope, action: 'file', targetId, filePath: argv[5] };
+  }
+
+  const fileOption = findSingleFileOption(argv, 5);
+  if (fileOption.invalid) return null;
+  return fileOption.path
+    ? { scope, action: 'file', targetId, filePath: fileOption.path }
+    : { scope, action: 'send', targetId };
+}
+
+function parseEvolclawHandoffReturnCommand(command: string): EvolclawHandoffReturnCommand | null {
+  const argv = parseLiteralShellArgv(command);
+  if (!argv || (argv[0] !== 'ec' && argv[0] !== 'evolclaw')) return null;
+  if (argv[1] !== 'handoff' || argv[2] !== 'return') return null;
+
+  const delimiterIndex = argv.indexOf('--', 3);
+  const fileIndex = argv.indexOf('--text-from-file', 3);
+  if (fileIndex < 0 || (delimiterIndex >= 0 && delimiterIndex < fileIndex)) return {};
+  if (argv.indexOf('--text-from-file', fileIndex + 1) >= 0) return null;
+
+  const filePath = argv[fileIndex + 1];
+  if (!isDeterministicFilePath(filePath)) return null;
+  const remaining = argv.slice(3).filter((_, index) => index !== fileIndex - 3 && index !== fileIndex - 2);
+  if (remaining.length > 1) return null;
+  return { filePath };
 }
 
 export function isEvolclawHandoffReturnCommand(command: string): boolean {
-  const trimmed = command.trim();
-  if (!trimmed || SHELL_CONTROL_RE.test(trimmed)) return false;
-  return /^(?:ec|evolclaw)\s+handoff\s+return(?:\s|$)/.test(trimmed);
+  return parseEvolclawHandoffReturnCommand(command) !== null;
 }
 
 export function isEvolclawSendCommandForSession(
@@ -510,6 +661,26 @@ export function isEvolclawSendCommandForSession(
   if (!parsed) return false;
   if (parsed.scope === 'ctl') return true;
   return parsed.targetId === channelId;
+}
+
+export function checkEvolclawFileCommandPath(
+  command: string,
+  projectPath: string,
+): { behavior: 'allow' } | { behavior: 'deny'; message: string } {
+  const send = parseEvolclawSendCommand(command);
+  const handoff = parseEvolclawHandoffReturnCommand(command);
+  if (!send && !handoff) {
+    return isSensitiveEvolclawCommandReference(command)
+      ? { behavior: 'deny', message: '🔒 EC 命令包含脚本包装、变量、重定向或无法确定的参数，已拒绝执行' }
+      : { behavior: 'allow' };
+  }
+
+  const filePath = send?.filePath ?? handoff?.filePath;
+  if (!filePath) return { behavior: 'allow' };
+  if (isHClassPath(filePath, { cwd: projectPath }) || containsHClassReference(filePath)) {
+    return { behavior: 'deny', message: '🔒 禁止通过 EC 文件命令读取或外发 H 类受保护文件' };
+  }
+  return { behavior: 'allow' };
 }
 
 export type PermissionDecision = 'allow' | 'always' | 'deny';
@@ -530,6 +701,7 @@ export interface PermissionRequestContext {
   peerKey?: string;
   approvalRouting?: ApprovalRoutingContext;
   flushPending?: () => Promise<void>;
+  causation?: CausationContext;
 }
 
 export async function requestDangerousCommandPermission(
@@ -574,6 +746,7 @@ interface PendingPermission {
   resolve: (decision: PermissionDecision) => void;
   interactionRouter?: InteractionRouter;
   timeout?: NodeJS.Timeout;
+  causation: CausationContext;
 }
 
 interface PendingCrossSessionPermission extends PendingPermission {
@@ -587,6 +760,7 @@ interface PendingCrossSessionPermission extends PendingPermission {
 
 interface TemporaryPermissionGrant {
   expiresAt: number;
+  causation?: CausationContext;
 }
 
 const SESSION_GRANT_TTL_MS = 30 * 60 * 1000;
@@ -714,12 +888,13 @@ export class PermissionGateway {
 
   private addTemporaryGrant(
     pending: Pick<PendingPermission, 'sessionId' | 'toolName' | 'inputFingerprint' | 'grantScope'>,
+    causation?: CausationContext,
   ): number {
     const now = Date.now();
     this.pruneTemporaryGrants(now);
     const expiresAt = now + SESSION_GRANT_TTL_MS;
     const key = this.temporaryGrantKey(pending.sessionId, pending.toolName, pending.inputFingerprint, pending.grantScope);
-    this.temporaryGrants.set(key, { expiresAt });
+    this.temporaryGrants.set(key, { expiresAt, causation: normalizeCausation(causation) });
     return expiresAt;
   }
 
@@ -747,10 +922,16 @@ export class PermissionGateway {
     const sessionGrant = action === 'approve_session_30m';
     const approved = action === 'approve_once' || sessionGrant || action === 'allow';
     const decision: PermissionDecision = approved ? 'allow' : 'deny';
-    if (sessionGrant) this.addTemporaryGrant(pending);
+    const decisionCausation = deriveCausation(pending.causation);
+    if (sessionGrant) this.addTemporaryGrant(pending, decisionCausation);
 
     pending.resolve(decision);
-    this.eventBus?.publish({ type: 'permission:resolved', sessionId, requestId, approved });
+    recordCausationSpan(decisionCausation, 'permission.decision', {
+      status: approved ? 'completed' : 'failed',
+      refs: { permissionRequestId: requestId, sessionId },
+      reason: approved ? undefined : 'denied',
+    });
+    this.eventBus?.publish({ type: 'permission:resolved', sessionId, requestId, approved, causation: decisionCausation });
     return true;
   }
 
@@ -763,6 +944,12 @@ export class PermissionGateway {
     this.crossSessionPending.delete(requestId);
 
     pending.resolve('deny');
+    const decisionCausation = deriveCausation(pending.causation);
+    recordCausationSpan(decisionCausation, 'permission.decision', {
+      status: 'failed',
+      refs: { permissionRequestId: requestId, sessionId },
+      reason,
+    });
     if (reason === 'cancelled') {
       this.eventBus?.publish({
         type: 'permission:cancelled',
@@ -770,6 +957,7 @@ export class PermissionGateway {
         requestId,
         toolName: pending.toolName,
         reason,
+        causation: decisionCausation,
       });
     } else {
       this.eventBus?.publish({
@@ -779,6 +967,7 @@ export class PermissionGateway {
         toolName: pending.toolName,
         reason,
         approved: false,
+        causation: decisionCausation,
       });
     }
     return true;
@@ -791,6 +980,7 @@ export class PermissionGateway {
     sendPrompt: (text: string) => Promise<void>,
     context: PermissionRequestContext,
     grantScope: string,
+    requestCausation: CausationContext,
   ): Promise<PermissionDecision> {
     const approval = context.approvalRouting;
     const interactionRouter = context.interactionRouter;
@@ -881,6 +1071,7 @@ export class PermissionGateway {
         grantScope,
         approverId: route.approverId,
         interactionRouter,
+        causation: requestCausation,
       };
       this.crossSessionPending.set(requestId, pending);
       interactionRouter.register(requestId, sessionId, (action, values, operatorId) => {
@@ -905,6 +1096,7 @@ export class PermissionGateway {
       metadata: {
         source: 'handoff',
         chatmode: 'interactive',
+        causation: this.crossSessionPending.get(requestId)?.causation,
       },
     };
 
@@ -916,6 +1108,7 @@ export class PermissionGateway {
       agentName: context.agentName,
       chatmode: 'interactive',
       replyContext: ownerReplyContext,
+      causation: this.crossSessionPending.get(requestId)?.causation,
     });
 
     let sent = false;
@@ -953,6 +1146,12 @@ export class PermissionGateway {
     pending.interactionRouter?.cancel(requestId);
     this.pending.delete(requestId);
     pending.resolve('deny');
+    const decisionCausation = deriveCausation(pending.causation);
+    recordCausationSpan(decisionCausation, 'permission.decision', {
+      status: 'failed',
+      refs: { permissionRequestId: requestId, sessionId },
+      reason,
+    });
     this.eventBus?.publish({
       type: 'permission:resolved',
       sessionId,
@@ -960,6 +1159,7 @@ export class PermissionGateway {
       toolName: pending.toolName,
       reason,
       approved: false,
+      causation: decisionCausation,
     });
     return true;
   }
@@ -983,6 +1183,16 @@ export class PermissionGateway {
     }
     const temporaryGrant = this.getTemporaryGrant(sessionId, toolName, toolInput, grantScope);
     if (temporaryGrant) {
+      const consumeCausation = deriveCausation(
+        normalizeCausation(temporaryGrant.causation)
+          ?? normalizeCausation(context?.causation)
+          ?? createRootCausation(),
+      );
+      recordCausationSpan(consumeCausation, 'permission.consume', {
+        status: 'completed',
+        refs: { taskId: context?.taskId, sessionId },
+        reason: 'temporary_grant',
+      });
       return 'allow';
     }
 
@@ -1001,11 +1211,22 @@ export class PermissionGateway {
       createdAt: Date.now(),
     };
 
-    this.eventBus?.publish({ type: 'permission:requested', sessionId, requestId, toolName, input: displaySummary });
+    const requestCausation = deriveCausation(normalizeCausation(context.causation) ?? createRootCausation());
+    recordCausationSpan(requestCausation, 'permission.request', {
+      status: 'started',
+      refs: { permissionRequestId: requestId, taskId: context.taskId, sessionId },
+    });
+    this.eventBus?.publish({ type: 'permission:requested', sessionId, requestId, toolName, input: displaySummary, causation: requestCausation });
 
     const route = planApprovalRoute(challenge, context);
     if (route.kind === 'unavailable') {
       await sendPrompt(`当前操作需要授权，但审批人不可用（${route.reason}）。`);
+      const decisionCausation = deriveCausation(requestCausation);
+      recordCausationSpan(decisionCausation, 'permission.decision', {
+        status: 'failed',
+        refs: { permissionRequestId: requestId, sessionId },
+        reason: route.reason,
+      });
       this.eventBus?.publish({
         type: 'permission:resolved',
         sessionId,
@@ -1013,6 +1234,7 @@ export class PermissionGateway {
         toolName,
         reason: route.reason,
         approved: false,
+        causation: decisionCausation,
       });
       return 'deny';
     }
@@ -1024,6 +1246,7 @@ export class PermissionGateway {
         sendPrompt,
         context!,
         grantScope,
+        requestCausation,
       );
     }
 
@@ -1067,6 +1290,7 @@ export class PermissionGateway {
         approverId: route.approverId,
         resolve,
         interactionRouter: context?.interactionRouter,
+        causation: requestCausation,
       };
       pending.timeout = setTimeout(() => {
         this.failPendingPermission(sessionId, requestId, 'expired');
@@ -1099,6 +1323,7 @@ export class PermissionGateway {
           agentName: context.agentName,
           chatmode: context.chatmode,
           replyContext: context.replyContext,
+          causation: requestCausation,
         });
         const fallbackText = `🔐 权限请求 - ${toolName}\n${displaySummary}${reasonLine}\n回复 /perm ${requestId} allow 允许本次 / /perm ${requestId} always 同操作授权 30 分钟 / /perm ${requestId} deny 拒绝`;
         const result = await sendInteractionPayload(
@@ -1143,10 +1368,16 @@ export class PermissionGateway {
     pending.interactionRouter?.cancel(requestId);
     pending.resolve(normalizedDecision === 'deny' ? 'deny' : 'allow');
     this.pending.delete(requestId);
+    const decisionCausation = deriveCausation(pending.causation);
     if (normalizedDecision === 'always') {
-      this.addTemporaryGrant(pending);
+      this.addTemporaryGrant(pending, decisionCausation);
     }
-    this.eventBus?.publish({ type: 'permission:resolved', sessionId, requestId, approved: normalizedDecision !== 'deny' });
+    recordCausationSpan(decisionCausation, 'permission.decision', {
+      status: normalizedDecision === 'deny' ? 'failed' : 'completed',
+      refs: { permissionRequestId: requestId, sessionId },
+      reason: normalizedDecision,
+    });
+    this.eventBus?.publish({ type: 'permission:resolved', sessionId, requestId, approved: normalizedDecision !== 'deny', causation: decisionCausation });
     return true;
   }
 
@@ -1189,12 +1420,19 @@ export class PermissionGateway {
         pending.interactionRouter?.cancel(requestId);
         pending.resolve('deny');
         this.pending.delete(requestId);
+        const decisionCausation = deriveCausation(pending.causation);
+        recordCausationSpan(decisionCausation, 'permission.decision', {
+          status: 'failed',
+          refs: { permissionRequestId: requestId, sessionId },
+          reason,
+        });
         this.eventBus?.publish({
           type: 'permission:cancelled',
           sessionId,
           requestId,
           toolName: pending.toolName,
           reason,
+          causation: decisionCausation,
         });
       }
     }

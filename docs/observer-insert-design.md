@@ -309,8 +309,8 @@ owner-hint item 的 `SubMessage` 带 `injectTime`（提示发出时间）、`own
 | 2 | ack 时机挪到写盘后 + 新增 `STORE_FAILED` | `src/channels/aun.ts` | `emitInjectAck` accepted 在成功写盘之后；写盘失败回 rejected |
 | 3 | pending-hints 读写（append-only + 回放 + 消费按 thread 清/删文件） | `src/core/message/pending-hints.ts`（新增） | `appendHintAdd`/`appendHintRemove`/`consumeHints(对端,thread)`/`peekHints`：回放算该 thread 有效集→返回→清该 thread（其它 thread 残留则重写保留，否则删文件） |
 | 4 | 渲染前消费 pending、包装 owner-hint SubMessage | `src/core/message/message-processor.ts` | `consumeOwnerHints` 在 `renderMessageBody` 前消费 (对端,thread) 提示、排对端 item 前；消费在 try 外，渲染抛错时 `composeHintFallback` 把已消费提示拼回 raw 兜底 |
-| 5 | 渲染模式命中变量 | `src/core/message/message-processor.ts`（注入 `renderModes`）+ `src/agents/message-renderer.ts`（逐 item 算 `renderMode_*`/`isOwnerHint`/`injectTime`/`ownerAid`） | processor 从内存 config 读 `render` 透传；renderer 据 `defaultModeNames` 回退并标记 owner-hint |
-| 6 | manifest schema 扩展 + `evaluateWhen` 加 `and`/`or` | `src/agents/manifest-engine.ts` + `kits/eck_message_manifest.json` + `kits/templates/message-fragments/inject-default.md` | section 加 modeType/modeName/isDefault（引擎忽略）；新增 `and`/`or` 复合算子；3 个 section（inject/private/group default） |
+| 5 | 渲染模式命中变量 | `src/core/message/message-processor.ts`（注入 `renderModes`）+ `src/eck/message-renderer.ts`（逐 item 算 `renderMode_*`/`isOwnerHint`/`injectTime`/`ownerAid`） | processor 从内存 config 读 `render` 透传；renderer 据 `defaultModeNames` 回退并标记 owner-hint |
+| 6 | manifest schema 扩展 + `evaluateWhen` 加 `and`/`or` | `src/eck/manifest-engine.ts` + `kits/eck_message_manifest.json` + `kits/templates/message-fragments/inject-default.md` | section 加 modeType/modeName/isDefault（引擎忽略）；新增 `and`/`or` 复合算子；3 个 section（inject/private/group default） |
 | 7 | SubMessage 加 kind/injectTime/ownerAid | `src/types.ts` | 标记 owner-hint item |
 | 8 | watch 记录 add/remove/consume（owner-inject 标记） | `src/channels/aun.ts` + `src/cli/watch-msg.ts` | 复用 `recordInjectWatch`，语义改为"已添加/已撤销/已消费" |
 | 9 | **删除 v0.2 残留** | aun.ts / message-bridge.ts / message-queue.ts / index.ts / types.ts | 拆除 replyOverride/forceInteractive/injectMeta/injectPeerChannelId/pendingReplay/owner优先级/recall 等全部主动链路 |

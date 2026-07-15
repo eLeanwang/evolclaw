@@ -33,6 +33,7 @@ export class TriggerEventSource {
           eventName: event.type,
           firedAt: Date.now(),
           payload: event as unknown as Record<string, unknown>,
+          causation: event.causation,
         });
       } catch (err) {
         logger.warn(`[TriggerEventSource] handler failed for ${trigger.id}: ${err}`);

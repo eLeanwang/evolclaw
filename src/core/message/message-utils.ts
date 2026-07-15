@@ -5,6 +5,7 @@
  */
 
 import type { OutboundEnvelope, ReplyContext, ChannelAdapter, InteractionRequest, OutboundPayload, InteractionKind, ActionInteraction } from '../../types.js';
+import type { CausationContext } from '../causation/types.js';
 import { renderCommandCardAsText, renderActionAsText } from '../interaction-router.js';
 
 /**
@@ -18,6 +19,7 @@ export function buildEnvelope(opts: {
   agentName?: string;
   chatmode?: 'interactive' | 'proactive';
   replyContext?: ReplyContext;
+  causation?: CausationContext;
   timestamp?: number;
 }): OutboundEnvelope {
   return {
@@ -28,6 +30,7 @@ export function buildEnvelope(opts: {
     agentName: opts.agentName ?? '<unknown>',
     chatmode: opts.chatmode ?? 'interactive',
     replyContext: opts.replyContext,
+    causation: opts.causation,
     timestamp: opts.timestamp ?? Date.now(),
   };
 }

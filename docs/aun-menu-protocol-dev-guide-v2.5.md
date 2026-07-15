@@ -10,7 +10,9 @@
 >
 > **v2.4 变更（agent 管理）**：`menu.action name=agent action=update` 支持 `patch.avatar` 单独提交，用于上传头像到 agent 自己的 AUN storage，并更新 `agent.md` frontmatter 的 `avatar` 字段。详见 §8.5。
 >
-> **v2.5 变更（capability 管理）**：新增 `menu.query/options/update name=capability`，用于查看并管理当前 agent 的 Skills / MCP / Plugins 策略。MVP 支持 `claude` 与 `codex`，策略存入 `agents/<aid>/config.json`，不写 baseagent 用户级配置文件。详见 §5.12、§6.9、§7.6。
+> **v2.5 变更（capability 管理）**：新增 `menu.query/options/update name=capability`，用于查看并管理当前 agent 的 Skills / MCP / Plugins 策略。MVP 支持 `claude` 与 `codex`，策略存入 `agents/<aid>/config.json`，不写 baseagent 用户级配置文件。详见 §5.13、§6.9、§7.7。
+
+> **observable 补充**：新增 `menu.query/update name=observable`。普通 Agent 通道自动作用于 owning Agent；ECWeb 与控制 AID 通道统一通过请求顶层 `agent: "<aid>"` 指定目标。`cmd:"/observable"` 仅作为兼容逃生口。
 
 ---
 
@@ -127,7 +129,8 @@ interface MenuResponse {
 | `chatmode` | — | ✅ | ✅ | ✅ | — | 关系级 / Agent 级 | 当前会话模式，或 Agent 默认 chatmode |
 | `dispatch` | — | ✅ | ✅ | ✅ | — | 关系级 / Agent 级 | 当前群关系分发覆盖，或 Agent 默认群分发 |
 | `permission` | — | ✅ | ✅ | ✅ | — | 关系级 / Agent 级 | 当前会话权限模式，或 Agent 默认权限模式 |
-| `activity` | — | ✅ | ✅ | ✅ | — | agent 级 | 无需会话 |
+| `activity` | — | ✅ | ✅ | ✅ | — | 关系级 / Agent 级 | 默认当前关系；`args.scope=agent` 查询或设置 Agent 默认值 |
+| `observable` | — | ✅ | — | ✅ | — | Agent 级 | owner-only；控制 Agent 入站/出站消息是否转发给 owners |
 | `system` | — | ✅ | — | — | `restart` `check` `upgrade` | 进程级 | 鉴权：`evolclaw.json` `owners` 名单（见 §3.1） |
 | `agent` | — | ✅ | ✅ | — | `create` `delete` `enable` `disable` `update` `reload` | 进程级 / 本 agent 管理 | 进程级走控制面；本 agent `reload` admin+，`update` owner-only |
 | `capability` | — | ✅ | ✅ | ✅ | — | agent/project 级 | Skills / MCP / Plugins 策略管理；MVP 支持 `claude` / `codex` |
@@ -149,6 +152,7 @@ MENU_NAME_MAP = {
   dispatch:   '/dispatch',
   permission: '/perm',
   activity:   '/activity',
+  observable: '/observable', // owner-only，Agent 观察者模式
   system:     '/system',
   cli:        '/cli',       // owner-only，透传后端 CLI（路由键，非真实 slash）
   agent:      '/agent',     // 进程级 owners 鉴权，evolagent 生命周期管理
@@ -160,6 +164,15 @@ MENU_NAME_MAP = {
 
 未在表中的 `name` → 客户端可改用 `cmd` 字段直传内部命令路径。推荐**优先用 `name`**。
 
+ECWeb / 控制 AID 通道执行 Agent 级能力时，使用与 `type`、`name` 同级的顶层 `agent` 选择目标：
+
+```jsonc
+{ "type": "menu.query", "id": "q-observable", "name": "observable",
+  "agent": "mybot.agentid.pub" }
+```
+
+顶层 `agent` 只负责外层路由，不等同于 `name:"agent"`，也不放入 `args`。普通 Agent 通道由当前 channel 自动确定 owning Agent。需要目标但未提供时返回 `MISSING_AID`；目标不存在或没有可用 channel 时返回 `NOT_FOUND`。
+
 ### 3.1 Name 作用层级与鉴权
 
 **「层级」指操作对象（操作什么），不是前置条件（需要什么参数）**。四层框架：
@@ -168,7 +181,7 @@ MENU_NAME_MAP = {
 |---|---|---|---|
 | **进程级** | daemon 进程 / evolagent 集合生命周期 | `system`、`agent.create/delete/enable/disable` | `evolclaw.json` `owners` 名单（静态 AID 比对） |
 | **本 agent 管理** | 当前 channel 绑定的 agent 自管理 | `agent.update/reload` | `resolveIdentity`（`reload` owner/admin；`update` owner-only） |
-| **agent 级默认配置** | 单个 agent 全局默认值（无论当前有无会话） | `baseagent`、`pwd`、`model`、`effort`、`chatmode`、`dispatch`、`permission` | `resolveIdentity`（owner/admin 写） |
+| **agent 级默认配置** | 单个 agent 全局默认值（无论当前有无会话） | `baseagent`、`pwd`、`model`、`effort`、`chatmode`、`dispatch`、`permission`、`observable` | `resolveIdentity`（observable 仅 owner，其余通常 owner/admin 写） |
 | **关系级 / 会话级覆盖** | 对端关系、群 venue、主会话或话题会话参数 | `session`、`topic`、`trigger`、`model`、`effort`、`chatmode`、`dispatch`、`permission`、`file` | `resolveIdentity` + scoped 可见性 |
 
 **鉴权来源只有两条路**，和层级不一一对应：
@@ -248,6 +261,10 @@ MENU_NAME_MAP = {
 
 返回某项的**当前生效值**。无会话时多数 name 会 fallback 到 evolagent 配置。
 
+可继承或带默认值的参数会返回 `source`，表示该值实际命中的来源层；已有的 `scope`
+仍表示本次查询的目标层。`source` 可为 `session` / `relation` / `role` / `agent` /
+`defaults` / `runner` / `builtin`，确实没有可用值时为 `null`。
+
 ### 5.1 pwd — 当前项目路径
 
 ```jsonc
@@ -256,15 +273,15 @@ MENU_NAME_MAP = {
 
 // ← 有会话
 { "type": "menu.response", "id": "q-001", "name": "pwd",
-  "data": { "name": "review", "path": "/home/user/projects/review" } }
+  "data": { "name": "review", "path": "/home/user/projects/review", "source": "session" } }
 
 // ← 无会话（fallback evolagent.projectPath）
 { "type": "menu.response", "id": "q-001", "name": "pwd",
-  "data": { "name": "review", "path": "/home/user/projects/review" } }
+  "data": { "name": "review", "path": "/home/user/projects/review", "source": "agent" } }
 
 // ← 无会话且 evolagent 也无 projectPath
 { "type": "menu.response", "id": "q-001", "name": "pwd",
-  "data": { "name": null, "path": null } }
+  "data": { "name": null, "path": null, "source": null } }
 ```
 
 ### 5.2 session — 当前会话状态
@@ -336,20 +353,20 @@ MENU_NAME_MAP = {
 { "type": "menu.query", "id": "q-003", "name": "baseagent" }
 
 // ← 有会话
-{ "data": { "baseagent": "claude" } }
+{ "data": { "baseagent": "claude", "source": "agent" } }
 
 // ← 无会话（fallback evolagent.config.active_baseagent）
-{ "data": { "baseagent": "claude" } }
+{ "data": { "baseagent": "claude", "source": "agent" } }
 
 // ← 无会话且无配置
-{ "data": { "baseagent": null } }
+{ "data": { "baseagent": null, "source": null } }
 ```
 
 `model` / `effort` 同结构：
 
 ```jsonc
-{ "data": { "model": "claude-opus-4-7" } }
-{ "data": { "effort": "high" } }
+{ "data": { "model": "claude-opus-4-7", "source": "agent" } }
+{ "data": { "effort": "high", "source": "relation" } }
 ```
 
 ### 5.5 chatmode — 私聊响应模式
@@ -361,7 +378,7 @@ MENU_NAME_MAP = {
 { "type": "menu.query", "id": "q-004", "name": "chatmode" }
 
 // ← 
-{ "data": { "mode": "interactive" } }   // "interactive" | "proactive"
+{ "data": { "mode": "interactive", "source": "agent" } }   // "interactive" | "proactive"
 ```
 
 无会话时 fallback 到 `evolagent.config.chatmode.private`。
@@ -372,7 +389,7 @@ MENU_NAME_MAP = {
 
 ```jsonc
 // → 群聊会话
-{ "data": { "mode": "broadcast" } }     // "mention" | "broadcast"
+{ "data": { "mode": "broadcast", "source": "relation" } }     // "mention" | "broadcast"
 
 // → 私聊会话或无会话
 { "error": { "code": "NOT_APPLICABLE", "message": "dispatch 仅在群聊会话中有效" } }
@@ -385,23 +402,49 @@ MENU_NAME_MAP = {
 { "type": "menu.query", "id": "q-006", "name": "permission" }
 
 // ← 有会话
-{ "data": { "mode": "auto" } }
+{ "data": { "mode": "auto", "source": "role" } }
 
 // ← Agent 默认配置上下文
-{ "data": { "mode": "auto", "scope": "agent-default" } }
+{ "data": { "mode": "auto", "scope": "agent-default", "source": "agent" } }
 ```
 
-`permission` 与 `model` / `chatmode` / `dispatch` 一样是双层设置：有具体会话/关系上下文时返回覆盖值；在 ECWeb/控制面或无活跃会话的 Agent 默认配置上下文中返回 Agent 默认值。旧实现里无会话返回 `NO_ACTIVE_SESSION` 的行为不再作为协议口径。
+`permission` 与 `model` / `effort` 都会应用当前 role 的字段策略。role 锁定、替换或提供默认值时
+`source=role`；配置值通过 role 校验时，仍返回其实际配置来源。`source` 仅用于观测，
+不参与命令鉴权或写入判定。
 
 ### 5.8 activity — 中间输出可见范围
 
-agent 级配置，无需会话：
+默认查询当前关系，关系未设置时继承 Agent：
 
 ```jsonc
-{ "data": { "mode": "all" } }   // "all" | "dm-only" | "owner-dm-only" | "none"
+{ "data": { "mode": "all", "scope": "relation", "source": "agent" } }
+
+// 显式查询 Agent 默认值
+{ "args": { "scope": "agent" } }
+{ "data": { "mode": "all", "scope": "agent", "source": "agent" } }
 ```
 
-### 5.9 system — 进程信息
+`mode` 可为 `all` / `text` / `none`。
+
+### 5.9 observable — 观察者模式
+
+Agent 级、owner-only，无需活跃会话：
+
+```jsonc
+// 普通 Agent 通道：自动使用 owning Agent
+{ "type": "menu.query", "id": "q-observable", "name": "observable" }
+
+// ECWeb / 控制 AID 通道：顶层 agent 指定目标
+{ "type": "menu.query", "id": "q-observable", "name": "observable",
+  "agent": "mybot.agentid.pub" }
+
+// ←
+{ "data": { "observable": false, "source": "builtin" } }
+```
+
+非 owner 查询返回 `NO_PERMISSION`。
+
+### 5.10 system — 进程信息
 
 进程级查询，需命中 `evolclaw.json` `owners` 名单；否则返回 `FORBIDDEN`。
 
@@ -425,7 +468,7 @@ agent 级配置，无需会话：
 { "error": { "code": "FORBIDDEN", "message": "操作需要 owner 权限" } }
 ```
 
-### 5.10 agent — 查询单个 evolagent 详情（进程级）
+### 5.11 agent — 查询单个 evolagent 详情（进程级）
 
 需 owners 鉴权。用 `args.aid` 指定目标 agent，返回 `agentShow` 结果；若该 agent 正在/曾经通过 menu 创建，附加 `createProgress` 构建进度（见 §8.6）。
 
@@ -457,7 +500,7 @@ agent 级配置，无需会话：
 { "error": { "code": "FORBIDDEN", "message": "操作需要 owner 权限" } }
 ```
 
-### 5.11 file — 文件元信息（可点击文件链接缓存校验）
+### 5.12 file — 文件元信息（可点击文件链接缓存校验）
 
 会话级。鉴权：agent owner/admin 或 aid channel owner。`args.path` 接受相对路径或**项目内绝对路径**；项目外文件仅 owner 可取（详见 `docs/file-link-cache-design.md` §6）。
 
@@ -482,7 +525,7 @@ agent 级配置，无需会话：
 { "error": { "code": "NO_PERMISSION", "message": "无权限" } }
 ```
 
-### 5.12 capability — 能力策略类型状态
+### 5.13 capability — 能力策略类型状态
 
 `capability` 管理当前 agent 在当前 project 下的 Skills / MCP / Plugins 策略。MVP scope 固定为 `project`，projectPath 由当前 agent 的 `projects.defaultPath` 或活跃 session 解析，客户端不得传任意文件路径。
 
@@ -653,14 +696,11 @@ interface MenuItem {
 
 ```jsonc
 { "data": [
-    { "value": "all",   "label": "全部显示",        "selected": true },
-    { "value": "dm",    "label": "仅私聊显示",      "selected": false },
-    { "value": "owner", "label": "仅 owner 私聊显示", "selected": false },
-    { "value": "none",  "label": "全部静默",        "selected": false }
+    { "value": "all",  "label": "私聊显示",   "selected": true },
+    { "value": "text", "label": "仅文字进展", "selected": false },
+    { "value": "none", "label": "全部静默",   "selected": false }
 ]}
 ```
-
-`value` 是输入值，对应内部存储值见下表（update 章节）。
 
 ### 6.7 agent — evolagent 列表（进程级）
 
@@ -858,22 +898,34 @@ baseagent 是双层设置：**当前会话的 runner** 和 **agent 默认后端*
 
 ```jsonc
 // →
-{ "type": "menu.update", "id": "u-005", "name": "activity", "value": "owner" }
+{ "type": "menu.update", "id": "u-005", "name": "activity", "value": "text" }
 
 // ←
-{ "data": { "mode": "owner-dm-only" } }
+{ "data": { "mode": "text", "scope": "relation" } }
+
+// 显式修改 Agent 默认值
+{ "type": "menu.update", "id": "u-006", "name": "activity", "value": "none",
+  "args": { "scope": "agent" } }
+{ "data": { "mode": "none", "scope": "agent" } }
 ```
 
-input → 存储值映射：
+### 7.6 observable（owner-only）
 
-| value 输入 | 存储 mode |
-|---|---|
-| `all` | `all` |
-| `dm` | `dm-only` |
-| `owner` | `owner-dm-only` |
-| `none` | `none` |
+```jsonc
+// 普通 Agent 通道
+{ "type": "menu.update", "id": "u-observable", "name": "observable", "value": "true" }
 
-### 7.6 capability — 能力策略写入
+// ECWeb / 控制 AID 通道
+{ "type": "menu.update", "id": "u-observable", "name": "observable",
+  "agent": "mybot.agentid.pub", "value": "false" }
+
+// ←
+{ "data": { "observable": true } }
+```
+
+`value` 仅接受字符串 `"true"` / `"false"`。修改通过 owning Agent 的 `setObservable()` 持久化并立即生效。非 owner 返回 `NO_PERMISSION`。
+
+### 7.7 capability — 能力策略写入
 
 `menu.update name=capability` 支持两类写入：
 
@@ -1651,6 +1703,7 @@ create 受理后，后台逐环节把进度写入 `agents/<aid>/create-status.js
 | `UNKNOWN_NAME` | `name` 不在映射表内且未提供 `cmd` | 协议层错误，开发期排查 |
 | `MISSING_CMD` | 请求中既无 `name` 也无 `cmd`（极少触发） | 协议层错误 |
 | `MISSING_VALUE` | update 缺 `value` / action 缺必需 args | 协议层错误 |
+| `MISSING_AID` | ECWeb/控制 AID 的 Agent 级请求缺少顶层 `agent` | 补充目标 Agent AID |
 | `INVALID_ARGS` | 进程级/触发器/capability 操作参数非法（缺必填、非法枚举/数值） | 校正 args 后重试 |
 | `INVALID_TYPE` | capability `args.type` 不是 `skill` / `mcp` / `plugin` | 重新拉取协议配置 |
 | `INVALID_SCOPE` | capability scope 不是 MVP 支持的 `project` | 固定使用 `scope=project` 或省略 |

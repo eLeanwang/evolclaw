@@ -18,6 +18,8 @@ import type { EventBus } from '../event-bus.js';
 import type { BootstrapService } from '../bootstrap-service.js';
 import type { HandoffRuntime } from '../handoff/runtime.js';
 import type { Message, InboundMessage, ChannelAdapter, ReplyContext, EvolAgentRegistryHandle, OutboundPayload, MenuListRequest, MenuQueryRequest, MenuOptionsRequest, MenuUpdateRequest, MenuActionRequest, MenuResponse, SessionIdentity } from '../../types.js';
+import { createRootCausation, deriveCausation, normalizeCausation } from '../causation/context.js';
+import { recordCausationSpan } from '../causation/audit.js';
 
 /**
  * MessageBridge — Channel 与 Core 之间的消息桥梁
@@ -339,6 +341,17 @@ export class MessageBridge {
           replyContext: msg.replyContext,
           source: msg.source,
           dispatchMode: msg.dispatchMode,
+          causation: (() => {
+            const restored = (msg.channelType || effectiveChannelType) === 'aun'
+              ? normalizeCausation(msg.causation)
+              : undefined;
+            const inbound = restored ? deriveCausation(restored) : createRootCausation();
+            recordCausationSpan(inbound, 'message.inbound', {
+              status: 'completed',
+              refs: { messageId: msg.messageId, sessionId: session.id },
+            });
+            return inbound;
+          })(),
         };
 
         const inboundEntry = (() => {
@@ -461,6 +474,7 @@ export class MessageBridge {
     dispatch: '/dispatch',
     permission: '/perm',
     activity: '/activity',
+    observable: '/observable',
     system: '/system',
     cli: '/cli',
     agent: '/agent',

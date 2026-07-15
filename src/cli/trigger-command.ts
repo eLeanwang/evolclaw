@@ -92,7 +92,7 @@ Flag 模式支持的参数（与 /trigger 命令一致）:
   --feedback target (flag 模式仅支持 target；origin/silent 请用 /trigger 或 --file)
   --model <模型>  --effort <low|medium|high|xhigh|max>
   --max-runs <次数>  --max-duration <时长: 30s|15m|2h|1d>
-  --permission <auto|bypass|readonly|plan|edit|request|noask>
+  --permission <readonly|auto|request|bypass>
   --tz <时区> (仅 cron)
   --target-channel <channelKey> --target-channel-id <ID>  (AUN 可简写为 aun)
   --target-session <main|thread> [--target-thread-id <threadId>]

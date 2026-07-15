@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import path from 'path';
-import { evaluateWhen, defaultModeNames, type ManifestSection } from '../../src/agents/manifest-engine.js';
-import { renderMessageBody } from '../../src/agents/message-renderer.js';
+import { evaluateWhen, defaultModeNames, type ManifestSection } from '../../src/eck/manifest-engine.js';
+import { renderMessageBody } from '../../src/eck/message-renderer.js';
 import { getPackageRoot } from '../../src/paths.js';
 import type { SubMessage } from '../../src/types.js';
 
@@ -131,4 +131,3 @@ describe('defaultModeNames: multiple isDefault (B5)', () => {
     expect(defaultModeNames(sorted)).toEqual({ private: 'first' });
   });
 });
-

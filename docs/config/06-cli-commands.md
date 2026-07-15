@@ -146,7 +146,17 @@ ec config effective --self bot1
 ec config effective --self bot1 --peer aun#alice
 ```
 
-**输出**：合并后的完整配置，每个字段标注来源。
+**输出**：按点路径展开的完整有效配置，每个叶子字段标注来源。例如：
+
+```json
+{
+  "baseagents.claude.model": { "value": "opus", "source": "relation" },
+  "baseagents.claude.effort": { "value": "high", "source": "role" },
+  "chatmode.private": { "value": "interactive", "source": "agent" }
+}
+```
+
+托管环境会使用服务端解析的当前 role 计算有效值；CLI 不接受调用方传入 role。
 
 ### snapshot - 创建快照
 

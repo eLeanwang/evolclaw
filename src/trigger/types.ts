@@ -1,4 +1,5 @@
-import type { PermissionMode } from '../types.js';
+import type { PublicPermissionMode } from '../core/permission-mode.js';
+import type { CausationContext } from '../core/causation/types.js';
 
 export type TriggerMatchValue =
   | string
@@ -24,6 +25,7 @@ export interface TriggerSourceEvent {
   eventName: string;
   firedAt: number;
   payload: Record<string, unknown>;
+  causation?: CausationContext;
 }
 
 export type TriggerSource =
@@ -41,7 +43,7 @@ export type TriggerMissedPolicy = 'skip' | 'run_once' | 'run_all';
 export type TriggerFeedbackBranch = 'onReply' | 'onNoop' | 'onFailure';
 export type TriggerRunPhase = 'running' | 'feedback-pending';
 export type TriggerRunStatus = 'completed' | 'noop' | 'skipped' | 'failed' | 'dry-run';
-export type TriggerPermissionMode = PermissionMode;
+export type TriggerPermissionMode = PublicPermissionMode;
 export type TriggerEffort = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 
 export interface TriggerOrigin {
@@ -287,6 +289,7 @@ export interface TriggerAuditRecord {
   } | null;
   effects: TriggerEffectRecord[];
   error: { code: string; message: string } | null;
+  causation?: CausationContext;
 }
 
 export interface TriggerRunPayload {
@@ -294,6 +297,7 @@ export interface TriggerRunPayload {
   firedAt: number;
   payload?: Record<string, unknown>;
   dryRun?: boolean;
+  causation?: CausationContext;
 }
 
 export interface TriggerRuntimeResult {

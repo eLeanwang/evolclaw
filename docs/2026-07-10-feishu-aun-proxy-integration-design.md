@@ -442,7 +442,7 @@ EvolClaw 的每一条代理出站消息都必须携带：
 
 ### 7.2 Feishu 与现有 feishu.ts 的关系
 
-当前 `/home/evolclaw/aunproxy` 是 Python，不能直接 import TypeScript 的 `src/channels/feishu.ts`。
+当前 `/home/evolclaw/projects/aunproxy` 是 Python，不能直接 import TypeScript 的 `src/channels/feishu.ts`。
 
 推荐目标是把 `feishu.ts` 中的原生能力拆成明确的协议契约和测试夹具：
 
@@ -691,7 +691,7 @@ aid#<principalAid>
 基于当前目录：
 
 ```text
-/home/evolclaw/aunproxy
+/home/evolclaw/projects/aunproxy
 ```
 
 主要改造：

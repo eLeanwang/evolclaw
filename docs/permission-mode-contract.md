@@ -166,10 +166,24 @@ H 类包括 EvolClaw 主配置（`evolclaw.json` 及遗留 `config.json`）、ag
 - Linux 外层 bubblewrap 对已有 H 类文件使用空文件或 tmpfs mask。
 - symlink 使用真实存在祖先解析，父目录和 glob grant 按权限范围拒绝。
 - `EVOLCLAW_HOME` 本身为 symlink 时，语义检查、deny glob 和外层 mask 统一使用 canonical root，不留真实路径别名。
+- EC 文件命令在执行前检查 H 类路径。
+- daemon 代上传文件时再次检查 H 类路径，不能利用 daemon 的高权限读取。
 
 H 类拒绝发生在 PermissionGateway 之前，因此不存在“人工批准后放行 H 类”的路径。
 
-## 7. 验证要求
+## 7. EC 命令与任务 delegation
+
+特权 EC 路径只接受单个 literal argv 调用。变量展开、命令替换、pipeline、重定向、glob、脚本包装和不确定文件参数全部拒绝。
+
+任务内 `msg/group send|file`、`ctl`、config 和 `handoff return` 使用 `EVOLCLAW_DELEGATION_TOKEN`。daemon 校验 token 是否仍为当前任务有效，并绑定：
+
+- EvolClaw session 和 task；
+- self AID 和 origin message；
+- 每次请求的目标 peer/group 及发起者角色对应的 operation 权限。
+
+任务内 AUN 私聊、群聊和文件上传必须走 daemon IPC。daemon 不可达、身份不匹配或尝试覆盖短连接参数时失败关闭，不回退到未鉴权短连接。文件由 daemon 长连接上传，上传前再次执行 H 类检查。
+
+## 8. 验证要求
 
 权限变更至少覆盖：
 
@@ -183,4 +197,6 @@ H 类拒绝发生在 PermissionGateway 之前，因此不存在“人工批准�
 - Gemini argv、Admin policy、真实 CLI policy 解析和 sandbox argv；
 - Bash、FileChange、permission profile、symlink、父目录和 glob 的 H 类拒绝；
 - 30 分钟授权的同输入命中、不同输入/不同 session 不命中及过期；
-- 缺少 owner、requester、adapter、Gateway 或 operator identity 时失败关闭。
+- 缺少 owner、requester、adapter、Gateway 或 operator identity 时失败关闭；
+- delegation token 的跨 session、跨 message、跨 sender、跨 target 和文件操作升级拒绝；
+- daemon 不可达时不回退短连接。

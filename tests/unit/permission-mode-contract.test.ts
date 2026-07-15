@@ -117,6 +117,10 @@ describe('permission mode contract', () => {
     expect(rules.glob_scan_max_depth).toBeGreaterThanOrEqual(32);
     expect(rules['/home/evolclaw/**/*.json_']).toBe('deny');
     expect(rules['/home/evolclaw/agents/*/contact.json']).toBe('deny');
+    expect(rules['/home/evolclaw/data/causation-aun.json*']).toBe('deny');
+    expect(rules['/home/evolclaw/data/message-queue.json*']).toBe('deny');
+    expect(rules['/home/evolclaw/data/outbox/**']).toBe('deny');
+    expect(rules['/home/evolclaw/data/handoff/**']).toBe('deny');
   });
 
   it('uses the canonical EvolClaw root for sandbox rules and protects legacy config.json', () => {
@@ -129,6 +133,10 @@ describe('permission mode contract', () => {
       expect(patterns).toContain(path.join(realRoot, 'evolclaw.json'));
       expect(patterns).toContain(path.join(realRoot, 'config.json'));
       expect(patterns).toContain(path.join(realRoot, 'agents', '*', 'contact.json'));
+      expect(patterns).toContain(path.join(realRoot, 'data', 'causation-aun.json*'));
+      expect(patterns).toContain(path.join(realRoot, 'data', 'message-queue.json*'));
+      expect(patterns).toContain(path.join(realRoot, 'data', 'outbox', '**'));
+      expect(patterns).toContain(path.join(realRoot, 'data', 'handoff', '**'));
       expect(patterns).not.toContain(path.join(linkedRoot, 'evolclaw.json'));
     } finally {
       fs.rmSync(linkedRoot, { force: true });

@@ -94,6 +94,7 @@ function readMcpServers(projectPath: string): CapabilityRawItem[] {
         source: candidate.source,
         status: 'configured',
         runtimeEnabled: true,
+        data: spec && typeof spec === 'object' && !Array.isArray(spec) ? { ...spec } : undefined,
       });
     }
   }

@@ -1,4 +1,5 @@
 import fs from 'fs';
+import path from 'path';
 import { createHash } from 'crypto';
 import { TextDecoder } from 'util';
 import type { AUNClient } from '@agentunion/fastaun';
@@ -8,6 +9,10 @@ import { getAidStore, loadClient, SLOT } from '../aid/store.js';
 import { uploadFileAndBuildPayload, type UploadProgress } from './upload.js';
 import type { MsgError } from './p2p.js';
 import { checkGroupIndex, getGroupIndex } from './group-index.js';
+import { readBestTaskRuntimeContext, type TaskRuntimeContext } from '../../core/task-runtime-context.js';
+import { ipcQuery, type IpcAunFileRequest, type IpcAunMsgSendResponse } from '../../ipc.js';
+import { resolvePaths } from '../../paths.js';
+import { AGENT_DELEGATION_TOKEN_ENV } from '../../core/auth/agent-delegation.js';
 
 // ==================== Types ====================
 
@@ -205,7 +210,87 @@ export interface GroupSendArgs extends GroupCommonOpts {
   onUploadProgress?: (info: UploadProgress) => void;
 }
 
+function buildGroupPayload(body: Exclude<GroupSendBody, { mode: 'file' }>): Record<string, unknown> {
+  return body.mode === 'text' ? { type: 'text', text: body.text } : { ...body.payload };
+}
+
+async function tryDaemonGroupSend(
+  args: GroupSendArgs,
+  payload: Record<string, unknown> | undefined,
+  runtimeContext?: TaskRuntimeContext | null,
+  file?: IpcAunFileRequest,
+): Promise<IpcAunMsgSendResponse | null> {
+  const delegatedTask = !!process.env.EVOLCLAW_SESSION_ID
+    || !!process.env[AGENT_DELEGATION_TOKEN_ENV];
+  if (!runtimeContext) {
+    return delegatedTask
+      ? { ok: false, code: 'DELEGATION_REQUIRED', error: 'Task runtime context is unavailable' }
+      : null;
+  }
+  if (!runtimeContext.selfAid || runtimeContext.selfAid !== args.from) {
+    return { ok: false, code: 'INVALID_DELEGATION', error: 'Task sender does not match the delegated agent' };
+  }
+  if (!runtimeContext.sessionId || !runtimeContext.messageId) {
+    return { ok: false, code: 'INVALID_DELEGATION', error: 'Task runtime context is incomplete' };
+  }
+  if (args.slotId || args.aunPath) {
+    return { ok: false, code: 'INVALID_DELEGATION', error: 'Task sends cannot override the daemon AUN connection' };
+  }
+
+  const response = await ipcQuery<IpcAunMsgSendResponse>(resolvePaths().socket, {
+    type: 'aun-msg-send',
+    aid: args.from,
+    to: args.groupId,
+    scope: 'group',
+    ...(payload ? { payload } : { file }),
+    mentions: args.mentions,
+    encrypt: args.encrypt === true,
+    originSessionId: runtimeContext.sessionId,
+    originMessageId: runtimeContext.messageId,
+    delegationToken: process.env[AGENT_DELEGATION_TOKEN_ENV],
+  }, file ? 120_000 : 5000);
+  return response ?? {
+    ok: false,
+    code: 'AUN_DAEMON_UNAVAILABLE',
+    error: 'EvolClaw daemon did not complete the delegated AUN group send',
+  };
+}
+
+function daemonGroupSendResult(
+  args: GroupSendArgs,
+  result: IpcAunMsgSendResponse,
+): GroupSendResult | MsgError {
+  if (!result.ok) {
+    return { ok: false, error: result.error || 'daemon AUN group send failed', code: result.code };
+  }
+  if (!result.group_id || !result.message) {
+    return { ok: false, error: 'daemon AUN group send returned no group message' };
+  }
+  return {
+    ok: true,
+    group_id: result.group_id || args.groupId,
+    message: result.message as unknown as GroupMessage,
+    event: result.event,
+  };
+}
+
 export async function groupSend(args: GroupSendArgs): Promise<GroupSendResult | MsgError> {
+  const runtimeContext = await readBestTaskRuntimeContext();
+  if (args.body.mode !== 'file') {
+    const payload = buildGroupPayload(args.body);
+    const daemonResult = await tryDaemonGroupSend(args, payload, runtimeContext);
+    if (daemonResult) return daemonGroupSendResult(args, daemonResult);
+  } else {
+    const daemonResult = await tryDaemonGroupSend(args, undefined, runtimeContext, {
+      filePath: path.resolve(args.body.filePath),
+      as: args.body.as,
+      contentType: args.body.contentType,
+      text: args.body.text,
+      transcript: args.body.transcript,
+    });
+    if (daemonResult) return daemonGroupSendResult(args, daemonResult);
+  }
+
   const conn = await createShortConnection(args.from, { aunPath: args.aunPath, slotId: args.slotId });
   try {
     let payload: Record<string, unknown>;

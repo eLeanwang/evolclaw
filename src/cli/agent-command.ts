@@ -333,6 +333,7 @@ Options:
 
 示例:
   evolclaw agent get mybot.agentid.pub active_baseagent
+  evolclaw agent get mybot.agentid.pub observable
   evolclaw agent get mybot.agentid.pub channels.aun.enabled`);
       return;
     }
@@ -362,6 +363,8 @@ Options:
 
 示例:
   evolclaw agent set mybot.agentid.pub active_baseagent codex
+  evolclaw agent set mybot.agentid.pub observable true
+  evolclaw agent set mybot.agentid.pub observable false
   evolclaw agent set mybot.agentid.pub channels.aun.enabled true`);
       return;
     }

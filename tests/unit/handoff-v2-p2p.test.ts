@@ -3,6 +3,8 @@ import { ipcQuery } from '../../src/ipc.js';
 import { createShortConnection } from '../../src/aun/rpc/index.js';
 import { uploadFileAndBuildPayload } from '../../src/aun/msg/upload.js';
 import { msgSend } from '../../src/aun/msg/p2p.js';
+import { groupSend } from '../../src/aun/msg/group.js';
+import { AGENT_DELEGATION_TOKEN_ENV } from '../../src/core/auth/agent-delegation.js';
 
 vi.mock('../../src/ipc.js', () => ({ ipcQuery: vi.fn() }));
 vi.mock('../../src/aun/rpc/index.js', () => ({ createShortConnection: vi.fn() }));
@@ -12,9 +14,11 @@ const mockedIpcQuery = vi.mocked(ipcQuery);
 const mockedCreateShortConnection = vi.mocked(createShortConnection);
 const mockedUploadFileAndBuildPayload = vi.mocked(uploadFileAndBuildPayload);
 const originalSessionId = process.env.EVOLCLAW_SESSION_ID;
+const originalDelegationToken = process.env[AGENT_DELEGATION_TOKEN_ENV];
 
 beforeEach(() => {
   process.env.EVOLCLAW_SESSION_ID = 'meta-origin';
+  process.env[AGENT_DELEGATION_TOKEN_ENV] = 'task-token';
   mockedIpcQuery.mockReset();
   mockedCreateShortConnection.mockReset();
   mockedUploadFileAndBuildPayload.mockReset();
@@ -23,6 +27,8 @@ beforeEach(() => {
 afterEach(() => {
   if (originalSessionId === undefined) delete process.env.EVOLCLAW_SESSION_ID;
   else process.env.EVOLCLAW_SESSION_ID = originalSessionId;
+  if (originalDelegationToken === undefined) delete process.env[AGENT_DELEGATION_TOKEN_ENV];
+  else process.env[AGENT_DELEGATION_TOKEN_ENV] = originalDelegationToken;
 });
 
 function mockRuntimeAndSend(
@@ -38,6 +44,7 @@ function mockRuntimeAndSend(
       } } as any;
     }
     if (command.type === 'aun-msg-send') {
+      expect(command.delegationToken).toBe('task-token');
       assertSend(command);
       return { ok: true, handoff_id: 'h-001', target_session_id: 'meta-target', status: 'queued' } as any;
     }
@@ -98,17 +105,11 @@ describe('handoff v2 msg send routing', () => {
     expect(mockedCreateShortConnection).not.toHaveBeenCalled();
   });
 
-  it('uploads a file then routes its payload through v2 without direct message.send', async () => {
-    const connection = { call: vi.fn(), close: vi.fn().mockResolvedValue(undefined) };
-    mockedCreateShortConnection.mockResolvedValue(connection as any);
-    mockedUploadFileAndBuildPayload.mockResolvedValue({
-      type: 'file',
-      attachment: {} as any,
-      payload: { type: 'file', text: 'report', attachments: [{ object_key: 'shared/report.txt' }] },
-    });
+  it('delegates file upload to the daemon before v2 routing', async () => {
     mockRuntimeAndSend(command => {
-      expect(command.payload).toMatchObject({
-        type: 'file', text: 'report', attachments: [{ object_key: 'shared/report.txt' }],
+      expect(command.payload).toBeUndefined();
+      expect(command.file).toMatchObject({
+        filePath: '/tmp/report.txt',
       });
     }, { channel: 'feishu', chatType: 'group' });
 
@@ -118,9 +119,8 @@ describe('handoff v2 msg send routing', () => {
     });
 
     expect(result).toMatchObject({ ok: true, handoff_id: 'h-001' });
-    expect(mockedUploadFileAndBuildPayload).toHaveBeenCalledTimes(1);
-    expect(connection.call).not.toHaveBeenCalledWith('message.send', expect.anything());
-    expect(connection.close).toHaveBeenCalledTimes(1);
+    expect(mockedUploadFileAndBuildPayload).not.toHaveBeenCalled();
+    expect(mockedCreateShortConnection).not.toHaveBeenCalled();
   });
 
   it('attaches the local session id when sending to the current peer', async () => {
@@ -144,5 +144,89 @@ describe('handoff v2 msg send routing', () => {
     });
 
     expect(result).toMatchObject({ ok: true, handoff_id: 'h-001', target_session_id: 'meta-target' });
+  });
+
+  it('fails closed when the daemon does not answer a delegated send', async () => {
+    mockedIpcQuery.mockImplementation(async (_socket, command) => {
+      if (command.type === 'task-runtime-context') {
+        return { ok: true, context: {
+          sessionId: 'meta-origin', messageId: 'origin-message', channel: 'aun', chatType: 'private',
+          selfAid: 'self.agentid.pub', peerId: 'origin.agentid.pub',
+        } } as any;
+      }
+      return null;
+    });
+
+    const result = await msgSend({
+      from: 'self.agentid.pub', to: 'target.agentid.pub',
+      body: { mode: 'text', text: 'must not bypass daemon auth' },
+    });
+
+    expect(result).toMatchObject({ ok: false, code: 'AUN_DAEMON_UNAVAILABLE' });
+    expect(mockedCreateShortConnection).not.toHaveBeenCalled();
+  });
+});
+
+describe('delegated AUN group send routing', () => {
+  function mockGroupRuntimeAndSend(assertSend: (command: any) => void): void {
+    mockedIpcQuery.mockImplementation(async (_socket, command) => {
+      if (command.type === 'task-runtime-context') {
+        return { ok: true, context: {
+          sessionId: 'meta-origin', messageId: 'origin-message', channel: 'aun', chatType: 'group',
+          selfAid: 'self.agentid.pub', peerId: 'group.owner/member.agentid.pub',
+        } } as any;
+      }
+      if (command.type === 'aun-msg-send') {
+        expect(command.delegationToken).toBe('task-token');
+        assertSend(command);
+        return {
+          ok: true,
+          group_id: 'group.owner/team',
+          message: { message_id: 'group-message', payload: command.payload ?? { type: 'file' } },
+        } as any;
+      }
+      return null;
+    });
+  }
+
+  it('routes text and mentions through the daemon', async () => {
+    mockGroupRuntimeAndSend(command => {
+      expect(command).toMatchObject({
+        scope: 'group',
+        aid: 'self.agentid.pub',
+        to: 'group.owner/team',
+        payload: { type: 'text', text: 'hello group' },
+        mentions: [{ scope: 'all' }],
+        originSessionId: 'meta-origin',
+        originMessageId: 'origin-message',
+      });
+    });
+
+    const result = await groupSend({
+      from: 'self.agentid.pub',
+      groupId: 'group.owner/team',
+      body: { mode: 'text', text: 'hello group' },
+      mentions: [{ scope: 'all' }],
+    });
+
+    expect(result).toMatchObject({ ok: true, group_id: 'group.owner/team' });
+    expect(mockedCreateShortConnection).not.toHaveBeenCalled();
+  });
+
+  it('delegates group file upload without opening a short connection', async () => {
+    mockGroupRuntimeAndSend(command => {
+      expect(command.payload).toBeUndefined();
+      expect(command.file).toMatchObject({ filePath: '/tmp/group-report.txt' });
+    });
+
+    const result = await groupSend({
+      from: 'self.agentid.pub',
+      groupId: 'group.owner/team',
+      body: { mode: 'file', filePath: '/tmp/group-report.txt' },
+    });
+
+    expect(result).toMatchObject({ ok: true, group_id: 'group.owner/team' });
+    expect(mockedUploadFileAndBuildPayload).not.toHaveBeenCalled();
+    expect(mockedCreateShortConnection).not.toHaveBeenCalled();
   });
 });

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { renderTemplate } from '../../src/agents/manifest-engine.js';
+import { renderTemplate } from '../../src/eck/manifest-engine.js';
 
 // {{#each}} 循环语法（保留空行模式，与消息渲染一致 stripBlankLines=false）
 describe('renderTemplate {{#each}}', () => {

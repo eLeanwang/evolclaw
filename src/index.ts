@@ -1,7 +1,7 @@
 // 【重要】最先加载环境变量，确保后续模块初始化时可用
 import dotenv from 'dotenv';
 import path from 'path';
-import { ensureDataDirs, resolvePaths, agentDir, getPackageRoot, agentMdPath } from './paths.js';
+import { ensureDataDirs, resolvePaths, agentDir, getPackageRoot, agentMdPath, eckDebugDir } from './paths.js';
 
 // 立即加载 .env 文件（在其他模块导入之前）
 try {
@@ -14,7 +14,7 @@ import { ClaudeSessionFileAdapter } from './core/session/adapters/claude-session
 import { CodexSessionFileAdapter } from './core/session/adapters/codex-session-file-adapter.js';
 import { GeminiSessionFileAdapter } from './core/session/adapters/gemini-session-file-adapter.js';
 import { resolveAnthropicConfig } from './agents/baseagent.js';
-import { loadDefaults, loadAllAgents, ensureAgentDirSkeleton, migrateIdentitiesIfNeeded, migrateProcessConfigIfNeeded, loadEvolclawConfig } from './config-store.js';
+import { loadDefaults, loadAllAgents, ensureAgentDirSkeleton, migrateIdentitiesIfNeeded, migrateProcessConfigIfNeeded, loadEvolclawConfig, initializeEckSnapshotsConfig } from './config-store.js';
 import { initConfigManager, resolveEffective } from './config/config-manager.js';
 import { shouldFailFastForMissingOwners } from './config/owner-policy.js';
 import { getFirstStaticAgentOwner, resolvePeerRoleDetail, roleToSessionIdentity } from './config/peer-role-resolver.js';
@@ -50,7 +50,8 @@ import { StatsCollector } from './utils/stats.js';
 import { AidStatsCollector } from './utils/stats.js';
 import { PermissionGateway } from './core/permission.js';
 import { InteractionRouter } from './core/interaction-router.js';
-import { AgentDelegationRegistry } from './core/auth/agent-delegation.js';
+import { AgentDelegationRegistry, authorizeDelegatedAunMsgSend } from './core/auth/agent-delegation.js';
+import { isHClassPath } from './core/protected-paths.js';
 import { ChannelLoader, type ChannelInstance, tryParseChannelKey } from './core/channel-loader.js';
 import { AgentLoader } from './core/baseagent-loader.js';
 import { EvolAgentRegistry, type ReloadHooks } from './core/evolagent-registry.js';
@@ -631,6 +632,11 @@ async function main() {
     }
   }
 
+  const evolclawCfg = loadEvolclawConfig();
+  if (initializeEckSnapshotsConfig(evolclawCfg)) {
+    logger.warn(`[ECK] Debug snapshots enabled at ${eckDebugDir()}; files may contain sensitive context and local paths.`);
+  }
+
   // ── ECK 运行时初始化 ──
   initEck();
 
@@ -640,7 +646,6 @@ async function main() {
 
   // 加载配置（新结构：defaults.json + per-agent config.json）
   const defaults: DefaultsConfig = loadDefaults() ?? { $schema_version: CONFIG_SCHEMA_VERSION };
-  const evolclawCfg = loadEvolclawConfig();
   let processLevelOwners = evolclawCfg.owners ?? [];
   const bindBootstrapMode = process.env.EVOLCLAW_BIND_BOOTSTRAP === '1';
   if (processLevelOwners.length === 0 && shouldFailFastForMissingOwners()) {
@@ -1027,6 +1032,7 @@ async function main() {
       to: targetSession.channelId,
       payload: handoff.request.payload,
       encrypt: handoff.request.encrypt,
+      causation: handoff.causation,
       log: {
         content: classified.content,
         sessionId: targetSession.id,
@@ -1848,7 +1854,11 @@ async function main() {
         ? { aid: evolclawCfg.aid, connected: controlChannel?.getAidState().status === 'connected' }
         : undefined,
     };
-  }, async (cmd, sessionId) => cmdHandler.handleCtl(cmd, sessionId));
+  }, async (cmd, sessionId, delegationToken) => {
+    const delegation = agentDelegationRegistry.validate(delegationToken, sessionId);
+    if (!delegation.ok) return { ok: false, code: delegation.code, error: delegation.reason };
+    return cmdHandler.handleCtl(cmd, sessionId);
+  });
 
   // M3: direct call (not cast) — wire EvolAgentRegistry into IPC for evolagent.* handlers
   ipcServer.setAgentRegistry(agentRegistry);
@@ -1983,6 +1993,21 @@ async function main() {
       ?? { ok: false, code: 'HANDOFF_NOT_FOUND', error: 'handoff not found' };
   });
   ipcServer.setAunMsgSender(async (params) => {
+    const runtimeCausation = params.originSessionId
+      ? responseEngine.getTaskRuntimeContext(params.originSessionId)?.causation
+      : undefined;
+    const delegation = authorizeDelegatedAunMsgSend(agentDelegationRegistry, {
+      delegationToken: params.delegationToken,
+      sessionId: params.originSessionId,
+      messageId: params.originMessageId,
+      aid: params.aid,
+      to: params.to,
+      scope: params.scope,
+      action: params.file ? 'file' : 'send',
+    });
+    if (!delegation.ok) {
+      return { ok: false, error: delegation.reason, code: delegation.code };
+    }
     const inst = channelInstances.find((candidate) => {
       if (candidate.channelType !== 'aun') return false;
       const ch = candidate.channel as any;
@@ -1997,6 +2022,49 @@ async function main() {
     if (!ch || typeof ch.sendDaemonMsg !== 'function') {
       return { ok: false, error: `AUN channel not found for ${params.aid}`, code: 'AUN_CHANNEL_NOT_FOUND' };
     }
+    const targetIsGroup = typeof ch.isGroupId === 'function' && ch.isGroupId(params.to);
+    if ((params.scope === 'group') !== targetIsGroup) {
+      return { ok: false, error: 'AUN target does not match the delegated send scope', code: 'UNSUPPORTED_TARGET' };
+    }
+
+    let payload = params.payload;
+    if (params.file) {
+      if (isHClassPath(params.file.filePath)) {
+        return {
+          ok: false,
+          error: 'H-class protected files cannot be uploaded by an agent task',
+          code: 'H_CLASS_PROTECTED',
+        };
+      }
+      if (typeof ch.buildDaemonFilePayload !== 'function') {
+        return { ok: false, error: 'AUN channel does not support daemon file uploads', code: 'AUN_FILE_UNSUPPORTED' };
+      }
+      try {
+        payload = await ch.buildDaemonFilePayload(params.file);
+      } catch (error) {
+        return {
+          ok: false,
+          error: error instanceof Error ? error.message : String(error),
+          code: (error as { code?: string })?.code ?? 'AUN_FILE_UPLOAD_FAILED',
+        };
+      }
+    }
+    if (!payload) {
+      return { ok: false, error: 'message payload is required', code: 'INVALID_PAYLOAD' };
+    }
+
+    if (params.scope === 'group') {
+      if (typeof ch.sendDaemonGroupMsg !== 'function') {
+        return { ok: false, error: 'AUN channel does not support daemon group sends', code: 'AUN_GROUP_UNSUPPORTED' };
+      }
+      return await ch.sendDaemonGroupMsg({
+        groupId: params.to,
+        payload,
+        mentions: params.mentions,
+        encrypt: params.encrypt,
+      });
+    }
+
     let targetSessionId: string | undefined;
     if (params.originSessionId && params.originMessageId) {
       try {
@@ -2005,10 +2073,11 @@ async function main() {
           to: params.to,
           originSessionId: params.originSessionId,
           originMessageId: params.originMessageId,
-          payload: params.payload,
+          payload,
           encrypt: params.encrypt === true,
           thread: params.thread,
           explicitReturnPolicy: params.returnPolicy,
+          causation: runtimeCausation,
         });
         targetSessionId = created.targetSession.id;
         if (created.crossSession && created.handoff) {
@@ -2019,8 +2088,8 @@ async function main() {
             target_session_id: created.targetSession.id,
           };
         }
-        if (!params.payload.ref_message_id) {
-          params.payload.ref_message_id = params.originMessageId;
+        if (!payload.ref_message_id) {
+          payload.ref_message_id = params.originMessageId;
         }
       } catch (error) {
         const code = (error as { code?: string })?.code;
@@ -2029,8 +2098,9 @@ async function main() {
     }
     return await ch.sendDaemonMsg({
       to: params.to,
-      payload: params.payload,
+      payload,
       encrypt: params.encrypt,
+      causation: runtimeCausation,
       log: params.log ? { ...params.log, sessionId: targetSessionId ?? params.log.sessionId } : undefined,
     });
   });

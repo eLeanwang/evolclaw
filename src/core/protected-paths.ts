@@ -22,13 +22,17 @@ const H_CLASS_RELATIVE_PATTERNS = [
   /^agents\/defaults_\d+\.json$/,
   /^\.lock$/,
   /^daemon\.pid$/,
+  /^data\/causation-aun\.json(?:_|__)?$/,
+  /^data\/message-queue\.json(?:_|__|\.tmp-.*)?$/,
+  /^data\/outbox(?:\/|$)/,
+  /^data\/handoff(?:\/|$)/,
 ];
 
 const H_CLASS_REFERENCE_PATTERNS = [
   /(?:^|[^A-Za-z0-9_.-])evolclaw\.json(?=$|[^A-Za-z0-9_.-])/,
   /(?:^|[^A-Za-z0-9_.-])agents[\\/](?:defaults\.json|[^/\\\s"']+[\\/](?:(?:config|contact)\.json|relations[\\/][^/\\\s"']+[\\/]config\.json))(?=$|[\s"';&|<>)},])/,
   /(?:^|[^A-Za-z0-9_.-])(?:backups[\\/]config|\.snapshots|CA|(?:AIDs|aids)[\\/][^/\\\s"']+[\\/](?:cert|keys))(?:[\\/]|$|[\s"';&|<>)},])/,
-  /(?:^|[/\\\s"'=<>])(?:\.device_id|\.env|\.seed(?:\.[^/\\\s"']*)?|\.migrated-[^/\\\s"']*|\.lock|daemon\.pid)(?:[\\/]|$|[\s"';&|<>)},])/,
+  /(?:^|[/\\\s"'=<>])(?:\.device_id|\.env|\.seed(?:\.[^/\\\s"']*)?|\.migrated-[^/\\\s"']*|\.lock|daemon\.pid|data[\\/](?:causation-aun\.json(?:_|__)?|message-queue\.json(?:_|__|\.tmp-[^/\\\s"']*)?|outbox|handoff))(?:[\\/]|$|[\s"';&|<>)},])/,
   /(?:^|[/\\\s"'=<>])(?:[^/\\\s"']+\.json_|[^/\\\s"']+\.json\.migrated|defaults_\d+\.json)(?=$|[\s"';&|<>)},])/,
 ];
 
@@ -126,6 +130,12 @@ export function getHClassSandboxPatterns(root = resolveRoot()): string[] {
     path.join('agents', 'defaults_*.json'),
     '.lock',
     'daemon.pid',
+    path.join('data', 'causation-aun.json*'),
+    path.join('data', 'message-queue.json*'),
+    path.join('data', 'outbox'),
+    path.join('data', 'outbox', '**'),
+    path.join('data', 'handoff'),
+    path.join('data', 'handoff', '**'),
   ];
   return entries.map(entry => path.join(absoluteRoot, entry));
 }
@@ -151,6 +161,8 @@ export function getExistingHClassMaskTargets(root = resolveRoot()): HClassMaskTa
   for (const relative of [
     'evolclaw.json', 'config.json', 'backups/config', '.snapshots', 'CA',
     '.device_id', '.env', '.seed', '.lock', 'daemon.pid',
+    'data/causation-aun.json', 'data/message-queue.json', 'data/message-queue.json_', 'data/message-queue.json__',
+    'data/outbox', 'data/handoff',
   ]) {
     addExistingTarget(targets, path.join(absoluteRoot, relative));
   }

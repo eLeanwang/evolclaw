@@ -186,6 +186,127 @@ describe('Trigger V4 e2e', () => {
     expect(events.some(event => event.type === 'trigger:fired' && event.triggerId === created.id)).toBe(true);
     expect(events.some(event => event.type === 'trigger:completed' && event.triggerId === created.id)).toBe(true);
   });
+
+  it('blocks a task:error caused by the same trigger before starting a second run', async () => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'trigger-causation-e2e-'));
+    const projectPath = path.join(tmpDir, 'project');
+    fs.mkdirSync(projectPath, { recursive: true });
+
+    const eventBus = new EventBus();
+    const events: GatewayEvent[] = [];
+    eventBus.subscribeAll(event => events.push(event));
+
+    const receivedMessages: Message[] = [];
+    const messageQueue = new MessageQueue(async message => {
+      receivedMessages.push(message);
+      const meta = message.triggerMeta!;
+      eventBus.publish({
+        type: 'task:error',
+        sessionId: meta.boundSessionId ?? 'target-session',
+        error: 'descendant failure',
+        errorType: 'agent:test',
+        causation: message.causation,
+      });
+      eventBus.publish({
+        type: 'trigger:completed',
+        triggerId: meta.triggerId,
+        name: meta.triggerName ?? 'causation-cycle',
+        runId: meta.runId!,
+        originTriggerId: meta.triggerId,
+        messageId: message.messageId ?? meta.runId!,
+        durationMs: 1,
+        targetChannel: message.channel,
+        targetChannelId: message.channelId,
+        fireTime: meta.fireTime ?? Date.now(),
+        causation: message.causation,
+      });
+    });
+    messageQueue.setEventBus(eventBus);
+
+    const sessionManager = new SessionManager(
+      path.join(tmpDir, 'sessions'),
+      eventBus,
+      () => ({ role: 'owner', mode: 'interactive' }),
+    );
+    const manager = new TriggerDefinitionManager('test.agentid.pub', path.join(tmpDir, 'triggers'));
+    const state = new TriggerRunStateStore(manager);
+    const audit = new TriggerAuditLogger(path.join(tmpDir, 'logs'), manager.history);
+    const binding = {
+      adapter: {
+        channelName: 'aun#test.agentid.pub#main',
+        channelKey: 'aun#test.agentid.pub#main',
+        capabilities: { file: false, image: false, interaction: false, markdown: true, thought: false, status: true, thread: true },
+        send: vi.fn(),
+      } as any,
+      agentAid: 'test.agentid.pub',
+      agentName: 'test-agent',
+      projectPath,
+      baseagent: 'claude',
+    };
+    const feedback = new TriggerFeedbackDispatcher({
+      getChannel: (_agentAid, channelKey) => channelKey === binding.adapter.channelKey ? binding : undefined,
+      sessionManager,
+      messageQueue,
+      eventBus,
+    });
+    const daemon = new DaemonChannel(sessionManager, messageQueue);
+    scheduler = new TriggerRuntimeScheduler(
+      manager,
+      state,
+      audit,
+      new TriggerScriptExecutor(),
+      feedback,
+      daemon,
+      { projectPath, baseagent: 'claude' },
+      eventBus,
+    );
+    await scheduler.init();
+
+    const created = scheduler.create({
+      $schema_version: 4,
+      id: 'trig_causation_cycle',
+      agentAid: 'test.agentid.pub',
+      enabled: true,
+      name: 'causation-cycle',
+      source: { type: 'event', eventPattern: 'task:error' },
+      execution: {
+        type: 'target_session',
+        prompt: 'diagnose {{event.error}}',
+        onError: 'fail',
+        noopSentinel: '[[NOOP]]',
+      },
+      feedback: {
+        strategy: 'target',
+        target: {
+          channelKey: binding.adapter.channelKey,
+          channelId: 'target.agentid.pub',
+          session: 'main',
+        },
+      },
+      reliability: {
+        concurrency: 'allow',
+        missedPolicy: 'run_once',
+        retry: { maxAttempts: 0, backoffMs: 1 },
+      },
+      limits: { maxRuns: 10 },
+    }, [], { enable: true });
+
+    eventBus.publish({
+      type: 'task:error',
+      sessionId: 'external-session',
+      error: 'initial failure',
+      errorType: 'agent:test',
+    });
+
+    await waitFor(() => audit.recent(created.id, 10).length === 2);
+    expect(receivedMessages).toHaveLength(1);
+    expect(receivedMessages[0].causation?.trigger?.path).toHaveLength(1);
+    expect(audit.recent(created.id, 10).map(record => record.status).sort()).toEqual(['completed', 'skipped']);
+    expect(audit.recent(created.id, 10).find(record => record.status === 'skipped')?.reason).toBe('causation_cycle');
+    expect(state.readLimitState(created.id)?.runCount).toBe(1);
+    expect(events.filter(event => event.type === 'trigger:fired' && event.triggerId === created.id)).toHaveLength(1);
+    expect(events.filter(event => event.type === 'trigger:failed' && event.triggerId === created.id)).toHaveLength(0);
+  });
 });
 
 async function waitFor(predicate: () => boolean, timeoutMs = 2_000): Promise<void> {

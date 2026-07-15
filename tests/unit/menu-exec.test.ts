@@ -31,10 +31,11 @@ function writeRelationConfig(peerId: string, patch: Record<string, any>): void {
   fs.writeFileSync(file, JSON.stringify({ ...readRelationConfig(peerId), ...patch }));
 }
 
-function relationPermissionResult(mode: string) {
+function relationPermissionResult(mode: string, source?: string) {
   return {
     data: {
       mode,
+      ...(source ? { source } : {}),
       scope: 'relation',
       field: 'permissionMode',
       self: TEST_AID,
@@ -254,14 +255,116 @@ describe('execMenuQuery', () => {
     it('returns current mode', async () => {
       const { handler } = createHandler();
       const result = await handler.execMenuQuery('/perm', 'aun', 'chat1', 'user1');
-      expect(result).toEqual(relationPermissionResult('bypass'));
+      expect(result).toEqual(relationPermissionResult('bypass', 'role'));
     });
 
     it('targets the current relation when no session exists', async () => {
       const sm = createMockSessionManager({ getActiveSession: vi.fn().mockResolvedValue(null) });
       const { handler } = createHandler({ sessionManager: sm });
       const result = await handler.execMenuQuery('/perm', 'aun', 'chat1', 'user1') as any;
-      expect(result).toEqual(relationPermissionResult('bypass'));
+      expect(result).toEqual(relationPermissionResult('bypass', 'role'));
+    });
+
+    it('reports the role scope when permission comes from the role policy', async () => {
+      writeTestAgentConfig({ permissionMode: undefined });
+      writeRelationConfig('user1', { permissionMode: undefined });
+      const { handler } = createHandler();
+
+      const result = await handler.execMenuQuery('/perm', 'aun', 'chat1', 'user1') as any;
+
+      expect(result.data).toMatchObject({ mode: 'bypass', source: 'role' });
+    });
+
+    it('reports the builtin scope when neither config nor role provides permission', async () => {
+      writeTestAgentConfig({ permissionMode: undefined });
+      writeRelationConfig('user1', { permissionMode: undefined });
+      const sm = createMockSessionManager({ resolveIdentity: vi.fn().mockReturnValue({ role: 'none' }) });
+      const { handler } = createHandler({ sessionManager: sm });
+
+      const result = await handler.execMenuQuery('/perm', 'aun', 'chat1', 'user1') as any;
+
+      expect(result.data).toMatchObject({ mode: 'readonly', source: 'builtin' });
+    });
+  });
+
+  describe('/model and /effort', () => {
+    it('reports the agent scope for an inherited model', async () => {
+      const { handler } = createHandler();
+
+      const result = await handler.execMenuQuery('/model', 'aun', 'chat1', 'user1') as any;
+
+      expect(result.data).toMatchObject({
+        model: 'sonnet',
+        source: 'agent',
+        scope: 'relation',
+        field: 'baseagents.claude.model',
+      });
+    });
+
+    it('reports the defaults scope for a defaults model', async () => {
+      writeTestAgentConfig({ baseagents: undefined });
+      fs.writeFileSync(path.join(tmpRoot, 'agents', 'defaults.json'), JSON.stringify({
+        $schema_version: 1,
+        baseagents: { claude: { model: 'haiku' } },
+      }));
+      const { handler } = createHandler();
+
+      const result = await handler.execMenuQuery('/model', 'aun', 'chat1', 'user1') as any;
+
+      expect(result.data).toMatchObject({ model: 'haiku', source: 'defaults' });
+    });
+
+    it('reports the relation scope for a relation model override', async () => {
+      writeRelationConfig('user1', { baseagents: { claude: { model: 'opus' } } });
+      const { handler } = createHandler();
+
+      const result = await handler.execMenuQuery('/model', 'aun', 'chat1', 'user1') as any;
+
+      expect(result.data).toMatchObject({ model: 'opus', source: 'relation' });
+    });
+
+    it('reports the role scope when a custom role replaces model and effort', async () => {
+      writeTestAgentConfig({
+        roles: {
+          definitions: {
+            reviewer: {
+              description: 'Restricted reviewer',
+              commandPermissions: {
+                'model.*': { allow: true, scopes: ['relation'] },
+              },
+              permissions: {
+                'baseagents.claude.model': {
+                  default: 'sonnet',
+                  allowOverride: true,
+                  allowedModels: ['sonnet'],
+                },
+                'baseagents.claude.effort': {
+                  default: 'low',
+                  allowOverride: true,
+                  allowedValues: ['low'],
+                },
+              },
+            },
+          },
+        },
+      });
+      writeRelationConfig('user1', { baseagents: { claude: { model: 'opus', effort: 'high' } } });
+      const sm = createMockSessionManager({ resolveIdentity: vi.fn().mockReturnValue({ role: 'reviewer' }) });
+      const { handler } = createHandler({ sessionManager: sm });
+
+      const model = await handler.execMenuQuery('/model', 'aun', 'chat1', 'user1') as any;
+      const effort = await handler.execMenuQuery('/effort', 'aun', 'chat1', 'user1') as any;
+
+      expect(model.data).toMatchObject({ model: 'sonnet', source: 'role' });
+      expect(effort.data).toMatchObject({ effort: 'low', source: 'role' });
+    });
+
+    it('reports the runner scope for an unconfigured effort', async () => {
+      const { handler } = createHandler();
+
+      const result = await handler.execMenuQuery('/effort', 'aun', 'chat1', 'user1') as any;
+
+      expect(result.data).toMatchObject({ effort: 'medium', source: 'runner' });
     });
   });
 
@@ -269,7 +372,7 @@ describe('execMenuQuery', () => {
     it('returns current mode', async () => {
       const { handler } = createHandler();
       const result = await handler.execMenuQuery('/chatmode', 'aun', 'chat1', 'user1');
-      expect(result).toEqual({ data: { mode: 'interactive', scope: 'relation', field: 'chatmode.private', self: TEST_AID, peerKey: formatPeerKey('aun', 'user1') } });
+      expect(result).toEqual({ data: { mode: 'interactive', source: 'agent', scope: 'relation', field: 'chatmode.private', self: TEST_AID, peerKey: formatPeerKey('aun', 'user1') } });
     });
 
     it('renders the Slash card from the current relation effective mode', async () => {
@@ -300,6 +403,7 @@ describe('execMenuQuery', () => {
       expect(result).toEqual({
         data: {
           mode: 'proactive',
+          source: 'builtin',
           scope: 'relation',
           field: 'chatmode.nothuman',
           self: TEST_AID,
@@ -313,7 +417,7 @@ describe('execMenuQuery', () => {
       const sm = createMockSessionManager({ getActiveSession: vi.fn().mockResolvedValue(null) });
       const { handler } = createHandler({ sessionManager: sm });
       const result = await handler.execMenuQuery('/chatmode', 'aun', 'chat1', 'user1');
-      expect(result).toEqual({ data: { mode: 'proactive', scope: 'relation', field: 'chatmode.private', self: TEST_AID, peerKey: formatPeerKey('aun', 'user1') } });
+      expect(result).toEqual({ data: { mode: 'proactive', source: 'agent', scope: 'relation', field: 'chatmode.private', self: TEST_AID, peerKey: formatPeerKey('aun', 'user1') } });
     });
   });
 
@@ -334,27 +438,110 @@ describe('execMenuQuery', () => {
       });
       const { handler } = createHandler({ sessionManager: sm });
       const result = await handler.execMenuQuery('/dispatch', 'aun', 'chat1', 'user1');
-      expect(result).toEqual({ data: { mode: 'mention', scope: 'relation', field: 'dispatch', self: TEST_AID, peerKey: formatPeerKey('aun', 'chat1') } });
+      expect(result).toEqual({ data: { mode: 'mention', source: 'agent', scope: 'relation', field: 'dispatch', self: TEST_AID, peerKey: formatPeerKey('aun', 'chat1') } });
+    });
+
+    it('reports the session scope when dispatch only comes from session metadata', async () => {
+      writeTestAgentConfig({ dispatch: undefined });
+      const sm = createMockSessionManager({
+        getActiveSession: vi.fn().mockResolvedValue({
+          id: 'sess-1', chatType: 'group', sessionMode: 'interactive',
+          metadata: { dispatchMode: 'broadcast' }, projectPath: '/tmp', agentId: 'claude',
+          createdAt: Date.now(), updatedAt: Date.now(),
+        }),
+      });
+      const { handler } = createHandler({ sessionManager: sm });
+
+      const result = await handler.execMenuQuery('/dispatch', 'aun', 'chat1', 'user1') as any;
+
+      expect(result.data).toMatchObject({ mode: 'broadcast', source: 'session' });
     });
   });
 
   describe('/activity', () => {
-    it('returns current mode (no session needed)', async () => {
+    it('queries the current relation without an active session', async () => {
+      writeTestAgentConfig({ show_activities: undefined });
       const sm = createMockSessionManager({ getActiveSession: vi.fn().mockResolvedValue(null) });
-      const agentRegistry = {
+      const agentRegistry = createMockAgentRegistry({
         getShowActivities: vi.fn().mockReturnValue('none'),
-        setShowActivities: vi.fn(),
-        resolveByChannel: vi.fn().mockReturnValue(null),
-      };
+      });
       const { handler } = createHandler({ sessionManager: sm, agentRegistry });
       const result = await handler.execMenuQuery('/activity', 'aun', 'chat1', 'user1');
-      expect(result).toEqual({ data: { mode: 'none' } });
+      expect(result).toEqual({
+        data: {
+          mode: 'none',
+          source: 'builtin',
+          scope: 'relation',
+          field: 'show_activities',
+          self: TEST_AID,
+          peerKey: formatPeerKey('aun', 'user1'),
+        },
+      });
     });
 
-    it('defaults to all when no registry', async () => {
+    it('defaults to relation scope and reports an inherited agent source', async () => {
       const { handler } = createHandler();
       const result = await handler.execMenuQuery('/activity', 'aun', 'chat1', 'user1');
-      expect(result).toEqual({ data: { mode: 'all' } });
+      expect(result).toEqual({
+        data: {
+          mode: 'all',
+          source: 'agent',
+          scope: 'relation',
+          field: 'show_activities',
+          self: TEST_AID,
+          peerKey: formatPeerKey('aun', 'user1'),
+        },
+      });
+    });
+
+    it('reports a relation override by default', async () => {
+      writeRelationConfig('user1', { show_activities: 'none' });
+      const { handler } = createHandler();
+
+      const result = await handler.execMenuQuery('/activity', 'aun', 'chat1', 'user1');
+
+      expect(result).toEqual({
+        data: {
+          mode: 'none',
+          source: 'relation',
+          scope: 'relation',
+          field: 'show_activities',
+          self: TEST_AID,
+          peerKey: formatPeerKey('aun', 'user1'),
+        },
+      });
+    });
+
+    it('supports an explicit agent query', async () => {
+      const { handler } = createHandler();
+
+      const result = await handler.execMenuQuery(
+        '/activity',
+        'aun',
+        'chat1',
+        'user1',
+        { scope: 'agent' },
+      ) as any;
+
+      expect(result.data).toMatchObject({ mode: 'all', scope: 'agent', source: 'agent' });
+      expect(result.data.peerKey).toBeUndefined();
+    });
+  });
+
+  describe('/observable', () => {
+    it('returns the current owner-only Agent setting', async () => {
+      const { handler } = createHandler();
+      const result = await handler.execMenuQuery('/observable', 'aun', 'chat1', 'user1');
+      expect(result).toEqual({ data: { observable: false, source: 'builtin' } });
+    });
+
+    it('rejects non-owner queries', async () => {
+      const sm = createMockSessionManager({
+        resolveIdentity: vi.fn().mockReturnValue({ role: 'admin', mode: 'interactive' }),
+      });
+      const { handler } = createHandler({ sessionManager: sm });
+      const result = await handler.execMenuQuery('/observable', 'aun', 'chat1', 'user1') as any;
+      expect(result.code).toBe('NO_PERMISSION');
     });
   });
 
@@ -431,6 +618,7 @@ describe('execMenuQuery', () => {
       const result = await handler.execMenuQuery('/pwd', 'aun', 'chat1', 'user1') as { data: any };
       expect(result.data.path).toBe('/tmp/test');
       expect(result.data.name).toBe('test');
+      expect(result.data.source).toBe('session');
     });
 
     it('falls back to evolagent default when no session', async () => {
@@ -441,6 +629,7 @@ describe('execMenuQuery', () => {
       const { handler } = createHandler({ sessionManager: sm, agentRegistry });
       const result = await handler.execMenuQuery('/pwd', 'aun', 'chat1', 'user1') as { data: any };
       expect(result.data.path).toBe('/home/me/proj');
+      expect(result.data.source).toBe('agent');
     });
 
     it('returns null path when nothing available', async () => {
@@ -448,7 +637,7 @@ describe('execMenuQuery', () => {
       const agentRegistry = createMockAgentRegistry({ resolveByChannel: vi.fn().mockReturnValue(null) });
       const { handler } = createHandler({ sessionManager: sm, agentRegistry });
       const result = await handler.execMenuQuery('/pwd', 'aun', 'chat1', 'user1');
-      expect(result).toEqual({ data: { name: null, path: null } });
+      expect(result).toEqual({ data: { name: null, path: null, source: null } });
     });
   });
 
@@ -718,17 +907,26 @@ describe('execMenuUpdate', () => {
   });
 
   describe('/activity', () => {
-    it('switches mode (owner)', async () => {
+    it('writes the current relation by default (owner)', async () => {
       const setShowActivities = vi.fn();
-      const agentRegistry = { getShowActivities: vi.fn(), setShowActivities, resolveByChannel: vi.fn().mockReturnValue(null) };
+      const agentRegistry = createMockAgentRegistry({ setShowActivities });
       const { handler } = createHandler({ agentRegistry });
       const result = await handler.execMenuUpdate('/activity', 'none', 'aun', 'chat1', 'user1');
-      expect(result).toEqual({ data: { mode: 'none' } });
-      expect(setShowActivities).toHaveBeenCalledWith('aun', 'none');
+      expect(result).toEqual({
+        data: {
+          mode: 'none',
+          scope: 'relation',
+          field: 'show_activities',
+          self: TEST_AID,
+          peerKey: formatPeerKey('aun', 'user1'),
+        },
+      });
+      expect(setShowActivities).not.toHaveBeenCalled();
+      expect(readRelationConfig().show_activities).toBe('none');
     });
 
     it('rejects invalid mode', async () => {
-      const agentRegistry = { getShowActivities: vi.fn(), setShowActivities: vi.fn(), resolveByChannel: vi.fn().mockReturnValue(null) };
+      const agentRegistry = createMockAgentRegistry();
       const { handler } = createHandler({ agentRegistry });
       const result = await handler.execMenuUpdate('/activity', 'invalid', 'aun', 'chat1', 'user1') as any;
       expect(result.code).toBe('INVALID_VALUE');
@@ -736,19 +934,81 @@ describe('execMenuUpdate', () => {
 
     it('rejects non-owner', async () => {
       const sm = createMockSessionManager({ resolveIdentity: vi.fn().mockReturnValue({ role: 'visitor' }) });
-      const agentRegistry = { getShowActivities: vi.fn(), setShowActivities: vi.fn(), resolveByChannel: vi.fn().mockReturnValue(null) };
+      const agentRegistry = createMockAgentRegistry();
       const { handler } = createHandler({ sessionManager: sm, agentRegistry });
       const result = await handler.execMenuUpdate('/activity', 'none', 'aun', 'chat1', 'user1') as any;
       expect(result.code).toBe('NO_PERMISSION');
     });
 
-    it('works without active session', async () => {
+    it('writes the current relation without an active session', async () => {
       const sm = createMockSessionManager({ getActiveSession: vi.fn().mockResolvedValue(null) });
       const setShowActivities = vi.fn();
-      const agentRegistry = { getShowActivities: vi.fn(), setShowActivities, resolveByChannel: vi.fn().mockReturnValue(null) };
+      const agentRegistry = createMockAgentRegistry({ setShowActivities });
       const { handler } = createHandler({ sessionManager: sm, agentRegistry });
       const result = await handler.execMenuUpdate('/activity', 'all', 'aun', 'chat1', 'user1');
-      expect(result).toEqual({ data: { mode: 'all' } });
+      expect(result).toEqual({
+        data: {
+          mode: 'all',
+          scope: 'relation',
+          field: 'show_activities',
+          self: TEST_AID,
+          peerKey: formatPeerKey('aun', 'user1'),
+        },
+      });
+      expect(setShowActivities).not.toHaveBeenCalled();
+      expect(readRelationConfig().show_activities).toBe('all');
+    });
+
+    it('writes agent config only when agent scope is explicit', async () => {
+      const { handler } = createHandler();
+
+      const result = await handler.execMenuUpdate(
+        '/activity',
+        'text',
+        'aun',
+        'chat1',
+        'user1',
+        undefined,
+        false,
+        { scope: 'agent' },
+      );
+
+      expect(result).toEqual({
+        data: {
+          mode: 'text',
+          scope: 'agent',
+          field: 'show_activities',
+          self: TEST_AID,
+        },
+      });
+      expect(readRelationConfig().show_activities).toBeUndefined();
+      expect(readTestAgentConfig().show_activities).toBe('text');
+    });
+  });
+
+  describe('/observable', () => {
+    it('persists true through the owning Agent handle', async () => {
+      const agentRegistry = createMockAgentRegistry();
+      const { handler } = createHandler({ agentRegistry });
+      const result = await handler.execMenuUpdate('/observable', 'true', 'aun', 'chat1', 'user1');
+      const agent = agentRegistry.resolveByChannel.mock.results[0]?.value ?? agentRegistry.resolveByChannel('aun');
+      expect(result).toEqual({ data: { observable: true } });
+      expect(agent.setObservable).toHaveBeenCalledWith(true);
+    });
+
+    it('rejects values other than true or false', async () => {
+      const { handler } = createHandler();
+      const result = await handler.execMenuUpdate('/observable', 'on', 'aun', 'chat1', 'user1') as any;
+      expect(result.code).toBe('INVALID_VALUE');
+    });
+
+    it('rejects non-owner updates', async () => {
+      const sm = createMockSessionManager({
+        resolveIdentity: vi.fn().mockReturnValue({ role: 'admin', mode: 'interactive' }),
+      });
+      const { handler } = createHandler({ sessionManager: sm });
+      const result = await handler.execMenuUpdate('/observable', 'true', 'aun', 'chat1', 'user1') as any;
+      expect(result.code).toBe('NO_PERMISSION');
     });
   });
 
@@ -1220,7 +1480,7 @@ describe('getMenuItems', () => {
     const perm = commands.find(command => command.cmd === '/perm');
 
     expect(perm?.next?.items.map((item: any) => item.value)).toEqual([
-      'readonly', 'auto', 'request', 'bypass', 'allow', 'always', 'deny',
+      'readonly', 'auto', 'request', 'bypass',
     ]);
     expect(commands.some(command => command.cmd === '/file')).toBe(true);
   });
@@ -1235,6 +1495,37 @@ describe('getMenuItems', () => {
     const { handler } = createHandler();
     const commands = flatten(handler.getMenuItems('owner', 'private', 'control'));
     expect(commands.some(command => command.cmd === '/restart')).toBe(true);
+  });
+
+  it('shows observable only to owners in agent scope', () => {
+    const { handler } = createHandler();
+    const ownerCommands = flatten(handler.getMenuItems('owner', 'private', 'agent'));
+    const adminCommands = flatten(handler.getMenuItems('admin', 'private', 'agent'));
+    const controlCommands = flatten(handler.getMenuItems('owner', 'private', 'control'));
+    const observable = ownerCommands.find(command => command.cmd === '/observable');
+
+    expect(observable?.next?.items.map((item: any) => item.value)).toEqual(['true', 'false']);
+    expect(adminCommands.some(command => command.cmd === '/observable')).toBe(false);
+    expect(controlCommands.some(command => command.cmd === '/observable')).toBe(false);
+  });
+
+  it('handles observable slash query and boolean updates', async () => {
+    const agentRegistry = createMockAgentRegistry();
+    const { handler } = createHandler({ agentRegistry });
+
+    const query = await handler.handle('/observable', 'aun', 'chat1', undefined, 'user1') as any;
+    const enabled = await handler.handle('/observable true', 'aun', 'chat1', undefined, 'user1') as any;
+    const disabled = await handler.handle('/observable false', 'aun', 'chat1', undefined, 'user1') as any;
+    const invalid = await handler.handle('/observable on', 'aun', 'chat1', undefined, 'user1') as any;
+    const agent = agentRegistry.resolveByChannel('aun');
+
+    expect(query.text).toContain('观察者模式: false');
+    expect(enabled.text).toContain('观察者模式: true');
+    expect(agent.setObservable).toHaveBeenCalledWith(true);
+    expect(disabled.text).toContain('观察者模式: false');
+    expect(agent.setObservable).toHaveBeenCalledWith(false);
+    expect(invalid.kind).toBe('command.error');
+    expect(invalid.text).toContain('/observable <true|false>');
   });
 });
 
@@ -1724,8 +2015,8 @@ describe('getSubMenuItems — selected field', () => {
   });
 
   it('/activity marks current mode as selected', async () => {
-    const agentRegistry = { getShowActivities: vi.fn().mockReturnValue('none'), setShowActivities: vi.fn(), resolveByChannel: vi.fn().mockReturnValue(null) };
-    const { handler } = createHandler({ agentRegistry });
+    writeRelationConfig('user1', { show_activities: 'none' });
+    const { handler } = createHandler();
     const items = await handler.getSubMenuItems('/activity', 'aun', 'chat1');
     const none = items?.find(i => i.value === 'none');
     const all = items?.find(i => i.value === 'all');

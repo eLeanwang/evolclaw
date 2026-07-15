@@ -74,12 +74,14 @@ export interface IpcCtlRequest {
   type: 'ctl';
   cmd: string;       // 完整 slash cmd，如 "/model sonnet"
   sessionId: string;  // EVOLCLAW_SESSION_ID
+  delegationToken?: string;
 }
 
 export interface IpcCtlResponse {
   ok: boolean;
   result?: string;
   error?: string;
+  code?: string;
 }
 
 export interface IpcConfigOpRequest {
@@ -110,6 +112,17 @@ export interface IpcAunMsgSendResponse {
   log_written?: boolean;
   error?: string;
   code?: string | number;
+  group_id?: string;
+  message?: Record<string, unknown>;
+  event?: Record<string, unknown>;
+}
+
+export interface IpcAunFileRequest {
+  filePath: string;
+  as?: string;
+  contentType?: string;
+  text?: string;
+  transcript?: string;
 }
 
 export interface IpcAunMsgSendLogRequest {
@@ -123,7 +136,7 @@ export interface IpcAunMsgSendLogRequest {
 }
 
 type StatusProvider = () => IpcStatusResponse;
-type CommandExecutor = (cmd: string, sessionId: string) => Promise<IpcCtlResponse>;
+type CommandExecutor = (cmd: string, sessionId: string, delegationToken?: string) => Promise<IpcCtlResponse>;
 type ConfigOperationExecutor = (argv: string[], sessionId: string, delegationToken: string) => Promise<IpcConfigOpResponse>;
 type AunAidProvider = () => AidConnectionState[];
 type AunAidStatsProvider = () => AidStatsSnapshot[];
@@ -147,8 +160,8 @@ type QueueSnapshotProvider = (params: { agent: string }) => Array<{ status: stri
 type QueueActionExecutor = (params: { agent: string; action: 'clear' | 'cancel' | 'interrupt'; messageId?: string; sessionKey?: string }) => Promise<{ ok: boolean; cleared?: number; cancelled?: boolean; interrupted?: boolean; error?: string }>;
 type TriggerExecutor = (cmd: { type: string; [key: string]: any }) => Promise<any>;
 type TaskRuntimeContextProvider = (params: { sessionId: string }) => TaskRuntimeContext | null | undefined;
-type AunMsgSender = (params: { aid: string; to: string; payload: Record<string, unknown>; encrypt?: boolean; thread?: string; returnPolicy?: 'required' | 'none'; originSessionId?: string; originMessageId?: string; log?: IpcAunMsgSendLogRequest }) => Promise<IpcAunMsgSendResponse>;
-type HandoffReturnExecutor = (params: { sessionId?: string; handoffId?: string; content: string }) => Promise<HandoffReturnResponse>;
+type AunMsgSender = (params: { aid: string; to: string; scope: 'msg' | 'group'; payload?: Record<string, unknown>; file?: IpcAunFileRequest; mentions?: Array<Record<string, unknown>>; encrypt?: boolean; thread?: string; returnPolicy?: 'required' | 'none'; originSessionId?: string; originMessageId?: string; delegationToken?: string; log?: IpcAunMsgSendLogRequest }) => Promise<IpcAunMsgSendResponse>;
+type HandoffReturnExecutor = (params: { sessionId?: string; handoffId?: string; content: string; delegationToken?: string }) => Promise<HandoffReturnResponse>;
 type HandoffStatusExecutor = (params: { sessionId?: string; handoffId: string }) => Promise<HandoffStatusResponse | { ok: false; code: string; error: string }>;
 type HandoffQueryError = { ok: false; code: string; error: string };
 type HandoffListExecutor = (params: {
@@ -494,8 +507,23 @@ export class IpcServer {
         if (!this.aunMsgSender) return { ok: false, error: 'aun msg sender not configured' };
         if (!cmd.aid || typeof cmd.aid !== 'string') return { ok: false, error: 'missing aid' };
         if (!cmd.to || typeof cmd.to !== 'string') return { ok: false, error: 'missing to' };
-        if (!cmd.payload || typeof cmd.payload !== 'object' || Array.isArray(cmd.payload)) {
-          return { ok: false, error: 'missing payload' };
+        const payload = cmd.payload && typeof cmd.payload === 'object' && !Array.isArray(cmd.payload)
+          ? cmd.payload as Record<string, unknown>
+          : undefined;
+        const rawFile = cmd.file && typeof cmd.file === 'object' && !Array.isArray(cmd.file)
+          ? cmd.file as Record<string, unknown>
+          : undefined;
+        const file: IpcAunFileRequest | undefined = typeof rawFile?.filePath === 'string'
+          ? {
+            filePath: rawFile.filePath,
+            as: typeof rawFile.as === 'string' ? rawFile.as : undefined,
+            contentType: typeof rawFile.contentType === 'string' ? rawFile.contentType : undefined,
+            text: typeof rawFile.text === 'string' ? rawFile.text : undefined,
+            transcript: typeof rawFile.transcript === 'string' ? rawFile.transcript : undefined,
+          }
+          : undefined;
+        if ((!payload && !file) || (payload && file)) {
+          return { ok: false, error: 'exactly one of payload or file is required' };
         }
         const rawLog = cmd.log && typeof cmd.log === 'object' && !Array.isArray(cmd.log)
           ? cmd.log as Record<string, unknown>
@@ -514,12 +542,18 @@ export class IpcServer {
           return await this.aunMsgSender({
             aid: cmd.aid,
             to: cmd.to,
-            payload: cmd.payload as Record<string, unknown>,
+            scope: cmd.scope === 'group' ? 'group' : 'msg',
+            payload,
+            file,
+            mentions: Array.isArray(cmd.mentions)
+              ? cmd.mentions.filter((entry: unknown): entry is Record<string, unknown> => !!entry && typeof entry === 'object' && !Array.isArray(entry))
+              : undefined,
             encrypt: cmd.encrypt === true,
             thread: typeof cmd.thread === 'string' ? cmd.thread : undefined,
             returnPolicy: cmd.returnPolicy === 'required' || cmd.returnPolicy === 'none' ? cmd.returnPolicy : undefined,
             originSessionId: typeof cmd.originSessionId === 'string' ? cmd.originSessionId : undefined,
             originMessageId: typeof cmd.originMessageId === 'string' ? cmd.originMessageId : undefined,
+            delegationToken: typeof cmd.delegationToken === 'string' ? cmd.delegationToken : undefined,
             log,
           });
         } catch (e: any) {
@@ -534,6 +568,7 @@ export class IpcServer {
             sessionId: typeof cmd.sessionId === 'string' ? cmd.sessionId : undefined,
             handoffId: typeof cmd.handoffId === 'string' ? cmd.handoffId : undefined,
             content: cmd.content,
+            delegationToken: typeof cmd.delegationToken === 'string' ? cmd.delegationToken : undefined,
           });
         } catch (e: any) {
           return { ok: false, error: e?.message || String(e) };
@@ -585,7 +620,11 @@ export class IpcServer {
         if (!this.commandExecutor) return { ok: false, error: 'ctl not configured' };
         const { cmd: slashCmd, sessionId } = cmd as unknown as IpcCtlRequest;
         if (!slashCmd || !sessionId) return { ok: false, error: 'missing cmd or sessionId' };
-        return await this.commandExecutor(slashCmd, sessionId);
+        return await this.commandExecutor(
+          slashCmd,
+          sessionId,
+          typeof cmd.delegationToken === 'string' ? cmd.delegationToken : undefined,
+        );
       }
       case 'config.op': {
         if (!this.configOperationExecutor) return { ok: false, code: 'NOT_CONFIGURED', error: 'config.op not configured' };

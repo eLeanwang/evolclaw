@@ -16,6 +16,7 @@ import type {
   TriggerScriptConfig,
   TriggerSource,
 } from './types.js';
+import { normalizePermissionMode as normalizePermissionModeContract } from '../core/permission-mode.js';
 import { formatChannelKey } from '../core/channel-loader.js';
 
 const MAX_SCRIPT_TIMEOUT_MS = 900_000;
@@ -23,13 +24,10 @@ const DEFAULT_NOOP_SENTINEL = '[[NOOP]]';
 const LIMIT_DURATION_RE = /^[1-9]\d*(s|m|h|d)$/;
 const TRIGGER_EFFORTS = new Set<TriggerEffort>(['low', 'medium', 'high', 'xhigh', 'max']);
 const PERMISSION_MODES = new Set<TriggerPermissionMode>([
-  'auto',
-  'bypass',
   'readonly',
-  'plan',
-  'edit',
+  'auto',
   'request',
-  'noask',
+  'bypass',
 ]);
 
 export function normalizeTriggerDefinition(input: unknown, opts: { now?: number } = {}): TriggerDefinition {
@@ -361,7 +359,7 @@ function normalizeExecution(value: unknown, _opts: { id: string }): TriggerExecu
     thread: type === 'trigger_session' ? (thread ?? 'per_run') : thread,
     model: optionalString(raw.model),
     effort: normalizeEffort(raw.effort),
-    permissionMode: normalizePermissionMode(raw.permissionMode),
+    permissionMode: normalizeTriggerPermissionMode(raw.permissionMode),
     onError: normalizeOnError(raw.onError),
     noopSentinel: optionalString(raw.noopSentinel) ?? DEFAULT_NOOP_SENTINEL,
   };
@@ -386,13 +384,18 @@ function normalizeEffort(value: unknown): TriggerEffort | undefined {
   return effort as TriggerEffort;
 }
 
-function normalizePermissionMode(value: unknown): TriggerPermissionMode | undefined {
+function normalizeTriggerPermissionMode(value: unknown): TriggerPermissionMode | undefined {
   const mode = optionalString(value);
   if (mode === undefined) return undefined;
-  if (!PERMISSION_MODES.has(mode as TriggerPermissionMode)) {
-    throw new Error('execution.permissionMode must be one of auto, bypass, readonly, plan, edit, request, noask');
+  if (PERMISSION_MODES.has(mode as TriggerPermissionMode)) {
+    return mode as TriggerPermissionMode;
   }
-  return mode as TriggerPermissionMode;
+  // Persisted v4 triggers may still contain legacy values. Normalize those at
+  // load time while new CLI/menu input only accepts the four public modes.
+  if (mode === 'edit' || mode === 'noask' || mode === 'plan') {
+    return normalizePermissionModeContract(mode).mode;
+  }
+  throw new Error('execution.permissionMode must be one of readonly, auto, request, bypass');
 }
 
 function normalizeScript(value: unknown): TriggerScriptConfig {

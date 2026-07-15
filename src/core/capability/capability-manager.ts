@@ -239,7 +239,7 @@ export async function resolveClaudeCapabilityRunOptionsForProject(
   const catalog: CapabilityCatalog = {};
   for (const type of CAPABILITY_TYPES) {
     const policy = getAgentCapabilityConfig(config, baseagent, type);
-    if (policy.mode === 'none' || (type === 'plugin' && policy.mode === 'all')) {
+    if (type === 'mcp' || policy.mode === 'none' || (type === 'plugin' && policy.mode === 'all')) {
       try { catalog[type] = await provider.discover(ctx, type); }
       catch { catalog[type] = []; }
     }
@@ -270,18 +270,31 @@ export function resolveClaudeCapabilityRunOptions(
   }
   if (Object.keys(skillOverrides).length > 0) settings.skillOverrides = skillOverrides;
 
-  const enabledMcp = Object.entries(mcp.overrides).filter(([, v]) => v === 'enabled').map(([id]) => id);
-  const disabledMcp = Object.entries(mcp.overrides).filter(([, v]) => v === 'disabled').map(([id]) => id);
-  if (mcp.mode === 'none') {
-    settings.enableAllProjectMcpServers = false;
-    settings.enabledMcpjsonServers = enabledMcp;
-    settings.allowedMcpServers = enabledMcp.map(serverName => ({ serverName }));
-  } else {
-    if (mcp.mode === 'all') settings.enableAllProjectMcpServers = true;
-    if (enabledMcp.length > 0) settings.enabledMcpjsonServers = enabledMcp;
-    if (disabledMcp.length > 0) settings.disabledMcpjsonServers = disabledMcp;
-    if (disabledMcp.length > 0) settings.deniedMcpServers = disabledMcp.map(serverName => ({ serverName }));
+  const mcpCatalog = catalog.mcp ?? [];
+  const selectedMcpIds = resolveCapabilityIds(mcp, mcpCatalog)
+    ?? mcpCatalog.filter(item => item.runtimeEnabled !== false).map(item => item.id);
+  const remoteMcpServers: Record<string, unknown> = {};
+  for (const item of mcpCatalog) {
+    if (!selectedMcpIds.includes(item.id) || !item.data || typeof item.data !== 'object' || Array.isArray(item.data)) continue;
+    const raw = item.data as Record<string, unknown>;
+    const rawUrl = typeof raw.url === 'string'
+      ? raw.url
+      : typeof raw.serverUrl === 'string'
+        ? raw.serverUrl
+        : undefined;
+    if (!rawUrl || typeof raw.command === 'string') continue;
+    const server: Record<string, unknown> = { ...raw, url: rawUrl };
+    delete server.command;
+    delete server.args;
+    delete server.env;
+    delete server.cwd;
+    delete server.serverUrl;
+    server.type = raw.type === 'sse' ? 'sse' : 'http';
+    remoteMcpServers[item.id] = server;
   }
+  // The runner uses strictMcpConfig, so local stdio servers and MCP definitions
+  // inherited from settings/plugins never start outside the Claude tool sandbox.
+  options.mcpServers = remoteMcpServers;
 
   const enabledPlugins: Record<string, boolean> = {};
   if (plugin.mode === 'all') {

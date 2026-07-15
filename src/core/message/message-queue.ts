@@ -4,6 +4,7 @@ import fs from 'fs';
 import { logger } from '../../utils/logger.js';
 import type { EventBus } from '../event-bus.js';
 import { LogicalQueueBridge } from './logical-queue-bridge.js';
+import { normalizeCausation } from '../causation/context.js';
 
 type MessageHandler = (message: Message) => Promise<void>;
 
@@ -267,7 +268,7 @@ export class MessageQueue {
 
   private restoredPart(item: PersistedQueuePart): QueuedMessagePart {
     return {
-      message: item.message,
+      message: this.normalizeRestoredMessage(item.message),
       projectPath: item.projectPath,
       agentName: item.agentName || DEFAULT_AGENT_NAME,
       role: item.role,
@@ -277,7 +278,7 @@ export class MessageQueue {
   }
 
   private restoreSubmittedPart(item: PersistedQueuePart): QueuedMessagePart {
-    const source = item.message;
+    const source = this.normalizeRestoredMessage(item.message);
     const message: Message = {
       ...source,
       content: RESTART_RESUME_CONTENT,
@@ -307,6 +308,21 @@ export class MessageQueue {
       role: item.role,
       resolve: () => {},
       reject: () => {},
+    };
+  }
+
+  private normalizeRestoredMessage(message: Message): Message {
+    const causation = normalizeCausation(message.causation);
+    if (message.causation && !causation) {
+      logger.warn(`[Queue] Ignoring invalid persisted causation for message ${message.messageId ?? '<none>'}`);
+    }
+    return {
+      ...message,
+      causation,
+      items: message.items?.map(item => ({
+        ...item,
+        causation: normalizeCausation(item.causation),
+      })),
     };
   }
 
@@ -621,6 +637,7 @@ export class MessageQueue {
             sessionId: sessionKey,
             reason: 'new_message',
             agentName: this.processingAgent.get(queueKey),
+            causation: this.activeBatches.get(queueKey)?.message.causation,
           });
           if (this.interruptCallback) {
             this.interruptCallback(sessionKey, activeState?.baseagent, this.processingAgent.get(queueKey)).catch(() => {});
@@ -762,7 +779,7 @@ export class MessageQueue {
   private dequeueGreedy(queue: QueuedMessage[]): QueuedMessage[] {
     const first = queue.shift()!;
     const result = [first];
-    if (first.message.handoffDelivery) return result;
+    if (this.isMergeBarrier(first.message)) return result;
     const mergeSubmittedResume = first.message.restartResume?.submitted === true;
     const mergeGroupTimeline = first.role !== undefined;
     const mergeKey = mergeGroupTimeline ? '<group-timeline>' : first.message.peerId;
@@ -770,7 +787,7 @@ export class MessageQueue {
     if (mergeSubmittedResume) {
       const remaining: QueuedMessage[] = [];
       for (const item of queue) {
-        if (this.canDequeueAfterSubmittedResume(first, item)) {
+        if (!this.isMergeBarrier(item.message) && this.canDequeueAfterSubmittedResume(first, item)) {
           result.push(item);
         } else {
           remaining.push(item);
@@ -786,7 +803,7 @@ export class MessageQueue {
     } else if (mergeGroupTimeline) {
       const remaining: QueuedMessage[] = [];
       for (const item of queue) {
-        if (this.canDequeueGroupTimeline(first, item)) {
+        if (!this.isMergeBarrier(item.message) && this.canDequeueGroupTimeline(first, item)) {
           result.push(item);
         } else {
           remaining.push(item);
@@ -796,7 +813,7 @@ export class MessageQueue {
       queue.push(...remaining);
       result.sort((a, b) => this.firstTimestamp(a) - this.firstTimestamp(b));
     } else {
-      while (queue.length > 0 && !queue[0].message.handoffDelivery && queue[0].message.peerId === mergeKey) {
+      while (queue.length > 0 && !this.isMergeBarrier(queue[0].message) && queue[0].message.peerId === mergeKey) {
         result.push(queue.shift()!);
       }
     }
@@ -806,6 +823,10 @@ export class MessageQueue {
     }
 
     return result;
+  }
+
+  private isMergeBarrier(message: Message): boolean {
+    return !!message.handoffDelivery || !!message.triggerMeta || !!message.causation?.trigger?.path.length;
   }
 
   private firstTimestamp(item: QueuedMessage): number {
@@ -868,6 +889,7 @@ export class MessageQueue {
           sameDevice: m.sameDevice, sameNetwork: m.sameNetwork, sameEgressIp: m.sameEgressIp,
           encrypted: m.encrypted,
           content: m.content, timestamp: m.timestamp,
+          causation: m.causation,
           images: m.images && m.images.length > 0 ? m.images : undefined,
           mentionAids: m.mentionAids && m.mentionAids.length > 0 ? m.mentionAids : undefined,
         });
@@ -1009,6 +1031,7 @@ export class MessageQueue {
         sessionId: sessionKey,
         reason: 'recalled',
         agentName,
+        causation: active?.message.causation,
       });
       if (this.interruptCallback) {
         this.interruptCallback(sessionKey, activeState.baseagent, agentName).catch(() => {});
@@ -1159,6 +1182,7 @@ export class MessageQueue {
           sessionId: sessionKey,
           reason: 'new_message',
           agentName: name,
+          causation: this.activeBatches.get(queueKey)?.message.causation,
         });
         if (this.interruptCallback) {
           this.interruptCallback(sessionKey, activeState?.baseagent, name).catch(() => {});
@@ -1388,6 +1412,7 @@ export class MessageQueue {
       sessionId: sessionKey,
       reason: 'new_message',
       agentName: targetAgentName,
+      causation: this.activeBatches.get(targetQueueKey)?.message.causation,
     });
 
     if (this.interruptCallback) {

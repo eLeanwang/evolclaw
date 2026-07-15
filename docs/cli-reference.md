@@ -42,6 +42,14 @@ evolclaw agent delete <aid>           删除 agent 配置（停止运行中的 a
 evolclaw agent delete <aid> --purge   同上，并删除 agent 数据目录
 ```
 
+观察者模式复用通用配置命令，无需专用子命令：
+
+```bash
+evolclaw agent get <aid> observable
+evolclaw agent set <aid> observable true
+evolclaw agent set <aid> observable false
+```
+
 非交互创建可选 channel flags:
 - `--aun-aid <aid> --aun-owner <aid>`
 - `--feishu-app-id <id> --feishu-app-secret <secret>`

@@ -89,7 +89,7 @@ Owner 的来源是 Agent 的 `config.json` 中**顶层 `owners` 字段**（即 `
 
 当 Agent 的 `config.json` 中**开启了观察者模式开关**时，EvolClaw 对每条入站和出站消息都额外执行一次转发。
 
-开关字段（`observable` / 命名待定）由 EvolClaw 后端读取。**不开启开关时，不发生任何转发**。
+开关字段 `observable` 由 EvolClaw 后端读取。**不开启开关时，不发生任何转发**。
 
 ### 3.3 入站消息转发
 
@@ -199,12 +199,22 @@ Agent 的观察者模式开关存储在 `agents/<aid>/config.json` 中，作为�
 
 前端通过 **Menu Protocol** 或直接修改 `config.json`（通过 `ec agent set` 命令）来切换开关。
 
+Menu Protocol 使用标准 `name: "observable"`；普通 Agent 通道自动作用于 owning Agent，ECWeb / 控制 AID 通道通过顶层 `agent: "<aid>"` 指定目标。
+
+```jsonc
+{ "type": "menu.query", "id": "q-observable", "name": "observable",
+  "agent": "mybot.agentid.pub" }
+{ "type": "menu.update", "id": "u-observable", "name": "observable",
+  "agent": "mybot.agentid.pub", "value": "true" }
+```
+
 ```bash
+ec agent get <aid> observable        # 查询当前状态
 ec agent set <aid> observable true   # 开启观察者模式
 ec agent set <aid> observable false  # 关闭观察者模式
 ```
 
-> 具体配置字段名（如 `observable`）由 EvolClaw 后端最终确定，前端对接时以实际命名为准。
+Slash 指令使用相同的布尔语义：`/observable` 查询，`/observable true` 开启，`/observable false` 关闭。
 
 ---
 
@@ -251,7 +261,8 @@ ec agent set <aid> observable false  # 关闭观察者模式
 | 出站消息处理 | ✅ 已实现 | `src/channels/aun.ts` → `deliverTextEntry()` 内 `group.send` 成功后（群聊）+ `message.send` 成功后（私聊） | `forwardToOwners('outbound', { from: agentAid, to: channelId/targetAid, payload })` |
 | `agent_aid` 归属字段 | ✅ 已实现 | `src/channels/aun.ts` → `forwardToOwners()` 内 `forwardPayload` | 所有方向恒为本 agent AID，供前端分组（详见 §5.1） |
 | `ec agent set/get` | ✅ 已实现（复用） | `src/cli/agent.ts` → `agentSet()` / `agentGet()` | 原有实现已接受任意 key，`ec agent set <aid> observable true` 直接可用，无需改动 |
-| Menu Protocol | ⏳ 待做 | — | 新增 `observable` 字段的 query/update 支持（供前端管理页面使用），等前端提需求再实现 |
+| Menu Protocol | ✅ 已实现 | `src/core/command/menu-handler.ts` / `src/core/message/message-bridge.ts` | 标准 `name=observable` 支持 query/update；普通通道绑定 owning Agent，ECWeb/Control 用顶层 `agent` 路由；兼容 `cmd=/observable` |
+| Slash / menu.list | ✅ 已实现 | `src/core/command/slash-handler.ts` / `src/core/command/menu-handler.ts` | `/observable [true\|false]`；仅普通 Agent 通道 owner 菜单可见 |
 
 > **实现版本**：v3.1.7 开发分支（2026-06-04）。构建通过零 TS 错误。
 

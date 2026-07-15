@@ -9,12 +9,13 @@
  *   - 零侵入：探针关闭时所有方法是 no-op，不影响行为
  *   - 仅记录「模式特有决策点」的输入输出，不记录消息内容（隐私 + 体积）
  *
- * 开关：环境变量 RESPONSE_SNAPSHOT=1 启用；默认关闭。
+ * 开关：进程级 debug.eckSnapshots 总闸开启，且 RESPONSE_SNAPSHOT=1 时启用。
  */
 
 import fs from 'fs';
 import path from 'path';
-import { resolvePaths } from '../../paths.js';
+import { isEckSnapshotsEnabled } from '../../config-store.js';
+import { eckDebugDir } from '../../paths.js';
 import { appendJsonl } from '../session/session-fs-store.js';
 import { logger } from '../../utils/logger.js';
 
@@ -58,25 +59,21 @@ export interface BehaviorSnapshot {
 
 // 动态检查环境变量（而非模块级常量）
 function isEnabled(): boolean {
-  return process.env.RESPONSE_SNAPSHOT === '1';
+  return isEckSnapshotsEnabled() && process.env.RESPONSE_SNAPSHOT === '1';
 }
 
 class SnapshotRecorder {
   /** (sessionId::taskId) → 进行中的快照 */
   private active = new Map<string, BehaviorSnapshot>();
-  private outPath: string | null = null;
 
   private key(sessionId: string, taskId: string): string {
     return `${sessionId}::${taskId}`;
   }
 
   private getOutPath(): string {
-    if (!this.outPath) {
-      const dir = path.join(resolvePaths().dataDir, 'eck-debug');
-      fs.mkdirSync(dir, { recursive: true });
-      this.outPath = path.join(dir, 'response-snapshots.jsonl');
-    }
-    return this.outPath;
+    const dir = eckDebugDir();
+    fs.mkdirSync(dir, { recursive: true });
+    return path.join(dir, 'response-snapshots.jsonl');
   }
 
   /** 开始一条快照（beforeProcess 阶段调用） */

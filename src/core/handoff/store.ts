@@ -18,6 +18,8 @@ import {
   type HandoffState,
   type HandoffStatusResponse,
 } from './types.js';
+import { normalizeCausation } from '../causation/context.js';
+import type { CausationContext } from '../causation/types.js';
 
 const SAFE_ID_RE = /^[A-Za-z0-9._-]+$/;
 export const HANDOFF_ID_RE = /^h-[A-Za-z0-9._-]+$/;
@@ -30,6 +32,7 @@ export interface CreateHandoffInput {
   payload: Record<string, unknown>;
   encrypt: boolean;
   now?: number;
+  causation?: CausationContext;
 }
 
 export interface BindReplyInput {
@@ -47,6 +50,7 @@ export interface ReturnHandoffInput {
   currentTaskHandoffIds?: string[];
   content: string;
   now?: number;
+  returnCausation?: CausationContext;
 }
 
 export interface ListHandoffsInput {
@@ -161,6 +165,7 @@ export class HandoffStore {
       origin_message_id: input.originMessageId,
       target_session_id: input.targetSessionId,
       request: { payload: clonePayload(input.payload), encrypt: input.encrypt },
+      causation: normalizeCausation(input.causation),
       return_policy: 'required',
       state: 'queued',
       target_message_id: null,
@@ -378,6 +383,7 @@ export class HandoffStore {
     instance.state = 'origin_queued';
     instance.return_content = normalized;
     instance.return_content_hash = hash;
+    instance.return_causation = normalizeCausation(input.returnCausation);
     instance.version++;
     instance.updated_at = now;
     try {

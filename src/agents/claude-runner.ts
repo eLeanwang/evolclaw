@@ -11,7 +11,7 @@ import fs from 'fs';
 import os from 'os';
 import crypto from 'crypto';
 import { logger } from '../utils/logger.js';
-import { checkBlacklist, checkDangerousCommand, checkReadonly, checkHClassWrite, isEvolclawHandoffReturnCommand, parseEvolclawSendCommand, summarizeToolInput, requestDangerousCommandPermission } from '../core/permission.js';
+import { checkBlacklist, checkDangerousCommand, checkReadonly, checkHClassWrite, checkEvolclawFileCommandPath, isEvolclawHandoffReturnCommand, parseEvolclawSendCommand, summarizeToolInput, requestDangerousCommandPermission } from '../core/permission.js';
 import { authorizeEcCommand } from '../core/command/ec-command-permission.js';
 import { encodePath } from '../utils/cross-platform.js';
 import { resolvePaths } from '../paths.js';
@@ -1498,6 +1498,8 @@ export class AgentRunner {
       // 优先于只读模式检查，因为 ec 命令有独立的角色权限策略（commandPermissions）
       if (toolName === 'Bash') {
         const command = typeof toolInput.command === 'string' ? toolInput.command : '';
+        const ecFile = checkEvolclawFileCommandPath(command, projectPath);
+        if (ecFile.behavior === 'deny') return hookDecision('deny', ecFile.message, updatedInput);
         if (isEvolclawHandoffReturnCommand(command)) {
           return hookDecision('allow', undefined, updatedInput);
         }
@@ -1643,6 +1645,10 @@ export class AgentRunner {
       // blanket shell whitelist.
       if (toolName === 'Bash') {
         const cmd = typeof input.command === 'string' ? input.command : '';
+        const ecFile = checkEvolclawFileCommandPath(cmd, projectPath);
+        if (ecFile.behavior === 'deny') {
+          return { behavior: 'deny' as const, message: ecFile.message, decisionClassification: 'user_reject' as const };
+        }
         if (isEvolclawHandoffReturnCommand(cmd)) {
           return { behavior: 'allow' as const, updatedInput: input, decisionClassification: 'user_permanent' as const };
         }

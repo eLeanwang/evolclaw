@@ -31,7 +31,7 @@ EvolClaw 是一个轻量级 AI Agent 网关系统，为 Claude Code / Codex / Ge
 |--------|------|----------|----------|------|
 | Claude (SDK) | ✅ 已完成 | v2.0.0 | `src/agents/claude-runner.ts` | Agent SDK 封装、中断支持、会话恢复 |
 | Codex (OpenAI API) | ✅ 已完成 | v2.2.0 | `src/agents/codex-runner.ts` | Responses API、rollout 文件回退 |
-| Hermes (Python Bridge) | 🔧 进行中 | — | `src/agents/hermes-runner.ts` + `hermes/hermes_bridge.py` | stdin/stdout JSON 协议、crash recovery |
+| Hermes (Python Bridge) | 🔧 进行中 | — | `src/agents/hermes-runner.ts` + `projects/hermes-bridge/hermes_bridge.py` | stdin/stdout JSON 协议、crash recovery |
 | Gemini (CLI subprocess) | ✅ 基础完成 | v2.2+ | `src/agents/gemini-runner.ts` | CLI 子进程、JSONL 事件解析、会话恢复 |
 | Gemini SDK 原生接入 | 📋 待开发 | — | 设计文档: `docs/gemini-sdk-integration-plan.md` | @google/genai 替代 CLI 调用 |
 

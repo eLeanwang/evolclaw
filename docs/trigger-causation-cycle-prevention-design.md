@@ -1,8 +1,8 @@
 # 因果链与 Trigger 循环调用防护设计
 
-> 状态：升级方案确认稿，待实施
+> 状态：已实施
 >
-> 日期：2026-07-13
+> 日期：2026-07-14
 >
 > 能力范围：跨消息、跨任务、跨会话、审批授权追踪，以及 Trigger 循环调用防护
 >
@@ -174,7 +174,7 @@ A 的后代事件触发 B：
 | 独立用户消息进入系统 | `message.inbound` | 无，创建新 trace |
 | Agent 开始处理消息 | `task.run` | 入站消息 span |
 | Agent 发起跨会话请求 | `handoff.request` | 当前 task span |
-| 目标会话接收 handoff | `message.handoff` | handoff request span |
+| 目标会话接收 handoff | `message.inbound` | handoff request 的出站消息 span |
 | 目标 Agent 执行 | `task.run` | handoff message span |
 | 目标回复原会话 | `handoff.response` | 目标 task span |
 | 发起权限审批 | `permission.request` | 发起工具调用的 task span |
@@ -240,7 +240,7 @@ link 记录按输入逐条写入，不在一个字段内累积数组。查询链
 - 每条普通消息仍只携带 `traceId/spanId/parentSpanId`；
 - Trigger 派生消息最多再携带 16 个 path 节点；
 - 审计总量随节点数线性增长，但不会导致单条消息膨胀；
-- 审计存储按现有日志策略设置保留期、归档和容量上限。
+- 审计存储按现有日志策略每日归档并保留 7 天。
 
 ## 7. 传播规则
 
@@ -381,9 +381,9 @@ A → B → C       允许
 | `src/core/event-bus.ts` | 内部事件增加可选因果 carrier |
 | `src/core/message/response-engine.ts` | 创建消息/任务 span，传播任务事件 |
 | `src/core/message/message-queue.ts` | 保留 carrier、写批次 link，并将 Trigger/handoff 消息作为合并屏障 |
-| `src/core/message/handoff.ts` | handoff 请求、接收和返回 span |
+| `src/core/handoff/runtime.ts`、`src/core/handoff/store.ts` | handoff 请求、接收和返回 span |
 | `src/core/permission.ts` | request、decision、consume span 与现有 ID 关联 |
-| `src/trigger/causation.ts` | Trigger path 追加、验证、判环和格式化 |
+| `src/core/causation/context.ts` | Trigger path 追加、验证、判环和格式化 |
 | `src/trigger/scheduler.ts` | Trigger run span、判环和 skipped audit |
 | `src/channels/daemon.ts`、`src/trigger/feedback.ts` | Trigger 内部任务和 AUN feedback 传播 |
 | `src/channels/aun.ts` | AUN 出站关联、入站验证和上下文恢复 |

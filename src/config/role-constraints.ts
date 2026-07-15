@@ -1,7 +1,7 @@
 import { agentConfig as agentConfigPath } from '../paths.js';
 import { atomicReadJson } from '../utils/atomic-write.js';
 import { getBuiltinRolesConfig, getManagementRoleDefinition, isManagementRole } from './builtin-roles.js';
-import type { AgentConfig, ConstraintCheckResult, ConstraintViolation, RoleDefinition } from '../types.js';
+import type { AgentConfig, ConstraintCheckResult, ConstraintViolation, FieldPermission, RoleDefinition } from '../types.js';
 
 export function mergeWithRoleConstraints(
   role: string,
@@ -103,6 +103,23 @@ export function isModelAllowedForRole(role: string, model: string, baseagent = '
     return true;
   }
   return isModelAllowedByPatterns(model, perm.allowedModels);
+}
+
+/** Return the exact field policy used by mergeWithRoleConstraints(). */
+export function getRoleFieldConstraint(
+  role: string,
+  field: string,
+  selfAid?: string,
+): FieldPermission | null {
+  return getRoleFieldConstraints(role, selfAid)[field] ?? null;
+}
+
+/** Return all field policies used by mergeWithRoleConstraints(). */
+export function getRoleFieldConstraints(
+  role: string,
+  selfAid?: string,
+): Record<string, FieldPermission> {
+  return getRoleDefinitionForConstraints(role, selfAid)?.permissions ?? {};
 }
 
 function getRoleDefinitionForConstraints(role: string, selfAid?: string): RoleDefinition | null {

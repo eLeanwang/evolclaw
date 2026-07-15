@@ -20,6 +20,8 @@ import { appendHintAdd, appendHintRemove, parseInjectRequest } from '../core/mes
 import { appendAidLifecycle } from '../aun/aid/identity.js';
 import { getAidStore, loadClient, SLOT } from '../aun/aid/store.js';
 import type { AIDStore } from '@agentunion/fastaun';
+import { uploadFileAndBuildPayload } from '../aun/msg/upload.js';
+import type { ShortConnection } from '../aun/rpc/index.js';
 import type { AidStatsCollector } from '../utils/stats.js';
 import { loadAgent, saveAgent } from '../config-store.js';
 import { activeBaseagent } from '../core/model/config-scope.js';
@@ -29,6 +31,11 @@ import * as outbox from '../aun/outbox.js';
 import { guessMime, formatSize } from '../utils/media-cache.js';
 import { formatPeerKey, PeerIdentityCache } from '../core/relation/peer-identity.js';
 import { getFirstStaticAgentOwner } from '../config/peer-role-resolver.js';
+import { isHClassPath } from '../core/protected-paths.js';
+import { consumeAunCausation, registerAunCausation } from '../core/causation/aun-association.js';
+import { deriveCausation, normalizeCausation } from '../core/causation/context.js';
+import { recordCausationSpan } from '../core/causation/audit.js';
+import type { CausationContext } from '../core/causation/types.js';
 
 /**
  * 构造 connect extra_info：自描述本进程身份。
@@ -100,6 +107,7 @@ export interface AUNDispatchOptions {
   /** 本条入站消息是否端到端加密（aun 专属）。回复加密态跟随此值。 */
   encrypted?: boolean;
   messageId?: string;
+  causation?: CausationContext;
   threadId?: string;
   mentions?: Array<{ userId: string; name?: string }>;
   mentionAids?: string[];
@@ -131,6 +139,7 @@ export interface AunDaemonMsgSendArgs {
   to: string;
   payload: Record<string, any>;
   encrypt?: boolean;
+  causation?: CausationContext;
   log?: {
     content: string;
     sessionId?: string;
@@ -145,6 +154,21 @@ export interface AunDaemonMsgSendArgs {
   };
 }
 
+export interface AunDaemonFileRequest {
+  filePath: string;
+  as?: string;
+  contentType?: string;
+  text?: string;
+  transcript?: string;
+}
+
+export interface AunDaemonGroupSendArgs {
+  groupId: string;
+  payload: Record<string, any>;
+  mentions?: Array<Record<string, unknown>>;
+  encrypt?: boolean;
+}
+
 export interface AunDaemonMsgSendResult {
   ok: boolean;
   message_id?: string;
@@ -157,6 +181,12 @@ export interface AunDaemonMsgSendResult {
   log_written?: boolean;
   error?: string;
   code?: string | number;
+}
+
+export interface AunDaemonGroupSendResult extends AunDaemonMsgSendResult {
+  group_id?: string;
+  message?: Record<string, unknown>;
+  event?: Record<string, unknown>;
 }
 
 function setIfDefined(target: Record<string, any>, key: string, value: unknown): void {
@@ -191,6 +221,7 @@ export function aunOptsToInbound(
     sameEgressIp: opts.sameEgressIp,
     encrypted: opts.encrypted,
     messageId: opts.messageId,
+    causation: opts.causation,
     mentions: opts.mentions,
     mentionAids: opts.mentionAids,
     threadId: opts.threadId,
@@ -1356,6 +1387,9 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     const env = (msg.envelope && typeof msg.envelope === 'object') ? msg.envelope as Record<string, any> : {};
     const fromAid = env.from ?? '';
     const payload = msg.payload ?? '';
+    const causationRef = payload && typeof payload === 'object' && typeof (payload as any)._evolclaw_causation_ref === 'string'
+      ? (payload as any)._evolclaw_causation_ref
+      : undefined;
     const logDescriptor = classifyAunPayloadForLog(payload);
     const text = this.extractTextPayload(payload, fromAid, fromAid);
     const threadId = typeof payload === 'object' && payload !== null ? (payload as any).thread_id : undefined;
@@ -1369,6 +1403,8 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       : undefined;
 
     const messageId = msg.message_id ?? '';
+    const causation = consumeAunCausation(causationRef || messageId, fromAid, this._aid || this.config.aid)
+      ?? (causationRef ? consumeAunCausation(messageId, fromAid, this._aid || this.config.aid) : undefined);
     const seq = msg.seq;
 
     // Observer forward (inbound)：在所有过滤之前转发原始明文 payload。
@@ -1492,6 +1528,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       text: finalText,
       chatType: 'private',
       messageId,
+      causation,
       seq,
       threadId,
       mentions,
@@ -1776,6 +1813,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     peerName?: string; peerType?: string;
     sameDevice?: boolean; sameNetwork?: boolean; sameEgressIp?: boolean;
     encrypted?: boolean;
+    causation?: CausationContext;
     seq?: number; threadId?: string; mentions?: string[];
     mentionAids?: string[];
     isMentioned?: boolean;  // ← 新增：是否 @ 了本 agent（群聊场景）
@@ -1858,6 +1896,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       sameEgressIp: event.sameEgressIp,
       encrypted: event.encrypted,
       messageId: event.messageId,
+      causation: event.causation,
       threadId: event.threadId,
       mentions: mentionObjects,
       mentionAids: event.mentionAids,
@@ -2569,8 +2608,15 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       : this.shouldEncrypt(encryptTarget);
     const method = isGroup ? 'group.send' : 'message.send';
 
+    const causation = normalizeCausation(context?.metadata?.causation);
+    const causationRef = !isGroup && causation ? `caus_${crypto.randomUUID().replace(/-/g, '')}` : undefined;
+    if (causationRef && causation) registerAunCausation(causationRef, this.config.aid, targetAid, causation);
+    const payloadWithCausationRef = causationRef
+      ? { ...payload, _evolclaw_causation_ref: causationRef }
+      : payload;
+
     // Truncate payload if too large (AUN SDK limit: 1MB)
-    const truncatedPayload = this.truncatePayloadIfNeeded(payload, label);
+    const truncatedPayload = this.truncatePayloadIfNeeded(payloadWithCausationRef, label);
 
     const params: Record<string, any> = { payload: truncatedPayload, encrypt };
     if (isGroup) params.group_id = channelId;
@@ -2623,6 +2669,14 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     logText: string,
     result: any,
   ): void {
+    const causation = normalizeCausation(context?.metadata?.causation);
+    if (!isGroup && causation) registerAunCausation(messageId, this.config.aid, channelId, causation);
+    if (causation) {
+      recordCausationSpan(causation, 'message.outbound', {
+        status: 'completed',
+        refs: { messageId, taskId: context?.metadata?.taskId },
+      });
+    }
     const kind = contentKind ?? (payload.type as outbox.OutboxContentKind | undefined) ?? 'custom';
     appendAidEvent({
       ts: Date.now(),
@@ -2878,6 +2932,13 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     const info = await this.fetchPeerInfo(args.to);
     const chatmode = info.type === 'human' ? 'interactive' : 'proactive';
     if (!finalPayload.chatmode) finalPayload.chatmode = chatmode;
+    const parentCausation = normalizeCausation(args.causation);
+    const outboundCausation = parentCausation ? deriveCausation(parentCausation) : undefined;
+    const causationRef = outboundCausation ? `caus_${crypto.randomUUID().replace(/-/g, '')}` : undefined;
+    if (causationRef && outboundCausation) {
+      finalPayload._evolclaw_causation_ref = causationRef;
+      registerAunCausation(causationRef, this.config.aid, args.to, outboundCausation);
+    }
 
     const encrypt = args.encrypt === true;
     const sendParams: Record<string, any> = {
@@ -2893,6 +2954,13 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
         return { ok: false, error: `message.send returned no message_id: ${JSON.stringify(result)}`, code: 'MISSING_MESSAGE_ID' };
       }
       logger.info(`${this.logPrefix()} daemon msg.send ok: to=${this.peerLabel(args.to)} mid=${messageId} encrypt=${encrypt} chatmode=${chatmode}`);
+      if (outboundCausation) {
+        registerAunCausation(messageId, this.config.aid, args.to, outboundCausation);
+        recordCausationSpan(outboundCausation, 'message.outbound', {
+          status: 'completed',
+          refs: { messageId, sessionId: args.log?.sessionId },
+        });
+      }
       this.forwardOutbound(result);
       let logWritten = false;
       if (args.log?.content !== undefined) {
@@ -2943,6 +3011,73 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
         error: e?.message || String(e),
         code: e?.code,
       };
+    }
+  }
+
+  /** Build an attachment payload with the daemon's long-lived AUN connection. */
+  async buildDaemonFilePayload(file: AunDaemonFileRequest): Promise<Record<string, unknown>> {
+    if (!this.connected || !this.client) {
+      throw Object.assign(new Error('AUN channel is not connected'), { code: 'AUN_NOT_CONNECTED' });
+    }
+    if (!file.filePath?.trim()) {
+      throw Object.assign(new Error('file path is required'), { code: 'INVALID_FILE' });
+    }
+    if (isHClassPath(file.filePath)) {
+      throw Object.assign(new Error('H-class protected files cannot be uploaded by an agent task'), {
+        code: 'H_CLASS_PROTECTED',
+      });
+    }
+
+    const connection: ShortConnection = {
+      call: (method, params) => this.callAndTrace(method, params),
+      close: async () => {},
+    };
+    const built = await uploadFileAndBuildPayload(connection, this.config.aid, file.filePath, {
+      as: file.as,
+      contentType: file.contentType,
+      text: file.text,
+      transcript: file.transcript,
+    });
+    return built.payload;
+  }
+
+  /** Daemon-side transport for `ec group send` running inside an agent task. */
+  async sendDaemonGroupMsg(args: AunDaemonGroupSendArgs): Promise<AunDaemonGroupSendResult> {
+    if (!this.connected || !this.client) {
+      return { ok: false, error: 'AUN channel is not connected', code: 'AUN_NOT_CONNECTED' };
+    }
+    if (!args.groupId || !this.isGroupId(args.groupId)) {
+      return { ok: false, error: 'aun-msg-send requires a valid group target', code: 'UNSUPPORTED_TARGET' };
+    }
+    if (!args.payload || typeof args.payload !== 'object' || Array.isArray(args.payload)) {
+      return { ok: false, error: 'payload must be an object', code: 'INVALID_PAYLOAD' };
+    }
+
+    const finalPayload = this.stripUndefinedDeep({ ...args.payload });
+    if (args.mentions?.length) finalPayload.mentions = args.mentions;
+    const encrypt = args.encrypt === true;
+    try {
+      const result = await this.callAndTrace<any>('group.send', {
+        group_id: args.groupId,
+        payload: this.truncatePayloadIfNeeded(finalPayload, 'group-send-ipc'),
+        encrypt,
+      });
+      const messageId = this.messageIdFromSendResult(result);
+      if (!messageId) {
+        return { ok: false, error: `group.send returned no message_id: ${JSON.stringify(result)}`, code: 'MISSING_MESSAGE_ID' };
+      }
+      logger.info(`${this.logPrefix()} daemon group.send ok: group=${args.groupId} mid=${messageId} encrypt=${encrypt}`);
+      this.forwardOutbound(result);
+      return {
+        ok: true,
+        message_id: messageId,
+        group_id: result?.group_id ?? args.groupId,
+        message: result?.message,
+        event: result?.event,
+        encrypt,
+      };
+    } catch (e: any) {
+      return { ok: false, error: e?.message || String(e), code: e?.code };
     }
   }
 
@@ -3007,6 +3142,14 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     if (context?.replyToMessageId) payload.ref_message_id = context.replyToMessageId;
     if (context?.metadata?.taskId) payload.task_id = context.metadata.taskId;
     if (context?.metadata?.chatmode) payload.chatmode = context.metadata.chatmode;
+    const causation = normalizeCausation(context?.metadata?.causation);
+    const causationRef = !this.isGroupId(channelId) && causation
+      ? `caus_${crypto.randomUUID().replace(/-/g, '')}`
+      : undefined;
+    if (causationRef && causation) {
+      payload._evolclaw_causation_ref = causationRef;
+      registerAunCausation(causationRef, this.config.aid, channelId, causation);
+    }
 
     // 诊断日志：记录 payload 构造结果（含 task_id / thread_id / chatmode）
     logger.info(`${this.logPrefix()} deliverTextEntry: channelId=${channelId} thread_id=${payload.thread_id ?? 'none'} task_id=${payload.task_id ?? 'none'} chatmode=${payload.chatmode ?? 'none'} source=${source} textLen=${finalText.length}`);
@@ -3051,6 +3194,14 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
           return false;
         } else {
           logger.info(`${this.logPrefix()} message.send ok: to=${this.peerLabel(targetAid)} mid=${result.message_id} encrypt=${encrypt} text=${finalText.slice(0, 60)}`);
+          const causation = normalizeCausation(context?.metadata?.causation);
+          if (causation) {
+            registerAunCausation(result.message_id, this.config.aid, targetAid, causation);
+            recordCausationSpan(causation, 'message.outbound', {
+              status: 'completed',
+              refs: { messageId: result.message_id, taskId: context?.metadata?.taskId },
+            });
+          }
           appendAidEvent({ ts: Date.now(), iso: new Date().toISOString(), event: 'message_out', aid: this.config.aid, to: targetAid, msgId: result.message_id, kind: 'text', len: finalText.length });
           this.aidStatsCollector?.recordOutbound(this.config.aid, targetAid, Buffer.byteLength(finalText, 'utf-8'), finalText, false, encrypt, context?.metadata?.chatmode as string | undefined, 'send');
           this.appendOutboundJsonl(targetAid, {
@@ -3090,6 +3241,14 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
             if (!result || !mid) {
               logger.warn(`${this.logPrefix()} message.send fallback returned no message_id: ${JSON.stringify(result)}`);
               return false;
+            }
+            const causation = normalizeCausation(context?.metadata?.causation);
+            if (causation) {
+              registerAunCausation(mid, this.config.aid, targetAid, causation);
+              recordCausationSpan(causation, 'message.outbound', {
+                status: 'completed',
+                refs: { messageId: mid, taskId: context?.metadata?.taskId },
+              });
             }
             appendAidEvent({ ts: Date.now(), iso: new Date().toISOString(), event: 'message_out', aid: this.config.aid, to: targetAid, msgId: mid, kind: 'text', len: finalText.length });
             this.aidStatsCollector?.recordOutbound(this.config.aid, targetAid, Buffer.byteLength(finalText, 'utf-8'), finalText, false, false, context?.metadata?.chatmode as string | undefined);
@@ -3872,7 +4031,20 @@ export class AUNChannelPlugin implements ChannelPlugin {
       channelKey: inst.name,  // channelName 实际上就是 channelKey
       capabilities: { file: true, image: true, interaction: true, markdown: true, thought: true, status: true, thread: true },
       send: async (envelope: any, payload: any) => {
-        const replyCtx: ReplyContext | undefined = envelope.replyContext;
+        const parentCausation = normalizeCausation(envelope.causation ?? envelope.replyContext?.metadata?.causation);
+        const outboundCausation = parentCausation ? deriveCausation(parentCausation) : undefined;
+        const replyCtx: ReplyContext | undefined = outboundCausation
+          ? {
+              ...(envelope.replyContext ?? {}),
+              metadata: { ...(envelope.replyContext?.metadata ?? {}), causation: outboundCausation },
+            }
+          : envelope.replyContext;
+        if (outboundCausation) {
+          recordCausationSpan(outboundCausation, 'message.outbound', {
+            status: 'started',
+            refs: { taskId: envelope.taskId, sessionId: envelope.sessionId },
+          });
+        }
         const channelId = envelope.channelId;
         const taskBase = () => channel.buildTaskPayloadBase(envelope, replyCtx);
         switch (payload.kind) {

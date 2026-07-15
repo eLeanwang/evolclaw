@@ -76,7 +76,7 @@
 
 ## manifest 共享引擎（manifest-engine.ts）
 
-两个渲染层共用同一套原语，由 `src/agents/manifest-engine.ts` 提供：
+两个渲染层共用同一套原语，由 `src/eck/manifest-engine.ts` 提供：
 
 | 函数 | 作用 |
 |------|------|
@@ -146,7 +146,7 @@ IMPORTANT: Use this context when it affects the current interaction.
 
 ### 执行位置
 
-`src/core/message/message-processor.ts` → `renderMessageBody(items, vars, sessionId)` → `src/agents/message-renderer.ts`
+`src/core/message/message-processor.ts` → `renderMessageBody(items, vars, sessionId)` → `src/eck/message-renderer.ts`
 
 ### 渲染流程
 
@@ -250,9 +250,9 @@ wrapper 的 {{@loop}} 处字面量填入 renderedParts.join(separator)
 
 | 文件 | 角色 |
 |------|------|
-| `src/agents/manifest-engine.ts` | 共享渲染引擎原语 |
+| `src/eck/manifest-engine.ts` | 共享渲染引擎原语 |
 | `src/agents/kit-renderer.ts` | 系统提示词渲染，输出 `<system-reminder>` |
-| `src/agents/message-renderer.ts` | 消息渲染层，输出 `{ body, images }` |
+| `src/eck/message-renderer.ts` | 消息渲染层，输出 `{ body, images }` |
 | `src/core/message/message-processor.ts` | 装配点：构造 vars，调两层渲染，调 runQuery |
 | `src/core/message/message-queue.ts` | 队列合并：mergeItems 保留 items[] 和 per-item images |
 | `src/core/message/message-bridge.ts` | 消息入口：已移除 messagePrefix 硬编码 |

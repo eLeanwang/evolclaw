@@ -8,7 +8,8 @@ import { appendMessageLog, buildOutboundEntry, classifyAunPayloadForLog } from '
 import { readBestTaskRuntimeContext, runtimeRefMessageIdForMsgSend, type TaskRuntimeContext } from '../../core/task-runtime-context.js';
 import { chatDirPath } from '../../core/session/session-fs-store.js';
 import { resolvePaths } from '../../paths.js';
-import { ipcQuery, type IpcAunMsgSendResponse } from '../../ipc.js';
+import { ipcQuery, type IpcAunFileRequest, type IpcAunMsgSendResponse } from '../../ipc.js';
+import { AGENT_DELEGATION_TOKEN_ENV } from '../../core/auth/agent-delegation.js';
 
 // ==================== Types ====================
 
@@ -159,12 +160,29 @@ function msgSendLogMetadata(args: MsgSendArgs, payload?: unknown, runtimeContext
   };
 }
 
-async function tryDaemonMsgSend(args: MsgSendArgs, payload: Record<string, unknown>, runtimeContext?: TaskRuntimeContext | null): Promise<IpcAunMsgSendResponse | null> {
-  if (!runtimeContext) return null;
-  if (!runtimeContext.selfAid || runtimeContext.selfAid !== args.from) return null;
-  if (!runtimeContext.sessionId || !runtimeContext.messageId) return null;
-  if (args.slotId || args.aunPath) return null;
-  const payloadThread = typeof payload.thread_id === 'string' && payload.thread_id.trim()
+async function tryDaemonMsgSend(
+  args: MsgSendArgs,
+  payload: Record<string, unknown> | undefined,
+  runtimeContext?: TaskRuntimeContext | null,
+  file?: IpcAunFileRequest,
+): Promise<IpcAunMsgSendResponse | null> {
+  const delegatedTask = !!process.env.EVOLCLAW_SESSION_ID
+    || !!process.env[AGENT_DELEGATION_TOKEN_ENV];
+  if (!runtimeContext) {
+    return delegatedTask
+      ? { ok: false, code: 'DELEGATION_REQUIRED', error: 'Task runtime context is unavailable' }
+      : null;
+  }
+  if (!runtimeContext.selfAid || runtimeContext.selfAid !== args.from) {
+    return { ok: false, code: 'INVALID_DELEGATION', error: 'Task sender does not match the delegated agent' };
+  }
+  if (!runtimeContext.sessionId || !runtimeContext.messageId) {
+    return { ok: false, code: 'INVALID_DELEGATION', error: 'Task runtime context is incomplete' };
+  }
+  if (args.slotId || args.aunPath) {
+    return { ok: false, code: 'INVALID_DELEGATION', error: 'Task sends cannot override the daemon AUN connection' };
+  }
+  const payloadThread = typeof payload?.thread_id === 'string' && payload.thread_id.trim()
     ? payload.thread_id.trim()
     : undefined;
 
@@ -174,17 +192,23 @@ async function tryDaemonMsgSend(args: MsgSendArgs, payload: Record<string, unkno
       type: 'aun-msg-send',
       aid: args.from,
       to: args.to,
-      payload,
+      scope: 'msg',
+      ...(payload ? { payload } : { file }),
       encrypt: args.encrypt === true,
       thread: args.thread || payloadThread,
       returnPolicy: args.returnPolicy,
       originSessionId: runtimeContext.sessionId,
       originMessageId: runtimeContext.messageId,
+      delegationToken: process.env[AGENT_DELEGATION_TOKEN_ENV],
       log: msgSendLogMetadata(args, payload, runtimeContext),
     },
-    5000,
+    file ? 120_000 : 5000,
   );
-  return response;
+  return response ?? {
+    ok: false,
+    code: 'AUN_DAEMON_UNAVAILABLE',
+    error: 'EvolClaw daemon did not complete the delegated AUN send',
+  };
 }
 
 async function daemonMsgSendResult(
@@ -281,6 +305,17 @@ export async function msgSend(args: MsgSendArgs): Promise<MsgSendResult | MsgErr
 
       const daemonResult = await tryDaemonMsgSend(args, payload, runtimeContext);
       if (daemonResult) return daemonMsgSendResult(args, payload, runtimeContext, daemonResult);
+    } else {
+      const daemonResult = await tryDaemonMsgSend(args, undefined, runtimeContext, {
+        filePath: path.resolve(args.body.filePath),
+        as: args.body.as,
+        contentType: args.body.contentType,
+        text: args.body.text,
+        transcript: args.body.transcript,
+      });
+      if (daemonResult) {
+        return daemonMsgSendResult(args, { type: args.body.as || 'file' }, runtimeContext, daemonResult);
+      }
     }
 
     conn = await createShortConnection(args.from, { aunPath: args.aunPath, slotId: args.slotId });

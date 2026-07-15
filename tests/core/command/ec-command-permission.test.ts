@@ -10,6 +10,8 @@ describe('EC Command Permission', () => {
 
     it('should parse ec msg file', () => {
       expect(parseEcOperationId('ec msg file self.aid peer.aid /path/to/file')).toBe('ec.msg.file');
+      expect(parseEcOperationId('ec msg send self.aid peer.aid --file /path/to/file')).toBe('ec.msg.file');
+      expect(parseEcOperationId('ec msg send self.aid peer.aid --text-from-file /path/to/message.txt')).toBe('ec.msg.file');
     });
 
     it('should parse ec group send', () => {
@@ -18,6 +20,7 @@ describe('EC Command Permission', () => {
 
     it('should parse ec group file', () => {
       expect(parseEcOperationId('ec group file self.aid group123 /path/to/file')).toBe('ec.group.file');
+      expect(parseEcOperationId('ec group send self.aid group123 --file "/path/to/file name.txt"')).toBe('ec.group.file');
     });
 
     it('should parse ec ctl send', () => {
@@ -26,6 +29,7 @@ describe('EC Command Permission', () => {
 
     it('should parse ec ctl file', () => {
       expect(parseEcOperationId('ec ctl file /path/to/file')).toBe('ec.ctl.file');
+      expect(parseEcOperationId('ec ctl file feishu /path/to/file')).toBe('ec.ctl.file');
     });
 
     it('should parse evolclaw variant', () => {
@@ -33,10 +37,10 @@ describe('EC Command Permission', () => {
       expect(parseEcOperationId('evolclaw ctl send')).toBe('ec.ctl.send');
     });
 
-    it('should parse send commands with trailing file descriptor duplication', () => {
-      expect(parseEcOperationId('ec group send self.aid group123 hello 2>&1')).toBe('ec.group.send');
-      expect(parseEcOperationId('ec msg send self.aid peer.aid hello 1>&2')).toBe('ec.msg.send');
-      expect(parseEcOperationId('ec ctl send hello 2>&1')).toBe('ec.ctl.send');
+    it('should reject redirection even when it is only file descriptor duplication', () => {
+      expect(parseEcOperationId('ec group send self.aid group123 hello 2>&1')).toBeNull();
+      expect(parseEcOperationId('ec msg send self.aid peer.aid hello 1>&2')).toBeNull();
+      expect(parseEcOperationId('ec ctl send hello 2>&1')).toBeNull();
     });
 
     it('should return null for non-ec commands', () => {
@@ -156,6 +160,19 @@ describe('EC Command Permission', () => {
       expect(decision).not.toBeNull();
       if (!decision) return;
       expect(decision.allow).toBe(false);
+    });
+
+    it('should classify the real --file spelling before applying visitor permissions', () => {
+      const visitorContext: EcCommandAuthorizationContext = {
+        ...baseContext,
+        role: 'visitor',
+      };
+      const decision = authorizeEcCommand(
+        'ec msg send agent1.agentid.pub user1 --file /tmp/file',
+        visitorContext,
+      );
+      expect(decision).not.toBeNull();
+      expect(decision?.allow).toBe(false);
     });
 
     it('should allow visitor ec group send in group chats', () => {

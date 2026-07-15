@@ -13,6 +13,7 @@ import type {
   TriggerReply,
   TriggerRunStatus,
 } from './types.js';
+import type { CausationContext } from '../core/causation/types.js';
 
 const FEEDBACK_DEADLINE_MS = 30_000;
 const TARGET_SESSION_DEADLINE_MS = 30 * 60_000;
@@ -40,6 +41,7 @@ export interface TriggerFeedbackDispatchInput {
   reply: TriggerReply;
   sourcePayload?: Record<string, unknown>;
   dryRun?: boolean;
+  causation: CausationContext;
 }
 
 export interface TriggerTargetSessionInput {
@@ -48,6 +50,7 @@ export interface TriggerTargetSessionInput {
   firedAt: number;
   prompt: string;
   dryRun?: boolean;
+  causation: CausationContext;
 }
 
 export interface TriggerFeedbackDispatchResult {
@@ -164,6 +167,7 @@ export class TriggerFeedbackDispatcher {
       messageId: input.runId,
       timestamp: Date.now(),
       source: 'trigger',
+      causation: input.causation,
       triggerMeta: {
         triggerId: input.trigger.id,
         runId: input.runId,
@@ -265,12 +269,16 @@ export class TriggerFeedbackDispatcher {
       attempt += 1;
       const startedAt = Date.now();
       try {
+        const isAunTarget = channelTypeFromKey(target.channelKey) === 'aun';
         await binding.adapter.send(buildEnvelope({
           taskId: `trigger:${input.runId}`,
           channel: binding.adapter.channelKey,
           channelId: target.channelId,
           agentName: binding.agentName,
-          replyContext: replyContextFromTarget(target),
+          replyContext: isAunTarget
+            ? replyContextWithCausation(target, input.causation)
+            : replyContextFromTarget(target),
+          causation: isAunTarget ? input.causation : undefined,
         }), {
           kind: 'result.text',
           text,
@@ -483,6 +491,14 @@ function originAsTarget(origin: NonNullable<TriggerDefinition['origin']>): Trigg
 function replyContextFromTarget(target: TriggerFeedbackTarget): ReplyContext | undefined {
   if (target.session !== 'thread' || !target.threadId) return undefined;
   return { threadId: target.threadId };
+}
+
+function replyContextWithCausation(target: TriggerFeedbackTarget, causation: CausationContext): ReplyContext {
+  const base = replyContextFromTarget(target);
+  return {
+    ...(base ?? {}),
+    metadata: { ...(base?.metadata ?? {}), causation },
+  };
 }
 
 function channelTypeFromKey(channelKey: string): string {

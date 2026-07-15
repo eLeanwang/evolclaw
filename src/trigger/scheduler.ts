@@ -39,6 +39,9 @@ import type {
   TriggerSubscriptionInfo,
   TriggerFeedbackTarget,
 } from './types.js';
+import { enterTrigger, formatTriggerPath } from '../core/causation/context.js';
+import { recordCausationSpan } from '../core/causation/audit.js';
+import type { CausationContext } from '../core/causation/types.js';
 
 const MAX_TIMER_MS = 2_147_483_647;
 const SCRIPT_PREVIEW_MAX_BYTES = 64 * 1024;
@@ -344,11 +347,33 @@ export class TriggerRuntimeScheduler {
     const firedAt = payload.firedAt;
     const runId = `run_${firedAt}_${crypto.randomBytes(3).toString('hex')}`;
     const source = this.buildSourceInfo(definition.source, firedAt, payload.scheduledAt, payload.payload);
+    const entered = enterTrigger(payload.causation, definition.id, runId);
+    if (!entered.ok) {
+      const audit = this.buildAudit({
+        definition,
+        runId,
+        startedAt: firedAt,
+        status: 'skipped',
+        reason: entered.reason,
+        source,
+        script: null,
+        reply: null,
+        feedback: null,
+        effects: [],
+        error: null,
+        causation: payload.causation,
+      });
+      if (!payload.dryRun) this.audit.write(audit);
+      logger.error(`[Trigger] causation blocked: reason=${entered.reason} trace=${payload.causation?.traceId ?? '<none>'} chain=${formatTriggerPath(payload.causation, definition.id)}`);
+      return { ok: true, runId, triggerId: definition.id, status: 'skipped', reason: entered.reason, audit };
+    }
+    const causation = entered.causation;
 
     if (!payload.dryRun) {
       const conflict = this.checkConcurrency(definition, runId, source);
       if (conflict) return conflict;
       if (definition.limits) this.state.incrementLimitRunCount(definition.id);
+      recordCausationSpan(causation, 'trigger.run', { status: 'started', refs: { triggerId: definition.id, runId } });
     }
 
     const startedAt = Date.now();
@@ -364,7 +389,7 @@ export class TriggerRuntimeScheduler {
     if (!payload.dryRun) {
       this.addRunning(definition.id, runId, { run: activeRun, controller });
       this.state.upsert(definition.id, activeRun);
-      this.publishTriggerFired(definition, runId, firedAt);
+      this.publishTriggerFired(definition, runId, firedAt, causation);
     }
 
     let script: TriggerScriptResult | null = null;
@@ -372,7 +397,7 @@ export class TriggerRuntimeScheduler {
     let reply: TriggerReply | null = null;
 
     try {
-      const execution = await this.runExecution(definition, runId, firedAt, source.payload, controller.signal, payload.dryRun === true);
+      const execution = await this.runExecution(definition, runId, firedAt, source.payload, controller.signal, payload.dryRun === true, causation);
       script = execution.script;
       processing = execution.processing;
       reply = execution.reply ?? null;
@@ -418,6 +443,7 @@ export class TriggerRuntimeScheduler {
         reply: execution.reply!,
         sourcePayload: source.payload,
         dryRun: payload.dryRun,
+        causation,
       });
 
       const audit = this.buildAudit({
@@ -433,12 +459,14 @@ export class TriggerRuntimeScheduler {
         feedback: feedbackResult.feedback,
         effects: feedbackResult.effects,
         error: feedbackResult.error,
+        causation,
       });
 
       if (!payload.dryRun) {
         this.audit.write(audit);
         this.publishTriggerRunOutcome(definition, audit);
         this.finishRun(definition.id, runId);
+        recordCausationSpan(causation, 'trigger.run', { status: audit.status === 'failed' ? 'failed' : 'completed', refs: { triggerId: definition.id, runId }, reason: audit.reason });
       }
 
       return {
@@ -465,11 +493,13 @@ export class TriggerRuntimeScheduler {
         feedback: null,
         effects: [],
         error: { code: 'daemon_error', message },
+        causation,
       });
       if (!payload.dryRun) {
         this.audit.write(audit);
         this.publishTriggerRunOutcome(definition, audit);
         this.finishRun(definition.id, runId);
+        recordCausationSpan(causation, 'trigger.run', { status: 'failed', refs: { triggerId: definition.id, runId }, reason: 'daemon_error' });
       }
       return { ok: false, runId, triggerId: definition.id, status: 'failed', reason: 'daemon_error', audit, error: message };
     }
@@ -482,14 +512,15 @@ export class TriggerRuntimeScheduler {
     sourcePayload: Record<string, unknown>,
     signal: AbortSignal,
     dryRun: boolean,
+    causation: CausationContext,
   ): Promise<ExecutionRunResult> {
     const maxAttempts = !dryRun && definition.execution.onError === 'retry'
       ? definition.reliability.retry.maxAttempts
       : 0;
-    let execution = await this.runExecutionAttempt(definition, runId, firedAt, sourcePayload, signal, dryRun);
+    let execution = await this.runExecutionAttempt(definition, runId, firedAt, sourcePayload, signal, dryRun, causation);
     for (let attempt = 0; execution.reply && shouldRetryExecution(execution.reply) && attempt < maxAttempts && !signal.aborted; attempt++) {
       await sleep(definition.reliability.retry.backoffMs);
-      execution = await this.runExecutionAttempt(definition, runId, firedAt, sourcePayload, signal, dryRun);
+      execution = await this.runExecutionAttempt(definition, runId, firedAt, sourcePayload, signal, dryRun, causation);
     }
     return execution;
   }
@@ -501,6 +532,7 @@ export class TriggerRuntimeScheduler {
     sourcePayload: Record<string, unknown>,
     signal: AbortSignal,
     dryRun: boolean,
+    causation: CausationContext,
   ): Promise<ExecutionRunResult> {
     if (definition.execution.type === 'script') {
       const script = await this.runScriptOnce(definition, runId, firedAt, sourcePayload, signal);
@@ -541,6 +573,7 @@ export class TriggerRuntimeScheduler {
         firedAt,
         prompt,
         dryRun,
+        causation,
       });
       return {
         script: null,
@@ -579,6 +612,7 @@ export class TriggerRuntimeScheduler {
         projectPath: this.runtime.projectPath,
         baseagent: runtimeBaseagent,
         session: executionSession,
+        causation,
       });
       const sentinel = definition.execution.noopSentinel ?? '[[NOOP]]';
       const reply: TriggerReply = {
@@ -826,6 +860,7 @@ export class TriggerRuntimeScheduler {
     effects: TriggerAuditRecord['effects'];
     error: TriggerAuditRecord['error'];
     conflictRunId?: string;
+    causation?: CausationContext;
   }): TriggerAuditRecord {
     return {
       runId: input.runId,
@@ -848,6 +883,7 @@ export class TriggerRuntimeScheduler {
       feedback: input.feedback,
       effects: input.effects,
       error: input.error,
+      causation: input.causation,
     };
   }
 
@@ -965,6 +1001,7 @@ export class TriggerRuntimeScheduler {
     await this.startRun(definition, {
       firedAt: event.firedAt,
       payload: event.payload,
+      causation: event.causation,
     });
   }
 
@@ -983,7 +1020,7 @@ export class TriggerRuntimeScheduler {
     });
   }
 
-  private publishTriggerFired(definition: TriggerDefinition, runId: string, firedAt: number): void {
+  private publishTriggerFired(definition: TriggerDefinition, runId: string, firedAt: number, causation: CausationContext): void {
     const target = primaryTarget(definition);
     this.eventBus?.publish({
       type: 'trigger:fired',
@@ -996,6 +1033,7 @@ export class TriggerRuntimeScheduler {
       targetChannelId: target?.channelId,
       scheduleType: definition.source.type,
       timestamp: Date.now(),
+      causation,
     });
   }
 
@@ -1012,6 +1050,7 @@ export class TriggerRuntimeScheduler {
       targetChannel,
       targetChannelId,
       fireTime: audit.source.firedAt,
+      causation: audit.causation,
     };
 
     if (audit.status === 'completed' || audit.status === 'noop') {

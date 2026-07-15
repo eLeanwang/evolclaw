@@ -4,7 +4,7 @@ import type { SessionManager } from '../session/session-manager.js';
 import type { MessageQueue } from '../message/message-queue.js';
 
 // 支持的命令列表
-const commands = ['/new', '/pwd', '/help', '/evolhelp', '/status', '/restart', '/reload', '/model', '/setmodel', '/effort', '/baseagent', '/slist', '/session', '/rename', '/stop', '/compact', '/repair', '/fork', '/del', '/perm', '/file', '/check', '/rewind', '/activity', '/chatmode', '/dispatch', '/ask', '/resume', '/aid', '/rpc', '/storage', '/agent', '/trigger', '/upgrade'];
+const commands = ['/new', '/pwd', '/help', '/evolhelp', '/status', '/restart', '/reload', '/model', '/setmodel', '/effort', '/baseagent', '/slist', '/session', '/rename', '/stop', '/compact', '/repair', '/fork', '/del', '/perm', '/file', '/check', '/rewind', '/activity', '/observable', '/chatmode', '/dispatch', '/ask', '/resume', '/aid', '/rpc', '/storage', '/agent', '/trigger', '/upgrade'];
 const deprecatedCommands = ['/clear'];
 
 // 命令别名映射
@@ -16,7 +16,7 @@ const aliases: Record<string, string> = {
 };
 
 // 命令快速路径前缀（所有命令都不进入消息队列）
-const quickCommandPrefixes = ['/new', '/pwd', '/help', '/evolhelp', '/status', '/restart', '/reload', '/model', '/setmodel', '/effort', '/baseagent', '/slist', '/session', '/rename', '/repair', '/fork', '/stop', '/clear', '/compact', '/del', '/perm', '/file', '/check', '/s ', '/name', '/rewind', '/rw', '/rw ', '/activity', '/chatmode', '/dispatch', '/ask', '/resume', '/base ', '/aid', '/rpc', '/storage', '/agent', '/trigger', '/upgrade'];
+const quickCommandPrefixes = ['/new', '/pwd', '/help', '/evolhelp', '/status', '/restart', '/reload', '/model', '/setmodel', '/effort', '/baseagent', '/slist', '/session', '/rename', '/repair', '/fork', '/stop', '/clear', '/compact', '/del', '/perm', '/file', '/check', '/s ', '/name', '/rewind', '/rw', '/rw ', '/activity', '/observable', '/chatmode', '/dispatch', '/ask', '/resume', '/base ', '/aid', '/rpc', '/storage', '/agent', '/trigger', '/upgrade'];
 
 /**
  * 计算两个字符串的 Levenshtein 距离（编辑距离）

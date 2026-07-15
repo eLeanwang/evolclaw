@@ -1,3 +1,5 @@
+import type { CausationContext } from '../causation/types.js';
+
 export const HANDOFF_SCHEMA_VERSION = 1 as const;
 
 export const HANDOFF_STATES = [
@@ -33,6 +35,8 @@ export interface HandoffInstance {
   origin_message_id: string;
   target_session_id: string;
   request: HandoffRequest;
+  causation?: CausationContext;
+  return_causation?: CausationContext;
   return_policy: 'required';
   state: HandoffState;
   target_message_id: string | null;
@@ -91,7 +95,9 @@ export type HandoffReturnCode =
   | 'HANDOFF_NOT_RETURNABLE'
   | 'HANDOFF_RETURN_CONTENT_REQUIRED'
   | 'HANDOFF_RETURN_CONFLICT'
-  | 'HANDOFF_STORE_WRITE_FAILED';
+  | 'HANDOFF_STORE_WRITE_FAILED'
+  | 'DELEGATION_REQUIRED'
+  | 'INVALID_DELEGATION';
 
 export interface HandoffReturnSuccess {
   ok: true;

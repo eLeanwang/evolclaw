@@ -409,6 +409,22 @@ describe('MessageBridge — menu 协议', () => {
     });
   });
 
+  it('menu.query 通过标准 observable name 路由', async () => {
+    const sendMock = vi.fn().mockResolvedValue(undefined);
+    const h = makeBridge({ adapterSend: sendMock });
+    h.cmdHandler.execMenuQuery.mockResolvedValue({ data: { observable: false, source: 'builtin' } });
+
+    await h.triggerInbound(makeInbound({ content: JSON.stringify({ type: 'menu.query', id: 'q-observable', name: 'observable' }) }));
+
+    expect(h.cmdHandler.execMenuQuery).toHaveBeenCalledWith('/observable', 'test-instance', 'chat-1', BRIDGE_PEER, undefined, 'private', false, MEMBER_IDENTITY);
+    expect(parseCustomResponse(sendMock)).toMatchObject({
+      type: 'menu.response',
+      id: 'q-observable',
+      name: 'observable',
+      data: { observable: false, source: 'builtin' },
+    });
+  });
+
   it('menu.options 通过 name 解析 cmd 并调用 getSubMenuItems', async () => {
     const sendMock = vi.fn().mockResolvedValue(undefined);
     const h = makeBridge({ adapterSend: sendMock });

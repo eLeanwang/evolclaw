@@ -1,4 +1,6 @@
 import crypto from 'crypto';
+import { authorizeCommand } from '../command/command-permission.js';
+import { parsePeerKey } from '../relation/peer-identity.js';
 
 export const AGENT_DELEGATION_TOKEN_ENV = 'EVOLCLAW_DELEGATION_TOKEN';
 
@@ -19,6 +21,10 @@ export interface AgentDelegationGrant {
 export type AgentDelegationValidation =
   | { ok: true; grant: AgentDelegationGrant }
   | { ok: false; code: 'DELEGATION_REQUIRED' | 'INVALID_DELEGATION'; reason: string };
+
+export type DelegatedAunMsgSendAuthorization =
+  | { ok: true; grant: AgentDelegationGrant }
+  | { ok: false; code: 'DELEGATION_REQUIRED' | 'INVALID_DELEGATION' | 'NOT_ALLOWED'; reason: string };
 
 export class AgentDelegationRegistry {
   private readonly grantsByHash = new Map<string, AgentDelegationGrant>();
@@ -70,6 +76,62 @@ export class AgentDelegationRegistry {
     if (tokenHash) this.grantsByHash.delete(tokenHash);
     this.activeHashBySession.delete(sessionId);
   }
+}
+
+export function authorizeDelegatedAunMsgSend(
+  registry: AgentDelegationRegistry,
+  input: {
+    delegationToken?: string;
+    sessionId?: string;
+    messageId?: string;
+    aid: string;
+    to: string;
+    scope?: 'msg' | 'group';
+    action?: 'send' | 'file';
+  },
+): DelegatedAunMsgSendAuthorization {
+  if (!input.sessionId) {
+    return { ok: false, code: 'DELEGATION_REQUIRED', reason: 'Origin session is required' };
+  }
+  const validation = registry.validate(input.delegationToken, input.sessionId);
+  if (!validation.ok) return validation;
+
+  const grant = validation.grant;
+  if (grant.selfAid !== input.aid) {
+    return { ok: false, code: 'INVALID_DELEGATION', reason: 'Delegation self agent does not match sender' };
+  }
+  if (grant.messageId && grant.messageId !== input.messageId) {
+    return { ok: false, code: 'INVALID_DELEGATION', reason: 'Delegation message does not match origin message' };
+  }
+
+  let channelId: string;
+  try {
+    channelId = parsePeerKey(grant.peerKey).channelId;
+  } catch {
+    return { ok: false, code: 'INVALID_DELEGATION', reason: 'Delegation relation key is invalid' };
+  }
+  const decision = authorizeCommand({
+    actorId: grant.actorId,
+    channel: grant.channel,
+    channelId,
+    chatType: grant.chatType,
+    selfAid: grant.selfAid,
+    peerKey: grant.peerKey,
+    role: grant.issuedRole,
+    isDaemonOwner: false,
+    fromControlChannel: false,
+    source: 'agent-tool',
+    intent: {
+      operation: `ec.${input.scope ?? 'msg'}.${input.action ?? 'send'}`,
+      scope: 'relation',
+      source: 'agent-tool',
+      args: { peer: input.to, targetId: input.to },
+    },
+  });
+  if (!decision.allow) {
+    return { ok: false, code: 'NOT_ALLOWED', reason: decision.reason };
+  }
+  return { ok: true, grant };
 }
 
 function hashDelegationToken(token: string): string {

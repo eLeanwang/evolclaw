@@ -1,6 +1,7 @@
 import { resolvePaths } from '../paths.js';
 import { ipcQuery } from '../ipc.js';
 import { isHelpFlag } from './help.js';
+import { AGENT_DELEGATION_TOKEN_ENV } from '../core/auth/agent-delegation.js';
 
 // ==================== Ctl ====================
 
@@ -70,6 +71,7 @@ Agent:
     type: 'ctl',
     cmd,
     sessionId,
+    delegationToken: process.env[AGENT_DELEGATION_TOKEN_ENV],
   }, timeout);
 
   if (!result) {
@@ -85,4 +87,3 @@ Agent:
     process.exit(1);
   }
 }
-

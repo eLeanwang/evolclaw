@@ -64,7 +64,11 @@ daemon 自身的运行配置，与 agent 行为无关。
 | `aun.encryptionSeed` | string | keystore 加密种子（应用 .env 引用） |
 | `tunnel` | TunnelConfig | 内网穿透配置 |
 | `ecweb` | {enabled, port} | web 控制台 |
-| `debug` | DebugBlock | daemon 级日志 |
+| `debug` | ProcessDebugBlock | daemon 级调试配置 |
+
+`debug.eckSnapshots` 是 `$EVOLCLAW_HOME/data/eck-debug/` 的进程级总写入开关，默认 `false`。显式设为
+`true` 后，ECK 渲染快照才会写入；响应模式探针还需同时设置 `RESPONSE_SNAPSHOT=1`。该配置在 daemon
+启动时读取，修改后需 restart/reload 生效。快照可能包含消息正文、session ID 和本地路径，仅应在排障时开启。
 
 ---
 
