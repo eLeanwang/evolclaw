@@ -205,7 +205,10 @@ describe('resolveEffective (v3 覆盖链: defaults → agent → relation)', () 
   });
 
   it('merges session_renew + responseModeParams across defaults, agent, and relation', () => {
-    // session_renew 三层合并；responseModeParams 从 agent 级起（不落 defaults）。
+    // 本例只验证「合并语义」（按模式 id dict 合并 + session_renew 三层合并），
+    // 不验证桶校验。为演示多桶并存用了两个不同模式 id（single-session + 前瞻的
+    // dual-session），后者尚未注册 schema，故用 skipValidate 绕过 write 期桶校验——
+    // 合并发生在 read 层，与写校验无关。桶校验本身另有专项用例覆盖。
     write(ConfigTarget.Defaults, {
       $schema_version: 1,
       session_renew: { enabled: false, after_hours: 24, effort: 'low' },
@@ -217,13 +220,13 @@ describe('resolveEffective (v3 覆盖链: defaults → agent → relation)', () 
       channels: [],
       responseModeParams: { 'dual-session': { auxiliaryModel: 'claude-haiku', debounceMs: 3000 } },
       session_renew: { enabled: true },
-    }, { self: AID });
+    }, { self: AID }, { skipValidate: true });
 
     write(ConfigTarget.Relation, {
       $schema_version: 2,
       responseModeParams: { 'single-session': { foo: 'bar' } },
       session_renew: { after_hours: 72, fallback_action: 'continue' },
-    }, { self: AID, peerKey: PEER });
+    }, { self: AID, peerKey: PEER }, { skipValidate: true });
 
     expect(resolveEffective({ self: AID, peerKey: PEER }).session_renew).toEqual({
       enabled: true,
@@ -238,6 +241,86 @@ describe('resolveEffective (v3 覆盖链: defaults → agent → relation)', () 
       'single-session': { foo: 'bar' },
     });
     expect(routeFieldPath('session_renew.enabled', 'defaults').target).toBe(ConfigTarget.Defaults);
+  });
+
+  it('迁移：旧顶层 proactive 块折叠进 responseModeParams[single-session]（agent + relation 两级）', () => {
+    // agent 级带旧 proactive 块 + 已有 single-session 桶（桶内显式键应优先）
+    write(ConfigTarget.Agent, {
+      $schema_version: 3,
+      aid: AID,
+      channels: [],
+      proactive: { pre_tool_1stmsgchk: false, tool_use_reminder: false },
+      responseModeParams: { 'single-session': { tool_use_reminder: true } },
+    }, { self: AID });
+
+    // relation 级仅带旧 proactive 块
+    write(ConfigTarget.Relation, {
+      $schema_version: 2,
+      proactive: { pre_tool_1stmsgchk: false },
+    }, { self: AID, peerKey: PEER });
+
+    // agent 单读：pre_tool 迁移进桶；tool_use_reminder 桶内已显式设 true，不被迁移值覆盖
+    expect(resolveEffective({ self: AID }).responseModeParams).toEqual({
+      'single-session': { pre_tool_1stmsgchk: false, tool_use_reminder: true },
+    });
+    // 迁移后旧块消失，不再出现在 effective
+    expect((resolveEffective({ self: AID }) as any).proactive).toBeUndefined();
+
+    // 合并后：relation 的 pre_tool=false 覆盖 agent 桶（responseModeParams 按模式 id dict 合并，
+    // 同一桶整体来自最高优先层——relation 桶 { pre_tool_1stmsgchk:false } 覆盖 agent 桶）
+    expect(resolveEffective({ self: AID, peerKey: PEER }).responseModeParams).toEqual({
+      'single-session': { pre_tool_1stmsgchk: false },
+    });
+  });
+
+  // ── responseModeParams 桶专项校验（write 期）────────────────────────────
+  it('桶校验：合法 single-session 桶通过', () => {
+    expect(() => write(ConfigTarget.Agent, {
+      $schema_version: 3, aid: AID, channels: [],
+      responseModeParams: { 'single-session': { pre_tool_1stmsgchk: false, tool_use_reminder: true } },
+    }, { self: AID })).not.toThrow();
+  });
+
+  it('桶校验：桶内非法值（enum/additionalProperties）报错', () => {
+    // 未知键（additionalProperties:false）
+    expect(() => write(ConfigTarget.Agent, {
+      $schema_version: 3, aid: AID, channels: [],
+      responseModeParams: { 'single-session': { unknown_key: 1 } },
+    }, { self: AID })).toThrow(/responseModeParams\["single-session"\]/);
+    // 类型不符（enum boolean）
+    expect(() => write(ConfigTarget.Agent, {
+      $schema_version: 3, aid: AID, channels: [],
+      responseModeParams: { 'single-session': { pre_tool_1stmsgchk: 'yes' } },
+    }, { self: AID })).toThrow(/responseModeParams\["single-session"\]/);
+  });
+
+  it('桶校验：未注册模式桶键报错并点名', () => {
+    let err: unknown;
+    try {
+      write(ConfigTarget.Agent, {
+        $schema_version: 3, aid: AID, channels: [],
+        responseModeParams: { 'dual-session': { debounceMs: 3000 }, 'typo-mode': {} },
+      }, { self: AID });
+    } catch (e) { err = e; }
+    expect(err).toBeInstanceOf(ConfigError);
+    // 点名列出所有未登记桶键 + 提示 ec response list
+    expect((err as Error).message).toContain('"dual-session"');
+    expect((err as Error).message).toContain('"typo-mode"');
+    expect((err as Error).message).toContain('ec response list');
+  });
+
+  it('桶校验：关系级同样生效', () => {
+    expect(() => write(ConfigTarget.Relation, {
+      $schema_version: 2,
+      responseModeParams: { 'no-such-mode': {} },
+    }, { self: AID, peerKey: PEER })).toThrow(/未注册的响应模式桶键/);
+  });
+
+  it('config schema 子命令能列出模式 schema single-session', () => {
+    // single-session 已登记 _meta.json，loadSchema 可读，带 default
+    const s = loadSchema('single-session');
+    expect(s.raw.properties?.pre_tool_1stmsgchk?.default).toBe(true);
+    expect(s.raw.properties?.tool_use_reminder?.default).toBe(true);
   });
 
   it('roles 块保留在 effective（用于角色寻址）', () => {
@@ -313,7 +396,6 @@ describe('config field policy', () => {
     'flush_delay',
     'debounce',
     'show_activities',
-    'proactive.pre_tool_1stmsgchk',
     'session_renew.enabled',
     'session_renew.after_hours',
     'session_renew.effort',
@@ -338,6 +420,9 @@ describe('config field policy', () => {
       expect(isSafeBehaviorConfigField(field), field).toBe(false);
     }
     expect(resolveConfigFieldRule('made_up_field').class).toBe('unknown');
+    // 旧的顶层 proactive 块已废弃（迁移进 responseModeParams['single-session']）——不再是可路由字段
+    expect(resolveConfigFieldRule('proactive.pre_tool_1stmsgchk').class).toBe('unknown');
+    expect(isSafeBehaviorConfigField('proactive.pre_tool_1stmsgchk')).toBe(false);
     expect(isSafeBehaviorConfigField('chatmode.secret')).toBe(false);
     expect(isCriticalAgentControlField('roles.definitions.member')).toBe(true);
   });
@@ -358,7 +443,8 @@ describe('config field policy', () => {
     expect(parseConfigFieldValue('flush_delay', '2.5')).toEqual({ ok: true, value: 2.5 });
     expect(parseConfigFieldValue('flush_delay', '-1').ok).toBe(false);
     expect(parseConfigFieldValue('mentionMode', 'disabled')).toEqual({ ok: true, value: 'disabled' });
-    expect(parseConfigFieldValue('show_activities', 'text').ok).toBe(false);
+    expect(parseConfigFieldValue('show_activities', 'text')).toEqual({ ok: true, value: 'text' });
+    expect(parseConfigFieldValue('show_activities', 'bogus').ok).toBe(false);
     expect(parseConfigFieldValue('permissionMode', 'bypass')).toEqual({ ok: true, value: 'bypass' });
     expect(parseConfigFieldValue('active_baseagent', 'codex')).toEqual({ ok: true, value: 'codex' });
     expect(parseConfigFieldValue('active_baseagent', 'unknown').ok).toBe(false);

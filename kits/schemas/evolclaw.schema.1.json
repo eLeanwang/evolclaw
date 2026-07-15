@@ -33,7 +33,7 @@
       "description": "内网穿透配置",
       "x-merge": "dict",
       "properties": {
-        "targets": { "type": "array", "items": { "type": "object" } }
+        "targets": { "type": "array", "description": "穿透目标列表", "items": { "type": "object" } }
       }
     },
     "aun": {
@@ -41,7 +41,7 @@
       "description": "keystore 加密种子等（值用 ${VAR} 引用）",
       "x-merge": "dict",
       "properties": {
-        "encryptionSeed": { "type": ["string", "null"] }
+        "encryptionSeed": { "type": ["string", "null"], "description": "keystore 加密种子（用 ${VAR} 引用，勿明文）" }
       }
     },
     "serviceProxy": {
@@ -49,8 +49,8 @@
       "description": "AUN Service Proxy：把本地服务暴露到 AUN 网络",
       "x-merge": "dict",
       "properties": {
-        "enabled": { "type": "boolean" },
-        "services": { "type": "array", "items": { "type": "object" } }
+        "enabled": { "type": "boolean", "description": "是否启用 Service Proxy" },
+        "services": { "type": "array", "description": "暴露到 AUN 的本地服务列表", "items": { "type": "object" } }
       }
     },
     "idleMonitor": {
@@ -58,8 +58,8 @@
       "description": "流式输出空闲监控配置",
       "x-merge": "dict",
       "properties": {
-        "enabled": { "type": "boolean", "default": true },
-        "timeout": { "type": "number", "default": 120 }
+        "enabled": { "type": "boolean", "default": true, "description": "是否启用空闲监控" },
+        "timeout": { "type": "number", "default": 120, "description": "空闲超时秒数" }
       }
     },
     "ecweb": {
@@ -67,15 +67,16 @@
       "description": "web 控制台开关/端口",
       "x-merge": "dict",
       "properties": {
-        "enabled": { "type": "boolean" },
-        "port": { "type": "number" }
+        "enabled": { "type": "boolean", "description": "是否启用 web 控制台" },
+        "port": { "type": "number", "description": "web 控制台监听端口" }
       }
     },
     "watch": {
       "type": "object",
+      "description": "日志监听配置",
       "x-merge": "dict",
       "properties": {
-        "logTypes": { "type": "array", "items": { "type": "string" } }
+        "logTypes": { "type": "array", "description": "要监听的日志类型", "items": { "type": "string" } }
       }
     }
   }

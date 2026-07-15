@@ -1,3 +1,4 @@
+import fs from 'fs';
 import type { CommandScope } from '../types.js';
 import { normalizeCliArgv } from '../cli/cli-argv.js';
 import { parseConfigSelector, type ConfigSelectorScope } from '../cli/config-selector.js';
@@ -7,6 +8,7 @@ import {
   type ConfigFieldRule,
 } from './config-field-policy.js';
 import { ConfigError, routeFieldPath, type FieldRoute } from './config-manager.js';
+import { agentDir } from '../paths.js';
 
 export type ConfigFieldSubcommand = 'get' | 'set' | 'unset';
 export type ConfigScopedSubcommand = 'show' | 'effective' | 'fields' | 'validate' | 'init';
@@ -146,7 +148,7 @@ export function resolveConfigCommand(
   }
 
   if (subcommand === 'get' || subcommand === 'set' || subcommand === 'unset') {
-    const field = resolveFieldCommand(argv, subcommand);
+    const field = resolveFieldCommand(argv, subcommand, options);
     return field.ok ? { ok: true, command: field.op } : field;
   }
   if (SCOPED_SUBCOMMANDS.has(subcommand as ConfigScopedSubcommand)) {
@@ -184,20 +186,29 @@ export function isResolvedConfigMutation(command: ResolvedConfigCommand): boolea
   return command.subcommand === 'snapshot' || command.subcommand === 'prune' || command.subcommand === 'restore';
 }
 
-function resolveFieldCommand(argv: string[], subcommand: ConfigFieldSubcommand): ResolveConfigOperationResult {
+const FIELD_USAGE: Record<ConfigFieldSubcommand, string> = {
+  get: 'config get <field> [selector]',
+  set: 'config set <field> <value> [selector]',
+  unset: 'config unset <field> [selector]',
+};
+
+function resolveFieldCommand(
+  argv: string[],
+  subcommand: ConfigFieldSubcommand,
+  options: ResolveConfigOperationOptions = {},
+): ResolveConfigOperationResult {
   const businessCount = subcommand === 'set' ? 2 : 1;
-  const business = parseLeadingPositionals(argv.slice(2), businessCount, `config ${subcommand}`);
+  const business = parseLeadingPositionals(argv.slice(2), businessCount, FIELD_USAGE[subcommand]);
   if (!business.ok) return business;
   const parsedOptions = parseOptions(business.rest, FIELD_OPTIONS);
   if (!parsedOptions.ok) return parsedOptions;
   const formatCheck = validateOutputFormat(parsedOptions.values.format);
   if (!formatCheck.ok) return formatCheck;
 
-  const selector = parseConfigSelector(business.rest, { requireSelector: subcommand !== 'get' });
+  // 先按"不强制 selector"解析，拿到用于路由的 scope；selector 是否缺失的判定推迟到字段校验之后，
+  // 这样非法字段会先于 SELECTOR_REQUIRED 暴露真正的 UNKNOWN_FIELD，而不是被通用的"缺 selector"掩盖。
+  const selector = parseConfigSelector(business.rest, { requireSelector: false });
   if (!selector.ok) return { ok: false, code: selector.code, reason: selector.reason };
-  if (subcommand === 'unset' && selector.scope === 'process') {
-    return { ok: false, code: 'UNSET_PROCESS_REJECT', reason: 'evolclaw.json has no lower config layer to fall back to' };
-  }
 
   const field = business.values[0].trim();
   if (!field) return { ok: false, code: 'MISSING_ARG', reason: `config ${subcommand} requires a field` };
@@ -223,6 +234,38 @@ function resolveFieldCommand(argv: string[], subcommand: ConfigFieldSubcommand):
     route = routeFieldPath(field, selector.scope);
   } catch (error) {
     if (routeRequired) return configErrorResult(error);
+  }
+
+  // 字段已校验通过，再补齐"写操作必须显式 selector"的约束（get 不要求）。
+  const selectorMissing = selector.scope === 'agent' && !selector.self;
+  if (subcommand !== 'get' && selectorMissing) {
+    return {
+      ok: false,
+      code: 'SELECTOR_REQUIRED',
+      reason: `config ${subcommand} ${field} needs a target: --self <aid> [--peer <peerKey>] | --default | --process`,
+    };
+  }
+  // get 在独立 CLI 模式（无 defaultRelation）也要求显式 selector，避免"不知道读谁的"。
+  if (subcommand === 'get' && selectorMissing && !options.defaultRelation?.self) {
+    return {
+      ok: false,
+      code: 'SELECTOR_REQUIRED',
+      reason: `config get ${field} needs a target: --self <aid> [--peer <peerKey>] | --default | --process`,
+    };
+  }
+  // 校验 agent 存在性：写和 get 都检查，避免"找不到 config.json"被误认为"未设值"。
+  if (selector.self) {
+    const agentPath = agentDir(selector.self);
+    if (!fs.existsSync(agentPath)) {
+      return {
+        ok: false,
+        code: 'AGENT_NOT_FOUND',
+        reason: `Agent "${selector.self}" does not exist. Create it with "ec agent create --aid ${selector.self}".`,
+      };
+    }
+  }
+  if (subcommand === 'unset' && selector.scope === 'process') {
+    return { ok: false, code: 'UNSET_PROCESS_REJECT', reason: 'evolclaw.json has no lower config layer to fall back to' };
   }
 
   const rawValue = subcommand === 'set' ? business.values[1] : undefined;
@@ -378,19 +421,20 @@ function hasExplicitConfigSelector(argv: string[]): boolean {
 function parseLeadingPositionals(
   argv: string[],
   count: number,
-  command: string,
+  usage: string,
 ): { ok: true; values: string[]; rest: string[] } | { ok: false; code: string; reason: string } {
   const values = argv.slice(0, count);
   if (values.length !== count || values.some(value => !value || value.startsWith('-'))) {
+    const noun = count === 1 ? '<field>' : '<field> <value>';
     return {
       ok: false,
       code: 'MISSING_ARG',
-      reason: `${command} requires exactly ${count} positional argument${count === 1 ? '' : 's'}`,
+      reason: `Missing ${noun}. Usage: ${usage}`,
     };
   }
   const rest = argv.slice(count);
   if (rest[0] && !rest[0].startsWith('-')) {
-    return { ok: false, code: 'INVALID_CONFIG_COMMAND', reason: `Unexpected positional argument for ${command}: ${rest[0]}` };
+    return { ok: false, code: 'INVALID_CONFIG_COMMAND', reason: `Unexpected argument "${rest[0]}". Usage: ${usage}` };
   }
   return { ok: true, values, rest };
 }

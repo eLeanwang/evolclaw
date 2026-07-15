@@ -15,7 +15,7 @@ import { logger } from '../../utils/logger.js';
 import { getErrorMessage, classifyError, ErrorType, ERROR_PREFIX, isInfraError, prefixErrorType, isRetryableError, isContextTooLongText } from '../../utils/error-utils.js';
 import { EventBus } from '../event-bus.js';
 import { isEvolclawSendCommandForSession, summarizeToolInput } from '../permission.js';
-import type { Message, Session, ChannelAdapter, ChannelOptions, ChannelPolicy, CommandHandler as CommandHandlerFn, ReplyContext, AgentContext, EvolAgentHandle, EvolAgentRegistryHandle, GlobalSettings, OutboundEnvelope, OutboundPayload, InteractionRequest, InteractionKind, ActionInteraction, CommandCard, ProactiveBehaviorBlock, ShowActivitiesMode } from '../../types.js';
+import type { Message, Session, ChannelAdapter, ChannelOptions, ChannelPolicy, CommandHandler as CommandHandlerFn, ReplyContext, AgentContext, EvolAgentHandle, EvolAgentRegistryHandle, GlobalSettings, OutboundEnvelope, OutboundPayload, InteractionRequest, InteractionKind, ActionInteraction, CommandCard, ShowActivitiesMode } from '../../types.js';
 import { getPackageRoot, resolveRoot, resolvePaths } from '../../paths.js';
 import { renderKitSections, type KitRenderContext } from '../../eck/kit-renderer.js';
 import { renderMessageBody, type RenderMessageResult } from '../../eck/message-renderer.js';
@@ -196,13 +196,6 @@ function streamHitContextLimit(result: StreamRunResult): boolean {
     isContextTooLongText(result.lastReplyText) ||
     isContextTooLongText(result.errors?.join(' ') || '') ||
     isContextTooLongText(result.fullText);
-}
-
-function resolveProactiveBehavior(block?: ProactiveBehaviorBlock): Required<ProactiveBehaviorBlock> {
-  return {
-    pre_tool_1stmsgchk: block?.pre_tool_1stmsgchk ?? true,
-    tool_use_reminder: block?.tool_use_reminder ?? true,
-  };
 }
 
 const SHELL_CONTROL_RE = /[;&|`]|[$][(]|\r|\n/;
@@ -1629,8 +1622,10 @@ export class ResponseEngine implements IMessageProcessor {
             // Stage 3: sessionKey 持久化字段
             sessionKey: session.sessionKey,
             chatMode: isProactive ? 'proactive' : 'interactive',
-            proactivePreTool1stMsgChk: proactive?.preTool1stMsgChk ?? true,
-            proactiveToolUseReminder: proactive?.toolUseReminder ?? true,
+            // proactive 为 null（interactive 模式，这些开关不适用）时如实为 false——
+            // 默认值不在此硬编码，出厂默认由模式 schema 声明、经 buildState 落入 proactive.*。
+            proactivePreTool1stMsgChk: proactive?.preTool1stMsgChk ?? false,
+            proactiveToolUseReminder: proactive?.toolUseReminder ?? false,
             proactiveFirstSendRequired: proactive?.firstSendRequired ?? false,
             proactiveToolReportRequired: proactive?.toolReportRequired ?? false,
             proactiveToolReportInterval: proactive?.toolReportInterval ?? 10,

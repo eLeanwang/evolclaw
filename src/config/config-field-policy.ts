@@ -35,7 +35,6 @@ const BEHAVIOR_TOP_FIELDS = new Set([
   'flush_delay',
   'debounce',
   'show_activities',
-  'proactive',
   'session_renew',
   'group_venue_sync',
   'render',
@@ -153,14 +152,6 @@ export function resolveConfigFieldRule(fieldPath: string): ConfigFieldRule {
     return readonlyObject('responseModeParams');
   }
 
-  if (top === 'proactive') {
-    if (parts.length === 1) return readonlyObject('proactive');
-    if (parts.length === 2 && (parts[1] === 'pre_tool_1stmsgchk' || parts[1] === 'tool_use_reminder')) {
-      return scalar('proactive', 'boolean');
-    }
-    return { class: 'unknown' };
-  }
-
   if (top === 'session_renew') {
     if (parts.length === 1) return readonlyObject('session_renew');
     if (parts.length !== 2) return { class: 'unknown' };
@@ -252,9 +243,9 @@ export function parseConfigFieldValue(fieldPath: string, rawValue: unknown): Con
         ? { ok: true, value: raw }
         : { ok: false, reason: `Config field ${fieldPath} must be disabled or mention-only` };
     case 'show-activities':
-      return raw === 'all' || raw === 'none'
+      return raw === 'all' || raw === 'text' || raw === 'none'
         ? { ok: true, value: raw }
-        : { ok: false, reason: `Config field ${fieldPath} must be all or none` };
+        : { ok: false, reason: `Config field ${fieldPath} must be all, text, or none` };
     case 'permission-mode':
       return PERMISSION_MODES.has(raw)
         ? { ok: true, value: raw }

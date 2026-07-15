@@ -17,6 +17,7 @@ import {
   readField, writeField, determineFieldScope, normalizePeer, ModelScopeError,
   type ScopeSelector,
 } from '../core/model/field-scope.js';
+import { readFieldWithSource, resolveAgentConfig, ConfigTarget } from '../config/config-manager.js';
 import { ResponseModeRegistry } from '../response-system/registry.js';
 import { registerBuiltinModes } from '../response-system/modes/index.js';
 import type { ResponseMode } from '../response-system/types.js';
@@ -102,16 +103,34 @@ function safeWrite(formatJson: boolean, fn: () => void): void {
   }
 }
 
-/** 读取指定作用域生效的 responseMode 标量 */
-function readResponseMode(sel: ScopeSelector): string | undefined {
-  const scope = determineFieldScope(sel);
-  return readField<string>(scope, sel, RESPONSE_MODE_FIELD);
+/**
+ * 解析**生效**的 responseMode（标量，合并链 relation > agent > defaults）。
+ *
+ * 与运行时 ResponseModeResolver、`ec config get responseMode` 同源：都走合并链，而不是
+ * 只读当前作用域的单个文件。返回命中的值 + 来源层（未命中任何层返回空对象）。
+ */
+function resolveResponseMode(sel: ScopeSelector): { mode?: string; source?: ConfigTarget } {
+  const hit = readFieldWithSource(RESPONSE_MODE_FIELD, sel, { cache: true });
+  return hit ? { mode: hit.value as string, source: hit.source.target } : {};
 }
 
-/** 读取指定作用域生效的 responseModeParams 字典 */
-function readResponseModeParams(sel: ScopeSelector): ResponseModeParams | undefined {
-  const scope = determineFieldScope(sel);
-  return readField<ResponseModeParams>(scope, sel, RESPONSE_MODE_PARAMS_FIELD);
+/**
+ * 解析**生效**的 responseModeParams（字典，按模式 id 分桶 dict 合并链）。
+ * 复用 ConfigManager 的合并（唯一合并点），与运行时一致。
+ */
+function resolveResponseModeParams(sel: ScopeSelector): ResponseModeParams | undefined {
+  const merged = resolveAgentConfig(sel, { cache: true });
+  return merged.responseModeParams as ResponseModeParams | undefined;
+}
+
+/** 中文展示用的来源标签 */
+function sourceLabel(target: ConfigTarget): string {
+  switch (target) {
+    case ConfigTarget.Relation: return '关系级';
+    case ConfigTarget.Agent: return 'agent 级';
+    case ConfigTarget.Defaults: return '全局默认';
+    default: return String(target);
+  }
 }
 
 const HELP = `用法: evolclaw response <command> [options]
@@ -171,16 +190,28 @@ function cmdList(args: string[], formatJson: boolean): void {
 function cmdCurrent(args: string[], formatJson: boolean): void {
   if (wantsHelp(args)) { console.log(HELP); return; }
   const sel = parseSelector(args, formatJson);
-  const mode = readResponseMode(sel);
-  const params = readResponseModeParams(sel);
   const scope = determineFieldScope(sel);
 
-  emit(formatJson, { ok: true, scope, responseMode: mode ?? null, responseModeParams: params ?? null }, () => {
+  // 生效值走合并链（relation > agent > defaults），与运行时 resolver / `ec config get` 一致。
+  // 无任何层设值时，回落注册表首选——这才是运行时真正生效的模式。
+  const { mode: configuredMode, source } = resolveResponseMode(sel);
+  const preferred = buildRegistry().getPreferredId();
+  const effectiveMode = configuredMode ?? preferred;
+  const params = resolveResponseModeParams(sel);
+
+  emit(formatJson, {
+    ok: true,
+    scope,
+    responseMode: effectiveMode ?? null,
+    source: configuredMode ? 'config' : 'preferred',
+    sourceTarget: source ?? null,
+    responseModeParams: params ?? null,
+  }, () => {
     const lines = [`响应模式配置（作用域: ${scope}）:`];
-    if (mode) {
-      lines.push(`  当前模式: ${mode}`);
+    if (configuredMode) {
+      lines.push(`  当前模式: ${configuredMode}（来源: ${source ? sourceLabel(source) : '配置'}）`);
     } else {
-      lines.push(`  当前模式: (未设置，使用注册表首选)`);
+      lines.push(`  当前模式: ${effectiveMode ?? '(无)'}（来源: 注册表首选，各层均未设置）`);
     }
     if (params && Object.keys(params).length) {
       lines.push('  模式参数:');
@@ -265,10 +296,10 @@ function cmdConfig(args: string[], formatJson: boolean): void {
     return cmdConfigSet(args, formatJson);
   }
 
-  // config [<mode-id>]：查看模式配置
+  // config [<mode-id>]：查看**生效**模式配置（合并链，与运行时一致）
   const modeId = args.find(a => !a.startsWith('--') && a !== 'config');
   const sel = parseSelector(args, formatJson);
-  const params = readResponseModeParams(sel) ?? {};
+  const params = resolveResponseModeParams(sel) ?? {};
 
   if (modeId) {
     emit(formatJson, { ok: true, mode: modeId, config: params[modeId] ?? {} }, () =>
@@ -295,7 +326,9 @@ function cmdConfigSet(args: string[], formatJson: boolean): void {
 
   const sel = parseWriteSelector(args, formatJson);
   const scope = determineFieldScope(sel);
-  const params = (readResponseModeParams(sel) || {}) as ResponseModeParams;
+  // 写路径是 read-modify-write：只读**目标层自身**的桶，绝不能读合并链——否则会把
+  // 继承来的父层参数一并写进本层文件，污染覆盖关系。
+  const params = (readField<ResponseModeParams>(scope, sel, RESPONSE_MODE_PARAMS_FIELD) || {}) as ResponseModeParams;
   if (!params[modeId!]) params[modeId!] = {};
   params[modeId!][key!] = value;
 

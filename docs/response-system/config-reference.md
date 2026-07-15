@@ -138,12 +138,45 @@
 
 ## 四、single-session 特有参数
 
-**无特有参数**。single-session 只使用通用参数（顶层 chatmode / mentionMode / model），
-`responseModeParams["single-session"]` 通常为空对象或省略。
+single-session 主要依赖通用参数（顶层 chatmode / mentionMode / model）。此外有两个
+**proactive 投递专用**的微调开关，存 `responseModeParams["single-session"]`，仅在
+本会话 chatMode 解析为 `proactive` 时生效（interactive 投递忽略）：
 
-| responseMode | 特有参数 |
-|--------------|---------|
-| `single-session` | 无 |
+| 参数 | 类型 | 候选 | 默认 | 说明 |
+|------|------|------|------|------|
+| `pre_tool_1stmsgchk` | boolean | `true`/`false` | `true` | proactive 下首个工具调用前必须先用 send/file 向对端表态，否则拦截 |
+| `tool_use_reminder` | boolean | `true`/`false` | `true` | proactive 下启用队列未读提醒 + 每 10 次工具调用的汇报提醒 |
+
+**事实源 = 模式 schema 文件**：这两个参数的候选值（`enum`）与默认值（`default`）唯一声明在
+`kits/schemas/single-session.schema.1.json`（随包分发，已登记 `_meta.json`）。三处消费同一份：
+
+1. **候选/默认展示**：`ec config schema single-session` 可读出（与 agent-config 等核心 schema 同一套子命令）；
+2. **运行时默认**：`default` 即出厂默认，由宿主组装 modeConfig 时提取注入（`coordinator.schemaDefaults`），
+   flow **不再硬编码** `?? true`；
+3. **写入校验**：写 config 时对 `responseModeParams` 做**桶专项校验**——桶键须是已注册模式
+   （否则报错并点名，提示 `ec response list`），桶内容用该模式 schema 校验（`enum` / 未知键拦截）。
+
+> **新增一个响应模式时，schema 侧要做哪些**：建
+> `kits/schemas/<name>.schema.<v>.json` → 登记 `_meta.json` → `LogicalSchemaName` union 加 `<name>`
+> → descriptor `configSchema = loadSchema('<name>').raw`。完成这几步后，桶写校验、候选/默认展示、
+> 运行时默认注入三条链路**零额外代码自动生效**。完整 8 步清单见
+> [mode-contract.md](./mode-contract.md) §4.1.1「新增一个响应模式：schema 侧清单」；
+> 模式桶 schema 作为「无 config target 的一等 schema」的定位见 [config/03-schema.md](../config/03-schema.md)。
+
+**每会话生效值的优先级**（高→低）：
+
+| 层 | 来源 |
+|----|------|
+| 1. 关系级 | `$RELATIONS_DIR/<peerKey>/config.json` 的 `responseModeParams["single-session"]` 桶 |
+| 2. agent 级 | `$AGENT_DIR/config.json` 的 `responseModeParams["single-session"]` 桶 |
+| 3. schema 默认 | `single-session.schema` 的 `default`（出厂默认，无人配时兜底） |
+
+> 桶按模式 id 整桶 dict 合并——关系级写了 `single-session` 桶即整桶覆盖 agent 级同名桶（不递归到键）。
+>
+> **迁移（旧顶层 `proactive` 块已废弃）**：这两个键历史上落在顶层 `proactive` 块。single-session
+> 合并后运行时只从桶读取，顶层 `proactive` 块已从 schema 移除。存量配置**读时自动折叠**进模式桶
+> （桶内已显式设置的同名键优先，旧块随后续写入从磁盘消失），用户无需手工迁移。新配置直接写桶：
+> `ec response config set pre_tool_1stmsgchk false --mode single-session`。
 
 配置示例（chatmode / mentionMode 均在顶层）：
 
@@ -151,11 +184,12 @@
 // coding 模式（无渠道，对端视为 system → 硬约束 interactive，通常无需配 chatmode）
 { "responseMode": "single-session" }
 
-// 单聊/群聊
+// 单聊/群聊（如需关闭 proactive 首工具表态）
 {
   "responseMode": "single-session",
   "chatmode": { "private": "interactive", "group": "proactive" },
-  "mentionMode": "disabled"
+  "mentionMode": "disabled",
+  "responseModeParams": { "single-session": { "pre_tool_1stmsgchk": false } }
 }
 ```
 

@@ -35,15 +35,24 @@
 
 ```
 src/response-system/modes/<name>/
-├── index.ts                 # 导出 ResponseModeDescriptor
-├── config-schema.json       # 配置参数的 JSON Schema
+├── index.ts                 # 导出 ResponseModeDescriptor；configSchema 由 loadSchema('<name>') 读磁盘
 └── ...                      # 内部实现，结构自由
+
+kits/schemas/
+├── <name>.schema.<v>.json   # 模式桶 schema（特有参数：候选/默认/校验）——唯一事实源，见 §4.1
+└── _meta.json               # 须登记 <name> 的 currentVersion + 一条 history
 
 kits/docs/response-system/<name>/
 ├── README.md                # 定位、适用场景（文档完备性见 checklist D 类）
 ├── prompts/                 # 本模式的提示词模板
 └── ...
 ```
+
+> **模式 schema 不再放 `modes/<name>/config-schema.json`**（旧约定已废）。它是一份独立的
+> kits schema `kits/schemas/<name>.schema.<v>.json`，随包分发、登记进 `_meta.json`，与
+> `agent-config` 等核心 schema 走同一套 `loadSchema` / `ec config schema` 机制。理由：`src/`
+> 下的 json 不进 dist、运行时读不到；且这样 `ec config schema <name>` 能直接展示给前端。
+> 详见 [config/03-schema.md](../config/03-schema.md)。
 
 ### 2.2 注册表条目（ResponseModeDescriptor）
 
@@ -55,9 +64,9 @@ interface ResponseModeDescriptor {
 
   factory: (config: ResolvedModeConfig, ctx: ModeContext) => ResponseModeImpl;
 
-  configSchema: object;                // 即 config-schema.json 内容
+  configSchema: object;                // = loadSchema('<name>').raw（读自 kits/schemas/<name>.schema.<v>.json）
   supportedCommonParams: string[];     // 声明支持的通用参数
-  specificParams: string[];            // 特有参数（必须与 configSchema 一致）
+  specificParams: string[];            // 特有参数（必须与 configSchema.properties 一致）
 
   // 会话原型声明：本模式有哪几种会话，各绑什么 manifest / 缺省模型 / 投递策略。
   // 宿主据此路由 manifest、注入 sessionPrototype 变量、决定事件流是否出站；
@@ -208,13 +217,38 @@ interface TurnResult {                // 事后摘要，供模式内部消费（
 
 ### 4.1 参数定义与读取分工
 
-- **定义归模式**：`config-schema.json` 定义全部特有参数（含默认值、范围）。
-  `specificParams` 与 schema 的 properties 必须一致。
-- **读取与合并归宿主**：四层合并（关系级 > 环境级 > agent 级 > 默认值）由宿主
-  ConfigManager 完成，factory 收到**合并后的最终 config**。
-  模式内**禁止**自行读取任何配置文件。
-- 非法配置必须在 factory 阶段报错拒绝（fail fast），不得运行中途才暴露。
-- 除声明为必填的通用参数外，**空 config 必须能启动**（全参数有默认值）。
+- **定义归模式 schema 文件**：`kits/schemas/<name>.schema.<v>.json` 定义全部特有参数
+  （`type` / `enum` 候选 / `default` 默认；`additionalProperties:false` 拦截未知键）。
+  `specificParams` 与 schema 的 properties 必须一致。这份 schema 是特有参数的**唯一事实源**，
+  同时供三处消费：
+  1. **写校验**：宿主 `write()` 对 `responseModeParams[<name>]` 桶用本 schema 逐桶校验
+     （桶键须是已注册模式，否则报错点名；桶内容按 `enum`/`additionalProperties` 校验）；
+  2. **候选/默认展示**：`ec config schema <name>` 读出给前端；
+  3. **运行时默认注入**：宿主 `coordinator.schemaDefaults` 提取 `default` 铺进 modeConfig，
+     模式/flow **不得**再硬编码默认（如 `?? true`）。
+- **读取与合并归宿主**：多层合并（关系级 > agent 级 > schema 默认）由宿主 ConfigManager 完成，
+  factory 收到**合并后的最终 config**。特有参数存 `responseModeParams[<name>]` 桶，按模式 id
+  整桶 dict 合并（高优先层整桶覆盖，不递归到键）。模式内**禁止**自行读取任何配置文件。
+- 非法配置在 write 期（桶校验）或 factory 阶段报错拒绝（fail fast），不得运行中途才暴露。
+- 除声明为必填的通用参数外，**空 config 必须能启动**（全特有参数在 schema 有 `default`）。
+
+### 4.1.1 新增一个响应模式：schema 侧清单
+
+新增模式 `<name>` 时，schema 相关**必须全部完成**，缺一即挂：
+
+| # | 动作 | 位置 |
+|---|------|------|
+| 1 | 建模式桶 schema，含 `x-logical-name`/`x-scope:mode`、每个特有参数的 `type`+`enum`+`default`、`additionalProperties:false` | `kits/schemas/<name>.schema.1.json` |
+| 2 | 登记 currentVersion + 一条 history | `kits/schemas/_meta.json` |
+| 3 | `LogicalSchemaName` union 加 `'<name>'` | `src/config/schema-registry.ts` |
+| 4 | descriptor `configSchema = loadSchema('<name>').raw`（不内联、不放 `modes/<name>/`） | `src/response-system/modes/<name>/index.ts` |
+| 5 | `specificParams` 与 schema properties 保持一致 | 同上 |
+| 6 | 确认写校验覆盖：`write()` 的桶专项校验对 `<name>` 桶生效（`isSchemaName('<name>')`→true 后自动走） | 无需改代码，靠 1+2+3 |
+| 7 | 确认默认注入：`coordinator.schemaDefaults` 会从新 schema 提 `default`（自动） | 无需改代码 |
+| 8 | 文档：本模式 README + config-reference 参数表与 schema 一致（checklist D1） | `docs/response-system/<name>/` |
+
+> 校验/默认/展示三条链路都靠「模式必带同名 schema 且登记进 `_meta`」这一约定驱动——
+> 只要 1+2+3 到位，桶校验与默认注入**零额外代码**自动生效；漏了 1/2/3 则该模式桶会被判「未注册」而报错。
 
 ### 4.2 通用参数的行为承诺
 

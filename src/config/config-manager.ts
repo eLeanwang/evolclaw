@@ -27,6 +27,7 @@ import { isValidAid } from '../aun/aid/validation.js';
 import {
   loadSchema,
   currentVersion,
+  isSchemaName,
   type LogicalSchemaName,
   type SchemaEntry,
 } from './schema-registry.js';
@@ -178,14 +179,16 @@ export function read<T = any>(target: ConfigTarget, sel?: Selector, opts: ReadOp
   const migrated = migrateIfNeeded(target, raw, file);
   const normalized = target === ConfigTarget.Agent
     ? normalizeAgentConfigForRead(migrated as any, sel?.self) as T
-    : migrated;
+    : target === ConfigTarget.Relation
+      ? foldLegacyProactiveBlock(migrated as any) as T
+      : migrated;
   if (!opts.expand) return normalized;
   const resolver = buildEnvResolver(envScopeFor(sel));
   return expandVars(normalized, resolver);
 }
 
 function normalizeAgentConfigForRead<T extends Record<string, any>>(value: T, aid?: string): T {
-  const config = normalizeAgentLifecycle(value) as T;
+  const config = foldLegacyProactiveBlock(normalizeAgentLifecycle(value)) as T;
   const mutable = config as Record<string, any>;
   normalizeShowActivitiesCompat(mutable);
 
@@ -389,6 +392,41 @@ function normalizeShowActivitiesCompat(value: Record<string, any>): void {
   else if (value.show_activities === false) value.show_activities = 'none';
 }
 
+/**
+ * 迁移：旧的顶层 `proactive` 块 → `responseModeParams['single-session']`。
+ *
+ * single-session 合并后，proactive 首工具表态/工具汇报开关是该模式的特有参数，
+ * 运行时只从 responseModeParams['single-session'] 读（见 coordinator.resolveMode）。
+ * 存量配置里这两个键落在废弃的顶层 proactive 块，若不迁移会静默失效。
+ *
+ * 读时就地折叠：把 proactive 的两个已知键搬进模式桶（桶内已显式设置的同名键不覆盖），
+ * 删除 proactive 块。随后任何 write 都会持久化迁移后的形态，磁盘上的旧块随之消失。
+ * 逐文件（层）迁移，跨层合并交给 mergeLayers（responseModeParams 按模式 id dict 合并）。
+ */
+function foldLegacyProactiveBlock<T extends Record<string, any>>(value: T): T {
+  const block = value.proactive;
+  if (!block || typeof block !== 'object' || Array.isArray(block)) return value;
+
+  const migrated: Record<string, boolean> = {};
+  if (typeof block.pre_tool_1stmsgchk === 'boolean') migrated.pre_tool_1stmsgchk = block.pre_tool_1stmsgchk;
+  if (typeof block.tool_use_reminder === 'boolean') migrated.tool_use_reminder = block.tool_use_reminder;
+
+  const mutable = { ...value } as Record<string, any>;
+  delete mutable.proactive;
+  if (Object.keys(migrated).length === 0) return mutable as T;
+
+  const params = (mutable.responseModeParams && typeof mutable.responseModeParams === 'object' && !Array.isArray(mutable.responseModeParams))
+    ? { ...mutable.responseModeParams }
+    : {};
+  const bucket = (params['single-session'] && typeof params['single-session'] === 'object' && !Array.isArray(params['single-session']))
+    ? { ...params['single-session'] }
+    : {};
+  // 桶内已显式设置的同名键优先，迁移值只补空缺
+  params['single-session'] = { ...migrated, ...bucket };
+  mutable.responseModeParams = params;
+  return mutable as T;
+}
+
 /** Write config with schema validation and atomic persistence. */
 export function write<T = any>(target: ConfigTarget, value: T, sel?: Selector, opts: WriteOpts = {}): void {
   const schema = loadSchema(TARGET_SCHEMA[target]);
@@ -408,6 +446,11 @@ export function write<T = any>(target: ConfigTarget, value: T, sel?: Selector, o
   // 1. Schema 鏍￠獙
   if (!opts.skipValidate) {
     validateOrThrow(schema, normalized, target);
+    // 1b. responseModeParams 妗跺笍鏍￠獙锛氫富 schema 鎶?responseModeParams 褰撻粦绠憋紝
+    //     姝ゅ鐢ㄢ€滄ā寮弆chema鈥濋€愭《鏍￠獙妗跺唴瀹癸紙妗擪 = 宸茬櫥璁扮殑鍝嶅簲妯″紡 id锛夈€?
+    if (target === ConfigTarget.Agent || target === ConfigTarget.Relation) {
+      validateResponseModeParams((normalized as any)?.responseModeParams, target);
+    }
   }
 
   // 2. 瑙掕壊绾︽潫鏍￠獙锛堜粎瀵?Relation锛?
@@ -453,6 +496,49 @@ function validateOrThrow(schema: SchemaEntry, value: unknown, target: ConfigTarg
       })
       .join('; ');
     throw new ConfigError('SCHEMA_INVALID', `${target} 閰嶇疆涓嶅悎 schema(${schema.logicalName}.v${schema.version}): ${errs}`);
+  }
+}
+
+/**
+ * responseModeParams 桶专项校验。
+ *
+ * 主 config schema 把 responseModeParams 当黑箱（{type:object}）放行，桶内部由本函数
+ * 用「模式桶 schema」逐桶校验：桶键 = 响应模式 id，须是已在 _meta.json 登记的 schema。
+ *   - 未登记的桶键：收集后统一报错，点名列出，提示用 `ec response list` 查可用模式；
+ *   - 已登记：用 loadSchema(modeId) 校验该桶内容（enum / additionalProperties 等）。
+ *
+ * 纯 schema 驱动，不 import response-system（避免 config→response-system 反向依赖）；
+ * 「桶键≡已注册模式」经由「模式必带同名 schema 且登记进 _meta」这一约定保证。
+ */
+function validateResponseModeParams(params: unknown, target: ConfigTarget): void {
+  if (!params || typeof params !== 'object' || Array.isArray(params)) return;
+
+  const unregistered: string[] = [];
+  for (const [modeId, bucket] of Object.entries(params as Record<string, unknown>)) {
+    if (!isSchemaName(modeId)) { unregistered.push(modeId); continue; }
+    const modeSchema = loadSchema(modeId as LogicalSchemaName);
+    if (!modeSchema.validate(bucket)) {
+      const errs = (modeSchema.validate.errors || [])
+        .map(e => {
+          const extra = typeof (e.params as any)?.additionalProperty === 'string'
+            ? ` (additionalProperty=${(e.params as any).additionalProperty})`
+            : '';
+          return `${e.instancePath || '/'} ${e.message}${extra}`;
+        })
+        .join('; ');
+      throw new ConfigError(
+        'SCHEMA_INVALID',
+        `${target} responseModeParams["${modeId}"] 不合模式 schema(${modeSchema.logicalName}.v${modeSchema.version}): ${errs}`,
+      );
+    }
+  }
+
+  if (unregistered.length > 0) {
+    throw new ConfigError(
+      'SCHEMA_INVALID',
+      `${target} responseModeParams 含未注册的响应模式桶键: ${unregistered.map(k => `"${k}"`).join(', ')}。` +
+      `桶键必须对应已注册的响应模式（用 \`ec response list\` 查看可用模式）。`,
+    );
   }
 }
 
@@ -610,7 +696,6 @@ export function resolveEffective(sel: Selector, opts: ReadOpts = {}): EffectiveA
     flush_delay: config.flush_delay,
     debounce: config.debounce,
     show_activities: config.show_activities,
-    proactive: config.proactive,
     session_renew: config.session_renew,
     render: config.render,
     sessionManifests: config.sessionManifests,
@@ -641,7 +726,6 @@ export function resolveEffective(sel: Selector, opts: ReadOpts = {}): EffectiveA
         'flush_delay',
         'debounce',
         'enable_rich_content',
-        'proactive',
         'session_renew',
         'render',
         'sessionManifests'
@@ -756,7 +840,6 @@ const EFFECTIVE_BEHAVIOR_FIELDS = [
   'flush_delay',
   'debounce',
   'show_activities',
-  'proactive',
   'session_renew',
   'render',
   'sessionManifests',
@@ -819,8 +902,40 @@ function routeIn(name: LogicalSchemaName, target: ConfigTarget, topField: string
   }
 
   const s = loadSchema(name);
-  if (!s.fields.has(topField)) throw new ConfigError('UNKNOWN_FIELD', `Unknown config field: ${topField} (${name})`);
+  if (!s.fields.has(topField)) {
+    const known = [...s.fields.keys()].sort();
+    const suggestion = suggestField(topField, known);
+    throw new ConfigError(
+      'UNKNOWN_FIELD',
+      `Unknown config field "${topField}" for ${name}.`
+        + (suggestion ? ` Did you mean "${suggestion}"?` : '')
+        + ` Run "ec config fields" to list valid fields.`,
+    );
+  }
   return mkRoute(s, target, topField);
+}
+
+/** 为未知字段找一个最接近的合法字段名（编辑距离 ≤2 才提示），用于 UNKNOWN_FIELD 纠错。 */
+function suggestField(input: string, candidates: string[]): string | undefined {
+  let best: string | undefined;
+  let bestDist = Infinity;
+  for (const c of candidates) {
+    const d = editDistance(input.toLowerCase(), c.toLowerCase());
+    if (d < bestDist) { bestDist = d; best = c; }
+  }
+  return bestDist <= 2 ? best : undefined;
+}
+
+function editDistance(a: string, b: string): number {
+  const dp = Array.from({ length: a.length + 1 }, (_, i) => [i, ...Array(b.length).fill(0)]);
+  for (let j = 0; j <= b.length; j++) dp[0][j] = j;
+  for (let i = 1; i <= a.length; i++) {
+    for (let j = 1; j <= b.length; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      dp[i][j] = Math.min(dp[i - 1][j] + 1, dp[i][j - 1] + 1, dp[i - 1][j - 1] + cost);
+    }
+  }
+  return dp[a.length][b.length];
 }
 
 function mkRoute(s: SchemaEntry, target: ConfigTarget, topField: string): FieldRoute {

@@ -1,4 +1,4 @@
-import { isHelpFlag, getArgValue } from './help.js';
+import { isHelpFlag, wantsHelp, getArgValue } from './help.js';
 import { ConfigTarget, initConfigManager } from '../config/config-manager.js';
 import { resolveConfigCommand } from '../config/resolved-config-op.js';
 import { executeResolvedConfigCommand, type ConfigExecutionResult } from '../config/config-operation-service.js';
@@ -32,10 +32,16 @@ function renderConfigExecution(result: ConfigExecutionResult, formatJson: boolea
         value: result.value,
         scope: result.scope,
         ...(result.source ? { source: result.source } : {}),
+        ...(result.schemaDefault ? { schemaDefault: true } : {}),
+        ...(result.note ? { note: result.note } : {}),
       };
       return emit(formatJson, payload, () => {
-        if (!result.source) return `${result.field} = ${JSON.stringify(result.value)} (${result.scope})`;
-        return `${result.field} = ${JSON.stringify(result.value)} [source: ${result.source.target}]`;
+        const head = result.schemaDefault
+          ? `${result.field} = ${JSON.stringify(result.value)} [source: schema default]`
+          : !result.source
+            ? `${result.field} = ${JSON.stringify(result.value)} (${result.scope})`
+            : `${result.field} = ${JSON.stringify(result.value)} [source: ${result.source.target}]`;
+        return result.note ? `${head}\n  ↳ ${result.note}` : head;
       });
     }
     case 'set':
@@ -156,7 +162,9 @@ Scoped commands:
 
 Global commands:
   list | snapshot | prune | history | diff | restore | current | boots
-  schema [<name> [<version>]] [--list]      view schema definitions and versions
+  schema                        overview of all schemas
+  schema <name> [<version>]     view a schema definition
+  schema <name> --list          list a schema's versions
 
 Selectors:
   --self <aid> [--peer <peerKey>] | --default | --process
@@ -167,7 +175,7 @@ Output:
 export async function cmdConfig(args: string[]): Promise<void> {
   const subcommand = args[0];
   const formatJson = getArgValue(args, '--format') === 'json';
-  if (!subcommand || isHelpFlag(subcommand)) {
+  if (!subcommand || isHelpFlag(subcommand) || wantsHelp(args)) {
     console.log(HELP);
     return;
   }

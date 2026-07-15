@@ -70,6 +70,7 @@ function slashChatmodeField(session: Session | null | undefined, chatType?: stri
 function resolveSlashChatmodeTarget(this: any, params: {
   session?: Session | null;
   channel: string;
+  channelId?: string;
   selfAID?: string;
   role?: string;
   chatType?: string;
@@ -80,7 +81,16 @@ function resolveSlashChatmodeTarget(this: any, params: {
     ?? this.resolveSelfAID?.(params.channel);
   if (!self) return { error: '找不到当前 agent，无法读写 chatmode', code: 'MISSING_AID' };
   const field = slashChatmodeField(params.session, params.chatType);
-  return { sel: { self, role: params.role }, field, fieldPath: `chatmode.${field}` };
+  // 读取 chatmode 时必须带 peerKey，才能命中 relation 级覆盖（与消息 dispatch 路径对齐）。
+  // 漏掉 peerKey 会只解析到 agent 级，导致 status 显示的 chatmode 与实际投递不一致。
+  const session = params.session;
+  const chatType = session?.chatType ?? params.chatType ?? 'private';
+  const channelType = session?.channelType ?? this.resolveChannelType?.(params.channel);
+  const peerKeyId = chatType === 'group'
+    ? (session?.metadata?.groupId || params.channelId)
+    : (session?.metadata?.peerId || params.channelId);
+  const peerKey = channelType && peerKeyId ? formatPeerKey(channelType, peerKeyId) : undefined;
+  return { sel: { self, peerKey, role: params.role }, field, fieldPath: `chatmode.${field}` };
 }
 
 function readSlashChatmode(target: SlashChatmodeTarget): SlashChatmodeValue {
@@ -514,6 +524,7 @@ export async function handleSlashCommand(this: any,
     const target = resolveSlashChatmodeTarget.call(this, {
       session,
       channel,
+      channelId,
       selfAID,
       role: session?.identity?.role || identity.role,
       chatType: session?.chatType || fallbackChatType,

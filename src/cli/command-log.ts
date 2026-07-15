@@ -40,9 +40,10 @@ export function logCliCommand(cmd: string, args: string[]): void {
   const selfAid = resolveSelfAid(args);
   const line =
     JSON.stringify({
-      ts: new Date().toISOString(),
+      ts: localTimestamp(),
       cmd,
-      argv: args,
+      // 完整命令行，可直接拷贝执行（含 ec 前缀，含空格的参数自动加引号）
+      command: `ec ${args.map(shellQuote).join(' ')}`,
       selfAid: selfAid || undefined,
       sessionId: process.env.EVOLCLAW_SESSION_ID || undefined,
     }) + '\n';
@@ -52,6 +53,23 @@ export function logCliCommand(cmd: string, args: string[]): void {
   appendLine(resolvePaths().logs, fileName, line);
   // per-agent 日志：有 AID 时再额外记一份到该 agent 自己的 logs/，便于单独查看。
   if (selfAid) appendLine(agentLogsDir(selfAid), fileName, line);
+}
+
+/** 本地时间字符串 YYYY-MM-DD HH:mm:ss（不含时区偏移，直接可读）。 */
+function localTimestamp(): string {
+  const d = new Date();
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return (
+    `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ` +
+    `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
+  );
+}
+
+/** 拼命令行时给单个参数按需加引号：含空格/引号/特殊字符才包一层单引号。 */
+function shellQuote(arg: string): string {
+  if (arg === '') return "''";
+  if (/^[A-Za-z0-9_@%+=:,./-]+$/.test(arg)) return arg;
+  return `'${arg.replace(/'/g, `'\\''`)}'`;
 }
 
 /** 本地日期 tag YYYYMMDD，用于日志文件按天切分（一天一个文件）。 */

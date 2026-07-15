@@ -28,6 +28,7 @@ import {
 import { readBootLog, type BootLogEntry } from './boot-log.js';
 import {
   currentVersion,
+  fieldSchemaDefault,
   isSchemaName,
   listSchemaNames,
   listSchemaVersions,
@@ -35,7 +36,9 @@ import {
   schemaHistoryEntry,
   type LogicalSchemaName,
 } from './schema-registry.js';
-import { resolvePaths } from '../paths.js';
+import fs from 'fs';
+import path from 'path';
+import { resolvePaths, agentRelationConfig } from '../paths.js';
 import type {
   ResolvedConfigCommand,
   ResolvedConfigOp,
@@ -51,6 +54,8 @@ export type ConfigExecutionResult =
       value: unknown;
       scope: ResolvedConfigOp['configScope'];
       source?: { target: ConfigTarget; file: string };
+      schemaDefault?: boolean;
+      note?: string;
     }
   | {
       ok: true;
@@ -281,24 +286,80 @@ function executeGet(op: ResolvedConfigOp): ConfigExecutionResult {
   const selector = selectorFor(op);
   if (op.configScope === 'process') {
     const config = read<Record<string, unknown>>(ConfigTarget.Process, selector) || {};
+    const stored = getNested(config, op.field);
+    if (stored !== undefined) {
+      return { ok: true, subcommand: 'get', field: op.field, value: stored, scope: op.configScope };
+    }
+    return getWithSchemaDefault(op, null);
+  }
+
+  const withSource = readFieldWithSource(op.field, selector);
+  // 关系级作用域下始终诊断 relation 层的贡献情况：命中非 relation 层时解释回退原因
+  // （对端不存在/无配置文件/未设值），命中 relation 层但值非法时给出告警。
+  const note = op.configScope === 'relation'
+    ? diagnoseRelationLayer(op, withSource?.source.target === ConfigTarget.Relation)
+    : undefined;
+  if (withSource) {
     return {
       ok: true,
       subcommand: 'get',
       field: op.field,
-      value: getNested(config, op.field) ?? null,
+      value: withSource.value,
       scope: op.configScope,
+      source: { target: withSource.source.target, file: withSource.source.file },
+      ...(note ? { note } : {}),
     };
   }
+  return getWithSchemaDefault(op, null, note);
+}
 
-  const withSource = readFieldWithSource(op.field, selector);
-  return {
-    ok: true,
-    subcommand: 'get',
-    field: op.field,
-    value: withSource?.value ?? null,
-    scope: op.configScope,
-    ...(withSource ? { source: { target: withSource.source.target, file: withSource.source.file } } : {}),
-  };
+/**
+ * 关系级取值时诊断 relation 层。
+ * @param hitRelation 最终取值是否来自 relation 层。
+ *   - 未命中 relation：解释为何回退（对端不存在 / 无配置文件 / JSON 损坏 / 该字段未设）。
+ *   - 命中 relation：正常无需说明；但若该值不在 schema 候选清单内，给出"非法值"告警。
+ */
+function diagnoseRelationLayer(op: ResolvedConfigOp, hitRelation: boolean): string | undefined {
+  if (!op.self || !op.peerKey) return undefined;
+  const relFile = agentRelationConfig(op.self, op.peerKey);
+  if (!fs.existsSync(relFile)) {
+    return hitRelation ? undefined
+      : `relation layer skipped: peer "${op.peerKey}" has no config file (${relPath(relFile)})`;
+  }
+  let relConfig: Record<string, unknown>;
+  try {
+    relConfig = JSON.parse(fs.readFileSync(relFile, 'utf-8'));
+  } catch (error) {
+    return `relation config ${relPath(relFile)} is not readable JSON (${error instanceof Error ? error.message : String(error)})`;
+  }
+  const stored = getNested(relConfig, op.field);
+  if (stored === undefined) {
+    return hitRelation ? undefined
+      : `relation layer skipped: "${op.field}" not set for peer "${op.peerKey}"`;
+  }
+  const allowed = op.route?.enum;
+  if (allowed && !allowed.includes(stored as string)) {
+    return `relation value ${JSON.stringify(stored)} is not a valid ${op.field} (expected: ${allowed.join(' | ')})`;
+  }
+  return undefined;
+}
+
+function relPath(absolute: string): string {
+  return path.relative(resolvePaths().root, absolute);
+}
+
+/**
+ * 各存储层都无值时的兜底：若 schema 为该字段声明了 `default`，展示出厂默认并标记
+ * schemaDefault=true（仅影响 `ec config get` 的展示；运行时 resolveEffective 不受影响，
+ * 未设值仍为 undefined，以保留"回退服务端 dispatch"等既有语义）。
+ */
+function getWithSchemaDefault(op: ResolvedConfigOp, absent: null, note?: string): ConfigExecutionResult {
+  const nt = note ? { note } : {};
+  const schemaDefault = op.route ? fieldSchemaDefault(op.route.schema, op.field) : undefined;
+  if (schemaDefault !== undefined) {
+    return { ok: true, subcommand: 'get', field: op.field, value: schemaDefault, scope: op.configScope, schemaDefault: true, ...nt };
+  }
+  return { ok: true, subcommand: 'get', field: op.field, value: absent, scope: op.configScope, ...nt };
 }
 
 function executeSet(op: ResolvedConfigOp): ConfigExecutionResult {

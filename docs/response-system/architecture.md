@@ -88,19 +88,21 @@ src/response-system/
 │       ├── types.ts
 │       └── README.md
 │
-└── modes/                              # 响应模式实现
+└── modes/                              # 响应模式实现（薄包装，仅 index.ts）
     ├── single-session/                # 单会话模式
-    │   ├── index.ts
-    │   └── config-schema.json
-    │
-    ├── dual-session/                  # 双会话模式（原 dual-session-lite）
-    │   ├── index.ts
-    │   └── config-schema.json
-    │
+    │   └── index.ts                   #   configSchema = loadSchema('single-session')
+    ├── dual-session/                  # 双会话模式（原 dual-session-lite，未来）
+    │   └── index.ts
     └── workflow/                      # 工作流模式（未来）
-        ├── index.ts
-        └── config-schema.json
+        └── index.ts
 ```
+
+> **模式桶 schema 落 `kits/schemas/`，不再散落各 modes 目录**：每个响应模式的特有参数
+> （候选/默认）声明为一份独立 schema `kits/schemas/<modeId>.schema.<v>.json`，随包分发、
+> 登记进 `_meta.json`。它是「无 config target 的一等 schema」——不绑任何 config.json 文件，
+> 只描述 `responseModeParams[modeId]` 桶的形状，供三处共用：`ec config schema <modeId>` 展示、
+> 运行时默认注入（`coordinator.schemaDefaults`）、写入时桶专项校验。模式代码用
+> `loadSchema(modeId)` 读取，不再内联 schema。详见 [config-reference.md §四](./config-reference.md)。
 
 ### 2.2 文档目录
 

@@ -15,20 +15,15 @@ import type {
 } from '../../types.js';
 import { FIFOQueue } from '../../queues/fifo-queue.js';
 import { flowForChatMode, type V1Flow } from '../../engines/v1/index.js';
+import { loadSchema } from '../../../config/schema-registry.js';
 
-/** 与 config-schema.json 同源（该文件供文档/校验工具读取；此处内联供运行时使用）。 */
-const CONFIG_SCHEMA: JSONSchema = {
-  type: 'object',
-  properties: {
-    chatMode: {
-      type: 'string',
-      enum: ['interactive', 'proactive'],
-      description: '回复投递方式：interactive=输出即回复；proactive=CLI 回复 + 思考投影。每会话生效值由宿主按配置层级（chatmode 场景表）解析后注入。',
-    },
-    pre_tool_1stmsgchk: { type: 'boolean', default: true, description: 'proactive 首工具表态检查（仅 chatMode=proactive 生效）' },
-    tool_use_reminder: { type: 'boolean', default: true, description: 'proactive 工具汇报提醒（仅 chatMode=proactive 生效）' },
-  },
-};
+/**
+ * 模式桶 schema —— 候选值与默认值的**唯一事实源**，从 kits/schemas/single-session.schema.1.json
+ * 读取（随包分发、config schema 子命令可展示、write 时桶专项校验共用同一份）。
+ * `default` 即运行时出厂默认，由宿主组装 modeConfig 时提取注入（coordinator.schemaDefaults），
+ * flow 不再硬编码默认。chatMode 无 default——由宿主按 chatmode 场景表解析后强制注入。
+ */
+const CONFIG_SCHEMA = loadSchema('single-session').raw as JSONSchema;
 
 /**
  * 单会话响应模式（architecture.md §4.1）—— 合并原 interactive / proactive。
@@ -55,9 +50,15 @@ export class SingleSessionMode implements ResponseMode {
 
   async cleanup(): Promise<void> { await this.queue.clear(); }
 
-  /** 本会话生效的 chatMode——从 modeConfig 读取；缺省 interactive（宿主注入前的兜底）。 */
+  /**
+   * 本会话生效的 chatmode——从 modeConfig 读取；缺省 interactive（宿主注入前的兜底）。
+   * 大小写不敏感：宿主注入的是小写 `chatmode`，但兼容历史/外部注入的 `chatMode`
+   * （二者语义同一，不应同时存在）。
+   */
   private chatMode(): 'interactive' | 'proactive' {
-    return this.context?.modeConfig?.chatMode === 'proactive' ? 'proactive' : 'interactive';
+    const cfg = this.context?.modeConfig as Record<string, unknown> | undefined;
+    const value = cfg?.chatmode ?? cfg?.chatMode;
+    return value === 'proactive' ? 'proactive' : 'interactive';
   }
 
   private flow(): V1Flow {

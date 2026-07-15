@@ -48,6 +48,23 @@ export interface CoordinatorInboundDeps {
   contextDeps: Omit<ContextDeps, 'modeConfig'>;
 }
 
+/**
+ * 从模式的 configSchema 提取特有参数出厂默认值：`properties[key].default`。
+ *
+ * 模式 schema 是模式特有参数「候选值 + 默认值」的唯一事实源（architecture §五）。
+ * 宿主组装 modeConfig 时先铺这层默认，再叠用户显式配置——默认来源收敛到 schema，
+ * flow 不再硬编码 `?? true` 之类的默认。chatMode 无 default（宿主强制注入），跳过。
+ */
+function schemaDefaults(mode: ResponseMode): Record<string, any> {
+  const props = mode.configSchema?.properties;
+  if (!props) return {};
+  const out: Record<string, any> = {};
+  for (const [key, spec] of Object.entries(props)) {
+    if (spec && typeof spec === 'object' && 'default' in spec) out[key] = (spec as any).default;
+  }
+  return out;
+}
+
 export class ResponseModeCoordinator {
   private resolver: ResponseModeResolver;
   private contextBuilder = new ResponseModeContextBuilder();
@@ -62,8 +79,8 @@ export class ResponseModeCoordinator {
    * 需要的是处理钩子（beforeProcess/configureRun/onToolUse 等），而非入队决策。
    *
    * @param responseModeId 合并后的标量 responseMode（关系级>agent级，可空 → 注册表首选）
-   * @param resolvedChatMode 本会话生效的 chatMode（宿主按配置层级解析后传入），
-   *        注入进模式 config.chatMode；模式据此分流投递方式。与「选哪个模式」无关。
+   * @param resolvedChatMode 本会话生效的 chatmode（宿主按配置层级解析后传入），
+   *        注入进模式 config.chatmode；模式据此分流投递方式。与「选哪个模式」无关。
    * @param responseModeParams 按模式分桶的参数字典 { [modeId]: {...} }，取当前模式的桶注入
    * @param contextDeps 构建 context 所需依赖
    */
@@ -76,10 +93,11 @@ export class ResponseModeCoordinator {
     try {
       const resolved = this.resolver.resolve(responseModeId);
       const mode = resolved.mode;
-      // chatMode 注入宿主解析出的值；模式特有参数从 responseModeParams[modeId] 桶读取
+      // 模式特有参数：先铺 schema 出厂默认，再叠用户显式桶（responseModeParams[modeId]，显式值优先）；
+      // chatmode 由宿主解析后强制注入（小写，与配置层 chatmode 字典一致）。
       const modeSpecificParams = responseModeParams?.[mode.id] ?? {};
-      const modeConfig = { chatMode: resolvedChatMode, ...modeSpecificParams };
-      contextDeps.logger.debug('[ResponseSystem] resolveMode mode=' + mode.id + ' source=' + resolved.source + ' chatMode=' + (modeConfig.chatMode ?? 'none'));
+      const modeConfig = { ...schemaDefaults(mode), chatmode: resolvedChatMode, ...modeSpecificParams };
+      contextDeps.logger.debug('[ResponseSystem] resolveMode mode=' + mode.id + ' source=' + resolved.source + ' chatmode=' + (modeConfig.chatmode ?? 'none'));
       const context = this.contextBuilder.build(mode.id, { ...contextDeps, modeConfig });
       return { mode, context, source: resolved.source };
     } catch (e) {
@@ -103,9 +121,10 @@ export class ResponseModeCoordinator {
       // 解析模式：标量 responseMode（合并后）> 注册表首选。chatMode 不参与选模式。
       const resolved = this.resolver.resolve(deps.agentConfig.responseMode);
       const mode = resolved.mode;
+      // 先铺 schema 出厂默认，再叠用户显式桶（显式值优先），chatmode 强制注入。
       const modeSpecificParams = deps.agentConfig.responseModeParams?.[mode.id] ?? {};
-      const modeConfig = { chatMode: resolvedChatMode, ...modeSpecificParams };
-      deps.contextDeps.logger.debug('[ResponseSystem] resolveInbound mode=' + mode.id + ' source=' + resolved.source + ' chatMode=' + (modeConfig.chatMode ?? 'none'));
+      const modeConfig = { ...schemaDefaults(mode), chatmode: resolvedChatMode, ...modeSpecificParams };
+      deps.contextDeps.logger.debug('[ResponseSystem] resolveInbound mode=' + mode.id + ' source=' + resolved.source + ' chatmode=' + (modeConfig.chatmode ?? 'none'));
       const context = this.contextBuilder.build(mode.id, {
         ...deps.contextDeps,
         modeConfig,

@@ -22,7 +22,11 @@ export type LogicalSchemaName =
   | 'defaults'
   | 'agent-config'
   | 'relation-config'
-  | 'contact-book';
+  | 'contact-book'
+  // 响应模式桶 schema：不绑 config.json 文件（不进 TARGET_SCHEMA），
+  // 只描述 responseModeParams[modeId] 桶的形状——供 config schema 子命令展示、
+  // 桶专项校验、schemaDefaults 提取默认。每个已实现的响应模式一份。
+  | 'single-session';
 
 export type MergeKind = 'scalar' | 'list' | 'dict';
 
@@ -82,6 +86,17 @@ export function listSchemaNames(): LogicalSchemaName[] {
 /** 是否为已知逻辑 schema 名。 */
 export function isSchemaName(name: string): name is LogicalSchemaName {
   return Object.prototype.hasOwnProperty.call(loadMeta().schemas, name);
+}
+
+/**
+ * 顶层字段的 schema 声明默认值（`default` 关键字），无则 undefined。
+ * 仅覆盖顶层标量字段——嵌套路径的默认值不在此解析。
+ * 用于 `ec config get` 在各存储层都无值时回落展示出厂默认。
+ */
+export function fieldSchemaDefault(name: LogicalSchemaName, fieldPath: string): unknown {
+  if (fieldPath.includes('.')) return undefined;
+  const spec = loadSchema(name).fields.get(fieldPath);
+  return spec && 'default' in spec ? spec.default : undefined;
 }
 
 /** 某版本的 history 元信息（date/description），无则 undefined。 */

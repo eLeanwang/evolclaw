@@ -846,13 +846,6 @@ export interface ProcessDebugBlock extends DebugBlock {
 
 export type ShowActivitiesMode = 'all' | 'text' | 'none';
 
-export interface ProactiveBehaviorBlock {
-  /** proactive 下首个工具调用是否必须先通过 send/file 表态。 */
-  pre_tool_1stmsgchk?: boolean;
-  /** proactive 下是否启用队列未读提醒和 10 次工具汇报提醒。 */
-  tool_use_reminder?: boolean;
-}
-
 export interface SessionRenewConfig {
   /** 超时后是否启用会话连续性判定。缺省或 false 均为关闭。 */
   enabled?: boolean;
@@ -1019,8 +1012,6 @@ export interface AgentConfig {
   debounce?: number;
   // 可见性
   show_activities?: ShowActivitiesMode;
-  // proactive 模式细粒度策略
-  proactive?: ProactiveBehaviorBlock;
   // 超时后的会话续接判定
   session_renew?: SessionRenewConfig;
   // 渲染
@@ -1054,7 +1045,6 @@ export interface RelationConfig {
   flush_delay?: number;
   debounce?: number;
   show_activities?: ShowActivitiesMode;
-  proactive?: ProactiveBehaviorBlock;
   session_renew?: SessionRenewConfig;
   render?: { private?: string; group?: string; inject?: string };
   sessionManifests?: Record<string, string>;
@@ -1103,8 +1093,6 @@ export interface EffectiveAgentConfig {
   debounce?: number;
   // 可见性
   show_activities?: ShowActivitiesMode;
-  // proactive 模式细粒度策略
-  proactive?: ProactiveBehaviorBlock;
   session_renew?: SessionRenewConfig;
   // 渲染
   render?: { private?: string; group?: string; inject?: string };

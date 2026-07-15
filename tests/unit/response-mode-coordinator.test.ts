@@ -42,7 +42,7 @@ describe('ResponseModeCoordinator', () => {
   it('无配置时兜底注册表首选 single-session，chatMode 注入 modeConfig', async () => {
     const r = await coord.resolveInbound(msg('private'), makeDeps(), 'proactive');
     expect(r?.modeId).toBe('single-session');
-    expect((r?.context as any).modeConfig?.chatMode).toBe('proactive');
+    expect((r?.context as any).modeConfig?.chatmode).toBe('proactive');
   });
 
   it('私聊/群聊均兜底 single-session（chatType 不影响选模式）', async () => {
@@ -56,7 +56,7 @@ describe('ResponseModeCoordinator', () => {
     const deps = makeDeps({ responseMode: 'single-session' });
     const r = await coord.resolveInbound(msg('private'), deps, 'proactive');
     expect(r?.modeId).toBe('single-session');
-    expect((r?.context as any).modeConfig?.chatMode).toBe('proactive');
+    expect((r?.context as any).modeConfig?.chatmode).toBe('proactive');
   });
 
   it('responseMode 指向不存在的模式时回落注册表首选', async () => {
@@ -72,7 +72,25 @@ describe('ResponseModeCoordinator', () => {
     });
     const r = await coord.resolveInbound(msg('private'), deps, 'proactive');
     expect((r?.context as any).modeConfig?.foo).toBe('bar');
-    expect((r?.context as any).modeConfig?.chatMode).toBe('proactive');
+    expect((r?.context as any).modeConfig?.chatmode).toBe('proactive');
+  });
+
+  // SSOT：模式特有参数的出厂默认来自模式 schema 的 default，由 coordinator 注入 modeConfig。
+  it('无用户配置时，模式 schema 的 default 注入 modeConfig（出厂默认）', async () => {
+    const r = await coord.resolveInbound(msg('private'), makeDeps(), 'proactive');
+    // single-session schema：pre_tool_1stmsgchk/tool_use_reminder 出厂默认 true
+    expect((r?.context as any).modeConfig?.pre_tool_1stmsgchk).toBe(true);
+    expect((r?.context as any).modeConfig?.tool_use_reminder).toBe(true);
+  });
+
+  it('用户显式桶覆盖 schema 默认（显式值优先）', async () => {
+    const deps = makeDeps({
+      responseMode: 'single-session',
+      responseModeParams: { 'single-session': { pre_tool_1stmsgchk: false } },
+    });
+    const r = await coord.resolveInbound(msg('private'), deps, 'proactive');
+    expect((r?.context as any).modeConfig?.pre_tool_1stmsgchk).toBe(false); // 用户覆盖
+    expect((r?.context as any).modeConfig?.tool_use_reminder).toBe(true);   // 仍取 schema 默认
   });
 
   it('proactive inbound carries runtimeState', async () => {

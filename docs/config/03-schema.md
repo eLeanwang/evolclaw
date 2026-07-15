@@ -50,6 +50,21 @@ kits/schemas/
 | `defaults` | `agents/defaults.json` |
 | `agent-config` | `agents/{aid}/config.json` |
 | `relation-config` | `relations/{peerKey}/config.json` |
+| `contact-book` | `agents/{aid}/contacts.json` |
+| `single-session` | *（无对应文件）* — 响应模式桶 schema |
+
+> **模式桶 schema 是一个新类别**：`single-session`（及未来每个响应模式各一份）不像
+> `agent-config` 那样绑定一个完整的 config.json 文件（不进 `TARGET_SCHEMA`、不被拿去做
+> “整文件”校验），它描述的是 `responseModeParams[modeId]` **这个桶**的形状。但它**照样参与
+> 写校验**——只是校验粒度是桶而非整文件：写 config 时，`write()` 会对 `responseModeParams`
+> 逐桶用对应模式 schema 校验（桶键须是已注册模式，否则报错并点名；桶内容按该模式 schema 的
+> `enum` / `additionalProperties` 校验）。三大用途一句话概括：
+>
+> 1. **写校验**：按模式 schema 文件校验各自的桶（核心目标之一）；
+> 2. **候选值 + 默认值**：`ec config schema <modeId>` 展示、运行时默认注入（`coordinator.schemaDefaults`）；
+> 3. 同样进 `_meta.json`、随包分发。
+>
+> 详见 [响应模式 config-reference §四](../response-system/config-reference.md)。
 
 ### 为什么放在 kits/schemas/
 

@@ -22,7 +22,9 @@
 
 | # | 标准 | 检验 | 契约依据 |
 |---|------|------|---------|
-| S1 | 目录符合规范：`modes/<name>/index.ts` 导出 descriptor；`config-schema.json` 存在且为合法 JSON Schema | 【自动】 | §2.1 |
+| S1 | 目录符合规范：`modes/<name>/index.ts` 导出 descriptor；模式桶 schema 在 `kits/schemas/<name>.schema.<v>.json` 存在、为合法 JSON Schema、且 descriptor `configSchema = loadSchema('<name>').raw`（不内联、不放 `modes/<name>/config-schema.json`） | 【自动】 | §2.1 |
+| S1b | 模式桶 schema 已登记 `_meta.json`（有 currentVersion + history），且 `LogicalSchemaName` union 含 `<name>`——否则该模式桶写入被判「未注册」而报错 | 【自动】 | §2.1 / §4.1.1 |
+| S1c | 桶专项写校验生效：写 `responseModeParams["<name>"]` 时按模式 schema 校验（非法值/未知键拦截）；桶键非已注册模式则报错点名 | 【自动】+【测试】 | §4.1 |
 | S2 | descriptor 必填字段齐全：name / displayName / description / factory / configSchema / supportedCommonParams / specificParams / sessionPrototypes | 【自动】 | §2.2 |
 | S3 | `specificParams` 与 configSchema 的 properties 一致：schema 里没有的参数不许声明，声明了的必须有 schema 定义 | 【自动】 | §4.1 |
 | S4 | `sessionPrototypes` 声明的每个 manifest 文件真实存在，且通过 manifest schema 校验 | 【自动】 | §2.3 |
@@ -64,7 +66,7 @@
 
 | # | 标准 |
 |---|------|
-| D1 | `docs/response-system/<name>/` 有 README（定位/适用场景）+ 参数说明；参数表与 config-schema.json 一致（可脚本比对） |
+| D1 | `docs/response-system/<name>/` 有 README（定位/适用场景）+ 参数说明；参数表与 `kits/schemas/<name>.schema.<v>.json` 一致（可脚本比对） |
 | D2 | `getStatus().detail` 的字段有说明文档（外部不解释它，但运维要能看懂） |
 | D3 | 声明降级行为：模式依赖的模型/服务不可用时的表现（参照 dual-session"辅助会话失败 → delay 降级"范本） |
 

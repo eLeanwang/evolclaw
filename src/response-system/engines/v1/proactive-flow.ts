@@ -48,8 +48,10 @@ function isHumanFacingMessage(message: InboundMessage): boolean {
 }
 
 function buildState(message: InboundMessage, cfg: Record<string, any>): ProactiveState {
-  const preTool1stMsgChk = cfg.pre_tool_1stmsgchk ?? true;
-  const toolUseReminder = cfg.tool_use_reminder ?? true;
+  // 默认值不在此硬编码：候选/出厂默认由模式 schema 声明，宿主组装 modeConfig 时注入
+  // （coordinator.schemaDefaults）。此处只读注入后的布尔——键缺失即视为关闭。
+  const preTool1stMsgChk = cfg.pre_tool_1stmsgchk === true;
+  const toolUseReminder = cfg.tool_use_reminder === true;
   const humanFacing = isHumanFacingMessage(message);
   return {
     firstToolDone: false,
